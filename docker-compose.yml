@@ -1,0 +1,60 @@
+# EXAMPLE compose file for HarborGate. Copy it, then:
+#   1. Set the hostname (harborgate.example.com) in the labels below.
+#   2. Set the image tag (latest is used here; pin a version tag for production).
+#   3. Create a .env file next to this file that contains HARBORGATE_ENCRYPTION_KEY.
+#      Do not put any key value in this file.
+# .env must not be committed.
+services:
+  harborgate:
+    # Pin a version tag for production instead of latest.
+    image: ghcr.io/nrosier/harborgate:latest
+    container_name: harborgate
+    restart: unless-stopped
+    # PID 1 does not reap children or forward signals on its own.
+    init: true
+    # Everything writable lives in the volume, so the rest can be immutable.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    env_file:
+      - .env
+    volumes:
+      - data:/data
+    networks:
+      - proxy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+
+      # Router (replace harborgate.example.com with your hostname)
+      - "traefik.http.routers.harborgate.rule=Host(`harborgate.example.com`)"
+      - "traefik.http.routers.harborgate.entrypoints=websecure"
+      - "traefik.http.routers.harborgate.tls.certresolver=cloudflare"
+      - "traefik.http.routers.harborgate.priority=100"
+
+      # Service
+      - "traefik.http.services.harborgate.loadbalancer.server.port=8080"
+
+      # Cloudflare tunnel (replace harborgate.example.com with your hostname)
+      - "dockflare.enable=true"
+      - "dockflare.hostname=harborgate.example.com"
+      # Replace https://192.168.1.2 with the Traefik or origin address for this host.
+      - "dockflare.service=https://192.168.1.2"
+      - "dockflare.http2_origin=true"
+      - "dockflare.match_sni_to_host=true"
+
+networks:
+  proxy:
+    external: true
+
+volumes:
+  data:
