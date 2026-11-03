@@ -46,8 +46,9 @@ async fn shutdown_signal(mut terminate: Signal) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Refuse to start without a valid key. This runs before the port is bound.
+    // Refuse to start without a valid key or settings. This runs before the port is bound.
     let _encryption_key = config::load_encryption_key()?;
+    let _settings = config::load_settings()?;
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
 
