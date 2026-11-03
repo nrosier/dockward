@@ -45,6 +45,8 @@ pub fn hash_password(password: &str) -> Result<String, AppError> {
 /// Verifies `password` against a PHC string. Returns `Ok(false)` for a wrong
 /// password, and `Err` only if the stored hash cannot be parsed.
 pub fn verify_password(password: &str, phc: &str) -> Result<bool, AppError> {
+    #[cfg(test)]
+    counter::count_verify();
     let parsed = PasswordHash::new(phc).map_err(|_| AppError::InternalError)?;
     Ok(hasher()?
         .verify_password(password.as_bytes(), &parsed)
@@ -56,6 +58,27 @@ pub fn verify_password(password: &str, phc: &str) -> Result<bool, AppError> {
 pub fn verify_dummy(password: &str) -> Result<(), AppError> {
     let _ = verify_password(password, dummy_hash()?);
     Ok(())
+}
+
+/// Test-only count of Argon2id verifications. Thread-local, so parallel tests cannot
+/// see each other's counts.
+#[cfg(test)]
+pub(crate) mod counter {
+    use std::cell::Cell;
+
+    thread_local! {
+        static VERIFY_CALLS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// Records one verification. Called from `verify_password`.
+    pub(crate) fn count_verify() {
+        VERIFY_CALLS.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Argon2id verifications run on this thread since it started.
+    pub(crate) fn verify_calls() -> u32 {
+        VERIFY_CALLS.with(Cell::get)
+    }
 }
 
 #[cfg(test)]
