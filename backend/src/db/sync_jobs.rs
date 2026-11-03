@@ -38,11 +38,22 @@ pub async fn enqueue(
     .map_err(|_| AppError::InternalError)
 }
 
-/// Moves a `running` job back to `queued` at startup. Its `attempts` is unchanged.
-/// Returns how many jobs were re-queued.
+/// Latest deferral: a deferred job is due at most this many seconds after `now`.
+pub const MAX_DEFERRAL_SECS: i64 = 60 * 60;
+
+/// Moves each `running` job back to `queued`. The interrupted run counts as one attempt
+/// (`specs/backend.md`, Durable job queue). When that attempt is the eighth, the job becomes
+/// `failed` instead, with `last_error` set. The limit of 8 is `services::sync_jobs::MAX_ATTEMPTS`;
+/// this layer does not depend on services, so the value is written here too.
+/// Returns how many jobs were re-queued or failed.
 pub async fn requeue_running(pool: &SqlitePool, now: i64) -> Result<u64, AppError> {
     sqlx::query!(
-        "UPDATE sync_jobs SET status = 'queued', next_attempt_at = ?, updated_at = ?
+        "UPDATE sync_jobs SET
+            attempts = attempts + 1,
+            status = CASE WHEN attempts + 1 >= 8 THEN 'failed' ELSE 'queued' END,
+            next_attempt_at = CASE WHEN attempts + 1 >= 8 THEN NULL ELSE ? END,
+            last_error = CASE WHEN attempts + 1 >= 8 THEN 'interrupted by restart' ELSE last_error END,
+            updated_at = ?
          WHERE status = 'running'",
         now,
         now
@@ -50,6 +61,23 @@ pub async fn requeue_running(pool: &SqlitePool, now: i64) -> Result<u64, AppErro
     .execute(pool)
     .await
     .map(|done| done.rows_affected())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Puts a job back in `queued` after a deferral. `attempts` and `last_error` are unchanged.
+/// `next_attempt_at` is `until`, capped at `MAX_DEFERRAL_SECS` after `now`. Returns the
+/// capped time the job is due.
+pub async fn defer(pool: &SqlitePool, id: &str, until: i64, now: i64) -> Result<i64, AppError> {
+    let next_attempt_at = until.min(now.saturating_add(MAX_DEFERRAL_SECS));
+    sqlx::query!(
+        "UPDATE sync_jobs SET status = 'queued', next_attempt_at = ?, updated_at = ? WHERE id = ?",
+        next_attempt_at,
+        now,
+        id
+    )
+    .execute(pool)
+    .await
+    .map(|_| next_attempt_at)
     .map_err(|_| AppError::InternalError)
 }
 

@@ -187,7 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let worker_pool = state.pool.clone();
     let worker_stop = stop_rx.clone();
     let worker_task = tokio::spawn(async move {
-        worker::run(worker_pool, worker::NoopHandler, worker_stop).await;
+        worker::run(worker_pool, Arc::new(worker::NoopHandler), worker_stop).await;
     });
 
     let mut graceful = stop_rx.clone();
