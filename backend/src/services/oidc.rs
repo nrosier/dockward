@@ -139,17 +139,34 @@ pub struct CodeExchange<'a> {
 /// followed and every connection re-checks the resolved address.
 pub struct HttpProvider {
     client: reqwest::Client,
+    allow_private: bool,
 }
 
 impl HttpProvider {
+    /// A provider that also trusts `root`. Tests only, so a loopback TLS server can
+    /// stand in for a provider through the production request path.
+    #[cfg(test)]
+    pub fn trusting(allow_private: bool, root: reqwest::Certificate) -> Result<Self, AppError> {
+        let client = outbound::client_trusting(TargetClass::Oidc, allow_private, root)
+            .map_err(|_| AppError::InternalError)?;
+        Ok(Self {
+            client,
+            allow_private,
+        })
+    }
+
     pub fn new(allow_private: bool) -> Result<Self, AppError> {
         let client = outbound::client(TargetClass::Oidc, allow_private)
             .map_err(|_| AppError::InternalError)?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            allow_private,
+        })
     }
 
     async fn get_json<T: for<'de> Deserialize<'de>>(&self, url: &Url) -> Result<T, AppError> {
-        outbound::require_https(url).map_err(|_| AppError::UpstreamUnreachable)?;
+        outbound::check_target(url, TargetClass::Oidc, self.allow_private)
+            .map_err(|_| AppError::UpstreamUnreachable)?;
         let response = self
             .client
             .get(url.as_str())
@@ -183,7 +200,8 @@ impl Provider for HttpProvider {
         token_endpoint: &Url,
         request: &CodeExchange<'_>,
     ) -> Result<TokenResponse, AppError> {
-        outbound::require_https(token_endpoint).map_err(|_| AppError::UpstreamUnreachable)?;
+        outbound::check_target(token_endpoint, TargetClass::Oidc, self.allow_private)
+            .map_err(|_| AppError::UpstreamUnreachable)?;
         let response = self
             .client
             .post(token_endpoint.as_str())
@@ -891,5 +909,87 @@ mod tests {
             Err(AppError::UpstreamUnreachable)
         );
         assert!(parse_endpoint("http://idp.example.com/jwks").is_err());
+    }
+}
+
+/// Discovery and JWKS fetches over a live loopback socket, through `HttpProvider`. The
+/// loopback server has a generated test certificate. Nothing is printed.
+#[cfg(test)]
+mod provider_socket_tests {
+    use super::*;
+    use crate::services::outbound::socket_tests::{OK, loopback_tls_server};
+
+    /// Builds a `200` response with a JSON body. The body is test data only.
+    fn json_response(body: &str) -> &'static str {
+        Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_boxed_str(),
+        )
+    }
+
+    #[tokio::test]
+    async fn discovery_to_loopback_is_refused_without_the_opt_out() {
+        let (port, root) = loopback_tls_server(OK).await;
+        let provider = HttpProvider::trusting(false, root).unwrap();
+        let issuer = Url::parse(&format!("https://127.0.0.1:{port}")).unwrap();
+        let outcome = provider.discovery(&issuer).await;
+        assert!(
+            matches!(outcome, Err(AppError::UpstreamUnreachable)),
+            "discovery to loopback must be refused by default"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_to_loopback_is_fetched_only_with_the_opt_out() {
+        // The body is fixed test data. `discovery` fetches it and parses the fields.
+        let body = r#"{"issuer":"https://127.0.0.1","authorization_endpoint":"https://127.0.0.1/a","token_endpoint":"https://127.0.0.1/t","jwks_uri":"https://127.0.0.1/j"}"#;
+        let (port, root) = loopback_tls_server(json_response(body)).await;
+        let provider = HttpProvider::trusting(true, root).unwrap();
+        let issuer = Url::parse(&format!("https://127.0.0.1:{port}")).unwrap();
+        // The control: with the opt-out the loopback server answers and the body parses.
+        assert!(
+            provider.discovery(&issuer).await.is_ok(),
+            "the opted-out discovery should succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_to_loopback_is_refused_without_the_opt_out() {
+        let (port, root) = loopback_tls_server(OK).await;
+        let provider = HttpProvider::trusting(false, root).unwrap();
+        let jwks_uri = Url::parse(&format!("https://127.0.0.1:{port}/jwks")).unwrap();
+        let outcome = provider.jwks(&jwks_uri).await;
+        assert!(
+            matches!(outcome, Err(AppError::UpstreamUnreachable)),
+            "a JWKS fetch from loopback must be refused by default"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_http_discovery_sends_no_request() {
+        // A plain TCP listener counts connections. Even with the opt-out, an http issuer
+        // must not open a connection. This proves the end-to-end result. The scheme rule
+        // itself is tested in `outbound::socket_tests`, because reqwest's `https_only`
+        // also refuses the request, so this test alone does not isolate `check_target`.
+        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
+            Ok(listener) => listener,
+            Err(err) => panic!("loopback bind failed: {err}"),
+        };
+        let port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(err) => panic!("loopback address unavailable: {err}"),
+        };
+        let provider = HttpProvider::new(true).unwrap();
+        let issuer = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let outcome = provider.discovery(&issuer).await;
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept())
+                .await
+                .is_ok();
+        assert!(matches!(outcome, Err(AppError::UpstreamUnreachable)));
+        assert!(!accepted, "an http:// issuer must not open a connection");
     }
 }

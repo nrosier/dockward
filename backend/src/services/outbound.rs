@@ -136,17 +136,61 @@ impl Resolve for GuardedResolver {
 /// `allow_private` is the class opt-out (`HARBORGATE_ALLOW_PRIVATE_*`). It is false by
 /// default. GitHub ignores it, because `api.github.com` is a fixed public host.
 pub fn client(class: TargetClass, allow_private: bool) -> Result<reqwest::Client, OutboundError> {
+    build(class, allow_private, None)
+}
+
+fn build(
+    class: TargetClass,
+    allow_private: bool,
+    extra_root: Option<reqwest::Certificate>,
+) -> Result<reqwest::Client, OutboundError> {
     let resolver = GuardedResolver {
         class,
         allow_private,
     };
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
         .dns_resolver(Arc::new(resolver))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|_| OutboundError::ClientBuild)
+        .timeout(Duration::from_secs(30));
+    if let Some(root) = extra_root {
+        builder = builder.add_root_certificate(root);
+    }
+    builder.build().map_err(|_| OutboundError::ClientBuild)
+}
+
+/// A client that also trusts `root`. Tests only: it lets a loopback TLS test server
+/// stand in for a provider. Production code never calls this.
+#[cfg(test)]
+pub fn client_trusting(
+    class: TargetClass,
+    allow_private: bool,
+    root: reqwest::Certificate,
+) -> Result<reqwest::Client, OutboundError> {
+    build(class, allow_private, Some(root))
+}
+
+/// Checks a URL before any request is made: it must be `https://`, and when its host is
+/// an IP literal, that address must pass the same range check as a resolved address.
+///
+/// reqwest and hyper skip the DNS resolver for an IP-literal host, so the resolver
+/// alone never sees `https://127.0.0.1/`. This check covers that path.
+pub fn check_target(
+    url: &reqwest::Url,
+    class: TargetClass,
+    allow_private: bool,
+) -> Result<(), OutboundError> {
+    require_https(url)?;
+    // IPv6 literals come back in brackets, so strip them before parsing.
+    let literal = url
+        .host_str()
+        .map(|host| host.trim_start_matches('[').trim_end_matches(']'))
+        .and_then(|host| host.parse::<IpAddr>().ok());
+    if let Some(ip) = literal {
+        let port = url.port_or_known_default().unwrap_or(443);
+        filter_addresses(vec![SocketAddr::new(ip, port)], class, allow_private)?;
+    }
+    Ok(())
 }
 
 /// Rejects a URL that is not `https://` before any request is made.
@@ -349,5 +393,148 @@ mod tests {
         };
         let outcome = client.get("http://example.com/").send().await;
         assert!(outcome.is_err(), "a plain http request was sent");
+    }
+}
+
+/// Live-socket tests. Each one runs a loopback TLS server with a generated test
+/// certificate and drives the real guarded client. Nothing is written to disk and no
+/// key or secret is printed.
+#[cfg(test)]
+pub(crate) mod socket_tests {
+    use super::*;
+    use std::sync::Arc as StdArc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
+
+    /// Starts a loopback HTTPS server on an ephemeral port. It answers every request
+    /// with `response`. Returns the port and the trust root for the test certificate.
+    pub(crate) async fn loopback_tls_server(response: &'static str) -> (u16, reqwest::Certificate) {
+        let names = vec!["localhost".to_owned(), "127.0.0.1".to_owned()];
+        let certified = match rcgen::generate_simple_self_signed(names) {
+            Ok(certified) => certified,
+            Err(err) => panic!("test certificate generation failed: {err}"),
+        };
+        let cert_der = certified.cert.der().clone();
+        let key_der =
+            rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
+        let config = match rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der.clone()], key_der.into())
+        {
+            Ok(config) => config,
+            Err(err) => panic!("test TLS config rejected: {err}"),
+        };
+        let acceptor = TlsAcceptor::from(StdArc::new(config));
+        let listener = match TcpListener::bind(("127.0.0.1", 0)).await {
+            Ok(listener) => listener,
+            Err(err) => panic!("loopback bind failed: {err}"),
+        };
+        let port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(err) => panic!("loopback address unavailable: {err}"),
+        };
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut tls) = acceptor.accept(stream).await {
+                        let mut buf = [0u8; 2048];
+                        let _ = tls.read(&mut buf).await;
+                        let _ = tls.write_all(response.as_bytes()).await;
+                        let _ = tls.shutdown().await;
+                    }
+                });
+            }
+        });
+        let root = match reqwest::Certificate::from_der(cert_der.as_ref()) {
+            Ok(root) => root,
+            Err(err) => panic!("test root rejected: {err}"),
+        };
+        (port, root)
+    }
+
+    pub(crate) const OK: &str =
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+    const REDIRECT: &str = "HTTP/1.1 302 Found\r\nLocation: https://127.0.0.1:1/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    #[tokio::test]
+    async fn loopback_is_reached_only_when_the_opt_out_is_set() {
+        let (port, root) = loopback_tls_server(OK).await;
+        let url = format!("https://127.0.0.1:{port}/");
+
+        // With the operator opt-out, the same server is reached. This is the control
+        // that proves the refusal below is the address check and not a broken server.
+        let allowed = client_trusting(TargetClass::Oidc, true, root.clone()).unwrap();
+        assert!(check_target(&reqwest::Url::parse(&url).unwrap(), TargetClass::Oidc, true).is_ok());
+        let ok = allowed.get(&url).send().await;
+        assert!(ok.is_ok(), "the opted-out request should reach the server");
+
+        // Without the opt-out, the IP-literal URL is refused by the target check that
+        // every OIDC request runs before it sends (`oidc::HttpProvider`).
+        assert_eq!(
+            check_target(
+                &reqwest::Url::parse(&url).unwrap(),
+                TargetClass::Oidc,
+                false
+            ),
+            Err(OutboundError::BlockedAddress),
+            "an IP literal in loopback must fail the target check by default"
+        );
+        drop(root);
+    }
+
+    #[tokio::test]
+    async fn resolver_refuses_a_hostname_that_resolves_to_loopback() {
+        // `localhost` resolves to loopback. The resolver filter refuses it by default.
+        let client = client(TargetClass::Oidc, false).unwrap();
+        let outcome = client.get("https://localhost:1/").send().await;
+        assert!(
+            outcome.is_err(),
+            "a hostname resolving to loopback was reached"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_http_is_refused_by_the_target_check_and_the_client() {
+        let url = reqwest::Url::parse("http://127.0.0.1:1/").unwrap();
+        assert_eq!(
+            check_target(&url, TargetClass::Oidc, true),
+            Err(OutboundError::NotHttps)
+        );
+        let client = client(TargetClass::Oidc, true).unwrap();
+        assert!(client.get(url.as_str()).send().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        let (port, root) = loopback_tls_server(REDIRECT).await;
+        let client = client_trusting(TargetClass::Oidc, true, root).unwrap();
+        let response = client
+            .get(format!("https://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap();
+        // A followed redirect would target 127.0.0.1:1 and fail. The 302 itself is returned.
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+    }
+
+    #[test]
+    fn private_ip_literals_are_refused_by_the_target_check() {
+        for raw in [
+            "https://10.0.0.1/",
+            "https://169.254.169.254/",
+            "https://[::1]/",
+            "https://[fd00::1]/",
+        ] {
+            let url = reqwest::Url::parse(raw).unwrap();
+            assert!(
+                check_target(&url, TargetClass::Oidc, false).is_err(),
+                "{raw} should be refused by default"
+            );
+        }
     }
 }
