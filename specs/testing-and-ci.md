@@ -6,6 +6,7 @@ Purpose: test strategy, CI workflows, dependency updates, and repo hygiene check
 
 - CI tests Harbor and GitHub integrations against mocked or recorded API responses. CI uses no real credentials.
 - A manual live smoke test runs against real Harbor and GitHub. It is never run in CI. It needs operator-provided credentials.
+  - Decided (2026-11-03, delegated): it also records what can only be seen live: the size of a real webhook payload, the GitHub probe response bodies ("no analysis found", code scanning unavailable, missing permission), the client IP chain behind Cloudflare and Traefik, and no `securitypolicyviolation` event on any page.
 - Webhook payload handling has a separate test fixture for each format (default JSON and CloudEvents).
 - Cargo tests run with `cargo test`. Build commands are in `CLAUDE.md`.
 

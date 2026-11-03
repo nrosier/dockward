@@ -17,7 +17,7 @@ Environment variables. Each rule lives in the linked file.
 
 - `HARBORGATE_ENCRYPTION_KEY`: required. Format and rules in [security.md](security.md).
 - `HARBORGATE_PUBLIC_URL`: Decided (2026-11-03): required. The external origin users open, for example `https://harborgate.example.com`. It must be `https://`. Decided (2026-11-03, delegated): `http://localhost` with any port is also allowed, for development. It is the only source for the OIDC `redirect_uri` (`<public url>/api/v1/auth/oidc/callback`), the webhook URL shown in the UI, and the login origin check. The app never derives these from the `Host` or `X-Forwarded-Host` header. The app refuses to start without it, like the encryption key.
-- `HARBORGATE_TRUSTED_PROXIES`: Decided (2026-11-03): a comma-separated list of CIDRs for the reverse proxies whose `X-Forwarded-For` header is trusted. Default empty. The client IP rule is in [security.md](security.md), "Client IP". In the reference compose setup this is Traefik's address on the `proxy` network. UNVERIFIED: the exact CIDR depends on the Docker network.
+- `HARBORGATE_TRUSTED_PROXIES`: Decided (2026-11-03): a comma-separated list of CIDRs for the reverse proxies whose `X-Forwarded-For` header is trusted. Default empty. The client IP rule is in [security.md](security.md), "Client IP". In the reference setup it lists Traefik's address on the `proxy` network and the address cloudflared connects to Traefik from. See "Client IP behind Cloudflare and Traefik" below. Verified (2026-11-03): Docker assigns user-defined network subnets from its default address pools: /16 networks from 172.17.0.0/16 through 172.31.0.0/16, then /20 networks from 192.168.0.0/16 (Docker docs, Networking, `default-address-pools`). The CIDR therefore differs per host and is not hard-coded in the example. Decided (2026-11-03), as implemented in `backend/src/config.rs`: every entry must be a CIDR with no host bits set, so a single address is written `/32` (IPv4) or `/128` (IPv6). An invalid entry stops startup with an error.
 - `HARBORGATE_DATA_DIR`: data directory, default `/data`.
 - `HARBORGATE_BACKUP_DIR`: backup directory, default `/data/backups` ([security.md](security.md)).
 - `HARBORGATE_ALLOW_PRIVATE_HARBOR`, `HARBORGATE_ALLOW_PRIVATE_OIDC`, `HARBORGATE_ALLOW_PRIVATE_ALERTS`: outbound address opt-outs, default `false` ([security.md](security.md), "Outbound HTTP (SSRF)").
@@ -43,6 +43,18 @@ Environment variables. Each rule lives in the linked file.
 
 - A Cloudflare tunnel, configured with dockflare labels, publishes the hostname and forwards to the origin.
 - The origin address is set per host in `docker-compose.yml`.
+
+## Client IP behind Cloudflare and Traefik
+
+Decided (2026-11-03, delegated). Why both settings are needed: [security.md](security.md), "Client IP".
+
+1. Traefik's address: `docker inspect -f '{{(index .NetworkSettings.Networks "proxy").IPAddress}}' <traefik-container>`. To keep it stable across restarts, give Traefik a fixed `ipv4_address` on `proxy` in Traefik's own compose file. `ipv4_address` needs a network with a configured subnet. Read the subnet with `docker network inspect proxy`.
+2. cloudflared's source address, as Traefik sees it: send one request through the tunnel and read `ClientHost` in Traefik's access log. It depends on how cloudflared reaches Traefik. A container on a Docker network shows its container address, and a connection to a published host port can show the bridge gateway instead.
+3. Traefik static configuration: `--entryPoints.websecure.forwardedHeaders.trustedIPs=<cloudflared source address or CIDR>`.
+4. HarborGate `.env`: `HARBORGATE_TRUSTED_PROXIES=<traefik address>/32,<cloudflared source address or CIDR>`.
+5. Check: Admin > Health shows the client IP HarborGate derived for your own request. It must be your public IP, with source `x-forwarded-for`.
+
+Use the narrowest ranges that work. Trusting the whole `proxy` subnet lets any container on that network send its own `X-Forwarded-For` and get around the per-IP login limits.
 
 ## Volumes and state
 

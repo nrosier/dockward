@@ -29,7 +29,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 ```
 
 - `message` never contains a secret, a token, a stack trace, or SQL. It follows the error-handling rule in [backend.md](backend.md).
-- Codes (Decided 2026-11-03, delegated; no external source): `invalid_request` (400), `password_too_short` (400, Decided 2026-11-03, see [security.md](security.md)), `unauthenticated` (401), `invalid_credentials` (401), `forbidden` (403), `csrf_invalid` (403), `not_found` (404), `conflict` (409), `validation_failed` (422), `payload_too_large` (413), `rate_limited` (429), `internal_error` (500), `upstream_unreachable` (502).
+- Codes (Decided 2026-11-03, delegated; no external source): `invalid_request` (400), `password_too_short` (400, Decided 2026-11-03, see [security.md](security.md)), `unauthenticated` (401), `invalid_credentials` (401), `forbidden` (403), `csrf_invalid` (403), `not_found` (404), `conflict` (409), `validation_failed` (422), `payload_too_large` (413), `rate_limited` (429), `internal_error` (500), `upstream_unreachable` (502), `code_scanning_unavailable` (422, Decided (2026-11-03, delegated): the GitHub repository cannot receive code scanning uploads, see [security.md](security.md), "GitHub token scope").
 - Status code sources: RFC 9110 section 15.5 (client errors) and section 15.6 (server errors), https://www.rfc-editor.org/rfc/rfc9110. `429` is from RFC 6585.
 - Alternative not adopted: RFC 9457 `application/problem+json` (https://www.rfc-editor.org/rfc/rfc9457). The user's envelope is used instead.
 - Login failures return the same `401 invalid_credentials` for an unknown user, a wrong password, a login inside the failed-login delay, and a regular user blocked by the OIDC-only toggle, so the response does not reveal which. Source: OWASP Authentication Cheat Sheet, generic error messages (https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html).
@@ -85,7 +85,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 - `base_url` and `username` apply to Harbor credentials. `base_url` must be HTTPS and must pass the address check in [security.md](security.md) (Outbound HTTP).
 - `DELETE` returns `409` while a mapping references the credential (`ON DELETE RESTRICT`, [database.md](database.md)).
 - Audit: create, update of the token, and delete write `credential.create`, `credential.rotate`, and `credential.delete`.
-- Test button (Decided 2026-11-03, delegated; UNVERIFIED where noted):
+- Test button (Decided 2026-11-03, delegated):
   - Harbor: the robot test in [integrations.md](integrations.md), "Test button" (`GET /api/v2.0/users/current`, where `412` means the robot credential works).
   - GitHub: the endpoint probes in [security.md](security.md), "GitHub token scope".
   - The test sends the request from the server, so it passes through the same SSRF address check.
@@ -97,7 +97,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |
 | GET | `/api/v1/mappings` | session | list params; `sort` (`harbor_repository`, `created_at`); admin may add `scope=all` | list of `Mapping` | 200, 401 |
-| POST | `/api/v1/mappings` | session | `{"harbor_cred_id","github_cred_id","harbor_project","harbor_repository","github_owner","github_repo","default_branch","auto_create_issues","min_issue_severity"}` | `{"mapping": Mapping, "webhook_url": "<shown once>", "auth_secret": "<shown once>"}` | 201, 400, 404 (credential), 409 `conflict` (duplicate Harbor repository on the same Harbor instance, or duplicate GitHub target), 422 |
+| POST | `/api/v1/mappings` | session | `{"harbor_cred_id","github_cred_id","harbor_project","harbor_repository","github_owner","github_repo","default_branch","auto_create_issues","min_issue_severity"}` | `{"mapping": Mapping, "webhook_url": "<shown once>", "auth_secret": "<shown once>"}` | 201, 400, 404 (credential), 409 `conflict` (duplicate Harbor repository on the same Harbor instance, or duplicate GitHub target), 422 (including `code_scanning_unavailable`) |
 | GET | `/api/v1/mappings/:id` | session | none | `Mapping` | 200, 404 |
 | PUT | `/api/v1/mappings/:id` | session (owner only) | any subset of the create fields except the credentials' owner | `Mapping` | 200, 404, 409, 422 |
 | DELETE | `/api/v1/mappings/:id` | session (owner only) | none | empty | 204, 404 |
@@ -192,10 +192,11 @@ All routes below are `admin`.
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |
 | GET | `/healthz` | public | none | `{"status": "ok"}` | 200, 503 |
-| GET | `/api/v1/admin/health` | admin | none | `{"harbor": [Check], "github": [Check], "robot_accounts": [{"credential_id","label","expires_at","days_left"}]}` | 200 |
+| GET | `/api/v1/admin/health` | admin | none | `{"harbor": [Check], "github": [Check], "robot_accounts": [{"credential_id","label","expires_at","days_left"}], "request": {"client_ip","source"}}` | 200 |
 
 - `/healthz` is the liveness check used by the compose healthcheck and the docker-smoke check ([deployment.md](deployment.md), provisional). It returns 200 without touching Harbor or GitHub, so a Harbor outage does not mark the container unhealthy. Decided (2026-11-03, delegated), no external source. It is excluded from rate limits, because health checks must not be throttled.
-- `Check` is `{"credential_id","label","reachable": bool,"missing_permissions": [string],"detail"}`. The permission check is described in [security.md](security.md), "GitHub token scope".
+- `Check` is `{"credential_id","label","reachable": bool,"missing_permissions": [string],"code_scanning": "ok" | "no_analysis_yet" | "unavailable" | null,"detail"}`. `code_scanning` is `null` for Harbor checks. The permission check and response classification are in [security.md](security.md), "GitHub token scope".
+- `request` (Decided (2026-11-03, delegated)): the client IP HarborGate derived for this request, and `source`, which is `peer` or `x-forwarded-for`. Operators use it to check `HARBORGATE_TRUSTED_PROXIES` ([deployment.md](deployment.md), "Client IP behind Cloudflare and Traefik"). It shows only the caller's own address.
 - The robot account warning window is 14 days before `expires_at` (Decided 2026-11-03, see [integrations.md](integrations.md)).
 
 ## Webhook

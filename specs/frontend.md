@@ -6,6 +6,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 
 - Design before build. Every screen's design is proposed and approved by the user before it is implemented.
 - Frontend stack: React 19, TypeScript, Vite, Tailwind CSS v4, Radix UI Primitives, Lucide React, TanStack Query v5, Recharts.
+- CSP (Decided (2026-11-03, delegated), details in [security.md](security.md), "Security headers"): `vite.config.ts` sets `html.cspNonce` to the placeholder and `build.assetsInlineLimit: 0`. At startup the app reads the nonce from `<meta property="csp-nonce">` through the element's `nonce` property, calls `setNonce` from `get-nonce` before the first render, and passes `nonce` to every Radix Select and ScrollArea viewport. No inline `<style>` or `style` attribute in markup. Styles come from Tailwind classes or the React `style` prop.
 - Layout proportions not yet decided (for example any 60/40 split) must be confirmed with the user before the frontend is built.
 
 ## House style and precedence
@@ -74,7 +75,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
   - Jobs: housekeeping and sync jobs, with counts and errors. Includes cleanup and retention runs and polling runs.
   - Failed syncs: error message and a retry action.
   - Audit log: admin actions such as user create and delete, role changes, OIDC config changes, credential rotation.
-  - Health: Harbor and GitHub reachability, token expiry, missing scopes, robot account expiry date with a warning 14 days before it lapses (Decided 2026-11-03, see [integrations.md](integrations.md)).
+  - Health: Harbor and GitHub reachability, token expiry, missing scopes, robot account expiry date with a warning 14 days before it lapses (Decided 2026-11-03, see [integrations.md](integrations.md)). Decided (2026-11-03, delegated): it also shows the code scanning state of each GitHub target (ready, no analysis yet, or unavailable), and the client IP HarborGate sees for the admin's own request, with its source ([api.md](api.md), "Health").
   - Settings (OIDC, Users, Alerts, Backup and restore): sections for the OIDC, Users, Alerts, and Backup and restore screens.
 - Decided (2026-11-03): Settings is the fifth tab, after Health. It holds the OIDC, Users, Alerts, and Backup and restore screens. Admin stays a single rail entry.
 - Settings > OIDC (decided 2026-11-03): OIDC settings and the toggle that restricts regular users to OIDC are managed here, stored encrypted (client secret AES-256-GCM), and every change is audited as `oidc.config_change`. Admin break-glass is always available. The "OIDC only for regular users" toggle restricts regular users to OIDC sign-in (Decided 2026-11-03, see [security.md](security.md)). See [security.md](security.md).

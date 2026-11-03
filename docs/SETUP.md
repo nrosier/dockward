@@ -39,31 +39,28 @@ Do these steps for each Harbor project that HarborGate will map. Use a project a
 
 ### 3a. Create a project-scoped robot account
 
-1. Open the Harbor project `<project>` and go to the robot accounts section (UNVERIFIED: confirm the exact menu path in your Harbor version UI).
+1. In Harbor, open **Projects**, choose `<project>`, open the **Robot Accounts** tab, and click **NEW ROBOT ACCOUNT**.
 2. Create a **project** robot account. Do not create a system robot account, because a system robot can cover multiple projects.
 3. Scope it to only the project `<project>`.
 4. Grant only the permissions needed to read artifacts and their vulnerability reports:
 
 | Permission (Harbor name) | Why it is needed |
 | --- | --- |
-| Pull Repository | Pull access to repository artifacts in the project |
-| Read Artifact | Read artifact metadata, including the OCI labels |
-| List Artifact | List artifacts in a repository |
-| Read Artifact Addition | Read the `additions/vulnerabilities` endpoint |
-| Read Scan | Read scan report data |
+| Artifact: List | List artifacts in a repository (`GET .../repositories/{repository}/artifacts`) |
+| Artifact: Read | Read one artifact, including its OCI labels and scan overview |
+| Artifact Addition: Read | Read the vulnerability report (`GET .../artifacts/{reference}/additions/vulnerabilities`) |
 
-Do not grant any push, delete, or tag-changing permission, and do not grant any project administrator or system administration permission. UNVERIFIED: confirm the exact names of these permissions in the Harbor UI, since this guide only verified the read-side names above.
+In the robot's permission list these appear as the resources **Artifact** and **Artifact Addition**, with the actions **List** and **Read**. Do not grant anything else: no Repository Pull or Push, no Scan, no create, delete, or tag permissions, and no project or system administration.
 
-Verification status:
-- The permission names and their mapping to the `artifacts` and `additions/vulnerabilities` endpoints are verified from the Harbor robot account documentation (https://goharbor.io/docs/latest/administration/robot-accounts/), which lists Pull Repository, Read Artifact, List Artifact, Read Artifact Addition, and Read Scan.
-- The Harbor UI labels may differ slightly by version. UNVERIFIED: confirm the exact labels in the Harbor UI.
-- Project-scoping of a robot account is verified from the same page.
+Verification status (2026-11-03):
+- Each endpoint's permission check was read in the Harbor source (`src/server/v2.0/handler/artifact.go`): listing artifacts needs Artifact List, reading an artifact needs Artifact Read, and the vulnerabilities addition needs Artifact Addition Read. The scan overview comes with the artifact read, so Scan Read is not needed. HarborGate never pulls an image, so Repository Pull is not needed.
+- The UI labels (Robot Accounts, NEW ROBOT ACCOUNT, Artifact, Artifact Addition, List, Read) come from Harbor's English string catalog (`src/portal/src/i18n/lang/en-us-lang.json`) on the `main` branch. An older Harbor release can word them slightly differently.
 
 ### 3b. Save the robot username and secret
 
 1. After you create the robot account, Harbor shows the username and secret once in the confirmation window. Copy both at this point or export them.
 2. Harbor does not store the secret. If you lose it, you can refresh it (which generates a new secret), but you cannot read the old one.
-3. The robot username follows the form `robot$<project>+<name>`. UNVERIFIED: the docs confirm the `robot$` prefix and `<prefix><account_name>` format, but the project-level `+` form was not confirmed. Copy the exact username that Harbor displays.
+3. The robot username has the form `robot$<project>+<name>`. Verified in the Harbor source (`src/controller/robot/controller.go`): a project robot is named `<prefix><project>+<name>`, and the prefix defaults to `robot$`. An administrator can change the prefix, so copy the exact username Harbor shows.
 4. Robot accounts expire after 30 days by default (verified). Set the lifespan you want in Harbor's system settings, or plan to rotate the secret before it expires.
 5. Store the username and secret in your password manager. You will paste them into HarborGate in section 5.
 
@@ -82,21 +79,21 @@ https://<your-host>/api/v1/webhooks/harbor/<mapping_token>
 - `<your-host>` is the public hostname of your HarborGate instance. Use HTTPS only.
 - `<mapping_token>` is the webhook token shown on the HarborGate mapping screen. You get it in section 5, after you create the mapping. Create the mapping first, then return here.
 
-6. Set the auth header on the webhook. In Harbor's webhook settings, set the **Auth Header** field to `Bearer <webhook-secret>`. Use the secret value shown once in the HarborGate mapping screen. Harbor sends this value as the `Authorization` header with every notification, and HarborGate checks it. Treat it as a secret. UNVERIFIED: confirm in the Harbor UI the exact menu label for the Auth Header field.
+6. Set the auth header on the webhook. In Harbor's webhook settings, set the **Auth Header** field to `Bearer <webhook-secret>`. Use the secret value shown once in the HarborGate mapping screen. Harbor sends this value as the `Authorization` header with every notification, and HarborGate checks it. Treat it as a secret. The field is labelled **Auth Header** in the Add Webhook form (verified in Harbor's string catalog).
 
 ```text
 Auth Header: Bearer <webhook-secret>
 ```
 
-7. Leave verify-SSL enabled if HarborGate uses a valid TLS certificate. UNVERIFIED: the Harbor docs say only "Verify Remote Certificate" and do not describe its behavior in detail. Confirm the option in your Harbor UI.
+7. Leave **Verify Remote Certificate** checked. Harbor's tooltip: "Determine whether the webhook should verify the certificate of a remote URL. Uncheck this box when the remote URL uses a self-signed or untrusted certificate." HarborGate behind Traefik has a valid certificate, so never uncheck it.
 8. Click **Add**.
 
 Treat the webhook URL as a secret. Anyone who has it can trigger a sync for that mapping. Do not paste it into tickets, chat, or screenshots. Do not log it. If it leaks, rotate the mapping (section 8).
 
 ### 3d. Enable scanning on the project
 
-1. In Harbor, open the project `<project>` and turn on automatic scanning of images on push. UNVERIFIED: the Harbor docs were not checked for this setting; confirm the label in the Harbor UI.
-2. Confirm that the scanner for the project is Trivy, and that a newly pushed image is scanned. Harbor shows scan results on the artifact's vulnerability view. UNVERIFIED: confirm the view name in the Harbor UI.
+1. In Harbor, open the project `<project>`, go to the **Configuration** tab, and under **Vulnerability scanning** check **Automatically scan images on push**. Save.
+2. Confirm that the scanner for the project is Trivy, and that a newly pushed image is scanned. Harbor shows the results on the artifact's **Vulnerabilities** view.
 3. HarborGate only converts Trivy output. Other scanners are not supported (per the project specification).
 
 ## 4. GitHub Setup
@@ -105,7 +102,7 @@ Do these steps once for each repository HarborGate will write to.
 
 ### 4a. Create a fine-grained personal access token
 
-1. In GitHub, go to **Settings > Developer settings > Personal access tokens > Fine-grained tokens** and choose **Generate new token**. UNVERIFIED: confirm the menu path in the GitHub UI.
+1. In GitHub, go to **Settings > Developer settings > Personal access tokens > Fine-grained tokens** and click **Generate new token** (verified in GitHub's "Managing your personal access tokens"). A pre-filled form with the right permissions: `https://github.com/settings/personal-access-tokens/new?name=HarborGate&target_name=<owner>&expires_in=90&security_events=write&issues=write`. You still pick the repositories yourself. Leave out `&issues=write` if issues are not used.
 2. **Resource owner:** select the organization or user account that owns the target repository, `<owner>`. A fine-grained token can only access resources owned by its single resource owner.
 3. **Repository access:** choose **Only select repositories** and select only the repositories HarborGate will write to. Do not choose "All repositories".
 4. **Expiration:** set an expiry. Recommended: 90 days, and create a calendar reminder to rotate the token a week before it expires. Non-expiring tokens are allowed by GitHub but are not recommended.
@@ -116,11 +113,12 @@ Grant only these repository permissions:
 
 | GitHub permission name | Access | Why it is needed | Status |
 | --- | --- | --- | --- |
-| Contents | Read-only | Read repository contents (`GET /repos/{owner}/{repo}/contents/{path}`) | Verified: "Contents" read maps to that endpoint. |
-| Code scanning alerts | Read and write | Upload SARIF (`POST /repos/{owner}/{repo}/code-scanning/sarifs`) and read alerts | Verified: "Code scanning alerts" read/write covers the SARIF upload. The permission-to-scope mapping (`security_events`) is for classic tokens. UNVERIFIED: confirm the fine-grained label in the GitHub UI. |
+| Code scanning alerts | Read and write | Upload SARIF (`POST /repos/{owner}/{repo}/code-scanning/sarifs`) and read alerts | Verified: "Code scanning alerts" read/write covers the SARIF upload. The fine-grained label is "Code scanning alerts", URL parameter `security_events` (verified in GitHub's token pre-fill parameter table). |
 | Issues | Read and write | Create and update issues (`POST /repos/{owner}/{repo}/issues`, `PATCH /repos/{owner}/{repo}/issues/{issue_number}`) | Verified. Required only if auto-issues or manual issue creation is enabled. |
 
-Do not grant Administration, Workflows, Actions, or any organization-wide permission.
+Metadata: read is always included. Do not grant Contents, Administration, Workflows, Actions, or any organization-wide permission.
+
+The target repository must support code scanning: a public repository, or an organization-owned repository on GitHub Team or Enterprise with GitHub Code Security enabled. A private repository owned by a personal account cannot receive SARIF uploads, and HarborGate rejects such a mapping (`code_scanning_unavailable`).
 
 ### 4c. Save the token in HarborGate
 
@@ -143,7 +141,7 @@ These steps are for the first run and for each user. The first local account you
 4. **Repository mapping:** create one mapping per Harbor repository (one image name within a project), not one mapping for a whole project. Each mapping has its own webhook URL. Each GitHub repository can be the target of only one mapping, regardless of branch. HarborGate rejects a second mapping for the same target. Create a mapping with these settings:
    - Harbor credential and GitHub credential: select the ones you added in steps 2 and 3
    - Harbor project: `<project>`
-   - Harbor repository: `<harbor-repository>` (the image name within the project; UNVERIFIED: confirm how Harbor displays this name in your version UI)
+   - Harbor repository: `<harbor-repository>`, the image name within the project. Harbor's **Repositories** tab shows the full name `<project>/<harbor-repository>` (for example `library/busybox`, the same form as `repo_full_name` in Harbor's webhook payload). Enter only the part after `<project>/`.
    - GitHub repository: `<repo>` (the GitHub repository)
    - GitHub owner: `<owner>`
    - Default branch: used only when the image has no `org.opencontainers.image.ref.name` label (default `main`)
@@ -166,17 +164,17 @@ You can sign in to HarborGate through an OpenID Connect (OIDC) provider instead 
 
    Replace `<your-host>` with the host name that users open in the browser. Note the client ID and client secret the provider gives you.
 
-   UNVERIFIED: the client type, grant settings, and the steps to create the client differ by provider. Confirm them in your provider's documentation.
+   The client type, grant settings, and steps to create the client differ by provider; follow your provider's documentation. HarborGate needs a confidential client with the authorization code flow.
 
 2. **Enter the settings in HarborGate.** Sign in as an admin, open **Admin > Settings**, and fill in the OIDC section:
    - **Issuer URL:** `<issuer-url>`. It must use `https://`.
    - **Client ID:** `<client-id>`.
    - **Client secret:** `<client-secret>`. HarborGate stores it encrypted and never shows it again.
-   - **Role claim:** the name of the token claim that lists the user's groups (for example `groups`). UNVERIFIED: the claim name depends on your provider. Confirm it in your provider's documentation.
+   - **Role claim:** the name of the token claim that lists the user's groups (for example `groups`). The claim name depends on your provider.
    - **Admin group:** the group value that gives the `Admin` role.
    - **User group:** the group value that gives the `User` role.
 
-3. **Put users in the groups.** In your provider, add each user to the admin group or the user group. UNVERIFIED: how to add group membership, and how to include the groups claim in the ID token, differ by provider. Confirm this in your provider's documentation. A user who is in neither group cannot sign in.
+3. **Put users in the groups.** In your provider, add each user to the admin group or the user group. How you add group membership, and how you include the groups claim in the ID token, differ by provider; follow your provider's documentation. A user who is in neither group cannot sign in.
 
 4. **Sign in.** Users open HarborGate and choose the OIDC sign-in option. HarborGate creates the account on the user's first successful sign-in. The role comes from the group claim, and HarborGate checks it again on every sign-in. If you move a user to another group, the new role applies at that user's next sign-in.
 
