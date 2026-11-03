@@ -5,7 +5,9 @@ Purpose: the single home for alert rules. Covers admin-configured email (SMTP) a
 ## Channels
 
 - Email over SMTP, configured by an admin.
+  - Decided (2026-11-03, user): sent with the `lettre` crate (tokio and rustls with aws-lc-rs, default features off). TLS is required: implicit TLS (usually port 465) or STARTTLS that must succeed (usually 587). Plaintext SMTP is rejected when the channel is saved. The SMTP host is resolved first and checked against the outbound address rules ([security.md](security.md), Outbound HTTP, class `alerts`). HarborGate then connects to the checked address and verifies the certificate against the configured hostname. Config: `{"host","port","tls": "implicit"|"starttls","username"?,"password"?,"from","to": [..]}`.
 - Outbound webhook, configured by an admin.
+  - Decided (2026-11-03, user): `POST` with `Content-Type: application/json` and the body `{"event": "sync_failed"|"critical_cve", "occurred_at": <RFC 3339 UTC>, "mapping": {"id", "harbor": "<project>/<repository>", "github": "<owner>/<repo>"}, "cve_id"?, "severity"?, "image_tag"?, "error"?, "text"}`. `text` is one human-readable sentence, so Slack and Teams incoming webhooks work unchanged. Config: `{"url", "headers"?: {name: value}}`, stored encrypted. The URL passes the outbound rules (HTTPS, address check, no redirects). Timeout 10 s; any `2xx` counts as delivered, and no delivery row is written otherwise.
 
 ## Triggers
 
