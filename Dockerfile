@@ -2,8 +2,11 @@
 
 FROM node:26-alpine AS frontend
 WORKDIR /build
+# The lockfile is copied first, so the npm ci layer is reused until dependencies change.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --ignore-scripts
 COPY frontend/ ./
-RUN npm ci --ignore-scripts && npm run build
+RUN npm run build
 
 # The frontend is built before the backend so rust-embed can embed
 # /src/frontend/dist (relative to the backend crate: ../frontend/dist).
@@ -12,13 +15,22 @@ WORKDIR /src/backend
 COPY backend/ ./
 COPY --from=frontend /build/dist /src/frontend/dist
 ENV SQLX_OFFLINE=true
-RUN cargo build --release --locked
+# A cache mount is not part of the layer, so the binary is copied out of target/.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/backend/target \
+    cargo build --release --locked && cp target/release/harborgate /harborgate
 
-FROM alpine:3.20
+FROM alpine:3.24
 RUN mkdir -p /data && chown 65532:65532 /data
-COPY --from=backend /src/backend/target/release/harborgate /usr/local/bin/harborgate
+COPY --from=backend /harborgate /usr/local/bin/harborgate
 USER 65532:65532
 EXPOSE 8080
 ENV HARBORGATE_DATA_DIR=/data
 VOLUME ["/data"]
+# Same values as docker-compose.yml. Uses busybox wget, which is in the alpine base image.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
+LABEL org.opencontainers.image.title="HarborGate" \
+      org.opencontainers.image.source="https://github.com/nrosier/harborgate" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.description="Harbor to GitHub Code Scanning relay"
 ENTRYPOINT ["/usr/local/bin/harborgate"]
