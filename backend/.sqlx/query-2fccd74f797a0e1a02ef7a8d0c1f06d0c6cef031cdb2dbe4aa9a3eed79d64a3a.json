@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO system_config (key, value, is_encrypted) VALUES ('auth.oidc_only_users', 'true', 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "2fccd74f797a0e1a02ef7a8d0c1f06d0c6cef031cdb2dbe4aa9a3eed79d64a3a"
+}

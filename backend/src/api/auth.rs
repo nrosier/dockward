@@ -2,14 +2,19 @@
 //! `specs/security.md` (Sessions).
 
 use axum::{
+    Json,
     extract::{FromRequestParts, State},
-    http::{StatusCode, header::SET_COOKIE, request::Parts},
+    http::{HeaderMap, StatusCode, header::SET_COOKIE, request::Parts},
     response::{IntoResponse, Response},
 };
+use serde::{Deserialize, Serialize};
 
 use crate::api::state::AppState;
+use crate::auth::csrf;
 use crate::auth::session::{self, SESSION_COOKIE};
 use crate::error::AppError;
+use crate::models::user::User;
+use crate::services::auth as local_auth;
 use crate::services::{sessions, sessions::AuthUser};
 
 /// Extracts the authenticated user from the session cookie. Any failure is `401`
@@ -68,4 +73,118 @@ fn cleared(status: StatusCode) -> Response {
         response.headers_mut().append(SET_COOKIE, value);
     }
     response
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetupBody {
+    pub username: String,
+    pub email: Option<String>,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginBody {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserResponse {
+    pub user: User,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SetupStatus {
+    pub setup_required: bool,
+    pub oidc_enabled: bool,
+}
+
+/// Parses a JSON body into `T`. A malformed body becomes `400 invalid_request`
+/// with the standard envelope.
+fn parse_body<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, AppError> {
+    serde_json::from_slice(bytes)
+        .map_err(|_| AppError::InvalidRequest("The request body is not valid.".to_owned()))
+}
+
+/// Builds a response that sets the session and CSRF cookies for `user_id`.
+fn session_response(
+    state: &AppState,
+    user: &crate::db::users::UserRow,
+    status: StatusCode,
+    body: UserResponse,
+) -> Result<Response, AppError> {
+    let now = session::now_unix()?;
+    let role = crate::models::role::Role::parse(&user.role).ok_or(AppError::InternalError)?;
+    let token = session::issue(
+        &state.session_key,
+        &user.id,
+        role.as_str(),
+        user.token_version,
+        now,
+    )?;
+    let csrf_value = csrf::issue(&state.csrf_key)?;
+    let mut response = (status, Json(body)).into_response();
+    for cookie in [session::set_cookie(&token), csrf::set_cookie(&csrf_value)] {
+        let value = cookie.parse().map_err(|_| AppError::InternalError)?;
+        response.headers_mut().append(SET_COOKIE, value);
+    }
+    Ok(response)
+}
+
+/// `GET /api/v1/auth/setup-status`. Public. Reports whether first-run setup is open.
+/// OIDC is not configured until #18, so `oidc_enabled` is `false` here.
+pub async fn setup_status(State(state): State<AppState>) -> Result<Json<SetupStatus>, AppError> {
+    let setup_required = local_auth::setup_required(&state.pool).await?;
+    Ok(Json(SetupStatus {
+        setup_required,
+        oidc_enabled: false,
+    }))
+}
+
+/// `POST /api/v1/auth/setup`. Public, same-origin only. Creates the first local admin
+/// and signs them in. Closed for good once any user exists.
+pub async fn setup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> Result<Response, AppError> {
+    local_auth::check_same_origin(&headers, &state.public_url)?;
+    let body: SetupBody = parse_body(&bytes)?;
+    let username = body.username.trim();
+    if username.is_empty() {
+        return Err(AppError::ValidationFailed(
+            "Username is required.".to_owned(),
+        ));
+    }
+    let id = local_auth::create_first_admin(
+        &state.pool,
+        username,
+        body.email.as_deref(),
+        &body.password,
+    )
+    .await?;
+    let user = crate::db::users::find_by_id(&state.pool, &id)
+        .await?
+        .ok_or(AppError::InternalError)?;
+    let view = User::try_from(user.clone())?;
+    session_response(
+        &state,
+        &user,
+        StatusCode::CREATED,
+        UserResponse { user: view },
+    )
+}
+
+/// `POST /api/v1/auth/login`. Public, same-origin only. Failures are one generic
+/// `401 invalid_credentials`.
+pub async fn login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> Result<Response, AppError> {
+    local_auth::check_same_origin(&headers, &state.public_url)?;
+    let body: LoginBody = parse_body(&bytes)?;
+    let user = local_auth::login(&state.pool, &body.username, &body.password).await?;
+    let view = User::try_from(user.clone())?;
+    session_response(&state, &user, StatusCode::OK, UserResponse { user: view })
 }

@@ -81,7 +81,9 @@ impl AppError {
             AppError::InvalidRequest(detail)
             | AppError::Conflict(detail)
             | AppError::ValidationFailed(detail) => detail.clone(),
-            AppError::PasswordTooShort => "Password must be at least 15 characters.".to_owned(),
+            AppError::PasswordTooShort => {
+                "Password must be between 15 and 64 characters.".to_owned()
+            }
             AppError::Unauthenticated => "Authentication is required.".to_owned(),
             AppError::InvalidCredentials => "Invalid username or password.".to_owned(),
             AppError::Forbidden => "You do not have permission to do this.".to_owned(),

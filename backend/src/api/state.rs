@@ -13,4 +13,6 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub session_key: Arc<DerivedKey>,
     pub csrf_key: Arc<DerivedKey>,
+    /// `HARBORGATE_PUBLIC_URL`, the origin that login and setup requests must match.
+    pub public_url: String,
 }

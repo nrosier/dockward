@@ -41,6 +41,9 @@ async fn healthz() -> Json<Health> {
 fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/api/v1/auth/setup-status", get(api::auth::setup_status))
+        .route("/api/v1/auth/setup", post(api::auth::setup))
+        .route("/api/v1/auth/login", post(api::auth::login))
         .route("/api/v1/auth/logout", post(api::auth::logout))
         .route("/api/v1/auth/logout-all", post(api::auth::logout_all))
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
@@ -92,6 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool,
         session_key,
         csrf_key,
+        public_url: settings.public_url.clone(),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -146,6 +150,7 @@ mod tests {
             pool: pool.clone(),
             session_key,
             csrf_key,
+            public_url: "https://harborgate.example.com".to_owned(),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -178,6 +183,7 @@ mod tests {
             pool: pool.clone(),
             session_key: Arc::new(auth::crypto::session_key(&root).unwrap()),
             csrf_key: Arc::new(auth::crypto::csrf_key(&root).unwrap()),
+            public_url: "https://harborgate.example.com".to_owned(),
         };
         (app(Vec::new(), state), pool, dir)
     }
