@@ -10,6 +10,7 @@ mod api;
 #[allow(dead_code)] // Used by the login and encryption paths in later issues.
 mod auth;
 mod config;
+#[allow(dead_code)] // Pool is consumed by handlers and workers added in later issues.
 mod db;
 #[allow(dead_code)] // Used by handlers and services added in later issues.
 mod error;
@@ -48,7 +49,10 @@ async fn shutdown_signal(mut terminate: Signal) {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Refuse to start without a valid key or settings. This runs before the port is bound.
     let _encryption_key = config::load_encryption_key()?;
-    let _settings = config::load_settings()?;
+    let settings = config::load_settings()?;
+    let _pool = db::open(&settings.data_dir)
+        .await
+        .map_err(|_| "could not open or migrate the database in HARBORGATE_DATA_DIR")?;
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
 
