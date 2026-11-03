@@ -10,6 +10,8 @@ pub mod credential_probe;
 pub mod credentials;
 #[allow(dead_code)] // Used by the admin routes and the auth paths added in later issues.
 pub mod ids;
+#[allow(dead_code)] // Used by the mapping routes.
+pub mod mappings;
 #[allow(dead_code)] // The list routes that use this are added with the admin routes.
 pub mod pagination;
 #[allow(dead_code)] // Used by the session extractor and logout routes.

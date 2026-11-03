@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS n FROM repo_mappings WHERE (? IS NULL OR user_id = ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "n",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "aa5686b3a5db684c5ee72e824a51e4ac6688a30ca68a2010e7f22612e947b9ad"
+}

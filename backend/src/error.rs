@@ -22,6 +22,8 @@ pub enum AppError {
     NotFound,
     Conflict(String),
     ValidationFailed(String),
+    /// GitHub cannot take code scanning uploads for the repository (`specs/security.md`).
+    CodeScanningUnavailable,
     PayloadTooLarge,
     RateLimited,
     InternalError,
@@ -48,7 +50,9 @@ impl AppError {
             AppError::Forbidden | AppError::CsrfInvalid => StatusCode::FORBIDDEN,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::Conflict(_) => StatusCode::CONFLICT,
-            AppError::ValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            AppError::ValidationFailed(_) | AppError::CodeScanningUnavailable => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             AppError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             AppError::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
@@ -68,6 +72,7 @@ impl AppError {
             AppError::NotFound => "not_found",
             AppError::Conflict(_) => "conflict",
             AppError::ValidationFailed(_) => "validation_failed",
+            AppError::CodeScanningUnavailable => "code_scanning_unavailable",
             AppError::PayloadTooLarge => "payload_too_large",
             AppError::RateLimited => "rate_limited",
             AppError::InternalError => "internal_error",
@@ -83,6 +88,9 @@ impl AppError {
             | AppError::ValidationFailed(detail) => detail.clone(),
             AppError::PasswordTooShort => {
                 "Password must be between 15 and 64 characters.".to_owned()
+            }
+            AppError::CodeScanningUnavailable => {
+                "This repository cannot receive code scanning uploads.".to_owned()
             }
             AppError::Unauthenticated => "Authentication is required.".to_owned(),
             AppError::InvalidCredentials => "Invalid username or password.".to_owned(),
@@ -141,6 +149,11 @@ mod tests {
                 "validation_failed",
             ),
             (AppError::PayloadTooLarge, 413, "payload_too_large"),
+            (
+                AppError::CodeScanningUnavailable,
+                422,
+                "code_scanning_unavailable",
+            ),
             (AppError::RateLimited, 429, "rate_limited"),
             (AppError::InternalError, 500, "internal_error"),
             (AppError::UpstreamUnreachable, 502, "upstream_unreachable"),
