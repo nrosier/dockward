@@ -2,6 +2,8 @@
 //! /admin/oidc`), `specs/security.md` (OIDC, Local login). The client secret is
 //! encrypted at rest and is never returned. The audit row never carries the secret.
 
+use std::fmt;
+
 use sqlx::SqlitePool;
 
 use crate::auth::crypto::DerivedKey;
@@ -12,7 +14,7 @@ use crate::services::oidc::{self, OidcSettings};
 
 /// Body of `PUT /api/v1/admin/oidc`. Every field is written as sent. `client_secret`
 /// is optional: when absent, the stored secret is kept.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 pub struct OidcSettingsBody {
     pub issuer_url: Option<String>,
     pub client_id: Option<String>,
@@ -21,6 +23,22 @@ pub struct OidcSettingsBody {
     pub user_group: Option<String>,
     pub client_secret: Option<String>,
     pub oidc_only_users: bool,
+}
+
+const REDACTED: &str = "<redacted>";
+
+impl fmt::Debug for OidcSettingsBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OidcSettingsBody")
+            .field("issuer_url", &self.issuer_url)
+            .field("client_id", &self.client_id)
+            .field("role_claim", &self.role_claim)
+            .field("admin_group", &self.admin_group)
+            .field("user_group", &self.user_group)
+            .field("client_secret", &REDACTED)
+            .field("oidc_only_users", &self.oidc_only_users)
+            .finish()
+    }
 }
 
 /// Reads the settings for the admin screen. Secrets are reported only as present.
@@ -177,4 +195,34 @@ fn clean(raw: Option<&str>) -> Option<String> {
     raw.map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oidc_settings_body_debug_redacts_client_secret() {
+        let body = OidcSettingsBody {
+            issuer_url: Some("https://issuer.example.test".to_owned()),
+            client_id: Some("fake-client-id".to_owned()),
+            role_claim: Some("groups".to_owned()),
+            admin_group: Some("fake-admins".to_owned()),
+            user_group: Some("fake-users".to_owned()),
+            client_secret: Some("FAKE_CLIENT_SECRET_1".to_owned()),
+            oidc_only_users: true,
+        };
+        let out = format!("{body:?}");
+        assert!(
+            !out.contains("FAKE_CLIENT_SECRET_1"),
+            "client secret leaked: {out}"
+        );
+        assert!(
+            out.contains("https://issuer.example.test"),
+            "issuer missing: {out}"
+        );
+        assert!(out.contains("fake-client-id"), "client_id missing: {out}");
+        assert!(out.contains("fake-admins"), "admin_group missing: {out}");
+        assert!(out.contains("oidc_only_users: true"), "flag missing: {out}");
+    }
 }
