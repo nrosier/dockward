@@ -1,0 +1,41 @@
+name: Issue dependencies
+
+# Syncs native "blocked by" links from each issue's `**Depends on:**` line and moves
+# issues between `blocked` and `ready` as their dependencies close or reopen.
+# Logic: .github/scripts/issue-deps.mjs
+
+on:
+  issues:
+    types: [opened, edited, closed, reopened]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: issue-deps
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync dependencies and labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Sync
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node .github/scripts/issue-deps.mjs
