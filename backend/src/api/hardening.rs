@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -61,15 +62,23 @@ pub fn client_ip(peer: IpAddr, forwarded_for: Option<&str>, trusted: &[Cidr]) ->
         .unwrap_or(peer)
 }
 
+/// Most keys one limiter holds at once. A new key past this cap is refused (fail closed)
+/// unless expired windows can be swept to make room.
+pub const MAX_KEYS: usize = 100_000;
+/// Expired windows are swept on every this-many-th call, even when the map is not full.
+const SWEEP_EVERY: u64 = 1_024;
+
 /// Fixed-window rate limiter keyed by a string. The clock is passed in, so tests are
 /// deterministic. A rejected request returns the seconds until the window resets, for
-/// `Retry-After`.
+/// `Retry-After`. Memory is bounded: expired windows are removed, and the key count
+/// never exceeds [`MAX_KEYS`].
 #[derive(Clone)]
-#[allow(dead_code)] // Attached to the login and webhook routes in later issues.
 pub struct RateLimiter {
     limit: u32,
     window: Duration,
     buckets: Arc<Mutex<HashMap<String, (Instant, u32)>>>,
+    /// Calls to `check`, shared by clones. Drives the periodic sweep.
+    calls: Arc<AtomicU64>,
 }
 
 impl RateLimiter {
@@ -78,6 +87,7 @@ impl RateLimiter {
             limit,
             window,
             buckets: Arc::new(Mutex::new(HashMap::new())),
+            calls: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -96,9 +106,20 @@ impl RateLimiter {
     }
 
     /// Records one request for `key` at `now`. Returns `Ok(())` when it is allowed, or
-    /// `Err(seconds)` with the wait before the next request is allowed.
+    /// `Err(seconds)` with the wait before the next request is allowed. A new key that
+    /// would exceed [`MAX_KEYS`] is refused with `Err`, and the window length is returned.
     pub fn check(&self, key: &str, now: Instant) -> Result<(), u64> {
         let mut buckets = self.buckets.lock().map_err(|_| 1_u64)?;
+        let call = self.calls.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        if call.is_multiple_of(SWEEP_EVERY) {
+            self.sweep(&mut buckets, now);
+        }
+        if buckets.len() >= MAX_KEYS && !buckets.contains_key(key) {
+            self.sweep(&mut buckets, now);
+            if buckets.len() >= MAX_KEYS {
+                return Err(self.window.as_secs().max(1));
+            }
+        }
         let entry = buckets.entry(key.to_owned()).or_insert((now, 0));
         if now.duration_since(entry.0) >= self.window {
             *entry = (now, 0);
@@ -110,6 +131,18 @@ impl RateLimiter {
         let elapsed = now.duration_since(entry.0);
         let remaining = self.window.saturating_sub(elapsed);
         Err(remaining.as_secs().max(1))
+    }
+
+    /// Removes every entry whose window has ended at `now`.
+    fn sweep(&self, buckets: &mut HashMap<String, (Instant, u32)>, now: Instant) {
+        let window = self.window;
+        buckets.retain(|_, entry| now.duration_since(entry.0) < window);
+    }
+
+    /// The number of keys currently held. Test builds only.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.buckets.lock().map_or(0, |buckets| buckets.len())
     }
 }
 
@@ -284,6 +317,39 @@ mod tests {
         let start = Instant::now();
         assert!(limiter.check("a", start).is_ok());
         assert!(limiter.check("b", start).is_ok());
+    }
+
+    #[test]
+    fn unique_keys_do_not_grow_the_map_past_the_cap() {
+        let limiter = RateLimiter::new(1, Duration::from_secs(60));
+        let start = Instant::now();
+        let mut refused = 0_usize;
+        for n in 0..(MAX_KEYS + 500) {
+            if limiter.check(&format!("flood-{n}"), start).is_err() {
+                refused += 1;
+            }
+        }
+        assert!(limiter.len() <= MAX_KEYS, "map grew to {}", limiter.len());
+        // Every key past the cap is refused, and the map does not grow.
+        assert_eq!(refused, 500);
+        assert_eq!(limiter.len(), MAX_KEYS);
+    }
+
+    #[test]
+    fn ended_windows_are_swept() {
+        let limiter = RateLimiter::new(1, Duration::from_secs(60));
+        let start = Instant::now();
+        for n in 0..100 {
+            assert!(limiter.check(&format!("old-{n}"), start).is_ok());
+        }
+        assert_eq!(limiter.len(), 100);
+        // Well after every window has ended, the sweep runs on the 1,024th call.
+        let later = start + Duration::from_secs(120);
+        for n in 0..SWEEP_EVERY {
+            assert!(limiter.check(&format!("new-{n}"), later).is_ok());
+        }
+        // The 100 old keys were removed. Only the new keys remain.
+        assert_eq!(limiter.len(), SWEEP_EVERY as usize);
     }
 
     #[test]
