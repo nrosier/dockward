@@ -1,7 +1,8 @@
 use std::env::{self, VarError};
 use std::fmt;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Name of the environment variable that holds the base64-encoded 32-byte key.
 pub const ENCRYPTION_KEY_VAR: &str = "HARBORGATE_ENCRYPTION_KEY";
@@ -55,6 +56,12 @@ impl std::error::Error for ConfigError {}
 #[allow(dead_code)] // Consumed by the encryption layer once it exists.
 pub struct EncryptionKey([u8; ENCRYPTION_KEY_LEN]);
 
+impl Drop for EncryptionKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 impl EncryptionKey {
     #[allow(dead_code)] // Consumed by the encryption layer once it exists.
     pub fn as_bytes(&self) -> &[u8; ENCRYPTION_KEY_LEN] {
@@ -79,18 +86,21 @@ where
     F: FnOnce(&str) -> Result<String, VarError>,
 {
     let raw = match lookup(ENCRYPTION_KEY_VAR) {
-        Ok(value) => value,
+        Ok(value) => Zeroizing::new(value),
         Err(VarError::NotPresent) => return Err(ConfigError::Missing),
         Err(VarError::NotUnicode(_)) => return Err(ConfigError::NotUnicode),
     };
-    parse_encryption_key(&raw)
+    parse_encryption_key(raw.as_str())
 }
 
 /// Decodes a base64 (standard alphabet) string into an [`EncryptionKey`].
 pub fn parse_encryption_key(encoded: &str) -> Result<EncryptionKey, ConfigError> {
-    let decoded = STANDARD
-        .decode(encoded.trim())
-        .map_err(|_| ConfigError::InvalidBase64)?;
+    // The decode buffer holds key material, so it is zeroed on drop.
+    let decoded = Zeroizing::new(
+        STANDARD
+            .decode(encoded.trim())
+            .map_err(|_| ConfigError::InvalidBase64)?,
+    );
     let bytes: [u8; ENCRYPTION_KEY_LEN] =
         decoded
             .as_slice()
