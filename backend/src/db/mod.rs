@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 
+#[allow(dead_code)] // Used by the audit writer and the admin audit list.
+pub mod audit;
+
 use crate::error::AppError;
 
 /// File name of the SQLite database inside `HARBORGATE_DATA_DIR`.
