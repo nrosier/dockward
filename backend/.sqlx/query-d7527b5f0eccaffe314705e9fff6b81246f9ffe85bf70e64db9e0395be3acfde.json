@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO system_config (key, value, is_encrypted) VALUES (?, ?, ?)\n         ON CONFLICT(key) DO UPDATE SET\n             value = excluded.value,\n             is_encrypted = excluded.is_encrypted,\n             updated_at = unixepoch()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "d7527b5f0eccaffe314705e9fff6b81246f9ffe85bf70e64db9e0395be3acfde"
+}

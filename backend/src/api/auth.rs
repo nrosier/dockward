@@ -132,13 +132,16 @@ pub fn session_response(
     Ok(response)
 }
 
-/// `GET /api/v1/auth/setup-status`. Public. Reports whether first-run setup is open.
-/// OIDC is not configured until #18, so `oidc_enabled` is `false` here.
+/// `GET /api/v1/auth/setup-status`. Public. Reports whether first-run setup is open and
+/// whether OIDC sign-in is fully configured.
 pub async fn setup_status(State(state): State<AppState>) -> Result<Json<SetupStatus>, AppError> {
     let setup_required = local_auth::setup_required(&state.pool).await?;
+    let oidc_enabled = crate::services::oidc::load_settings(&state.pool)
+        .await?
+        .is_complete();
     Ok(Json(SetupStatus {
         setup_required,
-        oidc_enabled: false,
+        oidc_enabled,
     }))
 }
 

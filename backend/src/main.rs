@@ -38,7 +38,7 @@ async fn healthz() -> Json<Health> {
     Json(Health { status: "ok" })
 }
 
-fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppState) -> Router {
+pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/v1/auth/setup-status", get(api::auth::setup_status))
@@ -49,9 +49,15 @@ fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppState) -> Route
             "/api/v1/account/password",
             post(api::auth::account_password),
         )
+        .route("/api/v1/auth/oidc/start", get(api::oidc::start))
+        .route("/api/v1/auth/oidc/callback", get(api::oidc::callback))
         .route("/api/v1/auth/logout", post(api::auth::logout))
         .route("/api/v1/auth/logout-all", post(api::auth::logout_all))
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
+        .route(
+            "/api/v1/admin/oidc",
+            get(api::oidc::get_settings).put(api::oidc::put_settings),
+        )
         .route(
             "/api/v1/admin/users",
             get(api::admin::list_users).post(api::admin::create_user),
@@ -108,6 +114,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let csrf_key = Arc::new(
         auth::crypto::csrf_key(&encryption_key).map_err(|_| "could not derive the CSRF key")?,
     );
+    let credentials_key = Arc::new(
+        auth::crypto::credentials_key(&encryption_key)
+            .map_err(|_| "could not derive the credentials key")?,
+    );
     let state = api::state::AppState {
         pool,
         session_key,
@@ -115,6 +125,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         public_url: settings.public_url.clone(),
         login_throttle: services::throttle::LoginThrottle::new(),
         login_limiter: api::hardening::RateLimiter::new(10, Duration::from_secs(60)),
+        credentials_key,
+        allow_private_oidc: settings.allow_private_oidc,
+        jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -172,6 +185,9 @@ mod tests {
             public_url: "https://harborgate.example.com".to_owned(),
             login_throttle: services::throttle::LoginThrottle::new(),
             login_limiter: api::hardening::RateLimiter::new(10, Duration::from_secs(60)),
+            credentials_key: Arc::new(auth::crypto::credentials_key(&root).unwrap()),
+            allow_private_oidc: false,
+            jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -207,6 +223,9 @@ mod tests {
             public_url: "https://harborgate.example.com".to_owned(),
             login_throttle: services::throttle::LoginThrottle::new(),
             login_limiter: api::hardening::RateLimiter::new(10, Duration::from_secs(60)),
+            credentials_key: Arc::new(auth::crypto::credentials_key(&root).unwrap()),
+            allow_private_oidc: false,
+            jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
         };
         (app(Vec::new(), state), pool, dir)
     }
