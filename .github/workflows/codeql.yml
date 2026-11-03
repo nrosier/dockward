@@ -25,8 +25,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # CodeQL does not analyze Rust. Rust is covered by the clippy and
-          # cargo audit steps in ci.yml.
+          - language: rust
+            build-mode: none
           - language: javascript-typescript
             build-mode: none
           - language: actions
