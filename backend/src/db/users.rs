@@ -263,9 +263,10 @@ pub async fn set_password_hash(
 }
 
 /// Finds the user that an OIDC issuer asserted for `subject`. Identity is the pair
-/// `(oidc_issuer, oidc_subject)` (`specs/security.md`, OIDC).
+/// `(oidc_issuer, oidc_subject)` (`specs/security.md`, OIDC). Runs on `conn`, so the
+/// sign-in can read inside its transaction.
 pub async fn find_by_oidc(
-    pool: &SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     issuer: &str,
     subject: &str,
 ) -> Result<Option<UserRow>, AppError> {
@@ -277,7 +278,7 @@ pub async fn find_by_oidc(
         issuer,
         subject
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|_| AppError::InternalError)
 }
@@ -299,6 +300,22 @@ pub async fn insert_oidc(
         role,
         issuer,
         subject
+    )
+    .execute(&mut *conn)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Increments `token_version` on `conn`, which revokes every session of the user.
+/// Used inside a transaction so the revoke and its audit row commit together.
+pub async fn bump_token_version_tx(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "UPDATE users SET token_version = token_version + 1 WHERE id = ?",
+        user_id
     )
     .execute(&mut *conn)
     .await
