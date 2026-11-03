@@ -80,7 +80,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 | POST | `/api/v1/credentials` | session | `{"service_type","label","base_url","username","token","expires_at"}` | `Credential` | 201, 400, 422 (not HTTPS, blocked address) |
 | PUT | `/api/v1/credentials/:id` | session (owner only) | any subset of `label`, `base_url`, `username`, `token`, `expires_at` | `Credential` | 200, 404, 409 `conflict` (`base_url` change while a mapping uses the credential), 422 |
 | DELETE | `/api/v1/credentials/:id` | session (owner only) | none | empty | 204, 404, 409 `conflict` (in use by a mapping) |
-| POST | `/api/v1/credentials/:id/test` | session (owner only) | Harbor: none. GitHub: `{"owner","repo"}` (Decided 2026-11-03: the repository is given per request, see below) | `{"ok": bool, "checks": [{"name","ok","detail"}]}` | 200, 404, 502 `upstream_unreachable` |
+| POST | `/api/v1/credentials/:id/test` | session (owner only) | Harbor: none. GitHub: `{"owner","repo"}` (Decided 2026-11-03: the repository is given per request, see below) | `{"ok": bool, "checks": [{"name","ok","detail","warning"?}]}` | 200, 404, 502 `upstream_unreachable` |
 
 - `base_url` and `username` apply to Harbor credentials. `base_url` must be HTTPS and must pass the address check in [security.md](security.md) (Outbound HTTP).
 - `DELETE` returns `409` while a mapping references the credential (`ON DELETE RESTRICT`, [database.md](database.md)).

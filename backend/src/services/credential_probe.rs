@@ -11,12 +11,15 @@ use reqwest::Url;
 use crate::error::AppError;
 use crate::services::outbound::{self, OutboundClient, TargetClass};
 
-/// One check in the test response: `{"name","ok","detail"}`.
+/// One check in the test response: `{"name","ok","detail","warning"?}`. `warning` is
+/// present only when a check passed with a caveat (`specs/api.md`, Credentials).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Check {
     pub name: &'static str,
     pub ok: bool,
     pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<&'static str>,
 }
 
 /// The status a probe got back. The request itself is the only network effect.
@@ -141,6 +144,7 @@ pub fn harbor_check(status: u16) -> Check {
         name: "harbor_robot",
         ok,
         detail,
+        warning: None,
     }
 }
 
@@ -266,6 +270,57 @@ pub fn github_repo_check(response: &GithubResponse) -> Check {
         name: "github_repo",
         ok,
         detail,
+        warning: None,
+    }
+}
+
+/// Path of the issues probe, `GET /repos/{owner}/{repo}/issues?per_page=1` (Issues read).
+pub fn github_issues_path(owner: &str, repo: &str) -> String {
+    format!("repos/{owner}/{repo}/issues?per_page=1")
+}
+
+/// Warning code for a token without the Issues permission (`specs/security.md`).
+pub const ISSUES_PERMISSION_MISSING: &str = "issues_permission_missing";
+
+/// Classifies the issues probe. `200` passes. A `403` passes with the
+/// `issues_permission_missing` warning, because SARIF upload does not need Issues.
+/// `401` and `404` fail as in [`github_repo_check`]. Mapping save applies its own,
+/// stricter rule to the same response (`specs/security.md`, "GitHub token scope").
+pub fn github_issues_check(response: &GithubResponse) -> Check {
+    match response.status {
+        200 => Check {
+            name: "github_issues",
+            ok: true,
+            detail: "the token can read issues".to_owned(),
+            warning: None,
+        },
+        403 => Check {
+            name: "github_issues",
+            ok: true,
+            detail: format!(
+                "the Issues permission is needed for automatic and manual issues; {}",
+                missing_permission_detail(response)
+            ),
+            warning: Some(ISSUES_PERMISSION_MISSING),
+        },
+        401 => Check {
+            name: "github_issues",
+            ok: false,
+            detail: "the token is invalid or expired".to_owned(),
+            warning: None,
+        },
+        404 => Check {
+            name: "github_issues",
+            ok: false,
+            detail: "the token cannot see the repository, or the owner or name is wrong".to_owned(),
+            warning: None,
+        },
+        other => Check {
+            name: "github_issues",
+            ok: false,
+            detail: format!("unexpected status {other} from GitHub"),
+            warning: None,
+        },
     }
 }
 
@@ -321,6 +376,7 @@ pub fn github_code_scanning_check(response: &GithubResponse) -> Check {
         name: "github_code_scanning",
         ok,
         detail,
+        warning: None,
     }
 }
 
@@ -452,6 +508,46 @@ mod tests {
             github_code_scanning_path("octo", "app"),
             "repos/octo/app/code-scanning/alerts?per_page=1"
         );
+    }
+
+    #[test]
+    fn issues_403_is_a_warning_not_a_failure() {
+        let check = github_issues_check(&github(
+            403,
+            "Resource not accessible by personal access token",
+            Some("issues=read"),
+        ));
+        assert_eq!(check.name, "github_issues");
+        assert!(check.ok, "a 403 on issues must not fail the test");
+        assert_eq!(check.warning, Some("issues_permission_missing"));
+        assert!(check.detail.contains("Issues permission"));
+        assert!(check.detail.contains("issues=read"));
+    }
+
+    #[test]
+    fn issues_200_is_ok_without_warning() {
+        let check = github_issues_check(&github(200, "", None));
+        assert_eq!(check.name, "github_issues");
+        assert!(check.ok);
+        assert_eq!(check.warning, None);
+    }
+
+    #[test]
+    fn github_issues_path_uses_the_decided_endpoint() {
+        assert_eq!(
+            github_issues_path("octo", "app"),
+            "repos/octo/app/issues?per_page=1"
+        );
+    }
+
+    #[test]
+    fn warning_is_omitted_from_json_when_absent() {
+        let plain = harbor_check(412);
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("warning").is_none(), "{json}");
+        let warned = github_issues_check(&github(403, "", None));
+        let json = serde_json::to_value(&warned).unwrap();
+        assert_eq!(json["warning"], "issues_permission_missing");
     }
 
     #[test]
