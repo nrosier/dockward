@@ -28,7 +28,10 @@ The current `backend/src/main.rs` is the only implemented file. Treat the layout
 - The webhook handler validates the request, stores a `sync_jobs` row, and returns.
 - An in-process worker runs jobs with retries and exponential backoff.
 - Jobs survive restarts.
-- Decided: 2026-11-02. A job left in `running` at startup is re-queued: `status` is set back to `queued` and `attempts` is unchanged.
+- Decided (2026-11-03, delegated, #48): a job left in `running` at startup is re-queued and the restart counts as an attempt: `attempts` is incremented. When that attempt is the eighth, `status` becomes `failed` with `last_error` set to `interrupted by restart` and `next_attempt_at` cleared. Otherwise `status` is `queued`.
+- Decided (2026-11-03, user, #48): on every worker loop iteration, any `running` job is re-queued the same way, counting one attempt. This recovers a job left `running` by a failed write after the handler. No job is in flight at that point, because the worker awaits each handler before it takes the next step.
+- Decided (2026-11-03, delegated, #48): a handler panic fails only its own job, with `last_error` set to `job handler panicked`. The worker continues with the next job.
+- Decided (2026-11-03, delegated, #48): a write after the handler (`mark_done`, a failure record, or a deferral) that fails is retried 3 times, 1 second apart, before the worker returns the error. That is 4 writes in total.
 - `sync_jobs.payload` contains the validated event only. No tokens or header secrets.
 - Retry state is held in `attempts`, `next_attempt_at`, and `last_error`.
 - Decided (2026-11-03, user): a job handler returns one of three outcomes: success (the job is `done`), failure (backoff below, one attempt used), or deferred until a time (the job goes back to `queued` with `next_attempt_at` set to that time, capped at now + 1 hour, and `attempts` unchanged). Deferral is only for upstream rate limits ([integrations.md](integrations.md)).
