@@ -303,6 +303,9 @@ mod tests {
             jwks: Arc::new(JwksCache::new()),
             webhook_token_limiter: crate::api::webhooks::new_token_limiter(),
             webhook_failure_limiter: crate::api::webhooks::new_failure_limiter(),
+            backup_key: Arc::new(crypto::backup_key(&root).unwrap()),
+            data_dir: dir.clone(),
+            backup_dir: dir.join("backups"),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }

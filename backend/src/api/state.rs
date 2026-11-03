@@ -1,5 +1,6 @@
 //! Shared application state for handlers and extractors.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use sqlx::SqlitePool;
@@ -35,4 +36,10 @@ pub struct AppState {
     pub webhook_token_limiter: RateLimiter,
     /// Failed webhook authentications per client IP: 30 per minute.
     pub webhook_failure_limiter: RateLimiter,
+    /// Derived backup key. It seals and opens backup files (`specs/security.md`, Derived keys).
+    pub backup_key: Arc<DerivedKey>,
+    /// `HARBORGATE_DATA_DIR`. The temporary `VACUUM INTO` copy is written here.
+    pub data_dir: PathBuf,
+    /// `HARBORGATE_BACKUP_DIR`. Encrypted backups are written here.
+    pub backup_dir: PathBuf,
 }

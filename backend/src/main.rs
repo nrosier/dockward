@@ -88,6 +88,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         )
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
         .route("/api/v1/admin/health", get(api::admin::health))
+        .route("/api/v1/admin/backup", post(api::admin::backup))
         .route(
             "/api/v1/admin/oidc",
             get(api::oidc::get_settings).put(api::oidc::put_settings),
@@ -153,6 +154,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth::crypto::credentials_key(&encryption_key)
             .map_err(|_| "could not derive the credentials key")?,
     );
+    let backup_key = Arc::new(
+        auth::crypto::backup_key(&encryption_key).map_err(|_| "could not derive the backup key")?,
+    );
     let state = api::state::AppState {
         pool,
         session_key,
@@ -166,6 +170,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
         webhook_token_limiter: api::webhooks::new_token_limiter(),
         webhook_failure_limiter: api::webhooks::new_failure_limiter(),
+        backup_key,
+        data_dir: settings.data_dir.clone(),
+        backup_dir: settings.backup_dir.clone(),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -247,6 +254,9 @@ mod tests {
             jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
             webhook_token_limiter: api::webhooks::new_token_limiter(),
             webhook_failure_limiter: api::webhooks::new_failure_limiter(),
+            backup_key: Arc::new(auth::crypto::backup_key(&root).unwrap()),
+            data_dir: dir.clone(),
+            backup_dir: dir.join("backups"),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -315,6 +325,9 @@ mod tests {
             jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
             webhook_token_limiter,
             webhook_failure_limiter: api::webhooks::new_failure_limiter(),
+            backup_key: Arc::new(auth::crypto::backup_key(&root).unwrap()),
+            data_dir: dir.clone(),
+            backup_dir: dir.join("backups"),
         };
         (app(Vec::new(), state), pool, dir, handle)
     }

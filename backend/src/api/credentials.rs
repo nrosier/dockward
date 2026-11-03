@@ -516,6 +516,9 @@ mod tests {
             jwks: std::sync::Arc::new(crate::services::oidc_jwt::JwksCache::new()),
             webhook_token_limiter: crate::api::webhooks::new_token_limiter(),
             webhook_failure_limiter: crate::api::webhooks::new_failure_limiter(),
+            backup_key: std::sync::Arc::new(crate::auth::crypto::backup_key(&root).unwrap()),
+            data_dir: dir.clone(),
+            backup_dir: dir.join("backups"),
         }
     }
 }
