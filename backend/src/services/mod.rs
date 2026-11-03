@@ -10,6 +10,8 @@ pub mod ids;
 pub mod pagination;
 #[allow(dead_code)] // Used by the session extractor and logout routes.
 pub mod sessions;
+#[allow(dead_code)] // Used by the login service.
+pub mod throttle;
 #[allow(dead_code)] // Used by the user response shape.
 pub mod time;
 

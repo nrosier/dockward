@@ -96,6 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_key,
         csrf_key,
         public_url: settings.public_url.clone(),
+        login_throttle: services::throttle::LoginThrottle::new(),
+        login_limiter: api::hardening::RateLimiter::new(10, Duration::from_secs(60)),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -151,6 +153,8 @@ mod tests {
             session_key,
             csrf_key,
             public_url: "https://harborgate.example.com".to_owned(),
+            login_throttle: services::throttle::LoginThrottle::new(),
+            login_limiter: api::hardening::RateLimiter::new(10, Duration::from_secs(60)),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -184,6 +188,8 @@ mod tests {
             session_key: Arc::new(auth::crypto::session_key(&root).unwrap()),
             csrf_key: Arc::new(auth::crypto::csrf_key(&root).unwrap()),
             public_url: "https://harborgate.example.com".to_owned(),
+            login_throttle: services::throttle::LoginThrottle::new(),
+            login_limiter: api::hardening::RateLimiter::new(10, Duration::from_secs(60)),
         };
         (app(Vec::new(), state), pool, dir)
     }
@@ -248,6 +254,133 @@ mod tests {
         // The matching token passes the guard. The logout handler then returns 401,
         // because no session cookie is present, so the response is not 403.
         assert_eq!(r3.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Posts one login from `peer`. Test values only. The password is obviously fake.
+    async fn post_login(
+        router: &Router,
+        peer: [u8; 4],
+        username: &str,
+        password: &str,
+    ) -> axum::http::Response<axum::body::Body> {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let body = format!(r#"{{"username":"{username}","password":"{password}"}}"#);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/login")
+            .header("origin", "https://harborgate.example.com")
+            .header("content-type", "application/json")
+            .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                peer, 8080,
+            ))))
+            .body(Body::from(body))
+            .unwrap();
+        router.clone().oneshot(request).await.unwrap()
+    }
+
+    /// Five wrong passwords, then the sixth attempt is refused inside the delay with
+    /// the same 401 as a wrong password. The same account from another IP still gets a
+    /// password check and is not delayed.
+    #[tokio::test]
+    async fn failed_login_delay_is_per_account_and_client_ip() {
+        use axum::http::StatusCode;
+
+        let (router, pool, dir) = test_router("login-throttle").await;
+        services::auth::create_first_admin(&pool, "test-admin", None, "test-password-fifteen")
+            .await
+            .unwrap();
+
+        for _ in 0..5 {
+            let r = post_login(
+                &router,
+                [192, 0, 2, 10],
+                "test-admin",
+                "test-wrong-password-xyz",
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        }
+        // Inside the 1-second wait: refused without a password check, same 401 body.
+        let blocked = post_login(
+            &router,
+            [192, 0, 2, 10],
+            "test-admin",
+            "test-password-fifteen",
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::UNAUTHORIZED);
+        let blocked_body = axum::body::to_bytes(blocked.into_body(), 4096)
+            .await
+            .unwrap();
+        let wrong = post_login(
+            &router,
+            [198, 51, 100, 7],
+            "test-admin",
+            "test-wrong-password-xyz",
+        )
+        .await;
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        let wrong_body = axum::body::to_bytes(wrong.into_body(), 4096).await.unwrap();
+        // Responses for a blocked attempt and a wrong password look the same.
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&blocked_body).unwrap()["error"]["code"],
+            "invalid_credentials"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&wrong_body).unwrap()["error"]["code"],
+            "invalid_credentials"
+        );
+        // Another IP is not delayed: the right password signs in.
+        let other_ip = post_login(
+            &router,
+            [198, 51, 100, 7],
+            "test-admin",
+            "test-password-fifteen",
+        )
+        .await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(other_ip.status(), StatusCode::OK);
+    }
+
+    /// The eleventh login from one IP in a minute gets 429 with Retry-After.
+    #[tokio::test]
+    async fn login_rate_limit_is_ten_per_minute_per_ip() {
+        use axum::http::StatusCode;
+
+        let (router, pool, dir) = test_router("login-rate").await;
+        services::auth::create_first_admin(&pool, "test-admin", None, "test-password-fifteen")
+            .await
+            .unwrap();
+        for n in 0..10 {
+            let r = post_login(
+                &router,
+                [203, 0, 113, 5],
+                &format!("test-nobody-{n}"),
+                "test-wrong-password-xyz",
+            )
+            .await;
+            assert_eq!(
+                r.status(),
+                StatusCode::UNAUTHORIZED,
+                "attempt {n} should reach the password check"
+            );
+        }
+        let limited = post_login(
+            &router,
+            [203, 0, 113, 5],
+            "test-nobody-x",
+            "test-wrong-password-xyz",
+        )
+        .await;
+        let retry = limited.headers().get("retry-after").cloned();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(retry.is_some(), "429 must carry Retry-After");
     }
 
     #[tokio::test]

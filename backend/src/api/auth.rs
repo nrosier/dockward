@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::api::hardening::{ClientIp, too_many_requests};
 use crate::api::state::AppState;
 use crate::auth::csrf;
 use crate::auth::session::{self, SESSION_COOKIE};
@@ -180,11 +181,39 @@ pub async fn setup(
 pub async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
+    axum::extract::Extension(ClientIp(ip)): axum::extract::Extension<ClientIp>,
     bytes: axum::body::Bytes,
 ) -> Result<Response, AppError> {
     local_auth::check_same_origin(&headers, &state.public_url)?;
     let body: LoginBody = parse_body(&bytes)?;
-    let user = local_auth::login(&state.pool, &body.username, &body.password).await?;
-    let view = User::try_from(user.clone())?;
-    session_response(&state, &user, StatusCode::OK, UserResponse { user: view })
+    let ip_text = ip.to_string();
+    let now = std::time::Instant::now();
+    // The per-IP rate limit runs first, so a flood cannot reach the password check.
+    if let Err(retry_after) = state.login_limiter.check(&ip_text, now) {
+        return Ok(too_many_requests(retry_after));
+    }
+    // A pair inside its delay is refused without a password check. The response is the
+    // generic 401 that a wrong password gets, so throttle state is not revealed.
+    if state
+        .login_throttle
+        .is_blocked(&body.username, &ip_text, now)
+    {
+        return Err(AppError::InvalidCredentials);
+    }
+    match local_auth::login(&state.pool, &body.username, &body.password).await {
+        Ok(user) => {
+            state
+                .login_throttle
+                .record_success(&body.username, &ip_text);
+            let view = User::try_from(user.clone())?;
+            session_response(&state, &user, StatusCode::OK, UserResponse { user: view })
+        }
+        Err(AppError::InvalidCredentials) => {
+            state
+                .login_throttle
+                .record_failure(&body.username, &ip_text, now);
+            Err(AppError::InvalidCredentials)
+        }
+        Err(other) => Err(other),
+    }
 }
