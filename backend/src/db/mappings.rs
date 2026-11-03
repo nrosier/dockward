@@ -166,6 +166,43 @@ pub async fn delete_owned(
     .map_err(|_| AppError::InternalError)
 }
 
+/// Lists the GitHub issue numbers still open for a GitHub repository. These are the
+/// `github_issues` rows that the mapping delete removes and reports.
+pub async fn open_issue_numbers(
+    conn: &mut SqliteConnection,
+    github_owner: &str,
+    github_repo: &str,
+) -> Result<Vec<i64>, AppError> {
+    sqlx::query_scalar!(
+        r#"SELECT github_issue_number AS "number!: i64" FROM github_issues
+           WHERE github_owner = ? AND github_repo = ? AND status = 'open'
+           ORDER BY github_issue_number"#,
+        github_owner,
+        github_repo
+    )
+    .fetch_all(conn)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Deletes the `github_issues` rows for one GitHub repository. The mapping owns them
+/// alone, because one mapping per repository is enforced (`specs/database.md`).
+pub async fn delete_github_issues(
+    conn: &mut SqliteConnection,
+    github_owner: &str,
+    github_repo: &str,
+) -> Result<u64, AppError> {
+    sqlx::query!(
+        "DELETE FROM github_issues WHERE github_owner = ? AND github_repo = ?",
+        github_owner,
+        github_repo
+    )
+    .execute(conn)
+    .await
+    .map(|done| done.rows_affected())
+    .map_err(|_| AppError::InternalError)
+}
+
 /// Returns the id of any mapping that uses the same Harbor repository on the same
 /// Harbor instance, or the same GitHub target. `None` when neither is taken.
 pub async fn find_conflict(

@@ -269,31 +269,53 @@ pub fn github_repo_check(response: &GithubResponse) -> Check {
     }
 }
 
-/// Classifies the code scanning probe. `404` with "no analysis found" is healthy.
+/// Result of the code scanning probe. `Unavailable` means the repository cannot receive
+/// code scanning uploads, which is not the same as a missing permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeScanningState {
+    Ready,
+    NoAnalysisYet,
+    Unavailable,
+    Failed,
+}
+
+/// Classifies the code scanning response. `404` with "no analysis found" is healthy.
 /// A `403` naming disabled code scanning is unavailable, not a missing permission.
-pub fn github_code_scanning_check(response: &GithubResponse) -> Check {
+pub fn code_scanning_state(response: &GithubResponse) -> CodeScanningState {
     let message = response.message.to_ascii_lowercase();
-    let (ok, detail) = match response.status {
-        200 => (true, "code scanning alerts are readable".to_owned()),
-        404 if message.contains("no analysis found") => (
-            true,
-            "code scanning is enabled; no analysis has been uploaded yet".to_owned(),
-        ),
+    match response.status {
+        200 => CodeScanningState::Ready,
+        404 if message.contains("no analysis found") => CodeScanningState::NoAnalysisYet,
         403 if message.contains("code scanning is not enabled")
             || message.contains("advanced security must be enabled")
             || message.contains("code security must be enabled") =>
         {
-            (
-                false,
-                "code scanning is unavailable for this repository".to_owned(),
-            )
+            CodeScanningState::Unavailable
         }
-        403 => (false, missing_permission_detail(response)),
-        404 => (
-            false,
-            "the token cannot see the repository, or the owner or name is wrong".to_owned(),
+        _ => CodeScanningState::Failed,
+    }
+}
+
+/// The check row for the code scanning probe, built from [`code_scanning_state`].
+pub fn github_code_scanning_check(response: &GithubResponse) -> Check {
+    let (ok, detail) = match code_scanning_state(response) {
+        CodeScanningState::Ready => (true, "code scanning alerts are readable".to_owned()),
+        CodeScanningState::NoAnalysisYet => (
+            true,
+            "code scanning is enabled; no analysis has been uploaded yet".to_owned(),
         ),
-        other => (false, format!("unexpected status {other} from GitHub")),
+        CodeScanningState::Unavailable => (
+            false,
+            "code scanning is unavailable for this repository".to_owned(),
+        ),
+        CodeScanningState::Failed => match response.status {
+            403 => (false, missing_permission_detail(response)),
+            404 => (
+                false,
+                "the token cannot see the repository, or the owner or name is wrong".to_owned(),
+            ),
+            other => (false, format!("unexpected status {other} from GitHub")),
+        },
     };
     Check {
         name: "github_code_scanning",
