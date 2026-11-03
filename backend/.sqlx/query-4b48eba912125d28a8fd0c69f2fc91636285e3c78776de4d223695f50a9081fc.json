@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n: i64\" FROM repo_mappings",
+  "describe": {
+    "columns": [
+      {
+        "name": "n: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4b48eba912125d28a8fd0c69f2fc91636285e3c78776de4d223695f50a9081fc"
+}

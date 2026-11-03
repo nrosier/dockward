@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n: i64\" FROM cve_acceptances",
+  "describe": {
+    "columns": [
+      {
+        "name": "n: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ae9cb5eaaab520bb7e840c63a4a20f2b4650ea7d6d6239b008c05427e1a4b035"
+}
