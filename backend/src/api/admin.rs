@@ -24,6 +24,7 @@ use crate::error::AppError;
 use crate::models::role::Role;
 use crate::models::user::User;
 use crate::services::audit::{self, AuditEntry, AuditQuery};
+use crate::services::backup as backup_service;
 use crate::services::credential_probe::{
     self, GithubProbe, HarborProbe, OutboundGithubProbe, OutboundHarborProbe,
 };
@@ -132,6 +133,36 @@ pub async fn create_user(
         .await?
         .ok_or(AppError::InternalError)?;
     Ok((StatusCode::CREATED, Json(User::try_from(row)?)).into_response())
+}
+
+/// `POST /api/v1/admin/backup`. Writes an encrypted backup to `HARBORGATE_BACKUP_DIR`
+/// and audits `backup.run` after the file exists. Returns `201` with the file name
+/// and the directory. A missing or unwritable directory is `500 internal_error`.
+pub async fn backup(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+) -> Result<Response, AppError> {
+    let now = crate::auth::session::now_unix()?;
+    let file = backup_service::create(
+        &state.pool,
+        &state.backup_key,
+        &state.data_dir,
+        &state.backup_dir,
+        now,
+    )
+    .await?;
+    let actor = audit::Actor {
+        user_id: Some(admin.id),
+        username: admin.username,
+    };
+    backup_service::record_run(&state.pool, &actor, &file).await?;
+    let path = state
+        .backup_dir
+        .to_str()
+        .ok_or(AppError::InternalError)?
+        .to_owned();
+    let body = serde_json::json!({"file": file, "path": path});
+    Ok((StatusCode::CREATED, Json(body)).into_response())
 }
 
 /// `DELETE /api/v1/admin/users/:id`. Returns `204`, or `409` for the self and last-admin cases.
@@ -412,6 +443,9 @@ pub(crate) mod test_support {
             jwks: Arc::new(crate::services::oidc_jwt::JwksCache::new()),
             webhook_token_limiter: crate::api::webhooks::new_token_limiter(),
             webhook_failure_limiter: crate::api::webhooks::new_failure_limiter(),
+            backup_key: Arc::new(crypto::backup_key(&root).unwrap()),
+            data_dir: dir.clone(),
+            backup_dir: dir.join("backups"),
         };
         (state, dir)
     }
@@ -508,6 +542,15 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::hardening::RateLimiter;
+    use crate::auth::crypto;
+    use crate::config::parse_encryption_key;
+    use crate::services::oidc_jwt::JwksCache;
+    use crate::services::throttle::LoginThrottle;
+    use axum::body::Body;
+    use axum::http::Request;
+    use std::sync::Arc;
+    use tower::ServiceExt;
 
     /// Sends one `GET /api/v1/admin/health` through the full app router with the given
     /// session token. The router is the real one, so the admin check is the real check.
@@ -621,5 +664,114 @@ mod tests {
         assert!(out.contains("fake-new-user"), "username missing: {out}");
         assert!(out.contains("new@example.test"), "email missing: {out}");
         assert!(out.contains("user"), "role missing: {out}");
+    }
+
+    // Base64 of 32 zero bytes. Test value only.
+    const TEST_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    /// A router over a fresh database. It has one admin and one regular user, each
+    /// with a valid session token, and a CSRF token that matches its cookie.
+    async fn router(name: &str) -> (axum::Router, sqlx::SqlitePool, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "harborgate-admin-backup-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = crate::db::open(&dir).await.unwrap();
+        let root = parse_encryption_key(TEST_KEY_B64).unwrap();
+        let state = AppState {
+            pool: pool.clone(),
+            session_key: Arc::new(crypto::session_key(&root).unwrap()),
+            csrf_key: Arc::new(crypto::csrf_key(&root).unwrap()),
+            public_url: "https://harborgate.example.com".to_owned(),
+            login_throttle: LoginThrottle::new(),
+            login_limiter: RateLimiter::new(10, std::time::Duration::from_secs(60)),
+            credentials_key: Arc::new(crypto::credentials_key(&root).unwrap()),
+            allow_private_oidc: false,
+            allow_private_harbor: false,
+            jwks: Arc::new(JwksCache::new()),
+            webhook_token_limiter: crate::api::webhooks::new_token_limiter(),
+            webhook_failure_limiter: crate::api::webhooks::new_failure_limiter(),
+            backup_key: Arc::new(crypto::backup_key(&root).unwrap()),
+            data_dir: dir.clone(),
+            backup_dir: dir.join("backups"),
+        };
+        (crate::app(Vec::new(), state), pool, dir)
+    }
+
+    /// Inserts an admin and a user, and returns the cookie header for each. The
+    /// cookie carries a session token and a matching CSRF token.
+    async fn cookies_for(pool: &sqlx::SqlitePool, root_key: &str) -> (String, String) {
+        let root = parse_encryption_key(root_key).unwrap();
+        let session_key = crypto::session_key(&root).unwrap();
+        let csrf_key = crypto::csrf_key(&root).unwrap();
+        let now = crate::auth::session::now_unix().unwrap();
+        let csrf = crate::auth::csrf::issue(&csrf_key).unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        crate::db::users::insert_local(&mut conn, "admin-id", "admin", None, "h", "admin")
+            .await
+            .unwrap();
+        crate::db::users::insert_local(&mut conn, "user-id", "regular", None, "h", "user")
+            .await
+            .unwrap();
+        drop(conn);
+        let admin = crate::auth::session::issue(&session_key, "admin-id", "admin", 0, now).unwrap();
+        let user = crate::auth::session::issue(&session_key, "user-id", "user", 0, now).unwrap();
+        (
+            format!("__Host-harborgate_session={admin}; __Host-harborgate_csrf={csrf}"),
+            format!("__Host-harborgate_session={user}; __Host-harborgate_csrf={csrf}"),
+        )
+    }
+
+    fn post(cookie: &str, csrf: &str) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/admin/backup")
+            .header("cookie", cookie)
+            .header("x-csrf-token", csrf)
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            ))));
+        request
+    }
+
+    #[tokio::test]
+    async fn backup_is_admin_only() {
+        let (router, pool, dir) = router("admin-only").await;
+        let (admin_cookie, user_cookie) = cookies_for(&pool, TEST_KEY_B64).await;
+        let csrf = admin_cookie
+            .split("__Host-harborgate_csrf=")
+            .nth(1)
+            .unwrap()
+            .to_owned();
+        std::fs::create_dir_all(dir.join("backups")).unwrap();
+
+        // A regular user is refused and no file is written.
+        let user_response = router
+            .clone()
+            .oneshot(post(&user_cookie, &csrf))
+            .await
+            .unwrap();
+        assert_eq!(user_response.status(), axum::http::StatusCode::FORBIDDEN);
+        let written = std::fs::read_dir(dir.join("backups")).unwrap().count();
+        assert_eq!(written, 0, "a regular user wrote a backup file");
+
+        // An admin gets 201 with the file name and the directory, and one backup.run row.
+        let admin_response = router.oneshot(post(&admin_cookie, &csrf)).await.unwrap();
+        assert_eq!(admin_response.status(), axum::http::StatusCode::CREATED);
+        let runs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'backup.run'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(runs, 1, "the admin backup did not write one backup.run row");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

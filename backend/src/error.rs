@@ -27,6 +27,10 @@ pub enum AppError {
     PayloadTooLarge,
     RateLimited,
     InternalError,
+    /// `HARBORGATE_BACKUP_DIR` is missing, not a directory, or not writable. Returned
+    /// as `500 internal_error` with a safe message that names the cause
+    /// (`specs/security.md`, Backup and restore).
+    BackupDirUnavailable,
     UpstreamUnreachable,
 }
 
@@ -55,7 +59,9 @@ impl AppError {
             }
             AppError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
-            AppError::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::InternalError | AppError::BackupDirUnavailable => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
             AppError::UpstreamUnreachable => StatusCode::BAD_GATEWAY,
         }
     }
@@ -75,7 +81,7 @@ impl AppError {
             AppError::CodeScanningUnavailable => "code_scanning_unavailable",
             AppError::PayloadTooLarge => "payload_too_large",
             AppError::RateLimited => "rate_limited",
-            AppError::InternalError => "internal_error",
+            AppError::InternalError | AppError::BackupDirUnavailable => "internal_error",
             AppError::UpstreamUnreachable => "upstream_unreachable",
         }
     }
@@ -100,6 +106,9 @@ impl AppError {
             AppError::PayloadTooLarge => "The request body is too large.".to_owned(),
             AppError::RateLimited => "Too many requests. Try again later.".to_owned(),
             AppError::InternalError => "An internal error occurred.".to_owned(),
+            AppError::BackupDirUnavailable => {
+                "The backup directory is missing or not writable.".to_owned()
+            }
             AppError::UpstreamUnreachable => "An upstream service could not be reached.".to_owned(),
         }
     }
@@ -156,6 +165,7 @@ mod tests {
             ),
             (AppError::RateLimited, 429, "rate_limited"),
             (AppError::InternalError, 500, "internal_error"),
+            (AppError::BackupDirUnavailable, 500, "internal_error"),
             (AppError::UpstreamUnreachable, 502, "upstream_unreachable"),
         ];
         for (err, status, code) in cases {
