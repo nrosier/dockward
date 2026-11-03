@@ -266,6 +266,29 @@ mod tests {
         assert!(open(&key, &file).is_err(), "a tampered byte was accepted");
     }
 
+    /// A backup sealed under one key must not open under another. The key below
+    /// derives from a different root (all 0x01 bytes, base64 `AQEB...`). The same
+    /// derivation runs, so only the root differs. Test values only.
+    #[test]
+    fn wrong_key_fails() {
+        const OTHER_KEY_B64: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+        let sealing_key = key();
+        let other_root = match parse_encryption_key(OTHER_KEY_B64) {
+            Ok(k) => k,
+            Err(_) => panic!("other test key must parse"),
+        };
+        let opening_key = match crate::auth::crypto::backup_key(&other_root) {
+            Ok(k) => k,
+            Err(_) => panic!("derivation must succeed"),
+        };
+        let file = seal(&sealing_key, b"database bytes").unwrap();
+
+        let result = open(&opening_key, &file);
+        assert!(result.is_err(), "a backup opened under the wrong key");
+        // `open` returns no plaintext on failure. The error carries no bytes.
+        assert_eq!(result.err(), Some(not_verified()));
+    }
+
     #[tokio::test]
     async fn backup_is_a_consistent_database() {
         let data = unique_dir("consistent-data");
