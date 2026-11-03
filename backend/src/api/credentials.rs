@@ -183,9 +183,13 @@ pub async fn run_github_probes<P: credential_probe::GithubProbe>(
             &token,
         )
         .await?;
+    let issues_response = probe
+        .get(&credential_probe::github_issues_path(owner, repo), &token)
+        .await?;
     Ok(vec![
         credential_probe::github_repo_check(&repo_response),
         credential_probe::github_code_scanning_check(&scanning_response),
+        credential_probe::github_issues_check(&issues_response),
     ])
 }
 
@@ -289,26 +293,31 @@ mod tests {
             _token: &[u8],
         ) -> Result<credential_probe::GithubResponse, AppError> {
             self.calls.lock().unwrap().push(path.to_owned());
-            let status = if path.contains("code-scanning") {
-                404
+            // Recorded answers per endpoint: repository 200, code scanning 404 with
+            // "no analysis found" (healthy), issues 403 (a warning).
+            let (status, message) = if path.contains("code-scanning") {
+                (404, "no analysis found")
+            } else if path.contains("/issues") {
+                (403, "Resource not accessible by personal access token")
             } else {
-                200
+                (200, "")
             };
             Ok(credential_probe::GithubResponse {
                 status,
-                message: "no analysis found".to_owned(),
-                accepted_permissions: None,
+                message: message.to_owned(),
+                accepted_permissions: Some("issues=read".to_owned()),
             })
         }
     }
 
     #[tokio::test]
-    async fn github_probes_hit_the_repository_and_code_scanning_endpoints() {
+    async fn github_test_runs_three_probes() {
         let state = test_state("github").await;
         let mut row = row_with_token(&state.credentials_key);
         row.service_type = "github".to_owned();
         row.base_url = None;
         row.username = None;
+        // Issues answers 403, which is a warning: the test still passes.
         let probe = RecordingGithub {
             calls: std::sync::Mutex::new(Vec::new()),
         };
@@ -321,10 +330,16 @@ mod tests {
             vec![
                 "repos/octo/app".to_owned(),
                 "repos/octo/app/code-scanning/alerts?per_page=1".to_owned(),
+                "repos/octo/app/issues?per_page=1".to_owned(),
             ]
         );
-        assert_eq!(checks.len(), 2);
+        let names: Vec<&str> = checks.iter().map(|check| check.name).collect();
+        assert_eq!(
+            names,
+            vec!["github_repo", "github_code_scanning", "github_issues"]
+        );
         assert!(checks.iter().all(|check| check.ok));
+        assert_eq!(checks[2].warning, Some("issues_permission_missing"));
     }
 
     async fn test_state(name: &str) -> AppState {

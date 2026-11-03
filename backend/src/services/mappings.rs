@@ -253,6 +253,46 @@ async fn check_code_scanning<G: GithubProbe>(
     }
 }
 
+/// Runs the issues probe on the mapping's repository when `auto_create_issues` is on.
+/// Only `200` passes. A `403` is `422` naming the Issues permission. Any other result,
+/// including a network error, is `422` with the check detail. Nothing is stored in
+/// either case (`specs/security.md`, "GitHub token scope"; decision on #21, 2026-11-03).
+async fn check_issues<G: GithubProbe>(
+    conn: &mut sqlx::SqliteConnection,
+    credentials_key: &DerivedKey,
+    github_probe: &G,
+    user_id: &str,
+    github_cred_id: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<(), AppError> {
+    let row = cred_db::find_owned(conn, user_id, github_cred_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let token = credentials::decrypt_token(credentials_key, &row)?;
+    let response = github_probe
+        .get(&credential_probe::github_issues_path(owner, repo), &token)
+        .await
+        .map_err(|error| match error {
+            AppError::UpstreamUnreachable => AppError::ValidationFailed(
+                "the GitHub issues check could not reach GitHub.".to_owned(),
+            ),
+            other => other,
+        })?;
+    if response.status == 200 {
+        return Ok(());
+    }
+    if response.status == 403 {
+        return Err(AppError::ValidationFailed(
+            "the GitHub token lacks the Issues permission needed for auto-created issues"
+                .to_owned(),
+        ));
+    }
+    Err(AppError::ValidationFailed(
+        credential_probe::github_issues_check(&response).detail,
+    ))
+}
+
 /// Creates a mapping for `user_id`. Returns the mapping and the two values shown
 /// once. Writes `mapping.create`.
 // Eight arguments: the two probes are injected separately so tests can fake each one.
@@ -304,6 +344,18 @@ pub async fn create<P: HarborProbe, G: GithubProbe>(
         &input.github_repo,
     )
     .await?;
+    if input.auto_create_issues.unwrap_or(false) {
+        check_issues(
+            &mut tx,
+            credentials_key,
+            github_probe,
+            user_id,
+            &input.github_cred_id,
+            &input.github_owner,
+            &input.github_repo,
+        )
+        .await?;
+    }
     if let Some((other_id, other_user)) = db::find_conflict(
         &mut tx,
         &harbor_base,
@@ -1070,6 +1122,110 @@ mod tests {
         assert_eq!(
             calls,
             vec!["repos/owner/gh/code-scanning/alerts?per_page=1".to_owned()]
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A GitHub probe that answers the issues path and the code scanning path with
+    /// different fixed responses, and records every path. No socket.
+    struct PathGithub {
+        calls: std::sync::Mutex<Vec<String>>,
+        scanning: (u16, &'static str),
+        issues: (u16, &'static str),
+    }
+
+    impl GithubProbe for PathGithub {
+        async fn get(
+            &self,
+            path: &str,
+            _token: &[u8],
+        ) -> Result<credential_probe::GithubResponse, AppError> {
+            self.calls.lock().unwrap().push(path.to_owned());
+            let (status, message) = if path.contains("/issues") {
+                self.issues
+            } else {
+                self.scanning
+            };
+            Ok(credential_probe::GithubResponse {
+                status,
+                message: message.to_owned(),
+                accepted_permissions: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_issues_without_issues_permission_is_422_and_stores_nothing() {
+        let (pool, dir) = fresh_pool("issues-403").await;
+        let owner = user(&pool, "owner").await;
+        let (h, g) = creds(&pool, &owner).await;
+        // Code scanning is healthy, so only the Issues answer decides the save.
+        let github = PathGithub {
+            calls: std::sync::Mutex::new(Vec::new()),
+            scanning: (404, "no analysis found"),
+            issues: (403, "Resource not accessible by personal access token"),
+        };
+        let mut new = input(&h, &g, "repo", "gh");
+        new.auto_create_issues = Some(true);
+        let result = create(
+            &pool,
+            &key(),
+            &READABLE,
+            &github,
+            &actor(&owner),
+            &owner,
+            PUBLIC,
+            new,
+        )
+        .await;
+        match result {
+            Err(AppError::ValidationFailed(detail)) => {
+                assert!(detail.contains("Issues permission"), "{detail}");
+            }
+            _ => panic!("a 403 on the issues probe must be 422 validation_failed"),
+        }
+        let stored = db::count_owned(&pool, Some(&owner)).await.unwrap();
+        assert_eq!(stored, 0, "a rejected save must store nothing");
+        let calls = github.calls.lock().unwrap().clone();
+        assert!(
+            calls
+                .iter()
+                .any(|path| path == "repos/owner/gh/issues?per_page=1"),
+            "{calls:?}"
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn auto_issues_off_skips_the_issues_probe() {
+        let (pool, dir) = fresh_pool("issues-off").await;
+        let owner = user(&pool, "owner").await;
+        let (h, g) = creds(&pool, &owner).await;
+        // A 403 on issues would reject the save if the probe ran. It must not run.
+        let github = PathGithub {
+            calls: std::sync::Mutex::new(Vec::new()),
+            scanning: (404, "no analysis found"),
+            issues: (403, "Resource not accessible by personal access token"),
+        };
+        create(
+            &pool,
+            &key(),
+            &READABLE,
+            &github,
+            &actor(&owner),
+            &owner,
+            PUBLIC,
+            input(&h, &g, "repo", "gh"),
+        )
+        .await
+        .unwrap();
+        let calls = github.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec!["repos/owner/gh/code-scanning/alerts?per_page=1".to_owned()],
+            "only the code scanning probe runs when auto-create is off"
         );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
