@@ -31,9 +31,14 @@ The current `backend/src/main.rs` is the only implemented file. Treat the layout
 - Decided: 2026-11-02. A job left in `running` at startup is re-queued: `status` is set back to `queued` and `attempts` is unchanged.
 - `sync_jobs.payload` contains the validated event only. No tokens or header secrets.
 - Retry state is held in `attempts`, `next_attempt_at`, and `last_error`.
-- PROPOSED: retry constants: base delay 30 seconds, doubling after each failed attempt (30 s, 60 s, 120 s, and so on), capped at 1 hour, at most 8 attempts, then `status` is `failed`. PROPOSED: no external source; tune in deployment.
-- PROPOSED: after failure number n (n = attempts, counted after the failure), `next_attempt_at` = now + min(30 s x 2^(n-1), 1 hour) while n < 8. Delays after failures 1 to 7 are 30 s, 60 s, 120 s, 240 s, 480 s, 960 s, and 1920 s. The 8th failure sets `status` to `failed` and schedules nothing. The 1-hour cap therefore does not apply under the 8-attempt limit; it stays as a guard if the limit changes.
-- PROPOSED: manual retry (`POST /api/v1/sync-jobs/:id/retry`) sets `status` to `queued`, resets `attempts` to 0, clears `last_error`, and sets `next_attempt_at` to now. See [api.md](api.md).
+- Decided (2026-11-03, delegated): retry constants: base delay 30 seconds, doubling after each failed attempt (30 s, 60 s, 120 s, and so on), capped at 1 hour, at most 8 attempts, then `status` is `failed`. Decided (2026-11-03, delegated): no external source; tune in deployment.
+- Decided (2026-11-03, delegated): after failure number n (n = attempts, counted after the failure), `next_attempt_at` = now + min(30 s x 2^(n-1), 1 hour) while n < 8. Delays after failures 1 to 7 are 30 s, 60 s, 120 s, 240 s, 480 s, 960 s, and 1920 s. The 8th failure sets `status` to `failed` and schedules nothing. The 1-hour cap therefore does not apply under the 8-attempt limit; it stays as a guard if the limit changes.
+- Decided (2026-11-03, delegated): manual retry (`POST /api/v1/sync-jobs/:id/retry`) sets `status` to `queued`, resets `attempts` to 0, clears `last_error`, and sets `next_attempt_at` to now. See [api.md](api.md).
+
+## Process lifecycle
+
+- Decided (2026-11-03): the binary handles SIGTERM and Ctrl+C itself, through Axum's `with_graceful_shutdown` and the Tokio `signal` feature. It does not rely on an init process to deliver or act on signals. `--init` or `init: true` stays recommended for reaping child processes.
+- On a signal it stops accepting connections, finishes in-flight requests, and stops the worker from taking new jobs. Decided (2026-11-03, delegated): drain for at most 8 seconds, inside Docker's default 10-second stop timeout, then exit. A job still `running` at exit is re-queued at the next startup (see "Durable job queue").
 
 ## Error handling
 
@@ -58,3 +63,5 @@ The current `backend/src/main.rs` is the only implemented file. Treat the layout
 3. SARIF: strict SARIF 2.1.0.
 4. Decoupling: services in `services/`, handlers in `api/`, DB in `db/`.
 5. Secrets: never in logs or Server-Sent Events streams. See [security.md](security.md).
+6. Key material in memory: Decided (2026-11-03): keys, derived keys, and decoded key bytes are zeroed on drop with the `zeroize` crate.
+7. Edition: Decided (2026-11-03): the crate uses the Rust 2024 edition.

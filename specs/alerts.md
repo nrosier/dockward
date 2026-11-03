@@ -14,8 +14,8 @@ Purpose: the single home for alert rules. Covers admin-configured email (SMTP) a
 
 ## Storage
 
-- PROPOSED: channels are rows in `alert_channels` (`id`, `kind` `smtp` or `webhook`, `config_encrypted`, `enabled`, `created_at`, `updated_at`). The whole channel config (host, port, user, password, URL, headers) is one JSON document encrypted into `config_encrypted` in the `v1:` format from [security.md](security.md).
-- PROPOSED: sent alerts are recorded in `alert_deliveries` (`id`, `channel_id`, `dedupe_key`, `sent_at`) with `UNIQUE (channel_id, dedupe_key)`.
+- Decided (2026-11-03, delegated): channels are rows in `alert_channels` (`id`, `kind` `smtp` or `webhook`, `config_encrypted`, `enabled`, `created_at`, `updated_at`). The whole channel config (host, port, user, password, URL, headers) is one JSON document encrypted into `config_encrypted` in the `v1:` format from [security.md](security.md).
+- Decided (2026-11-03, delegated): sent alerts are recorded in `alert_deliveries` (`id`, `channel_id`, `dedupe_key`, `sent_at`) with `UNIQUE (channel_id, dedupe_key)`.
 - `dedupe_key` is the CVE id alone for new CRITICAL CVE alerts, and `sync_failed:<sync_job_id>` for sync failures. See Deduplication below.
 - The 24-hour window is enforced by checking `sent_at`, not by the constraint. See [database.md](database.md) for the write rule.
 - Source: none external. The tables are a local design to implement the user's decided 24-hour dedupe. The schema is in [database.md](database.md).

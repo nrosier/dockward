@@ -30,7 +30,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 ## Page map (decided)
 
 - Dashboard: summary and recent syncs.
-- Mappings: create, edit, and show the webhook URL.
+- Mappings: create and edit. Decided (2026-11-03): the webhook URL and the auth secret are shown once, after create or rotation, with a copy button. They cannot be shown again; the user rotates to get a new one.
 - CVEs: list, and a per-CVE view.
 - Sync jobs: sync history and failures. Replaces a separate Logs page.
 - Admin (admins only): five tabs, see below.
@@ -77,8 +77,8 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
   - Health: Harbor and GitHub reachability, token expiry, missing scopes, robot account expiry date with a warning 14 days before it lapses (Decided 2026-11-03, see [integrations.md](integrations.md)).
   - Settings (OIDC, Users, Alerts, Backup and restore): sections for the OIDC, Users, Alerts, and Backup and restore screens.
 - Decided (2026-11-03): Settings is the fifth tab, after Health. It holds the OIDC, Users, Alerts, and Backup and restore screens. Admin stays a single rail entry.
-- Settings > OIDC (decided 2026-11-03): OIDC settings and the toggle that restricts regular users to OIDC are managed here, stored encrypted (client secret AES-256-GCM), and every change is audited as `oidc.config_change`. Break-glass is always available to admins while no OIDC provider is configured; the toggle restricts regular users to OIDC, and admin break-glass always remains available. See [security.md](security.md).
-- Settings > Users (decided 2026-11-03): an admin can create a local user (username, email, password, role; the password must be at least 15 characters and at most 64), change a user's role, and delete a user. OIDC users appear in the list after their first login. They are not created from this screen.
+- Settings > OIDC (decided 2026-11-03): OIDC settings and the toggle that restricts regular users to OIDC are managed here, stored encrypted (client secret AES-256-GCM), and every change is audited as `oidc.config_change`. Admin break-glass is always available. The "OIDC only for regular users" toggle restricts regular users to OIDC sign-in (Decided 2026-11-03, see [security.md](security.md)). See [security.md](security.md).
+- Settings > Users (decided 2026-11-03): an admin can create a local user (username, email, password, role; the password must be at least 15 characters and at most 64), change a user's role, and delete a user. Decided (2026-11-03): role changes are for local users only. An OIDC user's role comes from the group claim and is shown read-only. OIDC users appear in the list after their first login. They are not created from this screen.
 - Setup page (first-run, not a Settings screen): shown only while no users exist. Its design needs user approval before build.
 - Design before build: the screen designs for the four Settings sections need user approval before implementation.
 

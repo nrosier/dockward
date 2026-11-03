@@ -2,7 +2,7 @@
 
 Purpose: Harbor webhook, Harbor API usage, polling, OCI labels, and GitHub SARIF upload and issues.
 
-Every value not already decided by the user is marked `PROPOSED:` with a source. Open items are marked OPEN: (unresolved questions) and PROPOSED: (awaiting approval). `UNVERIFIED:` marks a claim whose source could not be confirmed. Route-level contracts are in [api.md](api.md).
+Decisions are marked `Decided (<date>)`. On 2026-11-03 the user delegated every remaining proposal; those decisions are marked `Decided (2026-11-03, delegated)`. `Verified (<date>)` marks a claim checked against the cited source on that date. `UNVERIFIED:` marks a claim that can only be checked against a live system or a later build. Route-level contracts are in [api.md](api.md).
 
 ## Harbor webhook
 
@@ -17,7 +17,7 @@ Every value not already decided by the user is marked `PROPOSED:` with a source.
 
 ### Payload format detection
 
-- PROPOSED: the format is detected from the parsed JSON body. If the top-level object has a `specversion` member, the body is CloudEvents. Otherwise it is Harbor's default JSON.
+- Decided (2026-11-03, delegated): the format is detected from the parsed JSON body. If the top-level object has a `specversion` member, the body is CloudEvents. Otherwise it is Harbor's default JSON.
   - Source: CloudEvents JSON Event Format, which requires `specversion` as a REQUIRED attribute in the JSON event (https://github.com/cloudevents/spec/blob/main/cloudevents/formats/json-format.md; fetched in this session, section "Examples" and the attribute table).
   - Source for the default payload shape: Harbor source `src/pkg/notifier/formats/default.go` (top-level `type`, `occur_at`, `operator`, `event_data`). Harbor `src/pkg/notifier/formats/cloudevents.go` sets `Content-Type: application/cloudevents+json` for the CloudEvents form.
 - Detection is based on the body, not on the `Content-Type` header. A header can be wrong or missing.
@@ -29,23 +29,24 @@ Every value not already decided by the user is marked `PROPOSED:` with a source.
 - Decided (2026-11-03): `Authorization: Bearer <secret>`, see decision. Harbor sends the configured value as the `Authorization` header, so the `Bearer` scheme prefix is part of the value entered in Harbor. A custom auth header name is not used.
   - Source for Harbor sending the value as `Authorization`: Harbor source `http_handler.go` (fetched in this session). Source for the Bearer scheme: RFC 6750 section 2.1 (https://www.rfc-editor.org/rfc/rfc6750).
   - The `Authorization` header is sent with every webhook request. Harbor's UI text is "If your webhook listener implements authentication, enter the authentication header" (Harbor webhook docs, fetched in this session).
-- Secret value: PROPOSED: 256 bits from a CSPRNG, encoded as base64url without padding (43 characters). Source for the 256-bit sizing: OWASP Session Management Cheat Sheet, "Session ID Entropy" (at least 64 bits required, and 256 bits is a stronger choice that the spec picks; https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html). Source for base64url: RFC 4648 section 5 (https://www.rfc-editor.org/rfc/rfc4648).
-- The secret is stored encrypted with AES-256-GCM (`v1:` format, see [security.md](security.md)) and shown once.
-- The secret is rotatable. Rotation writes a new encrypted value and audits `mapping.auth_secret_rotate`.
+- Secret value: Decided (2026-11-03, delegated): 256 bits from a CSPRNG, encoded as base64url without padding (43 characters). Source for the 256-bit sizing: OWASP Session Management Cheat Sheet, "Session ID Entropy" (at least 64 bits required, and 256 bits is a stronger choice that the spec picks; https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html). Source for base64url: RFC 4648 section 5 (https://www.rfc-editor.org/rfc/rfc4648).
+- Decided (2026-11-03): the secret itself is not stored. HarborGate stores only its SHA-256 digest (lowercase hex) in `repo_mappings.webhook_auth_secret_hash`. The secret is shown once, at creation and at rotation. To verify a request, the handler strips the `Bearer ` prefix, hashes the presented value, and compares the digests in constant time. A fast hash is enough because the value is 256 random bits and cannot be guessed offline; no external source.
+- The secret is rotatable. Rotation writes a new digest and audits `mapping.auth_secret_rotate`.
 - Compare values in constant time.
 - Requests with a missing or wrong `Authorization` value are rejected with 401.
 - The header value is never logged.
 
 ### Webhook URL token
 
-- PROPOSED: `webhook_token` is a random value of at least 256 bits from a CSPRNG, encoded as base64url without padding.
+- Decided (2026-11-03, delegated): the webhook token is a random value of at least 256 bits from a CSPRNG, encoded as base64url without padding.
   - Source: OWASP Session Management Cheat Sheet, "Session ID Entropy", which requires at least 64 bits of entropy from a strong CSPRNG (https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html). 256 bits is a stronger choice, which the spec makes deliberately.
-- The URL is a secret. Anyone who has it can trigger syncs for that mapping. It is shown on the mapping screen and is not logged.
+- The URL is a secret. Anyone who has it can trigger syncs for that mapping. It is not logged.
+- Decided (2026-11-03): only the SHA-256 digest (lowercase hex) of the token is stored, in `repo_mappings.webhook_token_hash` (UNIQUE). The full webhook URL is shown once, at mapping creation and at token rotation, and cannot be shown again. A lost URL is replaced by rotating the token. The handler hashes the path token and looks up the mapping by digest. The URL is built from `HARBORGATE_PUBLIC_URL` ([deployment.md](deployment.md)), never from the request's `Host` header.
 - Rotation is `POST /api/v1/mappings/:id/rotate-webhook-token`. The old token stops working immediately.
 
 ### Responses
 
-- PROPOSED response codes for `POST /api/v1/webhooks/harbor/:mapping_token`:
+- Decided (2026-11-03, delegated) response codes for `POST /api/v1/webhooks/harbor/:mapping_token`:
   - `202 Accepted`: the body is valid and a `sync_jobs` row was stored. Source: RFC 9110 section 15.3.3 (202 Accepted, https://www.rfc-editor.org/rfc/rfc9110).
   - `401 Unauthorized`: the mapping token is unknown, or the `Authorization` value is missing or wrong. Both auth failures return the same 401 with the same body, so the response does not reveal which check failed. Source: OWASP Authentication Cheat Sheet, which requires generic error messages that do not distinguish the failure reason (https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html). Source for 401: RFC 9110 section 15.5.2.
   - `400 Bad Request`: the body is not parseable JSON, or it matches neither format. Source: RFC 9110 section 15.5.1.
@@ -53,7 +54,12 @@ Every value not already decided by the user is marked `PROPOSED:` with a source.
   - `429 Too Many Requests`: the rate limit is exceeded. Source: RFC 6585 section 4.
 - The body cap and rate limits are in [security.md](security.md).
 - Handling is durable: validate, store a `sync_jobs` row, return. See [backend.md](backend.md).
-- Only events with `SCANNING_COMPLETED` create a job. Other event types return `202` and store nothing, so that Harbor does not retry them. PROPOSED, no external source (UNVERIFIED: Harbor's retry behaviour on non-2xx responses was not checked). The setup guide tells the user to select only this event, so this path should be rare.
+- Decided (2026-11-03, delegated): a job is created only when all three conditions hold. Otherwise the request returns `202` and stores nothing.
+  - The top-level `type` is `SCANNING_COMPLETED` (default format) or `harbor.scan.completed` (CloudEvents). Verified (2026-11-03) in the Harbor source: `src/controller/event/topic.go` defines `SCANNING_COMPLETED`, and the type table in `src/pkg/notifier/formats/cloudevents.go` maps it to `harbor.scan.completed`.
+  - The event's `scan.scan_type` is `vulnerability`. Harbor also sends `SCANNING_COMPLETED` for SBOM generation, with `scan_type` `sbom` (verified (2026-11-03), `src/pkg/scan/rest/v1/spec.go` and `src/controller/event/model/event.go`).
+  - `repository.repo_full_name` equals `<harbor_project>/<harbor_repository>` of the mapping. Harbor webhooks are configured per project, so a webhook URL receives events for every repository in its project.
+  - Field paths: under `event_data` in the default format and under `data` in CloudEvents (verified (2026-11-03), `src/pkg/notifier/formats/default.go` and `cloudevents.go`). The artifact digest is `resources[0].digest`.
+- Verified (2026-11-03) in `src/jobservice/job/impl/notification/webhook_job.go`: Harbor treats any response status outside 200 to 299 as a failure and retries the delivery, 3 times by default (`maxFails`, overridable by environment). Returning `202` for ignored events therefore stops needless retries.
 
 ## Harbor API
 
@@ -62,15 +68,18 @@ Every value not already decided by the user is marked `PROPOSED:` with a source.
 - Endpoint used: `GET /api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts/{reference}/additions/vulnerabilities`.
   - Source: Harbor API v2.0 swagger (https://github.com/goharbor/harbor/blob/main/api/v2.0/swagger.yaml), operation `getVulnerabilitiesAddition`, path `/projects/{project_name}/repositories/{repository_name}/artifacts/{reference}/additions/vulnerabilities`. Verified in this session.
 - `{repository_name}` is the Harbor repository name. If it contains a slash, encode it twice (Harbor swagger, `repositoryName`: "If it contains slash, encode it twice over with URL encoding"). Example: `a/b` becomes `a%252Fb`.
-- `{reference}` is the artifact digest (`sha256:...`). PROPOSED: use the digest, not a tag, because a tag can move between the event and the fetch. Harbor swagger, `reference`: "The reference can be digest or tag".
-- Request header: `X-Accept-Vulnerabilities: application/vnd.security.vulnerability.report; version=1.1` is the Trivy report MIME type. Harbor swagger, `acceptVulnerabilities`, lists `application/vnd.security.vulnerability.report; version=1.1` as the default. PROPOSED: send this value explicitly and reject a response with another content type. UNVERIFIED: that a Trivy-only install returns the Trivy report under this MIME type in the operator's Harbor version.
-- Response: the swagger types the 200 body as a plain `string` with a `Content-Type` header, so the body schema is not defined in the swagger. UNVERIFIED: the exact report JSON shape for the Trivy MIME type; the converter fixture must come from a real Harbor response. The swagger `VulnerabilityItem` model (a different, summary-style object) has `cve_id`, `package`, `version`, `fixed_version`, `severity`, and `status`; the spec maps `fixed_version` to `cve_findings.fixed_in_version` on that basis, UNVERIFIED for the addition body.
-- Status codes: 200 success, 400, 401, 403, 404 (artifact not found or no report), 500. Harbor swagger, `getVulnerabilitiesAddition`.
-- 404 means the artifact has no report yet. The worker retries it with backoff (see [backend.md](backend.md)). It is not an immediate failure.
+- `{reference}` is the artifact digest (`sha256:...`). Decided (2026-11-03, delegated): use the digest, not a tag, because a tag can move between the event and the fetch. Harbor swagger, `reference`: "The reference can be digest or tag".
+- Request header: `X-Accept-Vulnerabilities: application/vnd.security.vulnerability.report; version=1.1` is the Trivy report MIME type. Harbor swagger, `acceptVulnerabilities`, lists `application/vnd.security.vulnerability.report; version=1.1` as the default. Decided (2026-11-03, delegated): send only this MIME type. Verified (2026-11-03): the Harbor Trivy adapter (`goharbor/harbor-scanner-trivy`, `pkg/http/api/v1/handler.go`) produces only this MIME type for vulnerability reports. The response `Content-Type` is always `application/json` (`src/server/v2.0/handler/artifact.go`), so the format is checked by the key of the response object, not by the header.
+- Response, verified (2026-11-03) in `src/server/v2.0/handler/artifact.go` and `src/pkg/scan/vuln/report.go`: a JSON object keyed by MIME type, `{"application/vnd.security.vulnerability.report; version=1.1": Report}`. `Report` has `generated_at`, `scanner`, `severity`, and `vulnerabilities[]`. Each item has `id` (the CVE or advisory id), `package`, `version`, `fix_version`, `severity`, `status`, `description`, `links[]`, `preferred_cvss` (`score_v3`, `score_v2`, `vector_v3`, `vector_v2`), `cwe_ids[]`, `artifact_digests[]`, and `vendor_attributes`.
+  - The field is `fix_version`, not `fixed_version` as in the swagger's summary `VulnerabilityItem`. `fix_version` maps to `cve_findings.fixed_in_version`.
+  - Severity values are title case. The Trivy adapter emits only `Critical`, `High`, `Medium`, `Low`, and `Unknown` (verified (2026-11-03), `pkg/scan/transformer.go`). The converter upper-cases them.
+  - The converter fixture is still captured from a real Harbor response, to cover adapter-version differences.
+- Status codes: 200, 400, 401, 403, 404, and 500 (Harbor swagger, `getVulnerabilitiesAddition`). Verified (2026-11-03) in the handler: when the artifact has no report for the requested MIME type, Harbor returns `200` with an empty object `{}`. A `404` means the artifact digest does not exist.
+- Decided (2026-11-03, delegated): an empty object and a `404` are both retried with backoff (see [backend.md](backend.md)), because the report or a just-pushed artifact may not be visible yet. Neither is an immediate failure.
 
 ### Credentials and robot account
 
-- Robot account username: `robot$<name>`. Source: Harbor robot account documentation (https://goharbor.io/docs/latest/administration/robot-accounts/, fetched in this session), "robot$ prefix". UNVERIFIED: the project-level `robot$<project>+<name>` form in [docs/SETUP.md](../docs/SETUP.md) section 3b is not confirmed by the fetched page. Copy the exact name Harbor shows.
+- Robot account username: `robot$<name>`. Source: Harbor robot account documentation (https://goharbor.io/docs/latest/administration/robot-accounts/, fetched in this session), "robot$ prefix". Verified (2026-11-03) in `src/controller/robot/controller.go`: a project robot is named `<prefix><project>+<name>`. The prefix is Harbor's configurable robot name prefix, default `robot$`, so operators copy the exact name Harbor shows.
 - Robot account expiry: 30 days by default. Source: Harbor robot account documentation (fetched in this session; the default expiry text is confirmed). The system-wide duration is `robot_token_duration` in days (Harbor API swagger). A per-robot `duration` of `-1` means never expires (Harbor API swagger, `RobotCreate.duration`).
 - The stored credential has `user_credentials.username` and `user_credentials.expires_at` (see [database.md](database.md)).
 - Health: the app warns before `expires_at` (see [frontend.md](frontend.md)). Decided (2026-11-03): the warning window is 14 days before `expires_at`. The window is fixed in v1, not user-set.
@@ -78,18 +87,20 @@ Every value not already decided by the user is marked `PROPOSED:` with a source.
 ### Harbor base URL and transport
 
 - The Harbor base URL is stored per Harbor credential in `user_credentials.base_url`. Each mapping uses its credential's `base_url`. Decided: 2026-11-02.
-- PROPOSED: the base URL must be `https://`. Plain HTTP is rejected on save.
-- PROPOSED: the resolved address must not be loopback, link-local, or private, unless `HARBORGATE_ALLOW_PRIVATE_HARBOR=true`. The address check and the blocked ranges are in [security.md](security.md) under "Outbound HTTP (SSRF)".
+- Decided (2026-11-03, delegated): the base URL must be `https://`. Plain HTTP is rejected on save.
+- Decided (2026-11-03, delegated): the resolved address must not be loopback, link-local, or private, unless `HARBORGATE_ALLOW_PRIVATE_HARBOR=true`. The address check and the blocked ranges are in [security.md](security.md) under "Outbound HTTP (SSRF)".
   - Source: OWASP SSRF Prevention Cheat Sheet (https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html).
 - Redirects are not followed.
 - Harbor API paths are relative to `base_url` and begin with `/api/v2.0/` (Harbor swagger `basePath: /api/v2.0`).
 
 ### Test button
 
-- Harbor test: PROPOSED: `GET /api/v2.0/projects/{project_name}` with the robot credential, or a list call scoped to the mapping's project (`GET /api/v2.0/projects?name=<project>`). Both require authentication.
-  - Verified: Harbor swagger `/users/current` returns 412 for robot accounts ("Returns 412 if the caller is authenticated via a non-local context such as a robot account"). So `/users/current` is not usable for the test.
+- Harbor test: Decided (2026-11-03, delegated): `GET /api/v2.0/users/current` with the robot's basic auth. `412` means the robot credential works. `401` means the secret is wrong, or the robot is disabled or expired. `200` means the credentials belong to a human user, which is rejected, because only robot accounts are accepted.
+  - Reason, verified (2026-11-03) in the Harbor source: a wrong, disabled, or expired robot secret does not fail the request. The robot authenticator returns no security context (`src/server/middleware/security/robot.go`), so the request continues as anonymous. A project or artifact call can then succeed on a public project with a wrong secret. `users/current` returns `401` for anonymous callers and `412` for a robot (`src/server/v2.0/handler/user.go`).
+  - Repository access is checked when a mapping is saved: `GET /api/v2.0/projects/{project}/repositories/{repository}/artifacts?page_size=1` must return `200`.
+  - Verified: Harbor swagger `/users/current` returns 412 for robot accounts ("Returns 412 if the caller is authenticated via a non-local context such as a robot account"). That 412 is what makes it the test.
   - Verified: `GET /api/v2.0/systeminfo` is documented as callable anonymously ("this can be called by anonymous request"), so it cannot prove the robot secret is valid. Not used for the test.
-  - UNVERIFIED: that `GET /api/v2.0/projects?name=<project>` authenticates a robot account and returns the project. The swagger lists 401 for missing auth; the robot case was not run.
+  - The `projects?name=` call is not used: with a wrong secret it runs as anonymous and can still return a public project.
 
 ## Polling
 
@@ -105,17 +116,26 @@ Every value not already decided by the user is marked `PROPOSED:` with a source.
 Read these from the Harbor artifact (`GET .../artifacts/{reference}` or the artifact's config labels):
 
 - Commit SHA: `org.opencontainers.image.revision`. Required. If missing, the sync is marked `failed` with a clear error. Never guess the SHA.
-- Repository: `org.opencontainers.image.source`.
-- Branch: `org.opencontainers.image.ref.name` if present. Otherwise the mapping's `default_branch` (default `main`).
-- Source for the label names: OCI Image Format Specification, annotations (https://github.com/opencontainers/image-spec/blob/main/annotations.md). UNVERIFIED: this page was not fetched in this session; the label names are taken from the user's existing spec and the setup guide.
+- Repository: `org.opencontainers.image.source`. Decided (2026-11-03): when present, it must match the mapping's GitHub target, `https://github.com/<github_owner>/<github_repo>`, compared case-insensitively and ignoring a trailing `/` or `.git`. On a mismatch the sync is marked `failed` with a clear error and nothing is uploaded. Decided (2026-11-03, delegated): when the label is absent, the sync proceeds.
+- Branch: Decided (2026-11-03): from the HarborGate label `io.github.nrosier.harborgate.branch` if present, otherwise the mapping's `default_branch` (default `main`). Decided (2026-11-03, delegated): the label name uses reverse-domain notation under the project's GitHub Pages domain `nrosier.github.io`. The OCI annotation rules say keys SHOULD use reverse domain notation (verified (2026-11-03)). `org.opencontainers.image.ref.name` is not read for the branch, because the OCI image spec defines it as the name of a reference, typically a tag such as `1.2.3`, not a branch.
+- Source for the label names: OCI Image Format Specification, annotations (https://github.com/opencontainers/image-spec/blob/main/annotations.md). Verified (2026-11-03): the page defines `org.opencontainers.image.source` (URL to get the source code), `org.opencontainers.image.revision` (source control revision identifier), and `org.opencontainers.image.ref.name` ("Name of the reference for a target").
 
 ## SARIF conversion and upload
 
 - Convert the Trivy report to SARIF 2.1.0. Output must conform to the SARIF 2.1.0 schema (OASIS SARIF 2.1.0, https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html).
 - Gzip, then base64-encode the SARIF payload.
+- Decided (2026-11-03): the upload's `ref` field is always the fully qualified `refs/heads/<branch>`, built from the branch rule under "OCI labels". Verified (2026-11-03) in GitHub's OpenAPI description (`github/rest-api-description`): `ref` is required and is "The full Git reference, formatted as `refs/heads/<branch name>`" (or a tag or pull request ref).
 - Upload with `POST /repos/{owner}/{repo}/code-scanning/sarifs`. The request body fields are `commit_sha`, `ref`, `sarif` (base64 gzip), and optional `checkout_uri`, `started_at`, `tool_name`, `validate`.
-  - Source: GitHub REST API, "Code scanning" (https://docs.github.com/en/rest/code-scanning). UNVERIFIED: the field list was not fetched from the live GitHub docs in this session (the fetch returned only a partial page). Confirm before implementation.
-- SARIF category is set to the Harbor repository name for each image, so results stay separate. UNVERIFIED: the mechanism. SARIF 2.1.0 has `runAutomationDetails.id` on each run, and GitHub documents a `category` concept for separating analyses; neither page was fetched in this session. Confirm whether the converter sets `runAutomationDetails.id` and what the upload endpoint expects.
+  - Source: GitHub REST API, "Code scanning" (https://docs.github.com/en/rest/code-scanning). Verified (2026-11-03) in GitHub's OpenAPI description: `commit_sha`, `ref`, and `sarif` are required; `checkout_uri`, `started_at`, `tool_name`, and `validate` are optional. Responses: `202` (with an `id`), `400`, `403`, `404`, `413`, `503`.
+  - Limits, verified in the same description and in GitHub's "SARIF support for code scanning": 20 runs per file; 25,000 results and 25,000 rules per run, of which only the top 5,000 results are kept; 1,000 locations per result; 20 tags per rule; at most 10 MB of gzip-compressed SARIF per upload; 1,000 upload requests per hour per user.
+  - Decided (2026-11-03, delegated): after the upload, the worker polls `GET /repos/{owner}/{repo}/code-scanning/sarifs/{id}` until `processing_status` is `complete` or `failed` (verified (2026-11-03): the values are `pending`, `complete`, and `failed`). It records the result in `sync_reports.sarif_status`. A SARIF over 10 MB compressed fails the sync with a clear error, and nothing is uploaded.
+- SARIF category: Decided (2026-11-03, delegated): each SARIF file has one run, with `runAutomationDetails.id` = `harborgate/<harbor_project>/<harbor_repository>/`. Verified (2026-11-03) in GitHub's "SARIF support for code scanning": the `id` is read as `category/run-id`, where the category is everything before the last `/`, and an `id` without a `/` has an empty category. The trailing `/` keeps the whole path as the category, including repository names that contain `/`.
+- Converter rules: Decided (2026-11-03, delegated), using the properties GitHub marks as required (verified (2026-11-03), same page):
+  - Top level: `$schema`, `version` `2.1.0`, and `runs[]`. The run has `tool.driver.name` `HarborGate` and `tool.driver.rules[]`.
+  - Each rule has `id` (the vulnerability id), `shortDescription.text`, `fullDescription.text`, `help.text`, and `properties.security-severity`. Each result has `ruleId`, `message.text`, `locations[]`, and `partialFingerprints`.
+  - Location: an image finding has no source file, so `physicalLocation.artifactLocation.uri` is `<harbor_project>/<harbor_repository>`, and the region is line 1, column 1 to 1. That is what Trivy's own SARIF writer does when a package has no file location (verified (2026-11-03), `aquasecurity/trivy`, `pkg/report/sarif.go`).
+  - `partialFingerprints`: GitHub requires them, because API uploads without them can create duplicate alerts. The value is `{"harborgate/v1": sha256(<vulnerability id> + "|" + <package>)}`, which stays stable across image rebuilds and tags.
+  - `security-severity`: the CVSS v3 score from `preferred_cvss.score_v3` when present, otherwise `9.5` (CRITICAL), `8.0` (HIGH), `5.5` (MEDIUM), `2.0` (LOW), or `0.0` (UNKNOWN). This is Trivy's own fallback (verified (2026-11-03), `severityToScore` in `pkg/report/sarif.go`).
 - Validate output against SARIF 2.1.0 (see [testing-and-ci.md](testing-and-ci.md)).
 
 ## GitHub issues
@@ -123,6 +143,7 @@ Read these from the Harbor artifact (`GET .../artifacts/{reference}` or the arti
 - Auto-create issues for CRITICAL and HIGH findings. The `min_issue_severity` setting defaults to CRITICAL and may be lowered to HIGH (user decision).
 - Only CRITICAL and HIGH create issues. MEDIUM, LOW, and UNKNOWN never do.
 - Manual issue creation is also supported: `POST /api/v1/cves/:id/issue`. See [api.md](api.md).
+- Every issue carries the HarborGate label and body marker used to re-adopt issues. The rule is in [cve-lifecycle.md](cve-lifecycle.md).
 - Issue lifecycle (one open issue per CVE per repo, close, reopen) is defined in [cve-lifecycle.md](cve-lifecycle.md).
 - GitHub issues API permission: `Issues: read and write` (see [security.md](security.md)).
 

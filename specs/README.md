@@ -6,7 +6,7 @@ Index of the detailed build specifications. CLAUDE.md is the general guide; this
 
 - [architecture.md](architecture.md) - Overview, components, data flow, single-instance decision, tech stack.
 - [database.md](database.md) - Schema reference (`migrations/0001_init.sql`) and table decisions.
-- [api.md](api.md) - HTTP route contract: every route, auth level, request and response shape, status codes, error envelope, pagination. PROPOSED, awaiting approval.
+- [api.md](api.md) - HTTP route contract: every route, auth level, request and response shape, status codes, error envelope, pagination. Decided 2026-11-03 (delegated).
 - [backend.md](backend.md) - Modules, services, durable job queue, error handling, dev rules.
 - [security.md](security.md) - Encryption, key handling and rotation, backup and restore, auth, sessions, hardening, tenancy, GitHub token scope.
 - [integrations.md](integrations.md) - Harbor webhook, Harbor API, polling, GitHub SARIF upload, GitHub issues, OCI labels.
@@ -20,4 +20,6 @@ Index of the detailed build specifications. CLAUDE.md is the general guide; this
 
 - CLAUDE.md is the general guide. specs/ holds the detail.
 - Open items are marked OPEN: (unresolved questions) and PROPOSED: (awaiting approval). Do not decide them silently.
+- A decision the user delegates to the assistant is marked `Decided (<date>, delegated)`. On 2026-11-03 the user delegated every open proposal, so no PROPOSED items remain.
+- `Verified (<date>)` marks a claim checked against its cited source on that date. `UNVERIFIED:` marks a claim that can only be checked against a live system or a later build.
 - Contradictions between files are recorded as `CONFLICT:` until the user resolves them.
