@@ -8,6 +8,8 @@ pub mod auth;
 #[allow(dead_code)] // Used by the credential routes.
 pub mod credential_probe;
 pub mod credentials;
+#[allow(dead_code)] // Used by the webhook route.
+pub mod harbor_webhook;
 #[allow(dead_code)] // Used by the admin routes and the auth paths added in later issues.
 pub mod ids;
 #[allow(dead_code)] // Used by the mapping routes.

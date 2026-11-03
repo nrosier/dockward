@@ -1,0 +1,250 @@
+//! Harbor webhook parsing and filtering (`specs/integrations.md`, Harbor webhook).
+//!
+//! The body is parsed once. A top-level `specversion` marks CloudEvents. Otherwise the
+//! default Harbor JSON shape is used. Both produce one [`ScanEvent`]. A job is created
+//! only for a vulnerability scan of the mapping's repository.
+
+use serde_json::Value;
+
+use crate::error::AppError;
+
+/// The validated event stored in `sync_jobs.payload`. It holds no secrets.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ScanEvent {
+    /// `<project>/<repository>`, as Harbor reports it.
+    pub repo_full_name: String,
+    /// The artifact digest, `sha256:<hex>`.
+    pub digest: String,
+    /// The first tag, when Harbor sends one. Only the digest drives the sync.
+    pub tag: Option<String>,
+}
+
+/// What a valid body means for the mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// Store a `sync_jobs` row with this event.
+    Queue(ScanEvent),
+    /// Valid, but not a vulnerability scan of this repository. Nothing is stored.
+    Ignore,
+}
+
+/// Parses the body and decides. Returns `400` for a body that is not JSON or matches
+/// neither format. `repo_full_name` is the mapping's `<harbor_project>/<harbor_repository>`.
+pub fn classify(body: &[u8], repo_full_name: &str) -> Result<Outcome, AppError> {
+    let value: Value = serde_json::from_slice(body).map_err(|_| bad_request())?;
+    let object = value.as_object().ok_or_else(bad_request)?;
+    let (event_type, data) = if object.contains_key("specversion") {
+        // CloudEvents: the type and the payload sit under `type` and `data`.
+        (
+            string_at(&value, &["type"]),
+            value.get("data").cloned().unwrap_or(Value::Null),
+        )
+    } else {
+        // Harbor default: the type is top-level and the payload is under `event_data`.
+        if !object.contains_key("type") {
+            return Err(bad_request());
+        }
+        (
+            string_at(&value, &["type"]),
+            value.get("event_data").cloned().unwrap_or(Value::Null),
+        )
+    };
+    let is_scan_completed = matches!(
+        event_type.as_deref(),
+        Some("SCANNING_COMPLETED") | Some("harbor.scan.completed")
+    );
+    if !is_scan_completed {
+        return Ok(Outcome::Ignore);
+    }
+    let scan_type = string_at(&data, &["scan", "scan_type"]);
+    if scan_type.as_deref() != Some("vulnerability") {
+        return Ok(Outcome::Ignore);
+    }
+    let repo = string_at(&data, &["repository", "repo_full_name"]);
+    if repo.as_deref() != Some(repo_full_name) {
+        return Ok(Outcome::Ignore);
+    }
+    let Some(digest) = string_at(&data, &["resources", "0", "digest"]) else {
+        return Err(bad_request());
+    };
+    let tag = string_at(&data, &["resources", "0", "tag"]);
+    Ok(Outcome::Queue(ScanEvent {
+        repo_full_name: repo_full_name.to_owned(),
+        digest,
+        tag,
+    }))
+}
+
+/// Walks a JSON path of object keys or array indexes and returns the string at the end.
+fn string_at(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for key in path {
+        current = match current {
+            Value::Object(map) => map.get(*key)?,
+            Value::Array(items) => items.get(key.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    current.as_str().map(str::to_owned)
+}
+
+fn bad_request() -> AppError {
+    AppError::InvalidRequest("The request body is not a Harbor event.".to_owned())
+}
+
+/// Compares two equal-length byte strings without an early exit on the first difference.
+/// Used for the digests of the webhook auth secret and the mapping token.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REPO: &str = "proj/app";
+
+    /// A default-format scan event for a vulnerability scan of `REPO`.
+    fn default_vuln() -> &'static str {
+        r#"{
+          "type": "SCANNING_COMPLETED",
+          "occur_at": 1700000000,
+          "operator": "admin",
+          "event_data": {
+            "repository": {"repo_full_name": "proj/app", "name": "app"},
+            "resources": [{"digest": "sha256:aaaa", "tag": "1.2.3"}],
+            "scan": {"scan_type": "vulnerability"}
+          }
+        }"#
+    }
+
+    /// The same event in the CloudEvents format.
+    fn cloudevents_vuln() -> &'static str {
+        r#"{
+          "specversion": "1.0",
+          "type": "harbor.scan.completed",
+          "source": "harbor",
+          "data": {
+            "repository": {"repo_full_name": "proj/app", "name": "app"},
+            "resources": [{"digest": "sha256:aaaa", "tag": "1.2.3"}],
+            "scan": {"scan_type": "vulnerability"}
+          }
+        }"#
+    }
+
+    #[test]
+    fn default_format_queues_a_job() {
+        let outcome = classify(default_vuln().as_bytes(), REPO).unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::Queue(ScanEvent {
+                repo_full_name: REPO.to_owned(),
+                digest: "sha256:aaaa".to_owned(),
+                tag: Some("1.2.3".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn cloudevents_format_produces_the_same_event() {
+        let default = classify(default_vuln().as_bytes(), REPO).unwrap();
+        let cloud = classify(cloudevents_vuln().as_bytes(), REPO).unwrap();
+        assert_eq!(default, cloud);
+    }
+
+    #[test]
+    fn an_sbom_event_is_ignored() {
+        let body = default_vuln().replace("vulnerability", "sbom");
+        assert_eq!(classify(body.as_bytes(), REPO).unwrap(), Outcome::Ignore);
+    }
+
+    #[test]
+    fn another_repository_in_the_same_project_is_ignored() {
+        let body = default_vuln().replace("proj/app", "proj/other");
+        assert_eq!(classify(body.as_bytes(), REPO).unwrap(), Outcome::Ignore);
+    }
+
+    #[test]
+    fn a_different_event_type_is_ignored() {
+        let body = default_vuln().replace("SCANNING_COMPLETED", "PUSH_ARTIFACT");
+        assert_eq!(classify(body.as_bytes(), REPO).unwrap(), Outcome::Ignore);
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_is_a_bad_request() {
+        assert!(classify(b"not json", REPO).is_err());
+    }
+
+    #[test]
+    fn a_json_object_in_neither_format_is_a_bad_request() {
+        assert!(classify(br#"{"hello": "world"}"#, REPO).is_err());
+    }
+
+    #[test]
+    fn constant_time_eq_matches_equal_values_only() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+    }
+}
+
+use sqlx::SqlitePool;
+
+use crate::db::mappings as mapping_db;
+use crate::db::sync_jobs;
+use crate::services::mappings::digest;
+
+/// The result of one webhook request, for the route to turn into a status code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Received {
+    /// A `sync_jobs` row was stored (`202`).
+    Queued,
+    /// The event is valid but not for this repository or not a vulnerability scan (`202`).
+    Ignored,
+}
+
+/// Handles one webhook body for the mapping that owns `token` (`specs/integrations.md`).
+/// An unknown token, or a bad `Authorization` value, returns the same `401`. The token
+/// is hashed before lookup, and the secret is compared by digest in constant time.
+pub async fn receive(
+    pool: &SqlitePool,
+    token: &str,
+    authorization: Option<&str>,
+    body: &[u8],
+    now: i64,
+    new_job_id: &str,
+) -> Result<Received, AppError> {
+    let unauthorized = || AppError::InvalidCredentials;
+    let mapping_id = mapping_db::find_by_token_hash(pool, &digest(token))
+        .await?
+        .ok_or_else(unauthorized)?;
+    let presented = authorization
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(unauthorized)?;
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    let row = mapping_db::find_by_id(&mut conn, &mapping_id)
+        .await?
+        .ok_or_else(unauthorized)?;
+    let presented_digest = digest(presented);
+    if !constant_time_eq(
+        presented_digest.as_bytes(),
+        row.webhook_auth_secret_hash.as_bytes(),
+    ) {
+        return Err(unauthorized());
+    }
+    let repo_full_name = format!("{}/{}", row.harbor_project, row.harbor_repository);
+    match classify(body, &repo_full_name)? {
+        Outcome::Ignore => Ok(Received::Ignored),
+        Outcome::Queue(event) => {
+            let payload = serde_json::to_string(&event).map_err(|_| AppError::InternalError)?;
+            sync_jobs::enqueue(pool, new_job_id, &mapping_id, &payload, now).await?;
+            Ok(Received::Queued)
+        }
+    }
+}
