@@ -131,12 +131,40 @@ impl Resolve for GuardedResolver {
     }
 }
 
-/// Builds a reqwest client for one target class.
+/// The only outbound client. The inner reqwest client is private, and requests are built
+/// only through [`OutboundClient::get`] and [`OutboundClient::post`]. Both run
+/// [`check_target`] before a request builder is returned, so a caller cannot send a
+/// request that skipped the check, including one to an IP literal.
+pub struct OutboundClient {
+    inner: reqwest::Client,
+    class: TargetClass,
+    allow_private: bool,
+}
+
+impl OutboundClient {
+    /// A GET request builder for `url`, after the target check.
+    pub fn get(&self, url: &reqwest::Url) -> Result<reqwest::RequestBuilder, OutboundError> {
+        check_target(url, self.class, self.allow_private)?;
+        Ok(self.inner.get(url.as_str()))
+    }
+
+    /// A POST request builder for `url`, after the target check.
+    pub fn post(&self, url: &reqwest::Url) -> Result<reqwest::RequestBuilder, OutboundError> {
+        check_target(url, self.class, self.allow_private)?;
+        Ok(self.inner.post(url.as_str()))
+    }
+}
+
+/// Builds the guarded client for one target class.
 ///
 /// `allow_private` is the class opt-out (`HARBORGATE_ALLOW_PRIVATE_*`). It is false by
 /// default. GitHub ignores it, because `api.github.com` is a fixed public host.
-pub fn client(class: TargetClass, allow_private: bool) -> Result<reqwest::Client, OutboundError> {
-    build(class, allow_private, None)
+pub fn client(class: TargetClass, allow_private: bool) -> Result<OutboundClient, OutboundError> {
+    Ok(OutboundClient {
+        inner: build(class, allow_private, None)?,
+        class,
+        allow_private,
+    })
 }
 
 fn build(
@@ -166,16 +194,21 @@ pub fn client_trusting(
     class: TargetClass,
     allow_private: bool,
     root: reqwest::Certificate,
-) -> Result<reqwest::Client, OutboundError> {
-    build(class, allow_private, Some(root))
+) -> Result<OutboundClient, OutboundError> {
+    Ok(OutboundClient {
+        inner: build(class, allow_private, Some(root))?,
+        class,
+        allow_private,
+    })
 }
 
 /// Checks a URL before any request is made: it must be `https://`, and when its host is
 /// an IP literal, that address must pass the same range check as a resolved address.
 ///
 /// reqwest and hyper skip the DNS resolver for an IP-literal host, so the resolver
-/// alone never sees `https://127.0.0.1/`. This check covers that path.
-pub fn check_target(
+/// alone never sees `https://127.0.0.1/`. This check covers that path. Private to this
+/// module: [`OutboundClient`] is the only caller.
+fn check_target(
     url: &reqwest::Url,
     class: TargetClass,
     allow_private: bool,
@@ -365,18 +398,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn request_to_loopback_ip_literal_is_refused() {
-        // An IP literal skips DNS, so the resolver is not consulted. The https_only rule
-        // and the connector still stop it. The URL uses https so the scheme rule passes.
-        let client = match client(TargetClass::Harbor, false) {
-            Ok(client) => client,
-            Err(err) => panic!("client build failed: {err}"),
-        };
-        let outcome = client.get("https://127.0.0.1:1/").send().await;
-        assert!(outcome.is_err(), "a request to loopback succeeded");
-    }
-
     #[test]
     fn redirect_policy_is_no_follow() {
         // The production client is built with Policy::none(). Reqwest does not expose
@@ -391,8 +412,8 @@ mod tests {
             Ok(client) => client,
             Err(err) => panic!("client build failed: {err}"),
         };
-        let outcome = client.get("http://example.com/").send().await;
-        assert!(outcome.is_err(), "a plain http request was sent");
+        let url = reqwest::Url::parse("http://example.com/").unwrap();
+        assert_eq!(client.get(&url).err(), Some(OutboundError::NotHttps));
     }
 }
 
@@ -469,8 +490,12 @@ pub(crate) mod socket_tests {
         // With the operator opt-out, the same server is reached. This is the control
         // that proves the refusal below is the address check and not a broken server.
         let allowed = client_trusting(TargetClass::Oidc, true, root.clone()).unwrap();
-        assert!(check_target(&reqwest::Url::parse(&url).unwrap(), TargetClass::Oidc, true).is_ok());
-        let ok = allowed.get(&url).send().await;
+        let parsed = reqwest::Url::parse(&url).unwrap();
+        assert!(check_target(&parsed, TargetClass::Oidc, true).is_ok());
+        let ok = match allowed.get(&parsed) {
+            Ok(builder) => builder.send().await,
+            Err(err) => panic!("opted-out request refused: {err}"),
+        };
         assert!(ok.is_ok(), "the opted-out request should reach the server");
 
         // Without the opt-out, the IP-literal URL is refused by the target check that
@@ -491,7 +516,11 @@ pub(crate) mod socket_tests {
     async fn resolver_refuses_a_hostname_that_resolves_to_loopback() {
         // `localhost` resolves to loopback. The resolver filter refuses it by default.
         let client = client(TargetClass::Oidc, false).unwrap();
-        let outcome = client.get("https://localhost:1/").send().await;
+        let url = reqwest::Url::parse("https://localhost:1/").unwrap();
+        let outcome = match client.get(&url) {
+            Ok(builder) => builder.send().await,
+            Err(err) => panic!("target check refused a hostname: {err}"),
+        };
         assert!(
             outcome.is_err(),
             "a hostname resolving to loopback was reached"
@@ -506,18 +535,30 @@ pub(crate) mod socket_tests {
             Err(OutboundError::NotHttps)
         );
         let client = client(TargetClass::Oidc, true).unwrap();
-        assert!(client.get(url.as_str()).send().await.is_err());
+        assert_eq!(client.get(&url).err(), Some(OutboundError::NotHttps));
+    }
+
+    #[tokio::test]
+    async fn ip_literal_in_loopback_is_refused_by_the_client_before_any_send() {
+        // The wrapper runs the target check before it returns a request builder, so an
+        // IP literal in loopback never reaches the network. The port is ephemeral and
+        // nothing listens on it. The refusal is the address check, not a connection failure.
+        let (port, root) = loopback_tls_server(OK).await;
+        let url = reqwest::Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
+        let client = client_trusting(TargetClass::Oidc, false, root).unwrap();
+        assert_eq!(client.get(&url).err(), Some(OutboundError::BlockedAddress));
+        assert_eq!(client.post(&url).err(), Some(OutboundError::BlockedAddress));
     }
 
     #[tokio::test]
     async fn redirects_are_not_followed() {
         let (port, root) = loopback_tls_server(REDIRECT).await;
         let client = client_trusting(TargetClass::Oidc, true, root).unwrap();
-        let response = client
-            .get(format!("https://127.0.0.1:{port}/"))
-            .send()
-            .await
-            .unwrap();
+        let url = reqwest::Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
+        let response = match client.get(&url) {
+            Ok(builder) => builder.send().await.unwrap(),
+            Err(err) => panic!("opted-out request refused: {err}"),
+        };
         // A followed redirect would target 127.0.0.1:1 and fail. The 302 itself is returned.
         assert_eq!(response.status(), reqwest::StatusCode::FOUND);
     }

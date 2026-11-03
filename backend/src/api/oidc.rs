@@ -99,11 +99,11 @@ pub async fn start(State(state): State<AppState>) -> Result<Response, AppError> 
     if !settings.is_complete() {
         return Err(AppError::NotFound);
     }
-    let issuer = oidc::parse_issuer(settings.issuer_url.as_deref().unwrap_or_default())?;
+    let issuer_raw = settings.issuer_url.clone().unwrap_or_default();
     let client_id = settings.client_id.clone().unwrap_or_default();
     let provider = http_provider(&state)?;
     let (url, pending) =
-        oidc::begin_login(&provider, &issuer, &client_id, &redirect_uri(&state)).await?;
+        oidc::begin_login(&provider, &issuer_raw, &client_id, &redirect_uri(&state)).await?;
     let value = pending.to_cookie();
     let cookie = format!(
         "{OIDC_COOKIE}={value}; Max-Age={OIDC_COOKIE_MAX_AGE_SECS}; Path=/; HttpOnly; Secure; SameSite=Lax"
