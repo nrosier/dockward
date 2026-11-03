@@ -163,6 +163,33 @@ mod tests {
         (pool, dir)
     }
 
+    /// An unknown user and a wrong password must do the same Argon2id work: one
+    /// verification each, counted, with no wall-clock timing. Both return the same error.
+    #[tokio::test]
+    async fn unknown_user_and_wrong_password_do_equal_argon2_work() {
+        let (pool, dir) = fresh_pool("equal-work").await;
+        create_first_admin(&pool, "test-admin", None, PASSWORD)
+            .await
+            .unwrap();
+
+        let before = crate::auth::password::counter::verify_calls();
+        let unknown = login(&pool, "test-nobody", PASSWORD).await;
+        let after_unknown = crate::auth::password::counter::verify_calls();
+        let wrong = login(&pool, "test-admin", "test-wrong-password-xyz").await;
+        let after_wrong = crate::auth::password::counter::verify_calls();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(unknown.unwrap_err(), AppError::InvalidCredentials);
+        assert_eq!(wrong.unwrap_err(), AppError::InvalidCredentials);
+        assert_eq!(after_unknown - before, 1, "unknown user verify count");
+        assert_eq!(
+            after_wrong - after_unknown,
+            1,
+            "wrong password verify count"
+        );
+    }
+
     #[tokio::test]
     async fn concurrent_setup_creates_exactly_one_admin() {
         let (pool, dir) = fresh_pool("setup-race").await;
