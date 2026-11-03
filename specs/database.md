@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS cve_findings (
     package TEXT,
     severity TEXT NOT NULL CHECK (severity IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN')),
     fixed_in_version TEXT, -- Decided (2026-11-03, delegated): Harbor vulnerability item fixed_version; NULL when unknown
+    description TEXT, -- Decided (2026-11-03, user, #35): Harbor vulnerability item description, at most 4,000 characters; NULL when absent. Added by migrations/0002_cve_description.sql
     first_seen_at INTEGER DEFAULT (unixepoch()),
     last_seen_at INTEGER DEFAULT (unixepoch()),
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'fixed')), -- stored states only

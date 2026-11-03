@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Admin: Users</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}a:hover{color:#c4b8fd;text-decoration:underline}
+:focus-visible{outline:2px solid #a390fb;outline-offset:2px}
+h1,h2,p{margin:0}
+.muted{color:#9b98b8}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:0 14px;border-radius:8px;border:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:500 13px/1 'Inter',sans-serif;cursor:pointer;white-space:nowrap}
+.btn-primary{background:#a390fb;border-color:#a390fb;color:#0b0c18;font-weight:600}
+.btn-sm{min-height:30px;padding:0 10px;font-size:12.5px}
+.btn-danger{background:transparent;border-color:rgba(239,68,68,.5);color:#fca5a5}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+.tag{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:6px;background:#1b1c34;border:1px solid #2e3056;font:500 12px 'Inter',sans-serif;color:#d6d3ee}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font:600 11px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#9b98b8;padding:12px 14px;border-bottom:1px solid #25264a;white-space:nowrap}
+td{padding:10px 14px;border-bottom:1px solid #1d1e38;vertical-align:middle}
+tr:last-child td{border-bottom:0}
+.field{display:flex;flex-direction:column;gap:6px}
+.label{font-weight:600;font-size:13px}
+.help{color:#9b98b8;font-size:12.5px}
+.input{min-height:38px;border-radius:8px;border:1px solid #2e3056;background:#0f1022;color:#eceafa;padding:0 12px;font:14px 'Inter',sans-serif;width:100%;box-sizing:border-box}
+.sr{position:absolute;left:-9999px}
+</style>
+</helmet>
+<div style="min-height: 760px; display: flex; flex-wrap: wrap; background: #0b0c18">
+  <nav aria-label="Main" style="flex: 1 1 232px; background: #0f1020; border-right: 1px solid #22233f">
+    <dc-import name="Rail" active="admin" hint-size="232px,620px"></dc-import>
+  </nav>
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="position: sticky; top: 0; z-index: 5">
+      <dc-import name="Topbar" hint-size="100%,56px"></dc-import>
+    </header>
+    <main style="padding: 28px 32px 56px">
+      <div style="max-width: 64rem; margin: 0 auto; display: flex; flex-direction: column; gap: 20px">
+        <h1 style="font-size: 24px; font-weight: 650; letter-spacing: -0.01em">Admin</h1>
+        <dc-import name="AdminTabs" active="settings" sub="users" hint-size="100%,92px"></dc-import>
+
+        <section class="card" aria-labelledby="ul">
+          <div style="display: flex; flex-direction: column; gap: 4px; padding: 16px 18px 8px">
+            <h2 id="ul" style="font-size: 15px; font-weight: 600">Users</h2>
+            <p class="help">Single sign-on users appear here after their first sign-in. Their role comes from the identity provider.</p>
+          </div>
+          <div style="overflow-x: auto">
+            <table>
+              <thead><tr><th>Username</th><th>Email</th><th>Sign-in</th><th>Role</th><th>Created</th><th><span class="sr">Actions</span></th></tr></thead>
+              <tbody>
+                <tr>
+                  <td style="font-weight: 500">ops-admin <span class="muted" style="font-weight: 400">(you)</span></td><td class="muted">ops@example.org</td><td><span class="tag">Local</span></td>
+                  <td><label class="sr" for="r1">Role for ops-admin</label><select id="r1" class="input" style="min-height: 32px; width: auto" disabled title="The last local admin cannot be demoted"><option>Admin</option></select></td>
+                  <td class="muted">2026-10-01</td>
+                  <td style="text-align: right"><button type="button" class="btn btn-sm" disabled title="You cannot delete yourself">Delete</button></td>
+                </tr>
+                <tr>
+                  <td style="font-weight: 500">j.devries</td><td class="muted">j.devries@example.org</td><td><span class="tag">Local</span></td>
+                  <td><label class="sr" for="r2">Role for j.devries</label><select id="r2" class="input" style="min-height: 32px; width: auto"><option>User</option><option>Admin</option></select></td>
+                  <td class="muted">2026-11-01</td>
+                  <td style="text-align: right"><button type="button" class="btn btn-sm btn-danger">Delete</button></td>
+                </tr>
+                <tr>
+                  <td style="font-weight: 500">m.kaya</td><td class="muted">m.kaya@example.org</td><td><span class="tag">SSO</span></td>
+                  <td><span>Admin</span><div class="muted" style="font-size: 12px">From group harborgate-admins</div></td>
+                  <td class="muted">2026-11-03</td>
+                  <td style="text-align: right"><button type="button" class="btn btn-sm btn-danger">Delete</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 16px" aria-labelledby="nu">
+          <div style="display: flex; flex-direction: column; gap: 4px">
+            <h2 id="nu" style="font-size: 15px; font-weight: 600">Create local user</h2>
+            <p class="help">For people who do not use single sign-on, and for break-glass admins.</p>
+          </div>
+          <div class="field"><label class="label" for="nu-u">Username</label><input id="nu-u" class="input"></div>
+          <div class="field"><label class="label" for="nu-e">Email</label><input id="nu-e" class="input" type="email"></div>
+          <div class="field"><label class="label" for="nu-p">Password</label><span class="help">15 to 64 characters. Share it with the person securely.</span><input id="nu-p" class="input" type="password"></div>
+          <div class="field"><label class="label" for="nu-r">Role</label><select id="nu-r" class="input"><option>User</option><option>Admin</option></select></div>
+          <div style="display: flex; justify-content: flex-end"><button type="button" class="btn btn-primary">Create user</button></div>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":1160}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

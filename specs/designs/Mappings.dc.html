@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mappings</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}a:hover{color:#c4b8fd;text-decoration:underline}
+:focus-visible{outline:2px solid #a390fb;outline-offset:2px}
+h1,h2,h3,p{margin:0}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px}
+.muted{color:#9b98b8}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:0 14px;border-radius:8px;border:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:500 13px/1 'Inter',sans-serif;cursor:pointer;white-space:nowrap;text-decoration:none}
+.btn:hover{background:#23244a;text-decoration:none;color:#eceafa}
+.btn-primary{background:#a390fb;border-color:#a390fb;color:#0b0c18;font-weight:600}
+.btn-primary:hover{background:#b6a6fc;color:#0b0c18}
+.btn-sm{min-height:30px;padding:0 10px;font-size:12.5px}
+.pill{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px;border-radius:999px;font:600 11px/1 'Inter',sans-serif;letter-spacing:.05em;text-transform:uppercase;border:1px solid;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.crit{color:#fca5a5;background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.45)}
+.high{color:#fdba74;background:rgba(249,115,22,.12);border-color:rgba(249,115,22,.45)}
+.ok{color:#6ee7b7;background:rgba(16,185,129,.12);border-color:rgba(16,185,129,.45)}
+.unk{color:#c9c6e4;background:rgba(201,198,228,.06);border-color:#3a3c63}
+.low{color:#93c5fd;background:rgba(59,130,246,.12);border-color:rgba(59,130,246,.45)}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font:600 11px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#9b98b8;padding:12px 14px;border-bottom:1px solid #25264a;white-space:nowrap}
+td{padding:12px 14px;border-bottom:1px solid #1d1e38;vertical-align:middle}
+tr:last-child td{border-bottom:0}
+.seg{display:inline-flex;border:1px solid #2e3056;border-radius:8px;overflow:hidden}
+.seg button{background:transparent;border:0;color:#c9c6e4;font:500 12.5px 'Inter',sans-serif;padding:0 12px;min-height:32px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:#2a2b52;color:#eceafa}
+.count{display:inline-flex;align-items:center;gap:4px;font:600 12px 'Inter',sans-serif}
+.count i{width:8px;height:8px;border-radius:2px;display:inline-block}
+</style>
+</helmet>
+<div style="min-height: 760px; display: flex; flex-wrap: wrap; background: #0b0c18">
+  <nav aria-label="Main" style="flex: 1 1 232px; background: #0f1020; border-right: 1px solid #22233f">
+    <dc-import name="Rail" active="mappings" hint-size="232px,620px"></dc-import>
+  </nav>
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="position: sticky; top: 0; z-index: 5">
+      <dc-import name="Topbar" hint-size="100%,56px"></dc-import>
+    </header>
+    <main style="padding: 28px 32px 56px">
+      <div style="max-width: 64rem; margin: 0 auto; display: flex; flex-direction: column; gap: 24px">
+
+        <div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px">
+          <div style="display: flex; flex-direction: column; gap: 4px">
+            <h1 style="font-size: 24px; font-weight: 650; letter-spacing: -0.01em">Mappings</h1>
+            <p class="muted">Each mapping sends one Harbor repository's scans to one GitHub repository.</p>
+          </div>
+          <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center">
+            <div class="seg" role="group" aria-label="Scope">
+              <button type="button" aria-pressed="true">My mappings</button>
+              <button type="button" aria-pressed="false">All mappings</button>
+            </div>
+            <a class="btn btn-primary" href="MappingNew.dc.html">
+              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5v14"></path></svg>
+              New mapping
+            </a>
+          </div>
+        </div>
+
+        <section class="card" aria-label="Mappings">
+          <div style="overflow-x: auto">
+            <table>
+              <thead><tr><th>Harbor source</th><th>GitHub target</th><th>Issues</th><th>Open CVEs</th><th>Last sync</th><th><span style="position: absolute; left: -9999px">Actions</span></th></tr></thead>
+              <tbody>
+                <tr>
+                  <td><div style="font-weight: 500">platform/api-gateway</div><div class="muted" style="font-size: 12.5px">harbor.example.org</div></td>
+                  <td><div class="mono">example-org/api-gateway</div><div class="muted" style="font-size: 12.5px">Branch main</div></td>
+                  <td><div>Auto</div><div class="muted" style="font-size: 12.5px">HIGH and above</div></td>
+                  <td><div style="display: flex; gap: 10px"><span class="count" title="Critical"><i style="background: #ef4444"></i>1 C</span><span class="count" title="High"><i style="background: #f97316"></i>4 H</span></div></td>
+                  <td><span class="pill ok">Done</span><div class="muted" style="font-size: 12.5px; margin-top: 4px">2 min ago</div></td>
+                  <td style="text-align: right"><a class="btn btn-sm" href="MappingNew.dc.html">Edit</a></td>
+                </tr>
+                <tr>
+                  <td><div style="font-weight: 500">platform/billing-worker</div><div class="muted" style="font-size: 12.5px">harbor.example.org</div></td>
+                  <td><div class="mono">example-org/billing</div><div class="muted" style="font-size: 12.5px">Branch main</div></td>
+                  <td><div>Auto</div><div class="muted" style="font-size: 12.5px">CRITICAL only</div></td>
+                  <td><div style="display: flex; gap: 10px"><span class="count" title="Critical"><i style="background: #ef4444"></i>2 C</span><span class="count" title="High"><i style="background: #f97316"></i>3 H</span></div></td>
+                  <td><span class="pill crit">Failed</span><div class="muted" style="font-size: 12.5px; margin-top: 4px">14 min ago</div></td>
+                  <td style="text-align: right"><a class="btn btn-sm" href="MappingNew.dc.html">Edit</a></td>
+                </tr>
+                <tr>
+                  <td><div style="font-weight: 500">platform/web-frontend</div><div class="muted" style="font-size: 12.5px">harbor.example.org</div></td>
+                  <td><div class="mono">example-org/web</div><div class="muted" style="font-size: 12.5px">Branch release</div></td>
+                  <td><div>Off</div><div class="muted" style="font-size: 12.5px">Code scanning only</div></td>
+                  <td><div style="display: flex; gap: 10px"><span class="count" title="Critical"><i style="background: #ef4444"></i>0 C</span><span class="count" title="High"><i style="background: #f97316"></i>2 H</span></div></td>
+                  <td><span class="pill low">Running</span><div class="muted" style="font-size: 12.5px; margin-top: 4px">Just now</div></td>
+                  <td style="text-align: right"><a class="btn btn-sm" href="MappingNew.dc.html">Edit</a></td>
+                </tr>
+                <tr>
+                  <td><div style="font-weight: 500">data/etl-runner</div><div class="muted" style="font-size: 12.5px">harbor.example.org</div></td>
+                  <td><div class="mono">example-org/etl</div><div class="muted" style="font-size: 12.5px">Branch main</div></td>
+                  <td><div>Auto</div><div class="muted" style="font-size: 12.5px">HIGH and above</div></td>
+                  <td><div style="display: flex; gap: 10px"><span class="count" title="Critical"><i style="background: #ef4444"></i>0 C</span><span class="count" title="High"><i style="background: #f97316"></i>3 H</span></div></td>
+                  <td><span class="pill unk">Queued</span><div class="muted" style="font-size: 12.5px; margin-top: 4px">Just now</div></td>
+                  <td style="text-align: right"><a class="btn btn-sm" href="MappingNew.dc.html">Edit</a></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-top: 1px solid #25264a; font-size: 12.5px" class="muted">
+            <span>4 mappings</span>
+            <span>Page 1 of 1</span>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

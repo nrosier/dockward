@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CVEs</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}a:hover{color:#c4b8fd;text-decoration:underline}
+:focus-visible{outline:2px solid #a390fb;outline-offset:2px}
+h1,h2,h3,p{margin:0}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px}
+.muted{color:#9b98b8}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:0 14px;border-radius:8px;border:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:500 13px/1 'Inter',sans-serif;cursor:pointer;white-space:nowrap;text-decoration:none}
+.btn:hover{background:#23244a;text-decoration:none;color:#eceafa}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+.pill{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px;border-radius:999px;font:600 11px/1 'Inter',sans-serif;letter-spacing:.05em;text-transform:uppercase;border:1px solid;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.crit{color:#fca5a5;background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.45)}
+.high{color:#fdba74;background:rgba(249,115,22,.12);border-color:rgba(249,115,22,.45)}
+.med{color:#fde047;background:rgba(234,179,8,.10);border-color:rgba(234,179,8,.40)}
+.low{color:#93c5fd;background:rgba(59,130,246,.12);border-color:rgba(59,130,246,.45)}
+.ok{color:#6ee7b7;background:rgba(16,185,129,.12);border-color:rgba(16,185,129,.45)}
+.unk{color:#c9c6e4;background:rgba(201,198,228,.06);border-color:#3a3c63}
+.acc{color:#c4b8fd;background:rgba(163,144,251,.12);border-color:rgba(163,144,251,.5)}
+.open{color:#eceafa;background:rgba(236,234,250,.06);border-color:#4a4c78}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font:600 11px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#9b98b8;padding:12px 14px;border-bottom:1px solid #25264a;white-space:nowrap}
+td{padding:11px 14px;border-bottom:1px solid #1d1e38;vertical-align:middle}
+tr:last-child td{border-bottom:0}
+.seg{display:inline-flex;border:1px solid #2e3056;border-radius:8px;overflow:hidden}
+.seg button{background:transparent;border:0;color:#c9c6e4;font:500 12.5px 'Inter',sans-serif;padding:0 12px;min-height:32px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:#2a2b52;color:#eceafa}
+.input{min-height:36px;border-radius:8px;border:1px solid #2e3056;background:#0f1022;color:#eceafa;padding:0 12px;font:13.5px 'Inter',sans-serif;box-sizing:border-box}
+.sr{position:absolute;left:-9999px}
+</style>
+</helmet>
+<div style="min-height: 760px; display: flex; flex-wrap: wrap; background: #0b0c18">
+  <nav aria-label="Main" style="flex: 1 1 232px; background: #0f1020; border-right: 1px solid #22233f">
+    <dc-import name="Rail" active="cves" hint-size="232px,620px"></dc-import>
+  </nav>
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="position: sticky; top: 0; z-index: 5">
+      <dc-import name="Topbar" hint-size="100%,56px"></dc-import>
+    </header>
+    <main style="padding: 28px 32px 56px">
+      <div style="max-width: 64rem; margin: 0 auto; display: flex; flex-direction: column; gap: 20px">
+
+        <div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px">
+          <div style="display: flex; flex-direction: column; gap: 4px">
+            <h1 style="font-size: 24px; font-weight: 650; letter-spacing: -0.01em">CVEs</h1>
+            <p class="muted">One row per CVE per mapping, across the last 10 tags.</p>
+          </div>
+          <div class="seg" role="group" aria-label="Scope">
+            <button type="button" aria-pressed="true">My mappings</button>
+            <button type="button" aria-pressed="false">All mappings</button>
+          </div>
+        </div>
+
+        <form role="search" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center">
+          <label class="sr" for="q">Search CVEs</label>
+          <div style="position: relative; flex: 1 1 240px">
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9b98b8" stroke-width="2" stroke-linecap="round" style="position: absolute; left: 11px; top: 10px"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg>
+            <input id="q" class="input" placeholder="CVE id or package" style="width: 100%; padding-left: 34px">
+          </div>
+          <label class="sr" for="fs">Severity</label>
+          <select id="fs" class="input"><option>All severities</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option><option>UNKNOWN</option></select>
+          <label class="sr" for="fst">Status</label>
+          <select id="fst" class="input"><option>Open</option><option>Fixed</option><option>Accepted</option><option>All statuses</option></select>
+          <label class="sr" for="fm">Mapping</label>
+          <select id="fm" class="input"><option>All mappings</option><option>platform/api-gateway</option></select>
+        </form>
+
+        <section class="card" aria-label="CVE list">
+          <div style="overflow-x: auto">
+            <table>
+              <thead><tr><th aria-sort="none">CVE</th><th aria-sort="descending">Severity ↓</th><th>Status</th><th>Package</th><th>Fixed in</th><th>Mapping</th><th>Tags</th><th>Issue</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td><a href="CveDetail.dc.html" class="mono" style="font-size: 13px">CVE-2024-45337</a></td>
+                  <td><span class="pill crit">Critical</span></td>
+                  <td><span class="pill open">Open</span></td>
+                  <td><div>golang.org/x/crypto</div><div class="mono muted">v0.25.0</div></td>
+                  <td class="mono">v0.31.0</td>
+                  <td>platform/api-gateway</td>
+                  <td class="muted">4 of 10</td>
+                  <td><a href="CveDetail.dc.html">#214</a></td>
+                </tr>
+                <tr>
+                  <td><a href="CveDetail.dc.html" class="mono" style="font-size: 13px">CVE-2024-24790</a></td>
+                  <td><span class="pill crit">Critical</span></td>
+                  <td><span class="pill open">Open</span></td>
+                  <td><div>stdlib</div><div class="mono muted">go1.22.2</div></td>
+                  <td class="mono">1.22.4</td>
+                  <td>platform/billing-worker</td>
+                  <td class="muted">2 of 10</td>
+                  <td><a href="CveDetail.dc.html">#88</a></td>
+                </tr>
+                <tr>
+                  <td><a href="CveDetail.dc.html" class="mono" style="font-size: 13px">CVE-2024-3094</a></td>
+                  <td><span class="pill crit">Critical</span></td>
+                  <td><span class="pill acc">Accepted</span></td>
+                  <td><div>xz-utils</div><div class="mono muted">5.6.0-0.2</div></td>
+                  <td class="mono">5.6.1+really5.4.5-1</td>
+                  <td>platform/billing-worker</td>
+                  <td class="muted">1 of 10</td>
+                  <td class="muted">None</td>
+                </tr>
+                <tr>
+                  <td><a href="CveDetail.dc.html" class="mono" style="font-size: 13px">CVE-2023-44487</a></td>
+                  <td><span class="pill high">High</span></td>
+                  <td><span class="pill open">Open</span></td>
+                  <td><div>golang.org/x/net</div><div class="mono muted">v0.15.0</div></td>
+                  <td class="mono">v0.17.0</td>
+                  <td>platform/api-gateway</td>
+                  <td class="muted">6 of 10</td>
+                  <td><a href="CveDetail.dc.html">#201</a></td>
+                </tr>
+                <tr>
+                  <td><a href="CveDetail.dc.html" class="mono" style="font-size: 13px">CVE-2024-6387</a></td>
+                  <td><span class="pill high">High</span></td>
+                  <td><span class="pill open">Open</span></td>
+                  <td><div>openssh-client</div><div class="mono muted">1:9.2p1-2</div></td>
+                  <td class="mono">1:9.2p1-2+deb12u3</td>
+                  <td>data/etl-runner</td>
+                  <td class="muted">3 of 10</td>
+                  <td><a href="CveDetail.dc.html">#17</a></td>
+                </tr>
+                <tr>
+                  <td><a href="CveDetail.dc.html" class="mono" style="font-size: 13px">CVE-2023-38545</a></td>
+                  <td><span class="pill high">High</span></td>
+                  <td><span class="pill ok">Fixed</span></td>
+                  <td><div>curl</div><div class="mono muted">7.88.1-10</div></td>
+                  <td class="mono">7.88.1-10+deb12u4</td>
+                  <td>platform/web-frontend</td>
+                  <td class="muted">0 of 10</td>
+                  <td><a href="CveDetail.dc.html">#9</a> <span class="muted">closed</span></td>
+                </tr>
+                <tr>
+                  <td><a href="CveDetail.dc.html" class="mono" style="font-size: 13px">CVE-2024-2511</a></td>
+                  <td><span class="pill med">Medium</span></td>
+                  <td><span class="pill open">Open</span></td>
+                  <td><div>libssl3</div><div class="mono muted">3.0.11-1</div></td>
+                  <td class="mono">3.0.14-1</td>
+                  <td>platform/api-gateway</td>
+                  <td class="muted">6 of 10</td>
+                  <td class="muted">Not eligible</td>
+                </tr>
+                <tr>
+                  <td><a href="CveDetail.dc.html" class="mono" style="font-size: 13px">CVE-2024-28182</a></td>
+                  <td><span class="pill low">Low</span></td>
+                  <td><span class="pill open">Open</span></td>
+                  <td><div>libnghttp2-14</div><div class="mono muted">1.52.0-1</div></td>
+                  <td class="muted">Unknown</td>
+                  <td>data/etl-runner</td>
+                  <td class="muted">3 of 10</td>
+                  <td class="muted">Not eligible</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div style="display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; align-items: center; padding: 12px 14px; border-top: 1px solid #25264a; font-size: 12.5px">
+            <span class="muted">1–8 of 56</span>
+            <div style="display: flex; gap: 8px">
+              <button type="button" class="btn" disabled>Previous</button>
+              <button type="button" class="btn">Next</button>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

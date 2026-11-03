@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Admin: Health</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}a:hover{color:#c4b8fd;text-decoration:underline}
+:focus-visible{outline:2px solid #a390fb;outline-offset:2px}
+h1,h2,p,dl,dd{margin:0}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px}
+.muted{color:#9b98b8}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.pill{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px;border-radius:999px;font:600 11px/1 'Inter',sans-serif;letter-spacing:.05em;text-transform:uppercase;border:1px solid;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.crit{color:#fca5a5;background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.45)}
+.high{color:#fdba74;background:rgba(249,115,22,.12);border-color:rgba(249,115,22,.45)}
+.ok{color:#6ee7b7;background:rgba(16,185,129,.12);border-color:rgba(16,185,129,.45)}
+.unk{color:#c9c6e4;background:rgba(201,198,228,.06);border-color:#3a3c63}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font:600 11px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#9b98b8;padding:10px 18px;border-bottom:1px solid #25264a;white-space:nowrap}
+td{padding:10px 18px;border-bottom:1px solid #1d1e38;vertical-align:middle}
+tr:last-child td{border-bottom:0}
+h2{font-size:15px;font-weight:600}
+dt{font:600 11px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#9b98b8;margin-bottom:6px}
+</style>
+</helmet>
+<div style="min-height: 760px; display: flex; flex-wrap: wrap; background: #0b0c18">
+  <nav aria-label="Main" style="flex: 1 1 232px; background: #0f1020; border-right: 1px solid #22233f">
+    <dc-import name="Rail" active="admin" hint-size="232px,620px"></dc-import>
+  </nav>
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="position: sticky; top: 0; z-index: 5">
+      <dc-import name="Topbar" hint-size="100%,56px"></dc-import>
+    </header>
+    <main style="padding: 28px 32px 56px">
+      <div style="max-width: 64rem; margin: 0 auto; display: flex; flex-direction: column; gap: 20px">
+        <h1 style="font-size: 24px; font-weight: 650; letter-spacing: -0.01em">Admin</h1>
+        <dc-import name="AdminTabs" active="health" hint-size="100%,46px"></dc-import>
+
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px">
+          <section class="card" aria-labelledby="h-harbor">
+            <div style="padding: 16px 18px 8px"><h2 id="h-harbor">Harbor</h2></div>
+            <table>
+              <tbody>
+                <tr><td>harbor.example.org reachable</td><td style="text-align: right"><span class="pill ok">OK</span></td></tr>
+                <tr><td>Robot account harbor-robot accepted</td><td style="text-align: right"><span class="pill ok">OK</span></td></tr>
+              </tbody>
+            </table>
+          </section>
+          <section class="card" aria-labelledby="h-gh">
+            <div style="padding: 16px 18px 8px"><h2 id="h-gh">GitHub</h2></div>
+            <table>
+              <tbody>
+                <tr><td>api.github.com reachable</td><td style="text-align: right"><span class="pill ok">OK</span></td></tr>
+                <tr><td>Token github-app-token valid<div class="muted" style="font-size: 12.5px">Expires 2027-04-30</div></td><td style="text-align: right"><span class="pill ok">OK</span></td></tr>
+                <tr><td>Code scanning write<div class="muted" style="font-size: 12.5px">Missing for example-org/billing</div></td><td style="text-align: right"><span class="pill crit">Missing</span></td></tr>
+                <tr><td>Issues write</td><td style="text-align: right"><span class="pill ok">OK</span></td></tr>
+              </tbody>
+            </table>
+          </section>
+        </div>
+
+        <section class="card" aria-labelledby="h-robot">
+          <div style="padding: 16px 18px 8px; display: flex; flex-direction: column; gap: 4px">
+            <h2 id="h-robot">Robot accounts</h2>
+            <p class="muted" style="font-size: 12.5px">A warning shows 14 days before a robot account expires.</p>
+          </div>
+          <div style="overflow-x: auto">
+            <table>
+              <thead><tr><th>Credential</th><th>Expires</th><th>Days left</th></tr></thead>
+              <tbody>
+                <tr><td>harbor-robot</td><td class="muted">2026-11-12</td><td><span class="pill high">9 days</span></td></tr>
+                <tr><td>harbor-robot-old</td><td class="muted">No expiry</td><td class="muted">—</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="h-cs">
+          <div style="padding: 16px 18px 8px"><h2 id="h-cs">Code scanning per GitHub target</h2></div>
+          <div style="overflow-x: auto">
+            <table>
+              <thead><tr><th>Repository</th><th>State</th></tr></thead>
+              <tbody>
+                <tr><td class="mono">example-org/api-gateway</td><td><span class="pill ok">Ready</span></td></tr>
+                <tr><td class="mono">example-org/web</td><td><span class="pill ok">Ready</span></td></tr>
+                <tr><td class="mono">example-org/etl</td><td><span class="pill unk">No analysis yet</span></td></tr>
+                <tr><td class="mono">example-org/billing</td><td><span class="pill crit">Unavailable</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card" style="padding: 16px 18px; display: flex; flex-direction: column; gap: 14px" aria-labelledby="h-req">
+          <div style="display: flex; flex-direction: column; gap: 4px">
+            <h2 id="h-req">Your request</h2>
+            <p class="muted" style="font-size: 12.5px">What HarborGate sees for this page load. Use it to check the trusted proxy setting.</p>
+          </div>
+          <dl style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px">
+            <div><dt>Client IP</dt><dd class="mono" style="font-size: 13px">203.0.113.24</dd></div>
+            <div><dt>Source</dt><dd>X-Forwarded-For, from trusted proxy</dd></div>
+          </dl>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":1240}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

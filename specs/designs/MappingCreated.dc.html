@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mapping created</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}a:hover{color:#c4b8fd;text-decoration:underline}
+:focus-visible{outline:2px solid #a390fb;outline-offset:2px}
+h1,h2,h3,p,ol{margin:0}
+.muted{color:#9b98b8}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:0 16px;border-radius:8px;border:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:500 13.5px/1 'Inter',sans-serif;cursor:pointer;white-space:nowrap;text-decoration:none}
+.btn:hover{background:#23244a;text-decoration:none;color:#eceafa}
+.btn-primary{background:#a390fb;border-color:#a390fb;color:#0b0c18;font-weight:600}
+.btn-primary:hover{background:#b6a6fc;color:#0b0c18}
+.label{font-weight:600;font-size:13px}
+.secret{display:flex;align-items:stretch;border:1px solid #2e3056;border-radius:8px;background:#0f1022;overflow:hidden}
+.secret code{flex:1;min-width:0;padding:11px 12px;font:13px/1.5 'JetBrains Mono',monospace;color:#eceafa;word-break:break-all}
+.secret button{border:0;border-left:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:500 13px 'Inter',sans-serif;padding:0 14px;display:flex;align-items:center;gap:8px;cursor:pointer;min-width:96px;justify-content:center}
+.secret button:hover{background:#23244a}
+</style>
+</helmet>
+<div style="min-height: 760px; display: flex; flex-wrap: wrap; background: #0b0c18">
+  <nav aria-label="Main" style="flex: 1 1 232px; background: #0f1020; border-right: 1px solid #22233f">
+    <dc-import name="Rail" active="mappings" hint-size="232px,620px"></dc-import>
+  </nav>
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="position: sticky; top: 0; z-index: 5">
+      <dc-import name="Topbar" hint-size="100%,56px"></dc-import>
+    </header>
+    <main style="padding: 28px 32px 56px">
+      <div style="max-width: 64rem; margin: 0 auto; display: flex; flex-direction: column; gap: 24px">
+
+        <div style="display: flex; flex-direction: column; gap: 6px">
+          <a href="Mappings.dc.html" style="font-size: 13px">← Mappings</a>
+          <h1 style="font-size: 24px; font-weight: 650; letter-spacing: -0.01em">Mapping created</h1>
+          <p class="muted">platform/billing-api → <span style="font-family: 'JetBrains Mono', monospace; font-size: 13px">example-org/billing-api</span></p>
+        </div>
+
+        <div role="alert" style="display: flex; gap: 12px; padding: 14px 16px; border-radius: 10px; border: 1px solid rgba(249,115,22,.5); background: rgba(249,115,22,.10)">
+          <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fdba74" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex: none; margin-top: 1px"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
+          <div style="display: flex; flex-direction: column; gap: 2px">
+            <span style="font-weight: 600; color: #fdba74">Copy both values now. They are shown only once.</span>
+            <span style="color: #e7d3c4; font-size: 13px">HarborGate stores only a hash. If you lose them, rotate them on the mapping to get new ones.</span>
+          </div>
+        </div>
+
+        <section class="card" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 18px" aria-label="Webhook values">
+          <div style="display: flex; flex-direction: column; gap: 6px">
+            <span class="label" id="wu">Webhook URL</span>
+            <div class="secret">
+              <code aria-labelledby="wu">https://harborgate.example.org/api/v1/webhooks/harbor/q7Hn2Vd9kXw4LpT0aZcR8sYbM3uEfJ6g</code>
+              <button type="button"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>Copy</button>
+            </div>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 6px">
+            <span class="label" id="as">Auth header value</span>
+            <div class="secret">
+              <code aria-labelledby="as">hgs_Y2kP8wN1rQ5tV0mB7xC4zL9aD3fG6hJ</code>
+              <button type="button" style="color: #6ee7b7"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg>Copied</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="card" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 12px" aria-labelledby="hs">
+          <h2 id="hs" style="font-size: 15px; font-weight: 600">Add the webhook in Harbor</h2>
+          <ol style="padding-left: 20px; display: flex; flex-direction: column; gap: 8px; color: #d6d3ee">
+            <li>In Harbor, open the project <span style="font-family: 'JetBrains Mono', monospace; font-size: 13px">platform</span>, then Webhooks, then New webhook.</li>
+            <li>Paste the webhook URL as the endpoint and the auth header value as the auth header.</li>
+            <li>Select the event type “Artifact scan completed” and save.</li>
+          </ol>
+          <p class="muted" style="font-size: 12.5px">Polling every 15 minutes picks up scans if a webhook is missed.</p>
+        </section>
+
+        <div style="display: flex; justify-content: flex-end">
+          <a class="btn btn-primary" href="Mappings.dc.html">Done</a>
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

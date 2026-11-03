@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sticky header</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 100%; box-sizing: border-box; min-height: 56px; padding: 10px 32px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; background: rgba(11,12,24,0.92); border-bottom: 1px solid #22233f; font-family: 'Inter', system-ui, sans-serif; color: #eceafa">
+  <div role="status" aria-label="Environment status" style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px">
+    <span style="display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; border: 1px solid rgba(16,185,129,.45); background: rgba(16,185,129,.12); color: #6ee7b7; font-size: 12px; font-weight: 500">
+      <span style="width: 6px; height: 6px; border-radius: 50%; background: #10b981"></span>Harbor reachable
+    </span>
+    <span style="display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; border: 1px solid rgba(16,185,129,.45); background: rgba(16,185,129,.12); color: #6ee7b7; font-size: 12px; font-weight: 500">
+      <span style="width: 6px; height: 6px; border-radius: 50%; background: #10b981"></span>GitHub reachable
+    </span>
+    <a href="AdminHealth.dc.html" style="display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; border: 1px solid rgba(249,115,22,.45); background: rgba(249,115,22,.12); color: #fdba74; font-size: 12px; font-weight: 500; text-decoration: none">
+      <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
+      Robot account expires in 9 days
+    </a>
+  </div>
+  <div style="display: flex; align-items: center; gap: 14px">
+    <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #9b98b8">v1.0.0</span>
+    <button type="button" style="min-height: 32px; padding: 0 12px; border-radius: 8px; border: 1px solid #2e3056; background: transparent; color: #c9c6e4; font: 500 12.5px 'Inter', sans-serif; cursor: pointer">Sign out</button>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1048,"height":56}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

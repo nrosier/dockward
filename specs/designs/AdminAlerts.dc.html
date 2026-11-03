@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Admin: Alerts</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}a:hover{color:#c4b8fd;text-decoration:underline}
+:focus-visible{outline:2px solid #a390fb;outline-offset:2px}
+h1,h2,p,ul{margin:0}
+.muted{color:#9b98b8}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:0 14px;border-radius:8px;border:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:500 13px/1 'Inter',sans-serif;cursor:pointer;white-space:nowrap}
+.btn-primary{background:#a390fb;border-color:#a390fb;color:#0b0c18;font-weight:600}
+.btn-sm{min-height:30px;padding:0 10px;font-size:12.5px}
+.field{display:flex;flex-direction:column;gap:6px}
+.label{font-weight:600;font-size:13px}
+.help{color:#9b98b8;font-size:12.5px}
+.input{min-height:40px;border-radius:8px;border:1px solid #2e3056;background:#0f1022;color:#eceafa;padding:0 12px;font:14px 'Inter',sans-serif;width:100%;box-sizing:border-box}
+.switch{width:44px;height:26px;border-radius:999px;border:1px solid #2e3056;background:#1b1c34;position:relative;cursor:pointer;padding:0;flex:none}
+.switch span{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#9b98b8}
+.switch.on{background:#a390fb;border-color:#a390fb}
+.switch.on span{left:21px;background:#0b0c18}
+.seg{display:inline-flex;border:1px solid #2e3056;border-radius:8px;overflow:hidden}
+.seg button{background:transparent;border:0;color:#c9c6e4;font:500 13px 'Inter',sans-serif;padding:0 14px;min-height:38px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:#2a2b52;color:#eceafa}
+.chan{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid #1d1e38}
+.chan:last-child{border-bottom:0}
+</style>
+</helmet>
+<div style="min-height: 760px; display: flex; flex-wrap: wrap; background: #0b0c18">
+  <nav aria-label="Main" style="flex: 1 1 232px; background: #0f1020; border-right: 1px solid #22233f">
+    <dc-import name="Rail" active="admin" hint-size="232px,620px"></dc-import>
+  </nav>
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="position: sticky; top: 0; z-index: 5">
+      <dc-import name="Topbar" hint-size="100%,56px"></dc-import>
+    </header>
+    <main style="padding: 28px 32px 56px">
+      <div style="max-width: 64rem; margin: 0 auto; display: flex; flex-direction: column; gap: 20px">
+        <h1 style="font-size: 24px; font-weight: 650; letter-spacing: -0.01em">Admin</h1>
+        <dc-import name="AdminTabs" active="settings" sub="alerts" hint-size="100%,92px"></dc-import>
+
+        <section class="card" aria-labelledby="ch">
+          <div style="display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 18px 10px">
+            <div style="display: flex; flex-direction: column; gap: 4px">
+              <h2 id="ch" style="font-size: 15px; font-weight: 600">Alert channels</h2>
+              <p class="help">Alerts go out when a sync fails or a new CRITICAL CVE appears, for every mapping. The same alert is sent at most once in 24 hours.</p>
+            </div>
+            <button type="button" class="btn btn-primary">Add channel</button>
+          </div>
+          <ul style="list-style: none; padding: 0; border-top: 1px solid #25264a">
+            <li class="chan">
+              <div style="display: flex; align-items: center; gap: 12px">
+                <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#b4b1d0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg>
+                <div><div style="font-weight: 500">Email (SMTP)</div><div class="help">Added 2026-10-30 · updated 2026-11-02</div></div>
+              </div>
+              <div style="display: flex; align-items: center; gap: 12px">
+                <span class="help" id="e1">Enabled</span>
+                <button type="button" class="switch on" role="switch" aria-checked="true" aria-labelledby="e1"><span></span></button>
+                <button type="button" class="btn btn-sm" aria-pressed="true" style="background: #2a2b52">Editing</button>
+              </div>
+            </li>
+            <li class="chan">
+              <div style="display: flex; align-items: center; gap: 12px">
+                <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#b4b1d0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2"></path><path d="m6 17 3.13-5.78c.53-.97.1-2.18-.5-3.1a4 4 0 1 1 6.89-4.06"></path><path d="m12 6 3.13 5.73C15.66 12.7 16.9 13 18 13a4 4 0 0 1 0 8"></path></svg>
+                <div><div style="font-weight: 500">Webhook</div><div class="help">Added 2026-10-30</div></div>
+              </div>
+              <div style="display: flex; align-items: center; gap: 12px">
+                <span class="help" id="e2">Disabled</span>
+                <button type="button" class="switch" role="switch" aria-checked="false" aria-labelledby="e2"><span></span></button>
+                <button type="button" class="btn btn-sm">Edit</button>
+              </div>
+            </li>
+          </ul>
+        </section>
+
+        <form class="card" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 18px" aria-labelledby="ed">
+          <div style="display: flex; flex-direction: column; gap: 4px">
+            <h2 id="ed" style="font-size: 15px; font-weight: 600">Edit email channel</h2>
+            <p class="help">Saved settings are encrypted and not shown. To change this channel, enter all its settings again.</p>
+          </div>
+          <div class="field"><label class="label" for="h">SMTP host</label><input id="h" class="input" placeholder="smtp.example.org"></div>
+          <div style="display: flex; flex-wrap: wrap; gap: 16px">
+            <div class="field" style="flex: 1 1 140px"><label class="label" for="pt">Port</label><input id="pt" class="input" placeholder="465"></div>
+            <div class="field" style="flex: 3 1 240px">
+              <span class="label" id="tls">TLS</span>
+              <div class="seg" role="group" aria-labelledby="tls" style="align-self: flex-start">
+                <button type="button" aria-pressed="true">Implicit TLS</button>
+                <button type="button" aria-pressed="false">STARTTLS</button>
+              </div>
+            </div>
+          </div>
+          <span class="help" style="margin-top: -8px">Plain, unencrypted SMTP is not allowed.</span>
+          <div class="field"><label class="label" for="su">Username <span style="font-weight: 400; color: #9b98b8">(optional)</span></label><input id="su" class="input"></div>
+          <div class="field"><label class="label" for="sp">Password <span style="font-weight: 400; color: #9b98b8">(optional)</span></label><input id="sp" class="input" type="password"></div>
+          <div class="field"><label class="label" for="fr">From address</label><input id="fr" class="input" placeholder="harborgate@example.org"></div>
+          <div class="field"><label class="label" for="to">To addresses</label><span class="help">Separate addresses with commas.</span><input id="to" class="input" placeholder="security@example.org, ops@example.org"></div>
+          <div style="display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px">
+            <button type="button" class="btn">Cancel</button>
+            <button type="button" class="btn btn-primary">Save channel</button>
+          </div>
+        </form>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":1240}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>
