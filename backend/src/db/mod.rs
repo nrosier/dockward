@@ -4,6 +4,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePo
 
 #[allow(dead_code)] // Used by the audit writer and the admin audit list.
 pub mod audit;
+#[allow(dead_code)] // Used by the session service and the account and admin routes.
+pub mod users;
 
 use crate::error::AppError;
 
