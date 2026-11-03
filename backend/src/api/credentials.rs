@@ -123,25 +123,70 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /api/v1/credentials/:id/test`. Owner only. Runs the Harbor robot check
-/// from the server. GitHub probes need a repository, which this route does not
-/// receive, so a GitHub credential is refused with `422` until that input is
-/// decided (see the closing comment on the issue).
+/// Body of `POST /api/v1/credentials/:id/test` for GitHub credentials (`specs/api.md`).
+#[derive(Debug, Deserialize)]
+pub struct GithubTestBody {
+    pub owner: String,
+    pub repo: String,
+}
+
+/// `POST /api/v1/credentials/:id/test`. Owner only. Harbor runs the robot check.
+/// GitHub takes `{"owner","repo"}` and runs the repository and code scanning probes.
 pub async fn test(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let row = credentials::load_owned(&state.pool, &user.id, &id).await?;
-    if row.service_type != credentials::SERVICE_HARBOR {
+    if row.service_type == credentials::SERVICE_HARBOR {
+        let probe = OutboundHarborProbe::new(state.allow_private_harbor)?;
+        let check = run_harbor_probe(&state, &probe, &row).await?;
+        let ok = check.ok;
+        return Ok(Json(serde_json::json!({ "ok": ok, "checks": [check] })));
+    }
+    if body.is_empty() {
         return Err(AppError::ValidationFailed(
-            "the GitHub probe needs a repository, which this route does not take yet.".to_owned(),
+            "owner and repo are required for a GitHub credential.".to_owned(),
         ));
     }
-    let probe = OutboundHarborProbe::new(state.allow_private_harbor)?;
-    let check = run_harbor_probe(&state, &probe, &row).await?;
-    let ok = check.ok;
-    Ok(Json(serde_json::json!({ "ok": ok, "checks": [check] })))
+    let input: GithubTestBody = parse_body(&body)?;
+    if !credential_probe::valid_github_name(&input.owner)
+        || !credential_probe::valid_github_name(&input.repo)
+    {
+        return Err(AppError::ValidationFailed(
+            "owner and repo must be valid GitHub names.".to_owned(),
+        ));
+    }
+    let probe = credential_probe::OutboundGithubProbe::new()?;
+    let checks = run_github_probes(&state, &probe, &row, &input.owner, &input.repo).await?;
+    let ok = checks.iter().all(|check| check.ok);
+    Ok(Json(serde_json::json!({ "ok": ok, "checks": checks })))
+}
+
+/// Runs the repository and code scanning probes for one stored GitHub credential.
+/// The decrypted token lives only in the local buffer and is never logged or returned.
+pub async fn run_github_probes<P: credential_probe::GithubProbe>(
+    state: &AppState,
+    probe: &P,
+    row: &crate::db::credentials::CredentialRow,
+    owner: &str,
+    repo: &str,
+) -> Result<Vec<credential_probe::Check>, AppError> {
+    let token = credentials::decrypt_token(&state.credentials_key, row)?;
+    let repo_response = probe
+        .get(&credential_probe::github_repo_path(owner, repo), &token)
+        .await?;
+    let scanning_response = probe
+        .get(
+            &credential_probe::github_code_scanning_path(owner, repo),
+            &token,
+        )
+        .await?;
+    Ok(vec![
+        credential_probe::github_repo_check(&repo_response),
+        credential_probe::github_code_scanning_check(&scanning_response),
+    ])
 }
 
 /// Runs the probe for one stored Harbor credential. The decrypted secret lives only
@@ -230,6 +275,56 @@ mod tests {
             assert_eq!(check.ok, ok, "status {status}");
             assert_eq!(check.name, "harbor_robot");
         }
+    }
+
+    /// A GitHub probe that records each requested path. No socket is opened.
+    struct RecordingGithub {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl credential_probe::GithubProbe for RecordingGithub {
+        async fn get(
+            &self,
+            path: &str,
+            _token: &[u8],
+        ) -> Result<credential_probe::GithubResponse, AppError> {
+            self.calls.lock().unwrap().push(path.to_owned());
+            let status = if path.contains("code-scanning") {
+                404
+            } else {
+                200
+            };
+            Ok(credential_probe::GithubResponse {
+                status,
+                message: "no analysis found".to_owned(),
+                accepted_permissions: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn github_probes_hit_the_repository_and_code_scanning_endpoints() {
+        let state = test_state("github").await;
+        let mut row = row_with_token(&state.credentials_key);
+        row.service_type = "github".to_owned();
+        row.base_url = None;
+        row.username = None;
+        let probe = RecordingGithub {
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let checks = run_github_probes(&state, &probe, &row, "octo", "app")
+            .await
+            .unwrap();
+        let calls = probe.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                "repos/octo/app".to_owned(),
+                "repos/octo/app/code-scanning/alerts?per_page=1".to_owned(),
+            ]
+        );
+        assert_eq!(checks.len(), 2);
+        assert!(checks.iter().all(|check| check.ok));
     }
 
     async fn test_state(name: &str) -> AppState {
