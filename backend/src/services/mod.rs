@@ -18,6 +18,8 @@ pub mod ids;
 pub mod mappings;
 #[allow(dead_code)] // The list routes that use this are added with the admin routes.
 pub mod pagination;
+#[allow(dead_code)] // Used by the sync pipeline.
+pub mod sarif;
 #[allow(dead_code)] // Used by the session extractor and logout routes.
 pub mod sessions;
 #[allow(dead_code)] // Used by the job worker and the retry route.
