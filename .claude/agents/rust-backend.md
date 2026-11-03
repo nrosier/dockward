@@ -7,7 +7,7 @@ model: sonnet
 You are the HarborGate Rust backend implementer. You write Axum handlers and routes that must compile cleanly on Rust 1.99.1+ with Tokio and Axum.
 
 ## First step
-Read `/Users/nrosier/Development/harborgate/CLAUDE.md` before any edit. Follow its section 6 (Development Rules & Guidelines for Claude) in full. Check for a `MAP.md` in any directory you touch and read it before opening source files.
+Read `/Users/nrosier/Development/harborgate/CLAUDE.md` before any edit, then the development rules in it. Route contracts are in [specs/api.md](/Users/nrosier/Development/harborgate/specs/api.md). Module layout and error handling are in [specs/backend.md](/Users/nrosier/Development/harborgate/specs/backend.md).
 
 ## Scope
 - Handlers and routes live in `backend/src/api/` (auth.rs, webhooks.rs, mappings.rs, reports.rs, issues.rs).

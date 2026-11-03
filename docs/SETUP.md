@@ -14,13 +14,21 @@ Harbor scan completes -> webhook to HarborGate -> Harbor API (vulnerabilities)
                                                               -> optional issues
 ```
 
-If a webhook is missed, HarborGate also polls every 15 minutes and skips images whose digest was already synced.
+If a webhook is missed, HarborGate is designed to also poll every 15 minutes and to skip any digest and tag pair that already synced successfully. Polling is not built yet (see the status in [README.md](../README.md)).
 
 ## 2. Before You Start
 
+### Prerequisites
+
+- **Docker Engine 25.0 or later.** On Engine 25.0 and later, health checks run every `start_interval` (5 seconds by default) during the healthcheck's `start_period`, so Traefik routes to HarborGate within seconds of start. On an older Engine the first check runs only after the 30-second `interval`, and Traefik does not route to HarborGate until then (see [specs/deployment.md](../specs/deployment.md), Health).
+- **A public HTTPS hostname** for HarborGate. You set it as `HARBORGATE_PUBLIC_URL` below.
+- **Your reverse proxy addresses**, if Traefik or another proxy sits in front of HarborGate. You set them as `HARBORGATE_TRUSTED_PROXIES` below.
+
+### Encryption key
+
 HarborGate needs an encryption key in the environment variable `HARBORGATE_ENCRYPTION_KEY`. This is required.
 
-- The app refuses to start without it. There is no file fallback.
+- The value is the base64 encoding of exactly 32 random bytes. The app refuses to start if the value is missing or does not decode to 32 bytes.
 - It encrypts stored credentials (Harbor robot secrets, GitHub tokens) with AES-256-GCM. It also signs session cookies.
 - If you lose the key, the stored credentials cannot be recovered. You must re-enter every credential.
 - Store the key in a password manager or secrets store. Do not commit it to git or put it in an image.
@@ -32,6 +40,15 @@ openssl rand -base64 32
 ```
 
 Set the result as `HARBORGATE_ENCRYPTION_KEY` in your deployment environment (for example, a `.env` file that is kept out of git).
+
+### Public URL and trusted proxies
+
+Set these in the same `.env` file. Both are described in [specs/deployment.md](../specs/deployment.md), Configuration.
+
+- **`HARBORGATE_PUBLIC_URL`** (required). The external origin that users open, for example `https://harborgate.example.com`. It must use `https://`. For local development only, `http://localhost` with any port is also accepted. HarborGate builds the OIDC redirect URI, the webhook URLs it shows, and the login origin check from this value. It never reads the host from the request, so a wrong value breaks sign-in and the webhook URLs. HarborGate refuses to start without it.
+- **`HARBORGATE_TRUSTED_PROXIES`** (optional, default empty). A comma-separated list of CIDRs for the reverse proxies whose `X-Forwarded-For` header HarborGate trusts. Write a single address as `/32` (IPv4) or `/128` (IPv6). Each entry must have no host bits set. With the default empty list, HarborGate ignores `X-Forwarded-For`, so every visitor behind a proxy shares one client IP for rate limits. In the reference setup (Cloudflare tunnel, then Traefik), list Traefik's address on the `proxy` network and the address cloudflared connects to Traefik from.
+
+The addresses differ per host, so follow [specs/deployment.md](../specs/deployment.md), "Client IP behind Cloudflare and Traefik", to find them and to set Traefik's `forwardedHeaders.trustedIPs`. Use the narrowest ranges that work. Trusting the whole `proxy` subnet lets any container on that network send its own `X-Forwarded-For`. After you start HarborGate, check Admin > Health: it must show your public IP as the client IP, with source `x-forwarded-for`.
 
 ## 3. Harbor Setup
 
@@ -66,9 +83,11 @@ Verification status (2026-11-03):
 
 ### 3c. Create the project webhook
 
+Harbor webhooks are configured per project, so one webhook sends HarborGate the scan events of every repository in the project. HarborGate ignores events for repositories that have no mapping, and it ignores untagged pushes (an image pushed by digest only, with no tag). Only tagged events from a mapped repository are synced.
+
 1. In Harbor, open the project `<project>`, go to **Webhooks**, and create a new endpoint (requires project administrator rights).
 2. Set the notify type to **HTTP**.
-3. Select a payload format. Harbor offers `Default` and `CloudEvents` (verified). HarborGate accepts both formats (see `specs/integrations.md`).
+3. Select a payload format. Harbor offers `Default` and `CloudEvents` (verified). HarborGate accepts both formats (see [specs/integrations.md](../specs/integrations.md)).
 4. Select only the event **Scan completed** (`SCANNING_COMPLETED`). Do not select push, pull, delete, or other events. HarborGate triggers on `SCANNING_COMPLETED` only.
 5. Set the endpoint URL to HarborGate's webhook URL:
 
@@ -76,8 +95,8 @@ Verification status (2026-11-03):
 https://<your-host>/api/v1/webhooks/harbor/<mapping_token>
 ```
 
-- `<your-host>` is the public hostname of your HarborGate instance. Use HTTPS only.
-- `<mapping_token>` is the webhook token shown on the HarborGate mapping screen. You get it in section 5, after you create the mapping. Create the mapping first, then return here.
+- `<your-host>` is the public hostname of your HarborGate instance. Use HTTPS only. HarborGate builds this URL from `HARBORGATE_PUBLIC_URL`, so the hostname here must match it.
+- `<mapping_token>` is the webhook token shown in the HarborGate mapping screen. You get it in section 5, after you create the mapping. Create the mapping first, then return here.
 
 6. Set the auth header on the webhook. In Harbor's webhook settings, set the **Auth Header** field to `Bearer <webhook-secret>`. Use the secret value shown once in the HarborGate mapping screen. Harbor sends this value as the `Authorization` header with every notification, and HarborGate checks it. Treat it as a secret. The field is labelled **Auth Header** in the Add Webhook form (verified in Harbor's string catalog).
 
@@ -88,7 +107,9 @@ Auth Header: Bearer <webhook-secret>
 7. Leave **Verify Remote Certificate** checked. Harbor's tooltip: "Determine whether the webhook should verify the certificate of a remote URL. Uncheck this box when the remote URL uses a self-signed or untrusted certificate." HarborGate behind Traefik has a valid certificate, so never uncheck it.
 8. Click **Add**.
 
-Treat the webhook URL as a secret. Anyone who has it can trigger a sync for that mapping. Do not paste it into tickets, chat, or screenshots. Do not log it. If it leaks, rotate the mapping (section 8).
+HarborGate shows the webhook URL and the auth secret **once**, when you create the mapping and again when you rotate them. HarborGate stores only a digest of each, so it cannot show them again. Copy both before you leave the screen. If you lose one, rotate it (section 8) and update Harbor.
+
+Treat the webhook URL and the auth secret as secrets. Anyone who has the URL can trigger a sync for that mapping. Do not paste them into tickets, chat, or screenshots. Do not log them. If either leaks, rotate it (section 8).
 
 ### 3d. Enable scanning on the project
 
@@ -114,7 +135,9 @@ Grant only these repository permissions:
 | GitHub permission name | Access | Why it is needed | Status |
 | --- | --- | --- | --- |
 | Code scanning alerts | Read and write | Upload SARIF (`POST /repos/{owner}/{repo}/code-scanning/sarifs`) and read alerts | Verified: "Code scanning alerts" read/write covers the SARIF upload. The fine-grained label is "Code scanning alerts", URL parameter `security_events` (verified in GitHub's token pre-fill parameter table). |
-| Issues | Read and write | Create and update issues (`POST /repos/{owner}/{repo}/issues`, `PATCH /repos/{owner}/{repo}/issues/{issue_number}`) | Verified. Required only if auto-issues or manual issue creation is enabled. |
+| Issues | Read and write | Create and update issues (`POST /repos/{owner}/{repo}/issues`, `PATCH /repos/{owner}/{repo}/issues/{issue_number}`) | Verified. Needed for automatic issues and for manual issue creation. |
+
+> **Warning:** without the Issues permission, the GitHub credential test still passes with a warning (`issues_permission_missing`), because SARIF upload does not need Issues. A token without Issues can still sync SARIF but cannot create issues. Saving a mapping with auto-created issues on is rejected with `422 validation_failed` until the token has the Issues permission.
 
 Metadata: read is always included. Do not grant Contents, Administration, Workflows, Actions, or any organization-wide permission.
 
@@ -144,11 +167,13 @@ These steps are for the first run and for each user. The first local account you
    - Harbor repository: `<harbor-repository>`, the image name within the project. Harbor's **Repositories** tab shows the full name `<project>/<harbor-repository>` (for example `library/busybox`, the same form as `repo_full_name` in Harbor's webhook payload). Enter only the part after `<project>/`.
    - GitHub repository: `<repo>` (the GitHub repository)
    - GitHub owner: `<owner>`
-   - Default branch: used only when the image has no `org.opencontainers.image.ref.name` label (default `main`)
+   - Default branch: used only when the image has no `io.github.nrosier.harborgate.branch` label (default `main`)
    - Auto-create issues: on or off
    - Minimum issue severity: `CRITICAL` (default) or `HIGH`
-5. **Copy the webhook URL:** after you save the mapping, copy the webhook URL shown for it. Paste it into the Harbor project webhook from section 3c, replacing `<mapping_token>`.
-6. **SARIF category:** HarborGate sets the SARIF category to the Harbor repository name automatically, so each image's results stay separate in the Security tab. You do not configure the category.
+5. **Copy the webhook URL and auth secret:** after you save the mapping, copy the webhook URL and the auth secret shown for it. They are shown once. Paste the URL into the Harbor project webhook from section 3c, replacing `<mapping_token>`, and paste the secret into the Auth Header.
+6. **SARIF category:** HarborGate sets the SARIF run ID to `harborgate/<project>/<harbor-repository>/` automatically. The category is the part before the last `/`, so each image's results stay separate in the Security tab. You do not configure it.
+
+Creating a mapping also checks the GitHub repository. If code scanning is not available for it (for example, a private repository on a personal account), HarborGate rejects the mapping with `422 code_scanning_unavailable`. This shows the problem at setup, not at the first sync.
 
 Each user sees only their own credentials and mappings. Admins can view all of them read-only.
 
@@ -187,12 +212,12 @@ HarborGate reads the commit and repository from OCI labels on the Harbor artifac
 ```dockerfile
 LABEL org.opencontainers.image.revision="<commit-sha>"
 LABEL org.opencontainers.image.source="https://github.com/<owner>/<repo>"
-LABEL org.opencontainers.image.ref.name="<branch>"
+LABEL io.github.nrosier.harborgate.branch="<branch>"
 ```
 
 - `org.opencontainers.image.revision` (required): the full commit SHA. If it is missing, the sync is marked `failed` with a clear error. HarborGate does not guess the SHA.
-- `org.opencontainers.image.source` (recommended): the repository URL.
-- `org.opencontainers.image.ref.name` (optional): the branch name. When present, HarborGate uses it as the target branch. When absent, HarborGate uses the mapping's `default_branch`.
+- `org.opencontainers.image.source` (recommended): the repository URL. When present, it must match the mapping's GitHub target, `https://github.com/<owner>/<repo>`. The comparison ignores case and a trailing `/` or `.git`. On a mismatch the sync is marked `failed`, and nothing is uploaded. When the label is absent, the sync proceeds.
+- `io.github.nrosier.harborgate.branch` (optional): the branch name. When present, HarborGate uses it as the target branch. When absent, HarborGate uses the mapping's default branch. HarborGate does not read `org.opencontainers.image.ref.name` for the branch, because the OCI image spec defines that key as the name of a reference, typically a tag, not a branch.
 
 In a CI pipeline you can pass the values at build time, for example `docker build --label org.opencontainers.image.revision=$GIT_SHA ...`. Use placeholders in examples only, and never hardcode a real SHA in the Dockerfile.
 
@@ -215,6 +240,13 @@ Check each item before you rely on the setup:
 2. In HarborGate, open the Harbor credential, paste the new secret, and press **Test**.
 3. Run one test push to confirm that a sync succeeds.
 
+### Rotate the webhook URL or the auth secret
+
+1. In HarborGate, open the mapping and choose **Rotate webhook URL** or **Rotate auth secret**. Confirm the dialog.
+2. HarborGate shows the new value once. Copy it before you leave the screen.
+3. In Harbor, update the project webhook: paste the new URL into the endpoint URL, or the new secret into the **Auth Header** as `Bearer <webhook-secret>`.
+4. Run one test push. The old value stops working as soon as you rotate it, so a webhook that still uses it returns `401`.
+
 ### Rotate the GitHub token
 
 1. In GitHub, create a new fine-grained token with the same settings from section 4.
@@ -235,6 +267,6 @@ Check each item before you rely on the setup:
 | 403 from GitHub on SARIF upload | Token is missing the Code scanning alerts permission, or the repository is not selected for the token | Edit the token in GitHub to grant Code scanning alerts (read and write) and select the repository. |
 | 404 from GitHub | GitHub repository name or owner is wrong, or the token is not scoped to the repository | Check the mapping's owner and repo name. Confirm the token's repository access includes the repo. |
 | Sync failed: missing SHA label | The image has no `org.opencontainers.image.revision` label | Add the label at build time (section 6) and push the image again. |
-| No webhook triggers | Webhook event is not "Scan completed", or the webhook token does not match the mapping | Edit the Harbor webhook so it subscribes only to Scan completed, and confirm the URL contains the mapping's token. |
-| Issue not created | Severity is below the threshold, the CVE is accepted on the mapping, or auto-issues is off | Check the mapping's minimum severity and auto-issues setting. Check the CVE's acceptance status. |
+| No webhook triggers | Webhook event is not "Scan completed", the webhook token does not match the mapping, or the pushed image has no tag (HarborGate ignores untagged pushes) | Edit the Harbor webhook so it subscribes only to Scan completed, confirm the URL contains the mapping's token, and push the image with a tag. |
+| Issue not created | Severity is below the threshold, the CVE is accepted on the mapping, auto-issues is off, or the GitHub token lacks the Issues permission | Check the mapping's minimum severity and auto-issues setting. Check the CVE's acceptance status. Check that the token has Issues (read and write). |
 | Webhook returns 401 | Authorization header missing or wrong | Compare the Auth Header value in Harbor (`Bearer <webhook-secret>`) with the HarborGate mapping screen; rotate the value if it was exposed. |

@@ -2,7 +2,7 @@
 
 HarborGate is a local-first, multi-tenant security relay. It receives container vulnerability reports from Harbor (webhooks, with polling as backup), converts Trivy reports to SARIF 2.1.0, and pushes them to GitHub Code Scanning and Issues. The backend is Rust (Axum, SQLx on SQLite); the frontend is React and TypeScript (Vite). It ships as a single Docker container.
 
-Status: in development. Only the skeleton exists (`backend/src/main.rs`, a stub React app). No features are implemented yet.
+Status: in development. Built on `main`: first-run setup, local and OIDC login with sessions and CSRF, encrypted credentials with the Harbor and GitHub tests, mapping CRUD with hashed webhook secrets, the Harbor webhook receiver, the Harbor client, the Trivy-to-SARIF 2.1.0 converter, and the durable job queue. Not built yet: the sync pipeline (the worker completes jobs without fetching or uploading), the GitHub SARIF upload, GitHub issues, Harbor polling, the CVE lifecycle, alerts, backup and restore, and the web UI (the frontend is a stub). The specs describe the v1 behaviour.
 
 ## Specs
 
@@ -43,7 +43,7 @@ npm run build             # production build
 
 # Container (from repo root)
 docker build -t harborgate:latest .
-docker run -p 8080:8080 -v harborgate_data:/data harborgate:latest
+docker run --init --env-file .env -p 8080:8080 -v harborgate_data:/data harborgate:latest
 ```
 
 ## Repository layout
