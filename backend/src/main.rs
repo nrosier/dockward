@@ -162,6 +162,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         allow_private_oidc: settings.allow_private_oidc,
         allow_private_harbor: settings.allow_private_harbor,
         jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
+        webhook_token_limiter: api::webhooks::new_token_limiter(),
+        webhook_failure_limiter: api::webhooks::new_failure_limiter(),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -241,6 +243,8 @@ mod tests {
             allow_private_oidc: false,
             allow_private_harbor: false,
             jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
+            webhook_token_limiter: api::webhooks::new_token_limiter(),
+            webhook_failure_limiter: api::webhooks::new_failure_limiter(),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -271,12 +275,31 @@ mod tests {
         name: &str,
         login_throttle: services::throttle::LoginThrottle,
     ) -> (Router, sqlx::SqlitePool, std::path::PathBuf) {
+        let (router, pool, dir, _) =
+            test_router_with_limiters(name, login_throttle, api::webhooks::new_token_limiter())
+                .await;
+        (router, pool, dir)
+    }
+
+    /// The full test router. The caller keeps a handle on the webhook token limiter.
+    /// `RateLimiter` clones share one map, so the handle sees what the router records.
+    async fn test_router_with_limiters(
+        name: &str,
+        login_throttle: services::throttle::LoginThrottle,
+        webhook_token_limiter: api::hardening::RateLimiter,
+    ) -> (
+        Router,
+        sqlx::SqlitePool,
+        std::path::PathBuf,
+        api::hardening::RateLimiter,
+    ) {
         let dir = std::env::temp_dir().join(format!("harborgate-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = db::open(&dir).await.unwrap();
         let root =
             config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let handle = webhook_token_limiter.clone();
         let state = api::state::AppState {
             pool: pool.clone(),
             session_key: Arc::new(auth::crypto::session_key(&root).unwrap()),
@@ -288,8 +311,10 @@ mod tests {
             allow_private_oidc: false,
             allow_private_harbor: false,
             jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
+            webhook_token_limiter,
+            webhook_failure_limiter: api::webhooks::new_failure_limiter(),
         };
-        (app(Vec::new(), state), pool, dir)
+        (app(Vec::new(), state), pool, dir, handle)
     }
 
     fn with_peer(builder: axum::http::request::Builder) -> axum::http::request::Builder {
@@ -684,6 +709,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored, 0);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Requests with unknown tokens create no per-token budget entry, so a flood of random
+    /// tokens cannot grow the map. A request with a real token does create one entry, which
+    /// shows the count can move at all.
+    #[tokio::test]
+    async fn unknown_token_creates_no_budget_entry() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let limiter = api::webhooks::new_token_limiter();
+        let (router, pool, dir, budget) = test_router_with_limiters(
+            "webhook-no-budget",
+            services::throttle::LoginThrottle::new(),
+            limiter,
+        )
+        .await;
+        webhook_fixture(&pool, "tok-nob-fake", "sec-nob-fake").await;
+        assert_eq!(budget.len(), 0);
+        // Five unknown tokens: each is a 401, and none may create an entry.
+        for n in 0..5 {
+            let response = router
+                .clone()
+                .oneshot(webhook_request(
+                    &format!("tok-unknown-{n}-fake"),
+                    Some("Bearer sec-nob-fake"),
+                    WEBHOOK_BODY,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(budget.len(), 0, "an unknown token created a budget entry");
+        // Positive control: a real token is charged once, under its mapping id.
+        let response = router
+            .oneshot(webhook_request(
+                "tok-nob-fake",
+                Some("Bearer sec-nob-fake"),
+                WEBHOOK_BODY,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(budget.len(), 1);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

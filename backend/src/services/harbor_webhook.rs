@@ -209,26 +209,30 @@ pub enum Received {
     Ignored,
 }
 
-/// Handles one webhook body for the mapping that owns `token` (`specs/integrations.md`).
-/// An unknown token, or a bad `Authorization` value, returns the same `401`. The token
-/// is hashed before lookup, and the secret is compared by digest in constant time.
-pub async fn receive(
+/// Looks up the mapping that owns `token` by its digest. Returns `None` for an unknown
+/// token. The token is hashed before lookup. This is the only step that runs before the
+/// route's per-token budget is charged.
+pub async fn find_mapping(pool: &SqlitePool, token: &str) -> Result<Option<String>, AppError> {
+    mapping_db::find_by_token_hash(pool, &digest(token)).await
+}
+
+/// Handles one webhook body for an already-found mapping (`specs/integrations.md`). A bad
+/// `Authorization` value returns `401`, the same as an unknown token. The secret is
+/// compared by digest in constant time.
+pub async fn receive_for(
     pool: &SqlitePool,
-    token: &str,
+    mapping_id: &str,
     authorization: Option<&str>,
     body: &[u8],
     now: i64,
     new_job_id: &str,
 ) -> Result<Received, AppError> {
     let unauthorized = || AppError::InvalidCredentials;
-    let mapping_id = mapping_db::find_by_token_hash(pool, &digest(token))
-        .await?
-        .ok_or_else(unauthorized)?;
     let presented = authorization
         .and_then(|value| value.strip_prefix("Bearer "))
         .ok_or_else(unauthorized)?;
     let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
-    let row = mapping_db::find_by_id(&mut conn, &mapping_id)
+    let row = mapping_db::find_by_id(&mut conn, mapping_id)
         .await?
         .ok_or_else(unauthorized)?;
     let presented_digest = digest(presented);
@@ -243,7 +247,7 @@ pub async fn receive(
         Outcome::Ignore => Ok(Received::Ignored),
         Outcome::Queue(event) => {
             let payload = serde_json::to_string(&event).map_err(|_| AppError::InternalError)?;
-            sync_jobs::enqueue(pool, new_job_id, &mapping_id, &payload, now).await?;
+            sync_jobs::enqueue(pool, new_job_id, mapping_id, &payload, now).await?;
             Ok(Received::Queued)
         }
     }

@@ -6,8 +6,13 @@
 //! The clock is injected (see [`LoginThrottle::with_clock`]), so tests can freeze it
 //! and stay deterministic under CPU load. The state is in memory and resets on
 //! restart. That is a documented limit of v1.
+//!
+//! Memory is bounded. A pair is dropped once its wait has passed and no failure has
+//! come in for [`IDLE_AFTER`]. The map never holds more than [`MAX_KEYS`] pairs. When it
+//! is still full after a sweep, an attempt for a new pair is refused (fail closed).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,6 +20,13 @@ use std::time::{Duration, Instant};
 pub const FREE_FAILURES: u32 = 5;
 /// Upper bound on the wait between attempts.
 pub const MAX_WAIT: Duration = Duration::from_secs(60);
+/// A pair with no failure for this long, and a passed wait, is dropped from the map.
+pub const IDLE_AFTER: Duration = Duration::from_secs(15 * 60);
+/// Most pairs the throttle holds at once. Same cap as the rate limiter in
+/// `api/hardening.rs`.
+pub const MAX_KEYS: usize = 100_000;
+/// Idle pairs are swept on every this-many-th call, even when the map is not full.
+const SWEEP_EVERY: u64 = 1_024;
 
 #[derive(Clone, Copy)]
 struct PairState {
@@ -22,14 +34,18 @@ struct PairState {
     last_failure: Instant,
 }
 
-/// Failure counter and delay, keyed by `(username, client IP)`.
+type Pairs = HashMap<(String, String), PairState>;
+
 /// The time source. The system clock in production, a fixed clock in tests.
 pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
+/// Failure counter and delay, keyed by `(username, client IP)`.
 #[derive(Clone)]
 pub struct LoginThrottle {
-    pairs: Arc<Mutex<HashMap<(String, String), PairState>>>,
+    pairs: Arc<Mutex<Pairs>>,
     clock: Clock,
+    /// Calls that touch the map, shared by clones. Drives the periodic sweep.
+    calls: Arc<AtomicU64>,
 }
 
 impl Default for LoginThrottle {
@@ -54,6 +70,25 @@ pub fn wait_after(failures: u32) -> Duration {
     Duration::from_secs(secs).min(MAX_WAIT)
 }
 
+/// True when a pair can be dropped at `now`: its wait has passed and it has been idle
+/// for longer than [`IDLE_AFTER`]. Dropping it changes nothing, because such a pair
+/// would not be blocked anyway.
+fn is_idle(state: &PairState, now: Instant) -> bool {
+    let since = now.duration_since(state.last_failure);
+    since > IDLE_AFTER && since >= wait_after(state.failures)
+}
+
+/// True when `key` may be tracked: it is already in the map, or the map has room. When
+/// the map is full and `key` is new, idle pairs are swept first. Only a new key pays for
+/// that scan. An existing key never does.
+fn make_room(map: &mut Pairs, key: &(String, String), now: Instant) -> bool {
+    if map.contains_key(key) || map.len() < MAX_KEYS {
+        return true;
+    }
+    map.retain(|_, state| !is_idle(state, now));
+    map.len() < MAX_KEYS
+}
+
 impl LoginThrottle {
     /// A throttle that reads the system clock.
     pub fn new() -> Self {
@@ -65,6 +100,7 @@ impl LoginThrottle {
         Self {
             pairs: Arc::default(),
             clock,
+            calls: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -75,30 +111,37 @@ impl LoginThrottle {
     }
 
     /// Returns `true` when an attempt for this pair must wait and be refused without a
-    /// password check.
+    /// password check. Also returns `true` for a new pair when the map is full, so the
+    /// attempt is refused rather than tracked without a bound (fail closed).
     pub fn is_blocked(&self, username: &str, ip: &str, now: Instant) -> bool {
-        let Ok(map) = self.pairs.lock() else {
+        let Ok(mut map) = self.pairs.lock() else {
             // A poisoned lock fails closed: refuse rather than skip the throttle.
             return true;
         };
-        match map.get(&(username.to_owned(), ip.to_owned())) {
+        self.periodic_sweep(&mut map, now);
+        let key = (username.to_owned(), ip.to_owned());
+        match map.get(&key) {
             Some(state) => {
                 let wait = wait_after(state.failures);
                 now.duration_since(state.last_failure) < wait
             }
-            None => false,
+            None => !make_room(&mut map, &key, now),
         }
     }
 
-    /// Records a failed attempt for the pair at `now`.
+    /// Records a failed attempt for the pair at `now`. A new pair is not stored when the
+    /// map is still full after a sweep. Its next attempt is refused by [`Self::is_blocked`].
     pub fn record_failure(&self, username: &str, ip: &str, now: Instant) {
         if let Ok(mut map) = self.pairs.lock() {
-            let entry = map
-                .entry((username.to_owned(), ip.to_owned()))
-                .or_insert(PairState {
-                    failures: 0,
-                    last_failure: now,
-                });
+            self.periodic_sweep(&mut map, now);
+            let key = (username.to_owned(), ip.to_owned());
+            if !make_room(&mut map, &key, now) {
+                return;
+            }
+            let entry = map.entry(key).or_insert(PairState {
+                failures: 0,
+                last_failure: now,
+            });
             entry.failures = entry.failures.saturating_add(1);
             entry.last_failure = now;
         }
@@ -109,6 +152,21 @@ impl LoginThrottle {
         if let Ok(mut map) = self.pairs.lock() {
             map.remove(&(username.to_owned(), ip.to_owned()));
         }
+    }
+
+    /// Removes idle pairs on every [`SWEEP_EVERY`]-th call. Amortised, so the cost of
+    /// a full scan is spread over many requests.
+    fn periodic_sweep(&self, map: &mut Pairs, now: Instant) {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        if call.is_multiple_of(SWEEP_EVERY) {
+            map.retain(|_, state| !is_idle(state, now));
+        }
+    }
+
+    /// The number of pairs currently held. Test builds only.
+    #[cfg(test)]
+    fn pair_count(&self) -> usize {
+        self.pairs.lock().map_or(0, |map| map.len())
     }
 }
 
@@ -172,5 +230,36 @@ mod tests {
         assert!(t.is_blocked("test-user", "192.0.2.10", start));
         t.record_success("test-user", "192.0.2.10");
         assert!(!t.is_blocked("test-user", "192.0.2.10", start));
+    }
+
+    #[test]
+    fn idle_pairs_are_dropped() {
+        let t = LoginThrottle::new();
+        let start = Instant::now();
+        t.record_failure("idle-user", "192.0.2.10", start);
+        assert_eq!(t.pair_count(), 1);
+        // Well after the idle period. Other calls drive the periodic sweep.
+        let later = start + IDLE_AFTER + Duration::from_secs(1);
+        for n in 0..SWEEP_EVERY {
+            // Unknown pairs are not stored, so only the sweep can shrink the map.
+            t.is_blocked(&format!("probe-{n}"), "198.51.100.7", later);
+        }
+        assert_eq!(t.pair_count(), 0);
+    }
+
+    #[test]
+    fn full_map_fails_closed() {
+        let t = LoginThrottle::new();
+        let start = Instant::now();
+        for n in 0..MAX_KEYS {
+            t.record_failure(&format!("user-{n}"), "192.0.2.10", start);
+        }
+        assert_eq!(t.pair_count(), MAX_KEYS);
+        // A new pair is refused, and the map does not grow.
+        assert!(t.is_blocked("new-user", "198.51.100.7", start));
+        t.record_failure("new-user", "198.51.100.7", start);
+        assert_eq!(t.pair_count(), MAX_KEYS);
+        // A pair already in the map is still judged by its own failure count.
+        assert!(!t.is_blocked("user-0", "192.0.2.10", start + Duration::from_secs(1)));
     }
 }
