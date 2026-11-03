@@ -44,6 +44,11 @@ fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppState) -> Route
         .route("/api/v1/auth/setup-status", get(api::auth::setup_status))
         .route("/api/v1/auth/setup", post(api::auth::setup))
         .route("/api/v1/auth/login", post(api::auth::login))
+        .route("/api/v1/account/me", get(api::auth::account_me))
+        .route(
+            "/api/v1/account/password",
+            post(api::auth::account_password),
+        )
         .route("/api/v1/auth/logout", post(api::auth::logout))
         .route("/api/v1/auth/logout-all", post(api::auth::logout_all))
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))

@@ -53,6 +53,7 @@ pub struct Actor {
 
 impl Actor {
     /// The offline CLI operator, as recorded by restore and key rotation.
+    #[allow(dead_code)] // Used by the restore and key rotation commands in later milestones.
     pub fn cli() -> Self {
         Self {
             user_id: None,

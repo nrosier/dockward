@@ -108,7 +108,7 @@ fn parse_body<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, AppError>
 }
 
 /// Builds a response that sets the session and CSRF cookies for `user_id`.
-fn session_response(
+pub fn session_response(
     state: &AppState,
     user: &crate::db::users::UserRow,
     status: StatusCode,
@@ -216,4 +216,51 @@ pub async fn login(
         }
         Err(other) => Err(other),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PasswordBody {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+/// `GET /api/v1/account/me`. The signed-in user.
+pub async fn account_me(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Json<UserResponse>, AppError> {
+    let row = crate::db::users::find_by_id(&state.pool, &user.id)
+        .await?
+        .ok_or(AppError::Unauthenticated)?;
+    Ok(Json(UserResponse {
+        user: User::try_from(row)?,
+    }))
+}
+
+/// `POST /api/v1/account/password`. Returns `204` with a fresh session cookie for
+/// this session. Other sessions of the user are signed out.
+pub async fn account_password(
+    State(state): State<AppState>,
+    user: AuthUser,
+    bytes: axum::body::Bytes,
+) -> Result<Response, AppError> {
+    let body: PasswordBody = parse_body(&bytes)?;
+    let row = crate::services::account::change_password(
+        &state.pool,
+        &user.id,
+        &body.current_password,
+        &body.new_password,
+    )
+    .await?;
+    // Reissue the cookie with the new token_version so this session stays signed in.
+    let mut response = session_response(
+        &state,
+        &row,
+        StatusCode::NO_CONTENT,
+        UserResponse {
+            user: User::try_from(row.clone())?,
+        },
+    )?;
+    *response.body_mut() = axum::body::Body::empty();
+    Ok(response)
 }

@@ -1,6 +1,7 @@
 // Module placeholder. Filled in by later issues.
 
-#[allow(dead_code)] // Used by the admin routes and the auth paths added in later issues.
+#[allow(dead_code)] // Used by the account routes.
+pub mod account;
 pub mod audit;
 #[allow(dead_code)] // Used by the setup and login routes.
 pub mod auth;
