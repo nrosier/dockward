@@ -10,7 +10,7 @@ HarborGate is a planned local-first, multi-tenant security relay. It receives co
 
 ## Status
 
-**In development.** This repository currently contains the project specification in [`CLAUDE.md`](CLAUDE.md) and no source code yet. Nothing described here is implemented, runnable, or installable. The commands in the Development section are the planned workflow and will not work until the project scaffolding exists.
+**In development.** This repository currently contains only a skeleton: a stub backend (`backend/src/main.rs`) and a stub React app. No features are implemented yet. Nothing described under Features is implemented, runnable, or installable. The commands in the Development section are the planned workflow and will not work until the features are implemented.
 
 ## Features
 
@@ -18,11 +18,11 @@ The planned functionality, summarized from the specification:
 
 - **Secure credential storage:** user credentials (GitHub tokens, Harbor robot tokens, OIDC client secrets) are encrypted at rest with AES-256-GCM.
 - **Setup and login:** a first-run wizard creates the initial admin account, and OIDC sign-in can be configured from the admin UI. A local break-glass login remains available as a fallback.
-- **Role-based access:** admins manage system configuration, users, and global logs. Regular users manage their own credentials, repository mappings, and sync logs.
+- **Role-based access:** admins manage system configuration, users, and global logs. Regular users manage their own credentials, repository mappings, and Sync jobs.
 - **Scoped webhook relay:** each repository mapping has its own webhook endpoint. On receipt, HarborGate fetches the vulnerability report from the Harbor REST API and converts Trivy output to SARIF.
-- **GitHub delivery:** SARIF is gzipped, Base64-encoded, and submitted to the GitHub code-scanning API. The target branch and commit SHA come from OCI labels or from the mapping configuration.
-- **Optional issue creation:** GitHub Issues can be created automatically or triggered manually for CRITICAL and HIGH findings.
-- **Dashboard and logs:** a web UI covers dashboards, repository mappings, sync logs, and settings.
+- **GitHub delivery:** SARIF is gzipped, Base64-encoded, and submitted to the GitHub code-scanning API. The commit SHA comes only from the `org.opencontainers.image.revision` OCI label; the sync fails if it is missing. The branch comes from `org.opencontainers.image.ref.name` if present, otherwise from the mapping's default branch (default `main`).
+- **Optional issue creation:** GitHub Issues are created automatically for CRITICAL and HIGH findings, or triggered manually. `min_issue_severity` defaults to CRITICAL and may be lowered to HIGH.
+- **Dashboard and logs:** a web UI covers Dashboard, Mappings, CVEs, Sync jobs, and Account.
 
 ## Architecture
 
@@ -43,7 +43,7 @@ The Dockerfile is planned as a multi-stage build (Node, then Rust, then a slim r
 
 ## Development
 
-The commands below come from the specification in `CLAUDE.md`, section 5. They are planned and are not yet valid, because the project scaffolding does not exist yet.
+The commands below are planned and are not yet valid, because the features are not implemented yet. Build and design details are in [`specs/`](specs/README.md).
 
 ```bash
 # Backend (planned): run in development mode with file watching
@@ -72,9 +72,9 @@ docker run -p 8080:8080 -v harborgate_data:/data harborgate:latest
 
 - the full architecture and directory layout
 - the functional requirements
-- the SQLite database schema, including the `system_config`, `users`, `user_credentials`, `repo_mappings`, `sync_reports`, and `github_issues` tables
-- the UI style guidelines
 - the development rules for contributors and agents, including error-handling and no-secrets-in-logs requirements
+
+The detailed specifications are in [`specs/`](specs/README.md). The SQLite schema, including the `system_config`, `users`, `user_credentials`, `repo_mappings`, `sync_reports`, and `github_issues` tables, is in [`specs/database.md`](specs/database.md).
 
 For operator setup (Harbor robot account, webhook, GitHub token, and OCI labels), see [`docs/SETUP.md`](docs/SETUP.md).
 

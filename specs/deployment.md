@@ -36,7 +36,7 @@ Purpose: container build, compose file, Traefik and Cloudflare routing, volumes,
 
 - Health endpoint: `GET /healthz`. Provisional.
 - Used by the docker-smoke check and the compose healthcheck.
-- OPEN: the compose file has no healthcheck block yet. Add one, or keep the check in the smoke test only?
+- Decided: `docker-compose.yml` has a healthcheck that runs `wget -qO- http://127.0.0.1:8080/healthz` (busybox wget in alpine:3.20), with interval 30s, timeout 3s, retries 3, and start_period 10s.
 
 ## Repo hygiene
 
@@ -52,4 +52,4 @@ Purpose: container build, compose file, Traefik and Cloudflare routing, volumes,
 
 ## Backup and restore
 
-- Backup and restore procedures are in [security.md](security.md). Restore steps are in `docs/SETUP.md`.
+- Backup and restore procedures are in [security.md](security.md). Backup is created from the admin UI (Settings > Backup and restore). Restore is the CLI command `harborgate restore <file>`, run with the app stopped (Decided 2026-11-03). Restore steps are in `docs/SETUP.md`.

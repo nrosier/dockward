@@ -13,8 +13,8 @@ Smoke-tests the single-container build and runtime.
 
 1. Build from the repo root:
    `cd /Users/nrosier/Development/harborgate && docker build -t harborgate:latest .`
-2. Start the container with a named volume. Do not pass secrets. Do not set `HARBORGATE_ENCRYPTION_KEY`:
-   `docker run -d --name harborgate-smoke -p 8080:8080 -v harborgate_data:/data harborgate:latest`
+2. Start the container with a named volume and a throwaway encryption key. The app refuses to start without `HARBORGATE_ENCRYPTION_KEY`. Generate the key in the shell at run time. Do not print it, log it, or save it to a file:
+   `KEY=$(openssl rand -base64 32); docker run -d --name harborgate-smoke -p 8080:8080 -v harborgate_data:/data -e HARBORGATE_ENCRYPTION_KEY="$KEY" harborgate:latest; unset KEY`
 3. Wait up to 60 seconds for the root URL to respond (any HTTP status below 500 counts as responding):
    `for i in $(seq 1 30); do code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/); [ "$code" -gt 0 ] && [ "$code" -lt 500 ] && break; sleep 2; done; echo "$code"`
 4. Health check. Set the path here, then run:

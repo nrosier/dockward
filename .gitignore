@@ -11,3 +11,5 @@ data/
 *.key
 master.key
 .DS_Store
+frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo

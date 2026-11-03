@@ -17,7 +17,7 @@ Read `/Users/nrosier/Development/harborgate/CLAUDE.md` before any edit. Follow i
 
 ## Rules
 - The output must strictly conform to SARIF 2.1.0. Required top-level fields include `version` = `"2.1.0"`, `$schema`, and `runs`. Each run needs `tool.driver` with `name`. Results need `ruleId`, `message.text`, and `level`. Do not invent properties that are not in the 2.1.0 spec.
-- Map severities consistently. Use the same CRITICAL / HIGH / MEDIUM / LOW vocabulary as CLAUDE.md. Do not add a new severity scale.
+- Map all Trivy severities to SARIF output consistently. Do not add a new severity scale. Issue creation applies only to CRITICAL and HIGH findings.
 - Keep the mapping of Trivy fields to SARIF fields deterministic, so identical input always yields identical output.
 - Gzip then base64 encode the serialized SARIF exactly as the GitHub code-scanning endpoint expects. Do not add extra wrapping.
 - Never log SARIF payloads that contain tokens, and never log GitHub PATs, Harbor tokens, or AES keys. Do not echo request headers or credentials in error messages.

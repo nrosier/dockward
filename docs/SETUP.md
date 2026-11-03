@@ -71,7 +71,7 @@ Verification status:
 
 1. In Harbor, open the project `<project>`, go to **Webhooks**, and create a new endpoint (requires project administrator rights).
 2. Set the notify type to **HTTP**.
-3. Select a payload format. Harbor offers `Default` and `CloudEvents` (verified). UNVERIFIED: the project specification does not say which format HarborGate parses. Use the format the HarborGate version you run expects, and confirm it in the HarborGate webhook handler or release notes.
+3. Select a payload format. Harbor offers `Default` and `CloudEvents` (verified). HarborGate accepts both formats (see `specs/integrations.md`).
 4. Select only the event **Scan completed** (`SCANNING_COMPLETED`). Do not select push, pull, delete, or other events. HarborGate triggers on `SCANNING_COMPLETED` only.
 5. Set the endpoint URL to HarborGate's webhook URL:
 
@@ -80,12 +80,12 @@ https://<your-host>/api/v1/webhooks/harbor/<mapping_token>
 ```
 
 - `<your-host>` is the public hostname of your HarborGate instance. Use HTTPS only.
-- `<mapping_token>` is the token shown on the HarborGate mapping screen. You get it in section 5, after you create the mapping. Create the mapping first, then return here.
+- `<mapping_token>` is the webhook token shown on the HarborGate mapping screen. You get it in section 5, after you create the mapping. Create the mapping first, then return here.
 
-6. Add a custom auth header to the webhook. The header name and secret value are shown in the HarborGate mapping screen once; copy them into Harbor's auth header field. Harbor sends this header with every notification. Treat it as a secret. UNVERIFIED: confirm in the Harbor UI the exact menu path for the auth header field.
+6. Set the auth header on the webhook. In Harbor's webhook settings, set the **Auth Header** field to `Bearer <webhook-secret>`. Use the secret value shown once in the HarborGate mapping screen. Harbor sends this value as the `Authorization` header with every notification, and HarborGate checks it. Treat it as a secret. UNVERIFIED: confirm in the Harbor UI the exact menu label for the Auth Header field.
 
 ```text
-<header-name>: <header-value>
+Auth Header: Bearer <webhook-secret>
 ```
 
 7. Leave verify-SSL enabled if HarborGate uses a valid TLS certificate. UNVERIFIED: the Harbor docs say only "Verify Remote Certificate" and do not describe its behavior in detail. Confirm the option in your Harbor UI.
@@ -140,7 +140,7 @@ These steps are for the first run and for each user. The first local account you
 1. **First run:** open `https://<your-host>` and create the first local account. That account is the admin.
 2. **Harbor credential:** on the credentials screen, add a Harbor credential with the Harbor base URL, the robot username from section 3b, and the robot secret. Press **Test**. The test must succeed before you continue.
 3. **GitHub credential:** add a GitHub credential with the token from section 4. Press **Test**. The test must succeed before you continue.
-4. **Repository mapping:** create one mapping per Harbor repository (one image name within a project), not one mapping for a whole project. Each mapping has its own webhook URL. Each GitHub repository and branch can be the target of only one mapping. HarborGate rejects a second mapping for the same target. Create a mapping with these settings:
+4. **Repository mapping:** create one mapping per Harbor repository (one image name within a project), not one mapping for a whole project. Each mapping has its own webhook URL. Each GitHub repository can be the target of only one mapping, regardless of branch. HarborGate rejects a second mapping for the same target. Create a mapping with these settings:
    - Harbor credential and GitHub credential: select the ones you added in steps 2 and 3
    - Harbor project: `<project>`
    - Harbor repository: `<harbor-repository>` (the image name within the project; UNVERIFIED: confirm how Harbor displays this name in your version UI)
@@ -153,6 +153,34 @@ These steps are for the first run and for each user. The first local account you
 6. **SARIF category:** HarborGate sets the SARIF category to the Harbor repository name automatically, so each image's results stay separate in the Security tab. You do not configure the category.
 
 Each user sees only their own credentials and mappings. Admins can view all of them read-only.
+
+## Single sign-on (OIDC), optional
+
+You can sign in to HarborGate through an OpenID Connect (OIDC) provider instead of, or as well as, local accounts. This section is optional. Skip it if you use local accounts only.
+
+1. **Register HarborGate with your provider.** In your identity provider, create an OIDC client for HarborGate. Register this redirect URI:
+
+   ```text
+   https://<your-host>/api/v1/auth/oidc/callback
+   ```
+
+   Replace `<your-host>` with the host name that users open in the browser. Note the client ID and client secret the provider gives you.
+
+   UNVERIFIED: the client type, grant settings, and the steps to create the client differ by provider. Confirm them in your provider's documentation.
+
+2. **Enter the settings in HarborGate.** Sign in as an admin, open **Admin > Settings**, and fill in the OIDC section:
+   - **Issuer URL:** `<issuer-url>`. It must use `https://`.
+   - **Client ID:** `<client-id>`.
+   - **Client secret:** `<client-secret>`. HarborGate stores it encrypted and never shows it again.
+   - **Role claim:** the name of the token claim that lists the user's groups (for example `groups`). UNVERIFIED: the claim name depends on your provider. Confirm it in your provider's documentation.
+   - **Admin group:** the group value that gives the `Admin` role.
+   - **User group:** the group value that gives the `User` role.
+
+3. **Put users in the groups.** In your provider, add each user to the admin group or the user group. UNVERIFIED: how to add group membership, and how to include the groups claim in the ID token, differ by provider. Confirm this in your provider's documentation. A user who is in neither group cannot sign in.
+
+4. **Sign in.** Users open HarborGate and choose the OIDC sign-in option. HarborGate creates the account on the user's first successful sign-in. The role comes from the group claim, and HarborGate checks it again on every sign-in. If you move a user to another group, the new role applies at that user's next sign-in.
+
+Keep at least one local admin account as a break-glass login. Local login stays available for admins if the provider is unavailable or misconfigured.
 
 ## 6. OCI Labels on Images
 
@@ -176,7 +204,7 @@ Check each item before you rely on the setup:
 
 - [ ] The Harbor test in HarborGate is green.
 - [ ] The GitHub test in HarborGate is green.
-- [ ] Pushing a test image to the mapped Harbor project triggers a sync after Harbor finishes its scan. The sync appears in the sync logs with status `success`.
+- [ ] Pushing a test image to the mapped Harbor project triggers a sync after Harbor finishes its scan. The sync appears in the sync logs with status `done`.
 - [ ] The SARIF result appears in the repository's **Security > Code scanning** tab.
 - [ ] If auto-issues are on, an issue appears for a `CRITICAL` or `HIGH` finding (based on the severity threshold), and only one open issue exists per CVE per repository.
 - [ ] Lower-severity findings do not create issues.
@@ -199,7 +227,7 @@ Check each item before you rely on the setup:
 
 - To stop HarborGate from reading from Harbor, delete the robot account in Harbor.
 - To stop HarborGate from writing to GitHub, revoke the token in GitHub (**Settings > Developer settings > Personal access tokens**).
-- After revocation, new syncs fail. Each failure appears in the admin **Failed Syncs** view with the error message. Fix the credential and use the retry action, or remove the mapping.
+- After revocation, new syncs fail. Each failure appears in the admin **Failed syncs** view with the error message. Fix the credential and use the retry action, or remove the mapping.
 
 ## 9. Troubleshooting
 
@@ -209,6 +237,6 @@ Check each item before you rely on the setup:
 | 403 from GitHub on SARIF upload | Token is missing the Code scanning alerts permission, or the repository is not selected for the token | Edit the token in GitHub to grant Code scanning alerts (read and write) and select the repository. |
 | 404 from GitHub | GitHub repository name or owner is wrong, or the token is not scoped to the repository | Check the mapping's owner and repo name. Confirm the token's repository access includes the repo. |
 | Sync failed: missing SHA label | The image has no `org.opencontainers.image.revision` label | Add the label at build time (section 6) and push the image again. |
-| No webhook triggers | Webhook event is not "Scan completed", or the URL token does not match the mapping | Edit the Harbor webhook so it subscribes only to Scan completed, and confirm the URL contains the mapping's token. |
+| No webhook triggers | Webhook event is not "Scan completed", or the webhook token does not match the mapping | Edit the Harbor webhook so it subscribes only to Scan completed, and confirm the URL contains the mapping's token. |
 | Issue not created | Severity is below the threshold, the CVE is accepted on the mapping, or auto-issues is off | Check the mapping's minimum severity and auto-issues setting. Check the CVE's acceptance status. |
-| Webhook returns 401 or 403 | Auth header missing or wrong | Compare the header name and value in Harbor with the HarborGate mapping screen; rotate the value if it was exposed. |
+| Webhook returns 401 | Authorization header missing or wrong | Compare the Auth Header value in Harbor (`Bearer <webhook-secret>`) with the HarborGate mapping screen; rotate the value if it was exposed. |

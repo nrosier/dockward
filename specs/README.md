@@ -6,6 +6,7 @@ Index of the detailed build specifications. CLAUDE.md is the general guide; this
 
 - [architecture.md](architecture.md) - Overview, components, data flow, single-instance decision, tech stack.
 - [database.md](database.md) - Schema reference (`migrations/0001_init.sql`) and table decisions.
+- [api.md](api.md) - HTTP route contract: every route, auth level, request and response shape, status codes, error envelope, pagination. PROPOSED, awaiting approval.
 - [backend.md](backend.md) - Modules, services, durable job queue, error handling, dev rules.
 - [security.md](security.md) - Encryption, key handling and rotation, backup and restore, auth, sessions, hardening, tenancy, GitHub token scope.
 - [integrations.md](integrations.md) - Harbor webhook, Harbor API, polling, GitHub SARIF upload, GitHub issues, OCI labels.
@@ -18,5 +19,5 @@ Index of the detailed build specifications. CLAUDE.md is the general guide; this
 ## Rules
 
 - CLAUDE.md is the general guide. specs/ holds the detail.
-- Decisions not yet made are marked `OPEN:` with the question. Do not decide them silently.
+- Open items are marked OPEN: (unresolved questions) and PROPOSED: (awaiting approval). Do not decide them silently.
 - Contradictions between files are recorded as `CONFLICT:` until the user resolves them.

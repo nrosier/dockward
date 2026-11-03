@@ -22,7 +22,7 @@ Read `/Users/nrosier/Development/harborgate/CLAUDE.md` before any review. Follow
    - Role/group claim mapping cannot be spoofed by unvalidated claims.
 4. **JWT cookie flags**: `HttpOnly`, `Secure` (when served over HTTPS), and an appropriate `SameSite` value. Check expiry is set.
 5. **Secret leakage**: GitHub PATs, Harbor robot tokens, OIDC client secrets, and AES keys must never appear in log statements, `tracing` fields, error bodies, `Debug` output, or SSE streams. Grep for log macros and SSE emitters near credential identifiers.
-6. **Webhook URL tokens (D2)**: the `:mapping_token` path segment of `/api/v1/webhooks/harbor/:mapping_token` must not appear in logs or traces. Check access-log, request-span, and `tracing` fields for redaction or omission. Webhook auth is the URL token only; flag any header or HMAC auth added in its place.
+6. **Webhook auth (D2)**: the `:mapping_token` path segment of `/api/v1/webhooks/harbor/:mapping_token` must not appear in logs or traces. Check access-log, request-span, and `tracing` fields for redaction or omission. Webhooks must carry both the URL token and a shared secret per mapping, sent by Harbor as the `Authorization: Bearer <secret>` header (see `specs/integrations.md`). Check that the secret is compared as the Authorization Bearer value, not a custom header, in constant time. Flag any webhook path that accepts a request without both, and flag any log or trace that contains either value.
 
 ## Method
 - Start with `grep` for crypto and auth identifiers (`Aes256Gcm`, `Nonce`, `argon2`, `openidconnect`, `state`, `nonce`, `Set-Cookie`, `HttpOnly`, `HARBORGATE_ENCRYPTION_KEY`, `master.key`, `mapping_token`, `tracing::`, `info!`, `debug!`, `error!`).

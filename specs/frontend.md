@@ -33,8 +33,9 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 - Mappings: create, edit, and show the webhook URL.
 - CVEs: list, and a per-CVE view.
 - Sync jobs: sync history and failures. Replaces a separate Logs page.
-- Admin (admins only): four tabs, see below.
+- Admin (admins only): five tabs, see below.
 - Account: profile, credentials, theme, language. Replaces a separate Settings page.
+- Decided (2026-11-03): theme and language preferences are stored in the browser (`localStorage`), not on the server. No server route or `users` column holds them.
 - Login: outside the shell, shown before authentication.
 - Scope: all pages above are in the first release.
 
@@ -50,7 +51,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
   - GitHub target: GitHub owner, GitHub repository, default branch.
   - Issues: auto-create issues on or off, minimum severity.
 - Actions: Cancel and Save mapping.
-- Duplicate target: shows an inline error under the GitHub repository field: "Already used by mapping <name>. Choose another repository or branch." Save is blocked until the target changes.
+- Duplicate target: shows an inline error under the GitHub repository field: "Already used by mapping <name>. Choose another repository." Save is blocked until the target changes.
 - The app never moves a target from one mapping to another.
 
 ## Settings rows (decided)
@@ -63,16 +64,23 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 
 - A detail page for one CVE, linkable by URL.
 - Header: CVE id, severity pill, status pill, package, first seen date, link to the GitHub issue, and an "Accept risk" action.
+- Decided (2026-11-03): the manual-issue button sits in this header, next to the GitHub issue link. It calls `POST /api/v1/cves/{id}/issue`.
 - Below the header: a table with one row per tracked tag (up to 10). Columns: tag, status, last scan date, fixed-in version when known.
 
 ## Admin (decided)
 
 - One Admin entry in the rail, shown to admins only.
-- Four tabs:
+- Five tabs:
   - Jobs: housekeeping and sync jobs, with counts and errors. Includes cleanup and retention runs and polling runs.
   - Failed syncs: error message and a retry action.
   - Audit log: admin actions such as user create and delete, role changes, OIDC config changes, credential rotation.
-  - Health: Harbor and GitHub reachability, token expiry, missing scopes, robot account expiry date with a warning before it lapses.
+  - Health: Harbor and GitHub reachability, token expiry, missing scopes, robot account expiry date with a warning 14 days before it lapses (Decided 2026-11-03, see [integrations.md](integrations.md)).
+  - Settings (OIDC, Users, Alerts, Backup and restore): sections for the OIDC, Users, Alerts, and Backup and restore screens.
+- Decided (2026-11-03): Settings is the fifth tab, after Health. It holds the OIDC, Users, Alerts, and Backup and restore screens. Admin stays a single rail entry.
+- Settings > OIDC (decided 2026-11-03): OIDC settings and the toggle that restricts regular users to OIDC are managed here, stored encrypted (client secret AES-256-GCM), and every change is audited as `oidc.config_change`. Break-glass is always available to admins while no OIDC provider is configured; the toggle restricts regular users to OIDC, and admin break-glass always remains available. See [security.md](security.md).
+- Settings > Users (decided 2026-11-03): an admin can create a local user (username, email, password, role; the password must be at least 15 characters and at most 64), change a user's role, and delete a user. OIDC users appear in the list after their first login. They are not created from this screen.
+- Setup page (first-run, not a Settings screen): shown only while no users exist. Its design needs user approval before build.
+- Design before build: the screen designs for the four Settings sections need user approval before implementation.
 
 ## Visual direction (decided)
 
@@ -105,6 +113,6 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 ## i18n
 
 - English only in v1.
-- All user-visible text lives in a string catalog file (for example `frontend/src/i18n/en.json`, or an equivalent). Strings are never hard-coded in components.
+- All user-visible text lives in a string catalog file. Strings are never hard-coded in components.
+- Decided (2026-11-03): the catalog is one English file, `frontend/src/i18n/en.json`. A future language is a sibling file (for example `frontend/src/i18n/nl.json`). No per-area catalog folders.
 - Adding a language later is a translation task.
-- OPEN: the exact catalog path is an example. Confirm the final path when the frontend is set up.

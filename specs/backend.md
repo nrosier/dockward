@@ -31,6 +31,9 @@ The current `backend/src/main.rs` is the only implemented file. Treat the layout
 - Decided: 2026-11-02. A job left in `running` at startup is re-queued: `status` is set back to `queued` and `attempts` is unchanged.
 - `sync_jobs.payload` contains the validated event only. No tokens or header secrets.
 - Retry state is held in `attempts`, `next_attempt_at`, and `last_error`.
+- PROPOSED: retry constants: base delay 30 seconds, doubling after each failed attempt (30 s, 60 s, 120 s, and so on), capped at 1 hour, at most 8 attempts, then `status` is `failed`. PROPOSED: no external source; tune in deployment.
+- PROPOSED: after failure number n (n = attempts, counted after the failure), `next_attempt_at` = now + min(30 s x 2^(n-1), 1 hour) while n < 8. Delays after failures 1 to 7 are 30 s, 60 s, 120 s, 240 s, 480 s, 960 s, and 1920 s. The 8th failure sets `status` to `failed` and schedules nothing. The 1-hour cap therefore does not apply under the 8-attempt limit; it stays as a guard if the limit changes.
+- PROPOSED: manual retry (`POST /api/v1/sync-jobs/:id/retry`) sets `status` to `queued`, resets `attempts` to 0, clears `last_error`, and sets `next_attempt_at` to now. See [api.md](api.md).
 
 ## Error handling
 
