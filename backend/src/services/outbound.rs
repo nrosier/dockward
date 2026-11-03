@@ -78,16 +78,39 @@ fn is_blocked_v4(ip: Ipv4Addr) -> bool {
         || o[0] == 10                          // 10.0.0.0/8 private
         || (o[0] == 172 && (16..=31).contains(&o[1])) // 172.16.0.0/12 private
         || (o[0] == 192 && o[1] == 168)        // 192.168.0.0/16 private
-        || (224..=239).contains(&o[0]) // 224.0.0.0/4 multicast
+        || (o[0] == 100 && (64..=127).contains(&o[1])) // 100.64.0.0/10 shared address space (RFC 6598)
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0)     // 192.0.0.0/24 IETF protocol assignments (RFC 6890)
+        || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) // 198.18.0.0/15 benchmarking (RFC 2544)
+        || (224..=239).contains(&o[0])         // 224.0.0.0/4 multicast
+        || o[0] >= 240 // 240.0.0.0/4 reserved (RFC 1112), includes 255.255.255.255
 }
 
 fn is_blocked_v6(ip: Ipv6Addr) -> bool {
     let s = ip.segments();
+    // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052): judge the embedded IPv4 address.
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 {
+        return is_blocked_v4(embedded_v4(s[6], s[7]));
+    }
+    // Local-use NAT64 prefix 64:ff9b:1::/48 (RFC 8215): blocked entirely.
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0x0001 {
+        return true;
+    }
+    // 6to4 prefix 2002::/16 (RFC 3056): judge the embedded IPv4 address in segments 1 and 2.
+    if s[0] == 0x2002 {
+        return is_blocked_v4(embedded_v4(s[1], s[2]));
+    }
     ip.is_unspecified()                        // ::
         || ip.is_loopback()                    // ::1
         || (s[0] & 0xffc0) == 0xfe80           // fe80::/10 link-local
         || (s[0] & 0xfe00) == 0xfc00           // fc00::/7 unique local (private)
         || (s[0] & 0xff00) == 0xff00 // ff00::/8 multicast
+}
+
+/// Builds the IPv4 address held in two IPv6 segments, high half first.
+fn embedded_v4(high: u16, low: u16) -> Ipv4Addr {
+    let [a, b] = high.to_be_bytes();
+    let [c, d] = low.to_be_bytes();
+    Ipv4Addr::new(a, b, c, d)
 }
 
 /// Filters the resolved addresses. Returns the allowed addresses, or an error when
@@ -176,7 +199,11 @@ fn build(
         class,
         allow_private,
     };
+    // `no_proxy()` stops reqwest from reading HTTP_PROXY, HTTPS_PROXY and ALL_PROXY. A proxy
+    // would resolve the target host itself, and the guarded resolver would check only the
+    // proxy's address.
     let mut builder = reqwest::Client::builder()
+        .no_proxy()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
         .dns_resolver(Arc::new(resolver))
@@ -415,6 +442,77 @@ mod tests {
         let url = reqwest::Url::parse("http://example.com/").unwrap();
         assert_eq!(client.get(&url).err(), Some(OutboundError::NotHttps));
     }
+
+    #[test]
+    fn cgnat_and_reserved_ipv4_ranges_are_blocked() {
+        for ip in [
+            "100.64.0.1",      // 100.64.0.0/10 shared address space (RFC 6598), first address
+            "100.127.255.254", // 100.64.0.0/10, last address
+            "192.0.0.8",       // 192.0.0.0/24 IETF protocol assignments (RFC 6890)
+            "198.18.0.1",      // 198.18.0.0/15 benchmarking (RFC 2544), first address
+            "198.19.255.254",  // 198.18.0.0/15, last address
+            "240.0.0.1",       // 240.0.0.0/4 reserved (RFC 1112)
+            "255.255.255.255", // limited broadcast, inside 240.0.0.0/4
+        ] {
+            assert!(is_blocked(v4(ip)), "{ip} should be blocked");
+        }
+        // The edges of each range stay allowed, so the ranges are not wider than the RFCs.
+        for ip in [
+            "100.63.255.255",
+            "100.128.0.0",
+            "192.0.1.1",
+            "198.17.255.255",
+            "198.20.0.1",
+        ] {
+            assert!(!is_blocked(v4(ip)), "{ip} should be allowed");
+        }
+    }
+
+    #[test]
+    fn nat64_embedded_address_is_judged_as_ipv4() {
+        // 64:ff9b::/96 carries the IPv4 address in the last 32 bits (RFC 6052).
+        for ip in [
+            "64:ff9b::7f00:1",    // 127.0.0.1
+            "64:ff9b::a00:1",     // 10.0.0.1
+            "64:ff9b::6440:1",    // 100.64.0.1
+            "64:ff9b::a9fe:a9fe", // 169.254.169.254, cloud metadata
+            "64:ff9b::",          // 0.0.0.0
+        ] {
+            assert!(is_blocked(v4(ip)), "{ip} should be blocked");
+        }
+    }
+
+    #[test]
+    fn local_use_nat64_prefix_is_blocked() {
+        // 64:ff9b:1::/48 is local-use NAT64 (RFC 8215). It is blocked whatever it embeds.
+        for ip in [
+            "64:ff9b:1::1",
+            "64:ff9b:1:ffff::8",
+            "64:ff9b:1::808:808", // embeds a public address, still blocked
+        ] {
+            assert!(is_blocked(v4(ip)), "{ip} should be blocked");
+        }
+    }
+
+    #[test]
+    fn six_to_four_embedded_address_is_judged_as_ipv4() {
+        // 2002::/16 carries the IPv4 address in segments 1 and 2 (RFC 3056).
+        for ip in [
+            "2002:7f00:1::1",    // 127.0.0.1
+            "2002:a9fe:a9fe::1", // 169.254.169.254
+            "2002:a00:1::1",     // 10.0.0.1
+        ] {
+            assert!(is_blocked(v4(ip)), "{ip} should be blocked");
+        }
+    }
+
+    #[test]
+    fn public_nat64_and_6to4_addresses_are_allowed() {
+        // Both embed 8.8.8.8, a public address, so both are allowed.
+        for ip in ["64:ff9b::808:808", "2002:808:808::1"] {
+            assert!(!is_blocked(v4(ip)), "{ip} should be allowed");
+        }
+    }
 }
 
 /// Live-socket tests. Each one runs a loopback TLS server with a generated test
@@ -576,6 +674,62 @@ pub(crate) mod socket_tests {
                 check_target(&url, TargetClass::Oidc, false).is_err(),
                 "{raw} should be refused by default"
             );
+        }
+    }
+
+    /// Serialises the tests that change process environment variables. In edition 2024,
+    /// `set_var` is unsafe because another thread may read the environment at the same time.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn environment_proxy_is_ignored() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        // A listener stands in for a proxy. Any connection to it shows the proxy was used.
+        let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(listener) => listener,
+            Err(err) => panic!("loopback bind failed: {err}"),
+        };
+        let port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(err) => panic!("loopback address unavailable: {err}"),
+        };
+        if let Err(err) = listener.set_nonblocking(true) {
+            panic!("could not make the listener non-blocking: {err}");
+        }
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => panic!("test runtime failed to start: {err}"),
+        };
+        let url = match reqwest::Url::parse("https://example.invalid/") {
+            Ok(url) => url,
+            Err(err) => panic!("test URL rejected: {err}"),
+        };
+
+        // SAFETY: the ENV_LOCK guard above serialises environment access in this test
+        // binary, so no other test reads or writes HTTPS_PROXY while it is set.
+        unsafe { std::env::set_var("HTTPS_PROXY", format!("http://127.0.0.1:{port}")) };
+        // The client is built inside the runtime, because reqwest needs a Tokio reactor.
+        let outcome = runtime.block_on(async {
+            let client = client(TargetClass::Alerts, false)?;
+            let builder = client.get(&url)?;
+            Ok::<_, OutboundError>(builder.send().await)
+        });
+        // SAFETY: as above. The lock is still held, so the variable is removed before
+        // any assertion can panic.
+        unsafe { std::env::remove_var("HTTPS_PROXY") };
+
+        let failed = match outcome {
+            Ok(sent) => sent.is_err(),
+            Err(err) => panic!("guarded request was refused before sending: {err}"),
+        };
+        assert!(failed, "example.invalid must not be reachable");
+        match listener.accept() {
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(_) => panic!("the request went to the HTTPS_PROXY address"),
+            Err(err) => panic!("listener accept failed: {err}"),
         }
     }
 }
