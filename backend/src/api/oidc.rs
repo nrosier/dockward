@@ -84,7 +84,12 @@ pub struct CallbackQuery {
 
 /// The redirect URI sent to the provider. It is built from `HARBORGATE_PUBLIC_URL`.
 fn redirect_uri(state: &AppState) -> String {
-    format!("{}/api/v1/auth/oidc/callback", state.public_url)
+    redirect_uri_for(&state.public_url)
+}
+
+/// The callback URL for a public origin. Split out so the test can assert the value.
+fn redirect_uri_for(public_url: &str) -> String {
+    format!("{public_url}/api/v1/auth/oidc/callback")
 }
 
 /// `GET /api/v1/auth/oidc/start`. Redirects to the issuer and sets the sign-in cookie.
@@ -271,6 +276,80 @@ mod tests {
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(json["oidc_enabled"], serde_json::Value::Bool(false));
+    }
+
+    /// Inserts a local admin directly and returns the cookie header and a matching CSRF
+    /// header value. Test values only.
+    async fn admin_cookies(pool: &sqlx::SqlitePool) -> (String, String) {
+        let root = parse_encryption_key(TEST_KEY_B64).unwrap();
+        let inserted = crate::db::setup::insert_first_admin(
+            pool,
+            "admin-test-id",
+            "admin",
+            None,
+            "not-a-real-hash",
+        )
+        .await
+        .unwrap();
+        assert!(inserted, "the first admin should be inserted");
+        let session_key = crypto::session_key(&root).unwrap();
+        let csrf_key = crypto::csrf_key(&root).unwrap();
+        let now = crate::auth::session::now_unix().unwrap();
+        let token =
+            crate::auth::session::issue(&session_key, "admin-test-id", "admin", 0, now).unwrap();
+        let csrf_value = crate::auth::csrf::issue(&csrf_key).unwrap();
+        (
+            format!("__Host-harborgate_session={token}; __Host-harborgate_csrf={csrf_value}"),
+            csrf_value,
+        )
+    }
+
+    #[tokio::test]
+    async fn put_oidc_only_with_incomplete_settings_is_422() {
+        let (router, pool, dir) = router("put-422").await;
+        let (cookies, csrf) = admin_cookies(&pool).await;
+        // Issuer and client ID are set, but there is no secret, role claim, or group.
+        let body = serde_json::json!({
+            "issuer_url": "https://issuer.example.com",
+            "client_id": "harborgate-test",
+            "oidc_only_users": true,
+        });
+        let request = peer(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/admin/oidc")
+                .header("content-type", "application/json")
+                .header("cookie", cookies)
+                .header("x-csrf-token", csrf),
+        )
+        .body(Body::from(body.to_string()))
+        .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let stored = crate::db::config::get(&pool, crate::services::oidc::ONLY_USERS_KEY)
+            .await
+            .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            stored, None,
+            "a refused save must not enable OIDC-only login"
+        );
+    }
+
+    #[test]
+    fn redirect_uri_is_built_from_the_public_url() {
+        // `config` strips the trailing slash from HARBORGATE_PUBLIC_URL before it reaches
+        // AppState, so the redirect URI is the origin plus the callback path.
+        assert_eq!(
+            super::redirect_uri_for("https://harborgate.example.com"),
+            "https://harborgate.example.com/api/v1/auth/oidc/callback"
+        );
+        assert_eq!(
+            super::redirect_uri_for("http://localhost:8080"),
+            "http://localhost:8080/api/v1/auth/oidc/callback"
+        );
     }
 
     #[test]
