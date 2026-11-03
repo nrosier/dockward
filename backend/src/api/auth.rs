@@ -1,6 +1,8 @@
 //! Authentication extractor and the logout routes. Sources: `specs/api.md` (Auth),
 //! `specs/security.md` (Sessions).
 
+use std::fmt;
+
 use axum::{
     Json,
     extract::{FromRequestParts, State},
@@ -76,17 +78,38 @@ fn cleared(status: StatusCode) -> Response {
     response
 }
 
-#[derive(Debug, Deserialize)]
+const REDACTED: &str = "<redacted>";
+
+#[derive(Deserialize)]
 pub struct SetupBody {
     pub username: String,
     pub email: Option<String>,
     pub password: String,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for SetupBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SetupBody")
+            .field("username", &self.username)
+            .field("email", &self.email)
+            .field("password", &REDACTED)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 pub struct LoginBody {
     pub username: String,
     pub password: String,
+}
+
+impl fmt::Debug for LoginBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LoginBody")
+            .field("username", &self.username)
+            .field("password", &REDACTED)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -266,4 +289,39 @@ pub async fn account_password(
     )?;
     *response.body_mut() = axum::body::Body::empty();
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_body_debug_redacts_password() {
+        let body = SetupBody {
+            username: "fake-admin".to_owned(),
+            email: Some("fake@example.test".to_owned()),
+            password: "FAKE_PASSWORD_SETUP_1".to_owned(),
+        };
+        let out = format!("{body:?}");
+        assert!(
+            !out.contains("FAKE_PASSWORD_SETUP_1"),
+            "password leaked: {out}"
+        );
+        assert!(out.contains("fake-admin"), "username missing: {out}");
+        assert!(out.contains("fake@example.test"), "email missing: {out}");
+    }
+
+    #[test]
+    fn login_body_debug_redacts_password() {
+        let body = LoginBody {
+            username: "fake-user".to_owned(),
+            password: "FAKE_PASSWORD_LOGIN_1".to_owned(),
+        };
+        let out = format!("{body:?}");
+        assert!(
+            !out.contains("FAKE_PASSWORD_LOGIN_1"),
+            "password leaked: {out}"
+        );
+        assert!(out.contains("fake-user"), "username missing: {out}");
+    }
 }

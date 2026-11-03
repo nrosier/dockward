@@ -1,6 +1,8 @@
 //! Admin routes. Every handler takes `AdminUser`, so a non-admin gets `403` and a
 //! missing or invalid session gets `401`.
 
+use std::fmt;
+
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -47,12 +49,25 @@ pub async fn audit_log(
 }
 
 /// Body for `POST /api/v1/admin/users`. Local accounts only.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CreateUserBody {
     pub username: String,
     pub email: Option<String>,
     pub password: String,
     pub role: String,
+}
+
+const REDACTED: &str = "<redacted>";
+
+impl fmt::Debug for CreateUserBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CreateUserBody")
+            .field("username", &self.username)
+            .field("email", &self.email)
+            .field("password", &REDACTED)
+            .field("role", &self.role)
+            .finish()
+    }
 }
 
 /// Body for `PUT /api/v1/admin/users/:id/role`.
@@ -139,4 +154,27 @@ pub async fn set_role(
         .await?
         .ok_or(AppError::NotFound)?;
     Ok(Json(User::try_from(row)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_user_body_debug_redacts_password() {
+        let body = CreateUserBody {
+            username: "fake-new-user".to_owned(),
+            email: Some("new@example.test".to_owned()),
+            password: "FAKE_PASSWORD_CREATE_1".to_owned(),
+            role: "user".to_owned(),
+        };
+        let out = format!("{body:?}");
+        assert!(
+            !out.contains("FAKE_PASSWORD_CREATE_1"),
+            "password leaked: {out}"
+        );
+        assert!(out.contains("fake-new-user"), "username missing: {out}");
+        assert!(out.contains("new@example.test"), "email missing: {out}");
+        assert!(out.contains("user"), "role missing: {out}");
+    }
 }
