@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"mapping_id!\", user_id AS \"user_id!\",\n                  github_cred_id AS \"github_cred_id!\", github_owner AS \"github_owner!\",\n                  github_repo AS \"github_repo!\"\n           FROM repo_mappings\n           ORDER BY github_owner, github_repo",
+  "describe": {
+    "columns": [
+      {
+        "name": "mapping_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "user_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "github_cred_id!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "github_cred_id"
+          }
+        }
+      },
+      {
+        "name": "github_owner!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "github_owner"
+          }
+        }
+      },
+      {
+        "name": "github_repo!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "github_repo"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "81dd35420f0f58d1b446564ea9c1c89158b6883ec035043ea5ad4d91752e9e35"
+}

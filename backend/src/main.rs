@@ -87,6 +87,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             post(api::webhooks::receive),
         )
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
+        .route("/api/v1/admin/health", get(api::admin::health))
         .route(
             "/api/v1/admin/oidc",
             get(api::oidc::get_settings).put(api::oidc::put_settings),

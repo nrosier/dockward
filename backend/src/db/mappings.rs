@@ -311,6 +311,33 @@ pub async fn count_owned(pool: &SqlitePool, user_id: Option<&str>) -> Result<i64
     Ok(row.n)
 }
 
+/// The fields the admin health route needs from one mapping: its owner, its GitHub
+/// credential, and its GitHub target. No Harbor or token material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetRow {
+    pub mapping_id: String,
+    pub user_id: String,
+    pub github_cred_id: String,
+    pub github_owner: String,
+    pub github_repo: String,
+}
+
+/// Every mapping, ordered by GitHub owner and repository. Only the admin health route
+/// reads it, one check per mapping target (`specs/api.md`, Health).
+pub async fn all_targets(pool: &SqlitePool) -> Result<Vec<TargetRow>, AppError> {
+    sqlx::query_as!(
+        TargetRow,
+        r#"SELECT id AS "mapping_id!", user_id AS "user_id!",
+                  github_cred_id AS "github_cred_id!", github_owner AS "github_owner!",
+                  github_repo AS "github_repo!"
+           FROM repo_mappings
+           ORDER BY github_owner, github_repo"#
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
 /// Reads one mapping by id with no owner check. Only the webhook path uses it, after the
 /// token digest has selected the mapping.
 pub async fn find_by_id(

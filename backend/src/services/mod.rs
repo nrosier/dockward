@@ -12,6 +12,7 @@ pub mod credentials;
 pub mod harbor_client;
 #[allow(dead_code)] // Used by the webhook route.
 pub mod harbor_webhook;
+pub mod health;
 #[allow(dead_code)] // Used by the admin routes and the auth paths added in later issues.
 pub mod ids;
 #[allow(dead_code)] // Used by the mapping routes.

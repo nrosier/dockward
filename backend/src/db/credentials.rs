@@ -205,6 +205,23 @@ pub async fn list_owned(
     .map_err(|_| AppError::InternalError)
 }
 
+/// Every Harbor credential of every user, soonest expiry first, with no expiry last.
+/// Only the admin health route reads it (`specs/api.md`, Health).
+pub async fn all_harbor(pool: &SqlitePool) -> Result<Vec<CredentialRow>, AppError> {
+    sqlx::query_as!(
+        CredentialRow,
+        r#"SELECT id AS "id!", service_type AS "service_type!", label AS "label!",
+                  base_url, username, encrypted_token AS "encrypted_token!",
+                  expires_at, created_at
+           FROM user_credentials
+           WHERE service_type = 'harbor'
+           ORDER BY expires_at IS NULL, expires_at, label"#
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
 /// Counts credentials for the same filter as [`list_owned`].
 pub async fn count_owned(
     pool: &SqlitePool,
