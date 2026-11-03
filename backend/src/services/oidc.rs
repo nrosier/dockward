@@ -403,7 +403,7 @@ pub async fn begin_login<P: Provider>(
 }
 
 /// The inputs the callback needs from the request and the settings.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Callback<'a> {
     /// The `__Host-harborgate_oidc` cookie value, when present.
     pub cookie: Option<&'a str>,
@@ -414,6 +414,18 @@ pub struct Callback<'a> {
     pub redirect_uri: &'a str,
     /// The decrypted client secret. It is used only for the token request.
     pub client_secret: &'a str,
+}
+
+impl fmt::Debug for Callback<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Callback")
+            .field("cookie", &REDACTED)
+            .field("state", &REDACTED)
+            .field("code", &REDACTED)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("client_secret", &REDACTED)
+            .finish()
+    }
 }
 
 /// Completes a sign-in. Order: the cookie must parse, `state` must equal the cookie
@@ -729,6 +741,32 @@ mod tests {
             );
         }
         assert!(pending_text.contains("<redacted>"));
+    }
+
+    #[test]
+    fn callback_debug_output_redacts_secret_code_and_cookie() {
+        // Fixed fake values. Nothing here is a real credential.
+        const FAKE_SECRET: &str = "fake-client-secret-value";
+        const FAKE_CODE: &str = "fake-auth-code-value";
+        const FAKE_COOKIE: &str = "fake-cookie-value";
+        const FAKE_STATE: &str = "fake-state-value";
+
+        let callback = Callback {
+            cookie: Some(FAKE_COOKIE),
+            state: FAKE_STATE,
+            code: FAKE_CODE,
+            redirect_uri: "https://harbor.example.com/auth/oidc/callback",
+            client_secret: FAKE_SECRET,
+        };
+        let text = format!("{callback:?}");
+        for secret in [FAKE_SECRET, FAKE_CODE, FAKE_COOKIE, FAKE_STATE] {
+            assert!(
+                !text.contains(secret),
+                "Callback Debug output leaked a secret"
+            );
+        }
+        assert!(text.contains("<redacted>"));
+        assert!(text.contains("https://harbor.example.com/auth/oidc/callback"));
     }
 
     #[test]
