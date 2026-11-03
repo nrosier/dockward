@@ -7,6 +7,7 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::watch;
 
 mod api;
+#[allow(dead_code)] // Used by the login and encryption paths in later issues.
 mod auth;
 mod config;
 mod db;
