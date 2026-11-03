@@ -10,3 +10,5 @@ pub mod mappings;
 pub mod oidc;
 #[allow(dead_code)] // Shared by the extractor and the routes.
 pub mod state;
+#[allow(dead_code)] // The sync job routes are mounted by the app router.
+pub mod sync_jobs;
