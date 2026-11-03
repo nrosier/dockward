@@ -215,12 +215,6 @@ mod tests {
     use super::*;
     use crate::db::credentials::CredentialRow;
 
-    /// A fresh random test value. Generated at runtime so no secret-like literal is
-    /// hard-coded in the source.
-    fn runtime_value(prefix: &str) -> String {
-        format!("{prefix}-{}", crate::services::ids::new_id())
-    }
-
     /// A probe that returns a fixed status, so each Harbor response can be checked
     /// without a socket. The status values are the recorded Harbor responses.
     struct FixedStatus(u16);
@@ -253,7 +247,7 @@ mod tests {
         let encrypted = crate::auth::crypto::encrypt(
             key,
             &crate::auth::crypto::aad("user_credentials", "encrypted_token", "cred-1"),
-            runtime_value("test-robot").as_bytes(),
+            crate::services::ids::new_id().as_bytes(),
         )
         .unwrap();
         CredentialRow {
@@ -358,7 +352,7 @@ mod tests {
             &Actor::cli(),
             "owner",
             None,
-            &runtime_value("test-password"),
+            &crate::services::ids::new_id(),
             Role::User,
         )
         .await
@@ -377,7 +371,7 @@ mod tests {
                 label: "primary".to_owned(),
                 base_url: Some("https://harbor.example.com".to_owned()),
                 username: Some("robot$harborgate".to_owned()),
-                token: runtime_value("test-robot"),
+                token: crate::services::ids::new_id(),
                 expires_at: None,
             },
             false,
@@ -405,7 +399,7 @@ mod tests {
                 label: "gh".to_owned(),
                 base_url: None,
                 username: None,
-                token: runtime_value("test-github"),
+                token: crate::services::ids::new_id(),
                 expires_at: None,
             },
             false,
@@ -463,7 +457,7 @@ mod tests {
             &Actor::cli(),
             "owner",
             None,
-            &runtime_value("test-password"),
+            &crate::services::ids::new_id(),
             Role::User,
         )
         .await
@@ -479,7 +473,7 @@ mod tests {
                 "label": "primary",
                 "base_url": "https://harbor.example.com",
                 "username": "robot$harborgate",
-                "token": runtime_value("test-robot"),
+                "token": crate::services::ids::new_id(),
             })
             .to_string(),
         );
