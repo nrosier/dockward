@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO users (id, username, role, auth_provider, oidc_issuer, oidc_subject)\n             VALUES ('test-oidc-id', 'test-oidc', 'user', 'oidc', 'https://idp.example.test', 'test-sub')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "e5a516526151fbf09be499c7d014056f009bff4b09aba722ad5a41a51351ab17"
+}

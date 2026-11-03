@@ -14,6 +14,8 @@ pub mod sessions;
 pub mod throttle;
 #[allow(dead_code)] // Used by the user response shape.
 pub mod time;
+#[allow(dead_code)] // Used by the admin user routes.
+pub mod users;
 
 #[allow(dead_code)] // The Harbor, OIDC, and alert clients are built in later issues.
 pub mod outbound;

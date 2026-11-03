@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT role, auth_provider, username FROM users WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "role",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "name": "auth_provider",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "auth_provider"
+          }
+        }
+      },
+      {
+        "name": "username",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "username"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "16607cb5da25e3b484a11a0661fed083f014b6f17f89786ef0debd7c44d1fd49"
+}

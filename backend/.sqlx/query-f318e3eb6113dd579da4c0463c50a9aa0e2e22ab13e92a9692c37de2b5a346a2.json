@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_credentials (id, user_id, service_type, label, encrypted_token)\n             VALUES ('test-cred-g', ?, 'github', 'g', 'v1:test')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "f318e3eb6113dd579da4c0463c50a9aa0e2e22ab13e92a9692c37de2b5a346a2"
+}

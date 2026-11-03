@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n: i64\" FROM user_credentials",
+  "describe": {
+    "columns": [
+      {
+        "name": "n: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7dec135364cce57244f47d73eb0b4b2c66a3395609cce147845f73ffb37e338b"
+}

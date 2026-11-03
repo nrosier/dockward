@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n: i64\" FROM users WHERE role = 'admin' AND auth_provider = 'local'",
+  "describe": {
+    "columns": [
+      {
+        "name": "n: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8d2ab5a7b52f5f378544659bc620a39d8129324ac6a633e78e2787f42ba377b2"
+}

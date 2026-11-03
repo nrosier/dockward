@@ -47,6 +47,18 @@ fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppState) -> Route
         .route("/api/v1/auth/logout", post(api::auth::logout))
         .route("/api/v1/auth/logout-all", post(api::auth::logout_all))
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
+        .route(
+            "/api/v1/admin/users",
+            get(api::admin::list_users).post(api::admin::create_user),
+        )
+        .route(
+            "/api/v1/admin/users/{id}",
+            axum::routing::delete(api::admin::delete_user),
+        )
+        .route(
+            "/api/v1/admin/users/{id}/role",
+            axum::routing::put(api::admin::set_role),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::csrf::guard,

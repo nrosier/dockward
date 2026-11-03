@@ -93,3 +93,133 @@ pub async fn find_by_id(pool: &SqlitePool, user_id: &str) -> Result<Option<UserR
     .await
     .map_err(|_| AppError::InternalError)
 }
+
+/// Counts local admins. The last-local-admin rule uses this inside the write transaction.
+pub async fn count_local_admins(conn: &mut sqlx::SqliteConnection) -> Result<i64, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n: i64" FROM users WHERE role = 'admin' AND auth_provider = 'local'"#
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.n)
+}
+
+/// Reads one user's role and provider inside a transaction. `None` when the row is gone.
+pub async fn role_and_provider(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: &str,
+) -> Result<Option<(String, String, String)>, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT role, auth_provider, username FROM users WHERE id = ?"#,
+        user_id
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.map(|r| (r.role, r.auth_provider, r.username)))
+}
+
+/// Deletes a user's mappings. Step one of the user-deletion order in `specs/database.md`.
+pub async fn delete_mappings(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query!("DELETE FROM repo_mappings WHERE user_id = ?", user_id)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(|_| AppError::InternalError)
+}
+
+/// Deletes a user's credentials. Step two of the user-deletion order.
+pub async fn delete_credentials(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query!("DELETE FROM user_credentials WHERE user_id = ?", user_id)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(|_| AppError::InternalError)
+}
+
+/// Deletes the `users` row. Step three. Acceptances and audit rows keep their
+/// username snapshots, and their user references become NULL.
+pub async fn delete_user_row(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: &str,
+) -> Result<u64, AppError> {
+    sqlx::query!("DELETE FROM users WHERE id = ?", user_id)
+        .execute(&mut *conn)
+        .await
+        .map(|done| done.rows_affected())
+        .map_err(|_| AppError::InternalError)
+}
+
+/// Sets a user's role inside a transaction.
+pub async fn update_role(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: &str,
+    role: &str,
+) -> Result<(), AppError> {
+    sqlx::query!("UPDATE users SET role = ? WHERE id = ?", role, user_id)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(|_| AppError::InternalError)
+}
+
+/// Inserts a new local user. The caller has checked the password length.
+pub async fn insert_local(
+    conn: &mut sqlx::SqliteConnection,
+    id: &str,
+    username: &str,
+    email: Option<&str>,
+    password_hash: &str,
+    role: &str,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "INSERT INTO users (id, username, email, password_hash, role, auth_provider)
+         VALUES (?, ?, ?, ?, ?, 'local')",
+        id,
+        username,
+        email,
+        password_hash,
+        role
+    )
+    .execute(&mut *conn)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Finds a user by username inside a transaction. Used by the create check.
+pub async fn find_by_username_tx(
+    conn: &mut sqlx::SqliteConnection,
+    username: &str,
+) -> Result<Option<UserRow>, AppError> {
+    sqlx::query_as!(
+        UserRow,
+        r#"SELECT id AS "id!", username, email, password_hash, role,
+                  auth_provider, token_version, created_at
+           FROM users WHERE username = ?"#,
+        username
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Lists all users, oldest first. Used by the admin list route.
+pub async fn list_all(pool: &SqlitePool) -> Result<Vec<UserRow>, AppError> {
+    sqlx::query_as!(
+        UserRow,
+        r#"SELECT id AS "id!", username, email, password_hash, role,
+                  auth_provider, token_version, created_at
+           FROM users ORDER BY created_at, username"#
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
