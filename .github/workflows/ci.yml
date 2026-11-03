@@ -58,20 +58,17 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      # Prebuilt, checksum-verified binaries. Pinned to a commit SHA.
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2
+        with:
+          tool: cargo-audit,cargo-deny
 
       - name: Audit dependencies
         run: cargo audit --deny warnings
 
-      - name: Dependency policy (cargo-deny, only if deny.toml exists)
-        run: |
-          if [ -f deny.toml ]; then
-            cargo install cargo-deny --locked
-            cargo deny check
-          else
-            echo "deny.toml not present; skipping cargo deny"
-          fi
+      - name: Dependency policy (cargo-deny)
+        run: cargo deny check
 
   frontend:
     name: Frontend (audit, lint, build)
