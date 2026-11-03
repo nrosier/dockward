@@ -11,6 +11,7 @@ FROM rust:1.99.1-alpine AS backend
 WORKDIR /src/backend
 COPY backend/ ./
 COPY --from=frontend /build/dist /src/frontend/dist
+ENV SQLX_OFFLINE=true
 RUN cargo build --release --locked
 
 FROM alpine:3.20
