@@ -10,6 +10,8 @@
 //! - the token request authenticates with `client_secret_basic` (HTTP Basic);
 //! - the client secret is stored encrypted and is never returned by the API.
 
+use std::fmt;
+
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::jwk::JwkSet;
 use rand::RngCore;
@@ -125,8 +127,9 @@ pub trait Provider {
     ) -> Result<TokenResponse, AppError>;
 }
 
-/// The inputs to the token request.
-#[derive(Debug, Clone, Copy)]
+/// The inputs to the token request. `Debug` is hand-written so the client secret,
+/// the authorization code, and the PKCE verifier never reach a log or a trace.
+#[derive(Clone, Copy)]
 pub struct CodeExchange<'a> {
     pub client_id: &'a str,
     pub client_secret: &'a str,
@@ -135,11 +138,22 @@ pub struct CodeExchange<'a> {
     pub code_verifier: &'a str,
 }
 
+impl fmt::Debug for CodeExchange<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CodeExchange")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &REDACTED)
+            .field("code", &REDACTED)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("code_verifier", &REDACTED)
+            .finish()
+    }
+}
+
 /// The production provider, built on the guarded outbound client. Redirects are not
 /// followed and every connection re-checks the resolved address.
 pub struct HttpProvider {
-    client: reqwest::Client,
-    allow_private: bool,
+    client: outbound::OutboundClient,
 }
 
 impl HttpProvider {
@@ -149,27 +163,20 @@ impl HttpProvider {
     pub fn trusting(allow_private: bool, root: reqwest::Certificate) -> Result<Self, AppError> {
         let client = outbound::client_trusting(TargetClass::Oidc, allow_private, root)
             .map_err(|_| AppError::InternalError)?;
-        Ok(Self {
-            client,
-            allow_private,
-        })
+        Ok(Self { client })
     }
 
     pub fn new(allow_private: bool) -> Result<Self, AppError> {
         let client = outbound::client(TargetClass::Oidc, allow_private)
             .map_err(|_| AppError::InternalError)?;
-        Ok(Self {
-            client,
-            allow_private,
-        })
+        Ok(Self { client })
     }
 
     async fn get_json<T: for<'de> Deserialize<'de>>(&self, url: &Url) -> Result<T, AppError> {
-        outbound::check_target(url, TargetClass::Oidc, self.allow_private)
-            .map_err(|_| AppError::UpstreamUnreachable)?;
         let response = self
             .client
-            .get(url.as_str())
+            .get(url)
+            .map_err(|_| AppError::UpstreamUnreachable)?
             .send()
             .await
             .map_err(|_| AppError::UpstreamUnreachable)?;
@@ -200,11 +207,10 @@ impl Provider for HttpProvider {
         token_endpoint: &Url,
         request: &CodeExchange<'_>,
     ) -> Result<TokenResponse, AppError> {
-        outbound::check_target(token_endpoint, TargetClass::Oidc, self.allow_private)
-            .map_err(|_| AppError::UpstreamUnreachable)?;
         let response = self
             .client
-            .post(token_endpoint.as_str())
+            .post(token_endpoint)
+            .map_err(|_| AppError::UpstreamUnreachable)?
             .basic_auth(request.client_id, Some(request.client_secret))
             .form(&[
                 ("grant_type", "authorization_code"),
@@ -227,12 +233,25 @@ impl Provider for HttpProvider {
 
 /// The values for one sign-in attempt. They are kept in the `__Host-harborgate_oidc`
 /// cookie (`specs/security.md`, Sessions). Each is 32 random bytes, base64url.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Pending {
     pub state: String,
     pub nonce: String,
     pub verifier: String,
 }
+
+impl fmt::Debug for Pending {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Pending")
+            .field("state", &REDACTED)
+            .field("nonce", &REDACTED)
+            .field("verifier", &REDACTED)
+            .finish()
+    }
+}
+
+/// Placeholder printed in place of a secret-bearing field.
+const REDACTED: &str = "<redacted>";
 
 impl Pending {
     pub fn new() -> Self {
@@ -370,12 +389,13 @@ pub async fn free_username(
 /// pending values to store in the cookie.
 pub async fn begin_login<P: Provider>(
     provider: &P,
-    issuer: &Url,
+    issuer_raw: &str,
     client_id: &str,
     redirect_uri: &str,
 ) -> Result<(Url, Pending), AppError> {
-    let doc = provider.discovery(issuer).await?;
-    check_discovery(issuer, &doc)?;
+    let issuer = parse_issuer(issuer_raw)?;
+    let doc = provider.discovery(&issuer).await?;
+    check_discovery(issuer_raw, &doc)?;
     let endpoint = parse_endpoint(&doc.authorization_endpoint)?;
     let pending = Pending::new();
     let url = authorization_url(&endpoint, client_id, redirect_uri, &pending);
@@ -420,7 +440,7 @@ pub async fn complete_callback<P: Provider>(
     }
 
     let doc = provider.discovery(&issuer).await?;
-    check_discovery(&issuer, &doc)?;
+    check_discovery(&issuer_raw, &doc)?;
     let token_endpoint = parse_endpoint(&doc.token_endpoint)?;
     let jwks_uri = parse_endpoint(&doc.jwks_uri)?;
 
@@ -471,9 +491,10 @@ fn configured(settings: &OidcSettings) -> Result<(Url, &str, &str), AppError> {
     Ok((parse_issuer(issuer)?, client_id, role_claim))
 }
 
-/// The discovery issuer must equal the configured issuer exactly (OpenID Connect Discovery 4.3).
-fn check_discovery(issuer: &Url, doc: &Discovery) -> Result<(), AppError> {
-    if doc.issuer != issuer.as_str().trim_end_matches('/') && doc.issuer != issuer.as_str() {
+/// The discovery issuer must equal the configured issuer string exactly (OpenID Connect
+/// Discovery 4.3). Decided (2026-11-03): exact string match, with no URL normalisation.
+fn check_discovery(issuer_raw: &str, doc: &Discovery) -> Result<(), AppError> {
+    if doc.issuer != issuer_raw {
         return Err(AppError::UpstreamUnreachable);
     }
     Ok(())
@@ -668,6 +689,46 @@ mod tests {
         assert_eq!(pairs.get("nonce"), Some(&pending.nonce));
         assert_eq!(pairs.get("code_challenge"), Some(&pending.challenge()));
         assert_eq!(pairs.get("response_type").map(String::as_str), Some("code"));
+    }
+
+    #[test]
+    fn debug_output_redacts_the_client_secret_and_the_verifier() {
+        // Fixed fake values. Nothing here is a real credential.
+        const FAKE_SECRET: &str = "fake-client-secret-value";
+        const FAKE_VERIFIER: &str = "fake-pkce-verifier-value";
+        const FAKE_CODE: &str = "fake-auth-code-value";
+        const FAKE_STATE: &str = "fake-state-value";
+        const FAKE_NONCE: &str = "fake-nonce-value";
+
+        let exchange = CodeExchange {
+            client_id: "harborgate",
+            client_secret: FAKE_SECRET,
+            code: FAKE_CODE,
+            redirect_uri: "https://harbor.example.com/auth/oidc/callback",
+            code_verifier: FAKE_VERIFIER,
+        };
+        let exchange_text = format!("{exchange:?}");
+        for secret in [FAKE_SECRET, FAKE_VERIFIER, FAKE_CODE] {
+            assert!(
+                !exchange_text.contains(secret),
+                "CodeExchange Debug output leaked a secret"
+            );
+        }
+        assert!(exchange_text.contains("<redacted>"));
+
+        let pending = Pending {
+            state: FAKE_STATE.to_owned(),
+            nonce: FAKE_NONCE.to_owned(),
+            verifier: FAKE_VERIFIER.to_owned(),
+        };
+        let pending_text = format!("{pending:?}");
+        for secret in [FAKE_STATE, FAKE_NONCE, FAKE_VERIFIER] {
+            assert!(
+                !pending_text.contains(secret),
+                "Pending Debug output leaked a secret"
+            );
+        }
+        assert!(pending_text.contains("<redacted>"));
     }
 
     #[test]
@@ -892,20 +953,30 @@ mod tests {
 
     #[test]
     fn jwks_uri_and_discovery_checks_refuse_mismatches() {
-        let issuer = Url::parse(TEST_ISSUER).unwrap();
         let good = Discovery {
             issuer: TEST_ISSUER.to_owned(),
             authorization_endpoint: "https://idp.example.com/authorize".to_owned(),
             token_endpoint: "https://idp.example.com/token".to_owned(),
             jwks_uri: jwks_uri().to_string(),
         };
-        assert!(check_discovery(&issuer, &good).is_ok());
+        assert!(check_discovery(TEST_ISSUER, &good).is_ok());
         let other = Discovery {
             issuer: "https://elsewhere.example.com".to_owned(),
+            authorization_endpoint: good.authorization_endpoint.clone(),
+            token_endpoint: good.token_endpoint.clone(),
+            jwks_uri: good.jwks_uri.clone(),
+        };
+        assert_eq!(
+            check_discovery(TEST_ISSUER, &other),
+            Err(AppError::UpstreamUnreachable)
+        );
+        // Decided (2026-11-03): no URL normalisation. A trailing slash is a different string.
+        let slashed = Discovery {
+            issuer: format!("{TEST_ISSUER}/"),
             ..good
         };
         assert_eq!(
-            check_discovery(&issuer, &other),
+            check_discovery(TEST_ISSUER, &slashed),
             Err(AppError::UpstreamUnreachable)
         );
         assert!(parse_endpoint("http://idp.example.com/jwks").is_err());
