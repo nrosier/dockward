@@ -223,3 +223,20 @@ pub async fn list_all(pool: &SqlitePool) -> Result<Vec<UserRow>, AppError> {
     .await
     .map_err(|_| AppError::InternalError)
 }
+
+/// Replaces a user's password hash. The caller hashes the new password first.
+pub async fn set_password_hash(
+    pool: &SqlitePool,
+    user_id: &str,
+    password_hash: &str,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "UPDATE users SET password_hash = ? WHERE id = ?",
+        password_hash,
+        user_id
+    )
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
