@@ -3,8 +3,9 @@
 //! consecutive failures for a pair, each further attempt waits 2^(n-5) seconds after
 //! the previous failure, capped at 60 seconds. A success resets the pair.
 //!
-//! The clock is passed in, so tests are deterministic. The state is in memory and
-//! resets on restart. That is a documented limit of v1.
+//! The clock is injected (see [`LoginThrottle::with_clock`]), so tests can freeze it
+//! and stay deterministic under CPU load. The state is in memory and resets on
+//! restart. That is a documented limit of v1.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -22,9 +23,19 @@ struct PairState {
 }
 
 /// Failure counter and delay, keyed by `(username, client IP)`.
-#[derive(Clone, Default)]
+/// The time source. The system clock in production, a fixed clock in tests.
+pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+#[derive(Clone)]
 pub struct LoginThrottle {
     pairs: Arc<Mutex<HashMap<(String, String), PairState>>>,
+    clock: Clock,
+}
+
+impl Default for LoginThrottle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The wait that applies after `failures` consecutive failures. Zero below the
@@ -44,8 +55,23 @@ pub fn wait_after(failures: u32) -> Duration {
 }
 
 impl LoginThrottle {
+    /// A throttle that reads the system clock.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_clock(Arc::new(Instant::now))
+    }
+
+    /// A throttle that reads time from `clock`. Used by tests to freeze time.
+    pub fn with_clock(clock: Clock) -> Self {
+        Self {
+            pairs: Arc::default(),
+            clock,
+        }
+    }
+
+    /// The current time from this throttle's clock. Handlers take `now` from here so
+    /// the throttle and its callers agree on one time source.
+    pub fn now(&self) -> Instant {
+        (self.clock)()
     }
 
     /// Returns `true` when an attempt for this pair must wait and be refused without a

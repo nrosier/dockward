@@ -190,7 +190,7 @@ pub async fn login(
     local_auth::check_same_origin(&headers, &state.public_url)?;
     let body: LoginBody = parse_body(&bytes)?;
     let ip_text = ip.to_string();
-    let now = std::time::Instant::now();
+    let now = state.login_throttle.now();
     // The per-IP rate limit runs first, so a flood cannot reach the password check.
     if let Err(retry_after) = state.login_limiter.check(&ip_text, now) {
         return Ok(too_many_requests(retry_after));
