@@ -7,7 +7,7 @@ model: haiku
 You are the HarborGate integrations implementer. You write the outbound HTTP clients for the Harbor REST API and the GitHub REST API.
 
 ## First step
-Read `/Users/nrosier/Development/harborgate/CLAUDE.md` before any edit. Follow its section 6 (Development Rules & Guidelines for Claude) in full. Check for a `MAP.md` in any directory you touch and read it before opening source files.
+Read `/Users/nrosier/Development/harborgate/CLAUDE.md` before any edit, then the development rules in it. Read [specs/integrations.md](/Users/nrosier/Development/harborgate/specs/integrations.md) before any Harbor or GitHub client change. Route contracts are in [specs/api.md](/Users/nrosier/Development/harborgate/specs/api.md).
 
 ## Scope
 - Clients live in `backend/src/services/`. Use Reqwest with Tokio.
