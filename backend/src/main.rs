@@ -400,6 +400,48 @@ mod tests {
         assert!(retry.is_some(), "429 must carry Retry-After");
     }
 
+    /// Login and setup are exempt from the CSRF token. Without a token they must not
+    /// return `csrf_invalid`, so they reach their own checks (here the same-origin
+    /// check passes and the body is rejected instead). Both routes are tested.
+    #[tokio::test]
+    async fn login_and_setup_are_exempt_from_the_csrf_token() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, pool, dir) = test_router("csrf-exempt").await;
+        let body = r#"{"username":"test-x","password":"test-password-fifteen"}"#;
+        let login = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/login")
+            .header("origin", "https://harborgate.example.com")
+            .header("content-type", "application/json")
+            .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            ))))
+            .body(Body::from(body))
+            .unwrap();
+        let setup = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/setup")
+            .header("origin", "https://harborgate.example.com")
+            .header("content-type", "application/json")
+            .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            ))))
+            .body(Body::from(body))
+            .unwrap();
+        let login_status = router.clone().oneshot(login).await.unwrap().status();
+        let setup_status = router.oneshot(setup).await.unwrap().status();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        // The request reaches the route: login finds no user (401) and setup creates one (201).
+        assert_eq!(login_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(setup_status, StatusCode::CREATED);
+    }
+
     #[tokio::test]
     async fn healthz_returns_ok_json() {
         let Json(body) = healthz().await;
