@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT github_issue_number AS \"number!: i64\" FROM github_issues\n           WHERE github_owner = ? AND github_repo = ? AND status = 'open'\n           ORDER BY github_issue_number",
+  "describe": {
+    "columns": [
+      {
+        "name": "number!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "github_issues",
+            "name": "github_issue_number"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bcef52c9e60d872f642a818109cf2104fc96f3ee5ed090cf08e358c14c25766f"
+}

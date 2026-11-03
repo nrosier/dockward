@@ -18,7 +18,7 @@ use crate::db::credentials as cred_db;
 use crate::db::mappings::{self as db, MappingRow};
 use crate::error::AppError;
 use crate::services::audit::{self, Actor};
-use crate::services::credential_probe::HarborProbe;
+use crate::services::credential_probe::{self, GithubProbe, HarborProbe};
 use crate::services::credentials::{self, SERVICE_HARBOR};
 use crate::services::{
     ids,
@@ -221,12 +221,47 @@ async fn check_harbor_repository<P: HarborProbe>(
     }
 }
 
+/// Runs the code scanning probe for the GitHub repository before the mapping is stored.
+/// `unavailable` is `422 code_scanning_unavailable`. Other failures are reported
+/// through `AppError` without storing anything (`specs/security.md`, "GitHub token scope").
+async fn check_code_scanning<G: GithubProbe>(
+    conn: &mut sqlx::SqliteConnection,
+    credentials_key: &DerivedKey,
+    github_probe: &G,
+    user_id: &str,
+    github_cred_id: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<(), AppError> {
+    let row = cred_db::find_owned(conn, user_id, github_cred_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let token = credentials::decrypt_token(credentials_key, &row)?;
+    let response = github_probe
+        .get(
+            &credential_probe::github_code_scanning_path(owner, repo),
+            &token,
+        )
+        .await?;
+    match credential_probe::code_scanning_state(&response) {
+        credential_probe::CodeScanningState::Ready
+        | credential_probe::CodeScanningState::NoAnalysisYet => Ok(()),
+        credential_probe::CodeScanningState::Unavailable => Err(AppError::CodeScanningUnavailable),
+        credential_probe::CodeScanningState::Failed => Err(AppError::ValidationFailed(
+            credential_probe::github_code_scanning_check(&response).detail,
+        )),
+    }
+}
+
 /// Creates a mapping for `user_id`. Returns the mapping and the two values shown
 /// once. Writes `mapping.create`.
-pub async fn create<P: HarborProbe>(
+// Eight arguments: the two probes are injected separately so tests can fake each one.
+#[allow(clippy::too_many_arguments)]
+pub async fn create<P: HarborProbe, G: GithubProbe>(
     pool: &SqlitePool,
     credentials_key: &DerivedKey,
     probe: &P,
+    github_probe: &G,
     actor: &Actor,
     user_id: &str,
     public_url: &str,
@@ -257,6 +292,16 @@ pub async fn create<P: HarborProbe>(
         &input.harbor_cred_id,
         &input.harbor_project,
         &input.harbor_repository,
+    )
+    .await?;
+    check_code_scanning(
+        &mut tx,
+        credentials_key,
+        github_probe,
+        user_id,
+        &input.github_cred_id,
+        &input.github_owner,
+        &input.github_repo,
     )
     .await?;
     if let Some((other_id, other_user)) = db::find_conflict(
@@ -428,16 +473,24 @@ pub async fn delete(
     id: &str,
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
+    let mapping = db::find_owned(&mut tx, user_id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    // Open GitHub issues are left on GitHub. Their numbers are listed in the audit
+    // entry so the operator can close them (`specs/api.md`, Mappings).
+    let open = db::open_issue_numbers(&mut tx, &mapping.github_owner, &mapping.github_repo).await?;
     let removed = db::delete_owned(&mut tx, user_id, id).await?;
     if removed == 0 {
         return Err(AppError::NotFound);
     }
+    db::delete_github_issues(&mut tx, &mapping.github_owner, &mapping.github_repo).await?;
+    let details = serde_json::json!({ "open_issue_numbers": open });
     audit::record(
         &mut tx,
         actor,
         "mapping.delete",
         &format!("mapping:{id}"),
-        None,
+        Some(&details),
     )
     .await?;
     tx.commit().await.map_err(|_| AppError::InternalError)?;
@@ -476,6 +529,24 @@ mod tests {
     }
 
     const READABLE: ArtifactsStatus = ArtifactsStatus(200);
+    /// A GitHub probe whose code scanning answer is ready. No socket.
+    const GH_READY: GithubFixed = GithubFixed(200, "");
+    /// A GitHub probe that answers every request with one fixed status and message.
+    struct GithubFixed(u16, &'static str);
+
+    impl GithubProbe for GithubFixed {
+        async fn get(
+            &self,
+            _path: &str,
+            _token: &[u8],
+        ) -> Result<credential_probe::GithubResponse, AppError> {
+            Ok(credential_probe::GithubResponse {
+                status: self.0,
+                message: self.1.to_owned(),
+                accepted_permissions: None,
+            })
+        }
+    }
     use crate::services::credentials::{self, NewCredential, SERVICE_GITHUB, SERVICE_HARBOR};
     use crate::services::users as user_service;
 
@@ -616,6 +687,7 @@ mod tests {
             &pool,
             &key(),
             &READABLE,
+            &GH_READY,
             &actor(&owner),
             &owner,
             PUBLIC,
@@ -653,6 +725,7 @@ mod tests {
             &pool,
             &key(),
             &READABLE,
+            &GH_READY,
             &actor(&owner),
             &owner,
             PUBLIC,
@@ -718,6 +791,7 @@ mod tests {
             &pool,
             &key(),
             &READABLE,
+            &GH_READY,
             &actor(&owner),
             &owner,
             PUBLIC,
@@ -730,6 +804,7 @@ mod tests {
             &pool,
             &key(),
             &READABLE,
+            &GH_READY,
             &actor(&owner),
             &owner,
             PUBLIC,
@@ -750,6 +825,7 @@ mod tests {
             &pool,
             &key(),
             &READABLE,
+            &GH_READY,
             &actor(&owner),
             &owner,
             PUBLIC,
@@ -761,6 +837,7 @@ mod tests {
             &pool,
             &key(),
             &READABLE,
+            &GH_READY,
             &actor(&owner),
             &owner,
             PUBLIC,
@@ -782,6 +859,7 @@ mod tests {
             &pool,
             &key(),
             &READABLE,
+            &GH_READY,
             &actor(&owner),
             &owner,
             PUBLIC,
@@ -795,6 +873,7 @@ mod tests {
             &pool,
             &key(),
             &READABLE,
+            &GH_READY,
             &actor(&other),
             &other,
             PUBLIC,
@@ -816,6 +895,7 @@ mod tests {
             &pool,
             &key(),
             &READABLE,
+            &GH_READY,
             &actor(&owner),
             &owner,
             PUBLIC,
@@ -841,6 +921,7 @@ mod tests {
             &pool,
             &key(),
             &READABLE,
+            &GH_READY,
             &actor(&owner),
             &owner,
             PUBLIC,
@@ -874,6 +955,7 @@ mod tests {
             &pool,
             &key(),
             &ArtifactsStatus(404),
+            &GH_READY,
             &actor(&owner),
             &owner,
             PUBLIC,
@@ -900,6 +982,7 @@ mod tests {
             &pool,
             &key(),
             &READABLE,
+            &GH_READY,
             &actor(&other),
             &other,
             PUBLIC,
@@ -907,6 +990,148 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(AppError::NotFound)));
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A GitHub probe that records each path, so a test can check which repository and
+    /// endpoint the save-time probe used. No socket.
+    struct RecordingGithub {
+        calls: std::sync::Mutex<Vec<String>>,
+        status: u16,
+        message: &'static str,
+    }
+
+    impl GithubProbe for RecordingGithub {
+        async fn get(
+            &self,
+            path: &str,
+            _token: &[u8],
+        ) -> Result<credential_probe::GithubResponse, AppError> {
+            self.calls.lock().unwrap().push(path.to_owned());
+            Ok(credential_probe::GithubResponse {
+                status: self.status,
+                message: self.message.to_owned(),
+                accepted_permissions: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn save_rejects_unavailable_code_scanning_and_stores_nothing() {
+        let (pool, dir) = fresh_pool("cs-unavailable").await;
+        let owner = user(&pool, "owner").await;
+        let (h, g) = creds(&pool, &owner).await;
+        let github = GithubFixed(403, "Code scanning is not enabled for this repository.");
+        let result = create(
+            &pool,
+            &key(),
+            &READABLE,
+            &github,
+            &actor(&owner),
+            &owner,
+            PUBLIC,
+            input(&h, &g, "repo", "gh"),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::CodeScanningUnavailable)));
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM repo_mappings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn save_probes_the_mapping_repository_with_the_code_scanning_endpoint() {
+        let (pool, dir) = fresh_pool("cs-path").await;
+        let owner = user(&pool, "owner").await;
+        let (h, g) = creds(&pool, &owner).await;
+        let github = RecordingGithub {
+            calls: std::sync::Mutex::new(Vec::new()),
+            status: 404,
+            message: "no analysis found",
+        };
+        create(
+            &pool,
+            &key(),
+            &READABLE,
+            &github,
+            &actor(&owner),
+            &owner,
+            PUBLIC,
+            input(&h, &g, "repo", "gh"),
+        )
+        .await
+        .unwrap();
+        let calls = github.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec!["repos/owner/gh/code-scanning/alerts?per_page=1".to_owned()]
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Inserts one `github_issues` row for the given repository and number.
+    async fn issue(pool: &SqlitePool, repo: &str, number: i64, status: &str) {
+        sqlx::query(
+            "INSERT INTO github_issues (id, github_owner, github_repo, cve_id, github_issue_number, github_issue_url, status)
+             VALUES (?, 'owner', ?, ?, ?, 'https://github.example/issue', ?)",
+        )
+        .bind(format!("issue-{repo}-{number}"))
+        .bind(repo)
+        .bind(format!("CVE-2026-{number:04}"))
+        .bind(number)
+        .bind(status)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_removes_github_issue_rows_and_lists_open_numbers() {
+        let (pool, dir) = fresh_pool("delete-issues").await;
+        let owner = user(&pool, "owner").await;
+        let (h, g) = creds(&pool, &owner).await;
+        let created = create(
+            &pool,
+            &key(),
+            &READABLE,
+            &GH_READY,
+            &actor(&owner),
+            &owner,
+            PUBLIC,
+            input(&h, &g, "repo", "gh"),
+        )
+        .await
+        .unwrap();
+        issue(&pool, "gh", 7, "open").await;
+        issue(&pool, "gh", 9, "open").await;
+        issue(&pool, "gh", 8, "closed").await;
+        issue(&pool, "other", 3, "open").await;
+
+        delete(&pool, &actor(&owner), &owner, &created.mapping.id)
+            .await
+            .unwrap();
+
+        let left: Vec<String> = sqlx::query_scalar(
+            "SELECT github_repo FROM github_issues ORDER BY github_repo, github_issue_number",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        // Only the other repository's row survives, because it has no owning mapping here.
+        assert_eq!(left, vec!["other".to_owned()]);
+        let details: String =
+            sqlx::query_scalar("SELECT details FROM audit_log WHERE action = 'mapping.delete'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&details).unwrap();
+        assert_eq!(value["open_issue_numbers"], serde_json::json!([7, 9]));
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
