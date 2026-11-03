@@ -1,0 +1,277 @@
+//! Local authentication: first-run setup and local login, plus the same-origin
+//! check both routes need. Sources: `specs/security.md` (Authentication, Hardening
+//! "Login CSRF"), `specs/api.md` (Auth).
+
+use axum::http::HeaderMap;
+use sqlx::SqlitePool;
+
+use crate::auth::password;
+use crate::db::{config, setup, users};
+use crate::error::AppError;
+use crate::models::role::Role;
+use crate::services::ids;
+
+/// Minimum local password length, in characters.
+pub const MIN_PASSWORD_LEN: usize = 15;
+/// Maximum local password length, in characters (`specs/security.md`, Authentication).
+pub const MAX_PASSWORD_LEN: usize = 64;
+
+/// `system_config` key that restricts regular users to OIDC sign-in.
+pub const OIDC_ONLY_USERS_KEY: &str = "auth.oidc_only_users";
+
+/// Refuses a local password outside 15 to 64 characters with `password_too_short`.
+pub fn check_password_length(password: &str) -> Result<(), AppError> {
+    let chars = password.chars().count();
+    if (MIN_PASSWORD_LEN..=MAX_PASSWORD_LEN).contains(&chars) {
+        Ok(())
+    } else {
+        Err(AppError::PasswordTooShort)
+    }
+}
+
+/// Same-origin rule for login and setup (`specs/security.md`, Login CSRF). The
+/// `Origin` header must equal `public_url`. When `Origin` is absent,
+/// `Sec-Fetch-Site` must be `same-origin`. Anything else is `403 csrf_invalid`.
+pub fn check_same_origin(headers: &HeaderMap, public_url: &str) -> Result<(), AppError> {
+    if let Some(origin) = headers.get("origin") {
+        return match origin.to_str() {
+            Ok(value) if value == public_url => Ok(()),
+            _ => Err(AppError::CsrfInvalid),
+        };
+    }
+    match headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        Some("same-origin") => Ok(()),
+        _ => Err(AppError::CsrfInvalid),
+    }
+}
+
+/// Whether the first-run setup is still open (no user exists yet).
+pub async fn setup_required(pool: &SqlitePool) -> Result<bool, AppError> {
+    Ok(!setup::any_user_exists(pool).await?)
+}
+
+/// Creates the first local admin. The insert succeeds only while `users` is empty,
+/// so exactly one of several concurrent calls can win. The losers get `409 conflict`.
+pub async fn create_first_admin(
+    pool: &SqlitePool,
+    username: &str,
+    email: Option<&str>,
+    password_plain: &str,
+) -> Result<String, AppError> {
+    check_password_length(password_plain)?;
+    let hash = password::hash_password(password_plain)?;
+    let id = ids::new_id();
+    if setup::insert_first_admin(pool, &id, username, email, &hash).await? {
+        Ok(id)
+    } else {
+        Err(AppError::Conflict("Setup is already complete.".to_owned()))
+    }
+}
+
+/// Local login. Admins always sign in with a password. Regular users sign in
+/// unless `auth.oidc_only_users` is `true`. An unknown user, a wrong password, and
+/// an OIDC-only refusal all return `401 invalid_credentials` after the same Argon2
+/// work, so timing does not reveal which case happened.
+pub async fn login(
+    pool: &SqlitePool,
+    username: &str,
+    password_plain: &str,
+) -> Result<users::UserRow, AppError> {
+    let row = users::find_by_username(pool, username).await?;
+    let Some(row) = row else {
+        // Unknown user: same Argon2 cost as a real check, then the same error.
+        password::verify_dummy(password_plain)?;
+        return Err(AppError::InvalidCredentials);
+    };
+
+    let Some(stored_hash) = row.password_hash.clone() else {
+        // OIDC-only accounts have no local password. Same cost, same error.
+        password::verify_dummy(password_plain)?;
+        return Err(AppError::InvalidCredentials);
+    };
+
+    let role = Role::parse(&row.role).ok_or(AppError::InvalidCredentials)?;
+    let oidc_only = config::get(pool, OIDC_ONLY_USERS_KEY).await? == Some("true".to_owned());
+    let restricted = oidc_only && role == Role::User;
+
+    let password_ok = password::verify_password(password_plain, &stored_hash)?;
+    if !password_ok || restricted {
+        return Err(AppError::InvalidCredentials);
+    }
+    Ok(row)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    // Test values only. Passwords are obviously fake.
+    const PASSWORD: &str = "test-password-fifteen"; // 20 chars
+    const URL: &str = "https://harborgate.example.com";
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, HeaderValue::from_str(value).unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn password_length_bounds_are_15_to_64() {
+        assert!(check_password_length(&"a".repeat(14)).is_err());
+        assert!(check_password_length(&"a".repeat(15)).is_ok());
+        assert!(check_password_length(&"a".repeat(64)).is_ok());
+        assert!(check_password_length(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn same_origin_accepts_matching_origin_and_same_origin_fetch_metadata() {
+        assert!(check_same_origin(&headers(&[("origin", URL)]), URL).is_ok());
+        assert!(check_same_origin(&headers(&[("sec-fetch-site", "same-origin")]), URL).is_ok());
+    }
+
+    #[test]
+    fn cross_site_origin_is_refused_with_csrf_invalid() {
+        let cross = headers(&[("origin", "https://attacker.example.net")]);
+        assert_eq!(check_same_origin(&cross, URL), Err(AppError::CsrfInvalid));
+        // A cross-site Origin wins over a same-origin Sec-Fetch-Site.
+        let mixed = headers(&[
+            ("origin", "https://attacker.example.net"),
+            ("sec-fetch-site", "same-origin"),
+        ]);
+        assert_eq!(check_same_origin(&mixed, URL), Err(AppError::CsrfInvalid));
+        assert_eq!(
+            check_same_origin(&headers(&[]), URL),
+            Err(AppError::CsrfInvalid)
+        );
+        let cross_site = headers(&[("sec-fetch-site", "cross-site")]);
+        assert_eq!(
+            check_same_origin(&cross_site, URL),
+            Err(AppError::CsrfInvalid)
+        );
+    }
+
+    /// A fresh migrated database. Test values only.
+    async fn fresh_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("harborgate-auth-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = crate::db::open(&dir).await.unwrap();
+        (pool, dir)
+    }
+
+    #[tokio::test]
+    async fn concurrent_setup_creates_exactly_one_admin() {
+        let (pool, dir) = fresh_pool("setup-race").await;
+        let mut handles = Vec::new();
+        for n in 0..8 {
+            let pool = pool.clone();
+            handles.push(tokio::spawn(async move {
+                create_first_admin(&pool, &format!("test-admin-{n}"), None, PASSWORD).await
+            }));
+        }
+        let mut created = 0;
+        let mut conflicts = 0;
+        for handle in handles {
+            match handle.await.unwrap() {
+                Ok(_) => created += 1,
+                Err(AppError::Conflict(_)) => conflicts += 1,
+                Err(other) => panic!("unexpected error: {other:?}"),
+            }
+        }
+        let count = sqlx::query!(r#"SELECT COUNT(*) AS "n: i64" FROM users"#)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .n;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(created, 1, "exactly one setup must win");
+        assert_eq!(conflicts, 7);
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn setup_is_closed_after_the_first_account() {
+        let (pool, dir) = fresh_pool("setup-closed").await;
+        create_first_admin(&pool, "test-admin", None, PASSWORD)
+            .await
+            .unwrap();
+        assert!(!setup_required(&pool).await.unwrap());
+        let second = create_first_admin(&pool, "test-second", None, PASSWORD).await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(second, Err(AppError::Conflict(_))));
+    }
+
+    #[tokio::test]
+    async fn first_account_is_an_admin_with_a_local_provider() {
+        let (pool, dir) = fresh_pool("setup-role").await;
+        create_first_admin(&pool, "test-admin", None, PASSWORD)
+            .await
+            .unwrap();
+        let row =
+            sqlx::query!(r#"SELECT role, auth_provider FROM users WHERE username = 'test-admin'"#)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(row.role, "admin");
+        assert_eq!(row.auth_provider, "local");
+    }
+
+    #[tokio::test]
+    async fn login_succeeds_with_the_right_password_and_fails_generically_otherwise() {
+        let (pool, dir) = fresh_pool("login").await;
+        create_first_admin(&pool, "test-admin", None, PASSWORD)
+            .await
+            .unwrap();
+        let ok = login(&pool, "test-admin", PASSWORD).await;
+        let wrong = login(&pool, "test-admin", "test-wrong-password-xyz").await;
+        let unknown = login(&pool, "test-nobody", PASSWORD).await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ok.is_ok());
+        assert_eq!(wrong.err(), Some(AppError::InvalidCredentials));
+        assert_eq!(unknown.err(), Some(AppError::InvalidCredentials));
+    }
+
+    #[tokio::test]
+    async fn oidc_only_toggle_blocks_regular_users_but_not_admins() {
+        let (pool, dir) = fresh_pool("oidc-only").await;
+        create_first_admin(&pool, "test-admin", None, PASSWORD)
+            .await
+            .unwrap();
+        sqlx::query!(
+            "INSERT INTO users (id, username, password_hash, role, auth_provider)
+             VALUES ('test-user-id', 'test-user', ?, 'user', 'local')",
+            "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Use a real hash for the regular user so only the toggle can refuse it.
+        let real = password::hash_password(PASSWORD).unwrap();
+        sqlx::query!(
+            "UPDATE users SET password_hash = ? WHERE username = 'test-user'",
+            real
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query!("INSERT INTO system_config (key, value, is_encrypted) VALUES ('auth.oidc_only_users', 'true', 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let user = login(&pool, "test-user", PASSWORD).await;
+        let admin = login(&pool, "test-admin", PASSWORD).await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(user.err(), Some(AppError::InvalidCredentials));
+        assert!(admin.is_ok(), "break-glass admin login must stay available");
+    }
+}

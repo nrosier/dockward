@@ -49,3 +49,47 @@ pub async fn set_role(pool: &SqlitePool, user_id: &str, role: &str) -> Result<()
         .map(|_| ())
         .map_err(|_| AppError::InternalError)
 }
+
+/// Full row for login and the `User` response.
+#[derive(Debug, Clone)]
+pub struct UserRow {
+    pub id: String,
+    pub username: String,
+    pub email: Option<String>,
+    pub password_hash: Option<String>,
+    pub role: String,
+    pub auth_provider: String,
+    pub token_version: i64,
+    pub created_at: Option<i64>,
+}
+
+/// Finds a user by username for login. Returns `None` when no such user exists.
+pub async fn find_by_username(
+    pool: &SqlitePool,
+    username: &str,
+) -> Result<Option<UserRow>, AppError> {
+    sqlx::query_as!(
+        UserRow,
+        r#"SELECT id AS "id!", username, email, password_hash, role,
+                  auth_provider, token_version, created_at
+           FROM users WHERE username = ?"#,
+        username
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Finds a user by id for the `User` response.
+pub async fn find_by_id(pool: &SqlitePool, user_id: &str) -> Result<Option<UserRow>, AppError> {
+    sqlx::query_as!(
+        UserRow,
+        r#"SELECT id AS "id!", username, email, password_hash, role,
+                  auth_provider, token_version, created_at
+           FROM users WHERE id = ?"#,
+        user_id
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AppError::InternalError)
+}

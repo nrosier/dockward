@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (SELECT 1 FROM system_config WHERE key = ?) AS \"exists_flag: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "exists_flag: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0518af57763f11f393653f3043872827cf40a02e58630781adb4d2babf06476e"
+}
