@@ -33,8 +33,15 @@ async fn healthz() -> Json<Health> {
     Json(Health { status: "ok" })
 }
 
-fn app() -> Router {
-    Router::new().route("/healthz", get(healthz))
+fn app(trusted_proxies: Vec<config::Cidr>) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .layer(axum::middleware::from_fn_with_state(
+            api::hardening::TrustedProxies(std::sync::Arc::new(trusted_proxies)),
+            api::hardening::resolve_client_ip,
+        ))
+        .layer(axum::middleware::from_fn(api::hardening::access_log))
+        .layer(axum::middleware::from_fn(api::hardening::security_headers))
 }
 
 /// Resolves on the first SIGTERM or Ctrl+C.
@@ -65,7 +72,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let mut graceful = stop_rx.clone();
-    let serve = axum::serve(listener, app()).with_graceful_shutdown(async move {
+    let router = app(settings.trusted_proxies.clone())
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
         let _ = graceful.wait_for(|stopped| *stopped).await;
     });
     let drain_limit = async move {
