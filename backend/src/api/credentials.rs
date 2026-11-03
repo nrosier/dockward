@@ -215,6 +215,12 @@ mod tests {
     use super::*;
     use crate::db::credentials::CredentialRow;
 
+    /// A fresh random test value. Generated at runtime so no secret-like literal is
+    /// hard-coded in the source.
+    fn runtime_value(prefix: &str) -> String {
+        format!("{prefix}-{}", crate::services::ids::new_id())
+    }
+
     /// A probe that returns a fixed status, so each Harbor response can be checked
     /// without a socket. The status values are the recorded Harbor responses.
     struct FixedStatus(u16);
@@ -247,7 +253,7 @@ mod tests {
         let encrypted = crate::auth::crypto::encrypt(
             key,
             &crate::auth::crypto::aad("user_credentials", "encrypted_token", "cred-1"),
-            b"test-robot-secret-value",
+            runtime_value("test-robot").as_bytes(),
         )
         .unwrap();
         CredentialRow {
@@ -352,7 +358,7 @@ mod tests {
             &Actor::cli(),
             "owner",
             None,
-            "test-password-fifteen",
+            &runtime_value("test-password"),
             Role::User,
         )
         .await
@@ -371,7 +377,7 @@ mod tests {
                 label: "primary".to_owned(),
                 base_url: Some("https://harbor.example.com".to_owned()),
                 username: Some("robot$harborgate".to_owned()),
-                token: "test-robot-secret-value".to_owned(),
+                token: runtime_value("test-robot"),
                 expires_at: None,
             },
             false,
@@ -399,7 +405,7 @@ mod tests {
                 label: "gh".to_owned(),
                 base_url: None,
                 username: None,
-                token: "test-github-secret-value".to_owned(),
+                token: runtime_value("test-github"),
                 expires_at: None,
             },
             false,
@@ -457,7 +463,7 @@ mod tests {
             &Actor::cli(),
             "owner",
             None,
-            "test-password-fifteen",
+            &runtime_value("test-password"),
             Role::User,
         )
         .await
@@ -468,7 +474,14 @@ mod tests {
             role: Role::User,
         };
         let body = axum::body::Bytes::from(
-            r#"{"service_type":"harbor","label":"primary","base_url":"https://harbor.example.com","username":"robot$harborgate","token":"test-robot-secret-value"}"#,
+            serde_json::json!({
+                "service_type": "harbor",
+                "label": "primary",
+                "base_url": "https://harbor.example.com",
+                "username": "robot$harborgate",
+                "token": runtime_value("test-robot"),
+            })
+            .to_string(),
         );
         let response = create(State(state.clone()), user, body).await.unwrap();
         let bytes = axum::body::to_bytes(response.into_body(), 65_536)
