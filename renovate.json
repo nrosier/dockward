@@ -10,6 +10,32 @@
     "labels": ["security"],
     "automerge": false
   },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Rust toolchain pin in backend/rust-toolchain.toml",
+      "managerFilePatterns": ["/(^|/)rust-toolchain\\.toml$/"],
+      "matchStrings": ["channel\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""],
+      "depNameTemplate": "rust",
+      "datasourceTemplate": "rust-version"
+    },
+    {
+      "customType": "regex",
+      "description": "rust-version in backend/Cargo.toml",
+      "managerFilePatterns": ["/(^|/)Cargo\\.toml$/"],
+      "matchStrings": ["rust-version\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""],
+      "depNameTemplate": "rust",
+      "datasourceTemplate": "rust-version"
+    },
+    {
+      "customType": "regex",
+      "description": "Node pin in frontend/.nvmrc",
+      "managerFilePatterns": ["/(^|/)\\.nvmrc$/"],
+      "matchStrings": ["^(?<currentValue>\\d+)\\s*$"],
+      "depNameTemplate": "node",
+      "datasourceTemplate": "node-version"
+    }
+  ],
   "packageRules": [
     {
       "matchUpdateTypes": ["major"],
@@ -24,6 +50,14 @@
       "matchUpdateTypes": ["minor", "patch"],
       "matchCurrentVersion": "!/^0/",
       "automerge": false
+    },
+    {
+      "groupName": "Rust toolchain",
+      "matchDepNames": ["rust"]
+    },
+    {
+      "groupName": "Node",
+      "matchDepNames": ["node"]
     }
   ],
   "lockFileMaintenance": {
