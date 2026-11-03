@@ -310,3 +310,27 @@ pub async fn count_owned(pool: &SqlitePool, user_id: Option<&str>) -> Result<i64
     .map_err(|_| AppError::InternalError)?;
     Ok(row.n)
 }
+
+/// Reads one mapping by id with no owner check. Only the webhook path uses it, after the
+/// token digest has selected the mapping.
+pub async fn find_by_id(
+    conn: &mut SqliteConnection,
+    id: &str,
+) -> Result<Option<MappingRow>, AppError> {
+    sqlx::query_as!(
+        MappingRow,
+        r#"SELECT id AS "id!", user_id AS "user_id!", harbor_cred_id AS "harbor_cred_id!",
+                  github_cred_id AS "github_cred_id!", harbor_base_url AS "harbor_base_url!",
+                  harbor_project AS "harbor_project!", harbor_repository AS "harbor_repository!",
+                  github_owner AS "github_owner!", github_repo AS "github_repo!",
+                  webhook_token_hash AS "webhook_token_hash!",
+                  webhook_auth_secret_hash AS "webhook_auth_secret_hash!",
+                  auto_create_issues AS "auto_create_issues?", min_issue_severity AS "min_issue_severity?",
+                  default_branch AS "default_branch!", created_at AS "created_at?"
+           FROM repo_mappings WHERE id = ?"#,
+        id
+    )
+    .fetch_optional(conn)
+    .await
+    .map_err(|_| AppError::InternalError)
+}

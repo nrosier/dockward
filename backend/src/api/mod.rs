@@ -12,3 +12,5 @@ pub mod oidc;
 pub mod state;
 #[allow(dead_code)] // The sync job routes are mounted by the app router.
 pub mod sync_jobs;
+#[allow(dead_code)] // The webhook route is mounted by the app router.
+pub mod webhooks;

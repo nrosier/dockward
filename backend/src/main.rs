@@ -82,6 +82,10 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             post(api::mappings::rotate_auth_secret),
         )
         .route("/api/v1/sync-jobs/{id}/retry", post(api::sync_jobs::retry))
+        .route(
+            "/api/v1/webhooks/harbor/{mapping_token}",
+            post(api::webhooks::receive),
+        )
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
         .route(
             "/api/v1/admin/oidc",
@@ -531,5 +535,156 @@ mod tests {
             serde_json::to_string(&body).ok().as_deref(),
             Some(r#"{"status":"ok"}"#)
         );
+    }
+
+    /// Inserts a user, two credentials, and one mapping whose token and secret are the
+    /// given fake values, hashed the way the save path hashes them.
+    async fn webhook_fixture(pool: &sqlx::SqlitePool, token: &str, secret: &str) {
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, token_version)
+             VALUES ('wu', 'wu', NULL, 'user', 0)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
+             VALUES ('wc1', 'wu', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
+                    ('wc2', 'wu', 'github', 'g', NULL, NULL, 'v1:fake')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash, auto_create_issues, min_issue_severity, default_branch)
+             VALUES ('wm1', 'wu', 'wc1', 'wc2', 'https://harbor.example.com', 'proj', 'app', 'o', 'g', ?, ?, 0, 'CRITICAL', 'main')",
+        )
+        .bind(services::mappings::digest(token))
+        .bind(services::mappings::digest(secret))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A default-format vulnerability event for `proj/app`.
+    const WEBHOOK_BODY: &str = r#"{"type":"SCANNING_COMPLETED","event_data":{"repository":{"repo_full_name":"proj/app"},"resources":[{"digest":"sha256:aaaa"}],"scan":{"scan_type":"vulnerability"}}}"#;
+
+    fn webhook_request(
+        token: &str,
+        auth: Option<&str>,
+        body: &str,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut builder = with_peer(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/webhooks/harbor/{token}"))
+                .header("content-type", "application/json"),
+        );
+        if let Some(value) = auth {
+            builder = builder.header("authorization", value);
+        }
+        builder
+            .body(axum::body::Body::from(body.to_owned()))
+            .unwrap()
+    }
+
+    /// The webhook route is exempt from the CSRF guard: a POST with no CSRF token is not
+    /// refused with `403 csrf_invalid`. This is the route-level exemption, not the helper.
+    #[tokio::test]
+    async fn webhook_route_is_exempt_from_the_csrf_guard() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("webhook-csrf").await;
+        webhook_fixture(&pool, "tok-csrf-fake", "sec-csrf-fake").await;
+        let response = router
+            .oneshot(webhook_request(
+                "tok-csrf-fake",
+                Some("Bearer sec-csrf-fake"),
+                WEBHOOK_BODY,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn unknown_token_and_wrong_secret_return_the_same_401() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("webhook-401").await;
+        webhook_fixture(&pool, "tok-401-fake", "sec-401-fake").await;
+        let unknown = router
+            .clone()
+            .oneshot(webhook_request(
+                "tok-no-such-fake",
+                Some("Bearer sec-401-fake"),
+                WEBHOOK_BODY,
+            ))
+            .await
+            .unwrap();
+        let wrong = router
+            .oneshot(webhook_request(
+                "tok-401-fake",
+                Some("Bearer sec-wrong-fake"),
+                WEBHOOK_BODY,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        let a = axum::body::to_bytes(unknown.into_body(), 4096)
+            .await
+            .unwrap();
+        let b = axum::body::to_bytes(wrong.into_body(), 4096).await.unwrap();
+        assert_eq!(a, b, "the two 401 bodies must match");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn oversize_body_returns_413() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("webhook-413").await;
+        webhook_fixture(&pool, "tok-413-fake", "sec-413-fake").await;
+        let big = "x".repeat(api::webhooks::MAX_BODY_BYTES + 1);
+        let response = router
+            .oneshot(webhook_request(
+                "tok-413-fake",
+                Some("Bearer sec-413-fake"),
+                &big,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn another_repository_returns_202_and_stores_nothing() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("webhook-other").await;
+        webhook_fixture(&pool, "tok-other-fake", "sec-other-fake").await;
+        let other = WEBHOOK_BODY.replace("proj/app", "proj/other");
+        let response = router
+            .oneshot(webhook_request(
+                "tok-other-fake",
+                Some("Bearer sec-other-fake"),
+                &other,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

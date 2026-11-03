@@ -81,6 +81,20 @@ impl RateLimiter {
         }
     }
 
+    /// True when `key` has used its whole budget in the current window. Does not record
+    /// a request, so it can gate a request that is only counted when it fails.
+    pub fn is_exhausted(&self, key: &str, now: Instant) -> bool {
+        let Ok(buckets) = self.buckets.lock() else {
+            return false;
+        };
+        match buckets.get(key) {
+            Some((start, count)) => {
+                now.duration_since(*start) < self.window && *count >= self.limit
+            }
+            None => false,
+        }
+    }
+
     /// Records one request for `key` at `now`. Returns `Ok(())` when it is allowed, or
     /// `Err(seconds)` with the wait before the next request is allowed.
     pub fn check(&self, key: &str, now: Instant) -> Result<(), u64> {
