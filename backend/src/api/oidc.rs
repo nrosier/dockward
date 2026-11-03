@@ -257,6 +257,7 @@ mod tests {
             login_limiter: RateLimiter::new(10, Duration::from_secs(60)),
             credentials_key: Arc::new(crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
+            allow_private_harbor: false,
             jwks: Arc::new(JwksCache::new()),
         };
         (crate::app(Vec::new(), state), pool, dir)

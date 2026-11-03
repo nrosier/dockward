@@ -53,6 +53,18 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         .route("/api/v1/auth/oidc/callback", get(api::oidc::callback))
         .route("/api/v1/auth/logout", post(api::auth::logout))
         .route("/api/v1/auth/logout-all", post(api::auth::logout_all))
+        .route(
+            "/api/v1/credentials",
+            get(api::credentials::list).post(api::credentials::create),
+        )
+        .route(
+            "/api/v1/credentials/{id}",
+            axum::routing::put(api::credentials::update).delete(api::credentials::delete),
+        )
+        .route(
+            "/api/v1/credentials/{id}/test",
+            post(api::credentials::test),
+        )
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
         .route(
             "/api/v1/admin/oidc",
@@ -127,6 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         login_limiter: api::hardening::RateLimiter::new(10, Duration::from_secs(60)),
         credentials_key,
         allow_private_oidc: settings.allow_private_oidc,
+        allow_private_harbor: settings.allow_private_harbor,
         jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
     };
     let terminate = signal(SignalKind::terminate())?;
@@ -187,6 +200,7 @@ mod tests {
             login_limiter: api::hardening::RateLimiter::new(10, Duration::from_secs(60)),
             credentials_key: Arc::new(auth::crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
+            allow_private_harbor: false,
             jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
         };
         let response = app(Vec::new(), state)
@@ -233,6 +247,7 @@ mod tests {
             login_limiter: api::hardening::RateLimiter::new(10, Duration::from_secs(60)),
             credentials_key: Arc::new(auth::crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
+            allow_private_harbor: false,
             jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
         };
         (app(Vec::new(), state), pool, dir)

@@ -1,0 +1,110 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", service_type AS \"service_type!\", label AS \"label!\",\n                  base_url, username, encrypted_token AS \"encrypted_token!\",\n                  expires_at, created_at\n           FROM user_credentials\n           WHERE (? IS NULL OR user_id = ?) AND (? IS NULL OR service_type = ?)\n           ORDER BY\n             CASE WHEN ? = 'label' AND ? = 1 THEN label END ASC,\n             CASE WHEN ? = 'label' AND ? = -1 THEN label END DESC,\n             CASE WHEN ? = 'created_at' AND ? = 1 THEN created_at END ASC,\n             CASE WHEN ? = 'created_at' AND ? = -1 THEN created_at END DESC,\n             CASE WHEN ? = 'expires_at' AND ? = 1 THEN expires_at END ASC,\n             CASE WHEN ? = 'expires_at' AND ? = -1 THEN expires_at END DESC,\n             id ASC\n           LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "service_type!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "service_type"
+          }
+        }
+      },
+      {
+        "name": "label!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "label"
+          }
+        }
+      },
+      {
+        "name": "base_url",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "base_url"
+          }
+        }
+      },
+      {
+        "name": "username",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "username"
+          }
+        }
+      },
+      {
+        "name": "encrypted_token!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "encrypted_token"
+          }
+        }
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 18
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "5f1dc64e5bc8d9a56e072c507c3bf423a252501a6d5ed8686b9f3d4020036aad"
+}

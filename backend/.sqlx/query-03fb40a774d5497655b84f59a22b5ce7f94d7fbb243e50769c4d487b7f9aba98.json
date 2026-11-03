@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_credentials\n            (id, user_id, service_type, label, base_url, username, encrypted_token, expires_at)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "03fb40a774d5497655b84f59a22b5ce7f94d7fbb243e50769c4d487b7f9aba98"
+}

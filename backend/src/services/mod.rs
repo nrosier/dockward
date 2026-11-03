@@ -5,6 +5,9 @@ pub mod account;
 pub mod audit;
 #[allow(dead_code)] // Used by the setup and login routes.
 pub mod auth;
+#[allow(dead_code)] // Used by the credential routes.
+pub mod credential_probe;
+pub mod credentials;
 #[allow(dead_code)] // Used by the admin routes and the auth paths added in later issues.
 pub mod ids;
 #[allow(dead_code)] // The list routes that use this are added with the admin routes.

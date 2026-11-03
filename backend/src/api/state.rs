@@ -28,4 +28,6 @@ pub struct AppState {
     pub allow_private_oidc: bool,
     /// The JWKS cache for ID token verification.
     pub jwks: Arc<JwksCache>,
+    /// `HARBORGATE_ALLOW_PRIVATE_HARBOR`. The private-range opt-out for Harbor targets.
+    pub allow_private_harbor: bool,
 }
