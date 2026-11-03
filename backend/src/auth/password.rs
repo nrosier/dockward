@@ -11,6 +11,7 @@ use argon2::{
     Algorithm, Argon2, Params, Version,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
+use rand::distributions::{Alphanumeric, DistString};
 
 use crate::error::AppError;
 
@@ -33,7 +34,8 @@ fn dummy_hash() -> Result<&'static str, AppError> {
     if let Some(existing) = DUMMY_HASH.get() {
         return Ok(existing.as_str());
     }
-    let generated = hash_blocking("harborgate-dummy-password-not-a-secret")?;
+    // A random value that no account can have, generated at runtime.
+    let generated = hash_blocking(&Alphanumeric.sample_string(&mut OsRng, 32))?;
     Ok(DUMMY_HASH.get_or_init(|| generated).as_str())
 }
 
@@ -119,6 +121,13 @@ pub async fn verify_dummy(password: &str) -> Result<(), AppError> {
     run_blocking(move || verify_dummy_blocking(&password)).await
 }
 
+/// A random alphanumeric password of `len` characters, for tests only. It is generated
+/// at runtime so that no password literal appears in the source.
+#[cfg(test)]
+pub(crate) fn random_test_password(len: usize) -> String {
+    Alphanumeric.sample_string(&mut OsRng, len)
+}
+
 /// Test-only count of Argon2id verifications. Thread-local, so parallel tests cannot
 /// see each other's counts.
 #[cfg(test)]
@@ -169,53 +178,44 @@ pub(crate) mod gauge {
 mod tests {
     use super::*;
 
-    // Test values only. Passwords are obviously fake.
-    const PASSWORD: &str = "test-password-fifteen";
+    // Test values only. Passwords are generated at runtime, so none is a source literal.
 
     #[tokio::test]
     async fn hash_then_verify_accepts_right_password() {
-        let phc = hash_password("correct horse battery")
-            .await
-            .unwrap_or_default();
+        let right = random_test_password(20);
+        let phc = hash_password(&right).await.unwrap_or_default();
         assert!(phc.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
-        assert!(matches!(
-            verify_password("correct horse battery", &phc).await,
-            Ok(true)
-        ));
+        assert!(matches!(verify_password(&right, &phc).await, Ok(true)));
     }
 
     #[tokio::test]
     async fn verify_rejects_wrong_password() {
-        let phc = hash_password("correct horse battery")
-            .await
-            .unwrap_or_default();
-        assert!(matches!(
-            verify_password("wrong password value", &phc).await,
-            Ok(false)
-        ));
+        let right = random_test_password(20);
+        let wrong = random_test_password(20);
+        let phc = hash_password(&right).await.unwrap_or_default();
+        assert!(matches!(verify_password(&wrong, &phc).await, Ok(false)));
     }
 
     #[tokio::test]
     async fn salts_differ_between_hashes() {
-        let a = hash_password("same password text")
-            .await
-            .unwrap_or_default();
-        let b = hash_password("same password text")
-            .await
-            .unwrap_or_default();
+        let same = random_test_password(20);
+        let a = hash_password(&same).await.unwrap_or_default();
+        let b = hash_password(&same).await.unwrap_or_default();
         assert_ne!(a, b);
     }
 
     #[tokio::test]
     async fn dummy_verification_runs_and_returns_ok() {
-        assert!(verify_dummy("any password value").await.is_ok());
+        let any = random_test_password(20);
+        assert!(verify_dummy(&any).await.is_ok());
     }
 
     /// A hash runs on the blocking pool, so a 1 ms timer on a single-threaded runtime
     /// finishes while the hash is still running.
     #[tokio::test]
     async fn hash_does_not_block_the_runtime() {
-        let hash = tokio::spawn(async { hash_password(PASSWORD).await });
+        let password = random_test_password(20);
+        let hash = tokio::spawn(async move { hash_password(&password).await });
         let tick = tokio::spawn(tokio::time::sleep(std::time::Duration::from_millis(1)));
         tick.await.unwrap();
         assert!(
@@ -228,9 +228,11 @@ mod tests {
     /// Six hashes start together. The permit keeps the gauge at four or below.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn at_most_four_hashes_run_at_once() {
+        let password = random_test_password(20);
         let mut handles = Vec::new();
         for _ in 0..6 {
-            handles.push(tokio::spawn(async { hash_password(PASSWORD).await }));
+            let password = password.clone();
+            handles.push(tokio::spawn(async move { hash_password(&password).await }));
         }
         for handle in handles {
             assert!(handle.await.unwrap().is_ok());
