@@ -59,7 +59,7 @@ pub async fn create_first_admin(
     password_plain: &str,
 ) -> Result<String, AppError> {
     check_password_length(password_plain)?;
-    let hash = password::hash_password(password_plain)?;
+    let hash = password::hash_password(password_plain).await?;
     let id = ids::new_id();
     if setup::insert_first_admin(pool, &id, username, email, &hash).await? {
         Ok(id)
@@ -80,13 +80,13 @@ pub async fn login(
     let row = users::find_by_username(pool, username).await?;
     let Some(row) = row else {
         // Unknown user: same Argon2 cost as a real check, then the same error.
-        password::verify_dummy(password_plain)?;
+        password::verify_dummy(password_plain).await?;
         return Err(AppError::InvalidCredentials);
     };
 
     let Some(stored_hash) = row.password_hash.clone() else {
         // OIDC-only accounts have no local password. Same cost, same error.
-        password::verify_dummy(password_plain)?;
+        password::verify_dummy(password_plain).await?;
         return Err(AppError::InvalidCredentials);
     };
 
@@ -94,7 +94,7 @@ pub async fn login(
     let oidc_only = config::get(pool, OIDC_ONLY_USERS_KEY).await? == Some("true".to_owned());
     let restricted = oidc_only && role == Role::User;
 
-    let password_ok = password::verify_password(password_plain, &stored_hash)?;
+    let password_ok = password::verify_password(password_plain, &stored_hash).await?;
     if !password_ok || restricted {
         return Err(AppError::InvalidCredentials);
     }
@@ -106,9 +106,12 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
-    // Test values only. Passwords are obviously fake.
-    const PASSWORD: &str = "test-password-fifteen"; // 20 chars
+    // Test values only. Passwords are generated at runtime, so none is a source literal.
     const URL: &str = "https://harborgate.example.com";
+    static PASSWORD: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| crate::auth::password::random_test_password(20));
+    static WRONG: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| crate::auth::password::random_test_password(20));
 
     fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
@@ -168,14 +171,14 @@ mod tests {
     #[tokio::test]
     async fn unknown_user_and_wrong_password_do_equal_argon2_work() {
         let (pool, dir) = fresh_pool("equal-work").await;
-        create_first_admin(&pool, "test-admin", None, PASSWORD)
+        create_first_admin(&pool, "test-admin", None, &PASSWORD)
             .await
             .unwrap();
 
         let before = crate::auth::password::counter::verify_calls();
-        let unknown = login(&pool, "test-nobody", PASSWORD).await;
+        let unknown = login(&pool, "test-nobody", &PASSWORD).await;
         let after_unknown = crate::auth::password::counter::verify_calls();
-        let wrong = login(&pool, "test-admin", "test-wrong-password-xyz").await;
+        let wrong = login(&pool, "test-admin", &WRONG).await;
         let after_wrong = crate::auth::password::counter::verify_calls();
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -197,7 +200,7 @@ mod tests {
         for n in 0..8 {
             let pool = pool.clone();
             handles.push(tokio::spawn(async move {
-                create_first_admin(&pool, &format!("test-admin-{n}"), None, PASSWORD).await
+                create_first_admin(&pool, &format!("test-admin-{n}"), None, &PASSWORD).await
             }));
         }
         let mut created = 0;
@@ -224,11 +227,11 @@ mod tests {
     #[tokio::test]
     async fn setup_is_closed_after_the_first_account() {
         let (pool, dir) = fresh_pool("setup-closed").await;
-        create_first_admin(&pool, "test-admin", None, PASSWORD)
+        create_first_admin(&pool, "test-admin", None, &PASSWORD)
             .await
             .unwrap();
         assert!(!setup_required(&pool).await.unwrap());
-        let second = create_first_admin(&pool, "test-second", None, PASSWORD).await;
+        let second = create_first_admin(&pool, "test-second", None, &PASSWORD).await;
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
         assert!(matches!(second, Err(AppError::Conflict(_))));
@@ -237,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn first_account_is_an_admin_with_a_local_provider() {
         let (pool, dir) = fresh_pool("setup-role").await;
-        create_first_admin(&pool, "test-admin", None, PASSWORD)
+        create_first_admin(&pool, "test-admin", None, &PASSWORD)
             .await
             .unwrap();
         let row =
@@ -254,12 +257,12 @@ mod tests {
     #[tokio::test]
     async fn login_succeeds_with_the_right_password_and_fails_generically_otherwise() {
         let (pool, dir) = fresh_pool("login").await;
-        create_first_admin(&pool, "test-admin", None, PASSWORD)
+        create_first_admin(&pool, "test-admin", None, &PASSWORD)
             .await
             .unwrap();
-        let ok = login(&pool, "test-admin", PASSWORD).await;
-        let wrong = login(&pool, "test-admin", "test-wrong-password-xyz").await;
-        let unknown = login(&pool, "test-nobody", PASSWORD).await;
+        let ok = login(&pool, "test-admin", &PASSWORD).await;
+        let wrong = login(&pool, "test-admin", &WRONG).await;
+        let unknown = login(&pool, "test-nobody", &PASSWORD).await;
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
         assert!(ok.is_ok());
@@ -270,7 +273,7 @@ mod tests {
     #[tokio::test]
     async fn oidc_only_toggle_blocks_regular_users_but_not_admins() {
         let (pool, dir) = fresh_pool("oidc-only").await;
-        create_first_admin(&pool, "test-admin", None, PASSWORD)
+        create_first_admin(&pool, "test-admin", None, &PASSWORD)
             .await
             .unwrap();
         sqlx::query!(
@@ -282,7 +285,7 @@ mod tests {
         .await
         .unwrap();
         // Use a real hash for the regular user so only the toggle can refuse it.
-        let real = password::hash_password(PASSWORD).unwrap();
+        let real = password::hash_password(&PASSWORD).await.unwrap();
         sqlx::query!(
             "UPDATE users SET password_hash = ? WHERE username = 'test-user'",
             real
@@ -294,8 +297,8 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let user = login(&pool, "test-user", PASSWORD).await;
-        let admin = login(&pool, "test-admin", PASSWORD).await;
+        let user = login(&pool, "test-user", &PASSWORD).await;
+        let admin = login(&pool, "test-admin", &PASSWORD).await;
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(user.err(), Some(AppError::InvalidCredentials));

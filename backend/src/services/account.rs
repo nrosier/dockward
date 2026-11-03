@@ -28,11 +28,11 @@ pub async fn change_password(
         return Err(AppError::Forbidden);
     }
     let stored = row.password_hash.clone().ok_or(AppError::Forbidden)?;
-    if !password::verify_password(current, &stored)? {
+    if !password::verify_password(current, &stored).await? {
         return Err(AppError::InvalidCredentials);
     }
     local_auth::check_password_length(new)?;
-    let new_hash = password::hash_password(new)?;
+    let new_hash = password::hash_password(new).await?;
     users::set_password_hash(pool, user_id, &new_hash).await?;
     sessions::revoke_all(pool, user_id).await?;
     users::find_by_id(pool, user_id)
@@ -48,9 +48,15 @@ mod tests {
     use crate::config::parse_encryption_key;
     use crate::services::sessions::authenticate;
 
-    // Test values only. Passwords are obviously fake.
-    const OLD: &str = "test-old-password-fifteen";
-    const NEW: &str = "test-new-password-fifteen";
+    // Test values only. Passwords are generated at runtime, so none is a source literal.
+    static OLD: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| crate::auth::password::random_test_password(24));
+    static NEW: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| crate::auth::password::random_test_password(24));
+    static WRONG: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| crate::auth::password::random_test_password(24));
+    static SHORT: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| crate::auth::password::random_test_password(8));
 
     fn key() -> crate::auth::crypto::DerivedKey {
         let root = parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
@@ -63,7 +69,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = crate::db::open(&dir).await.unwrap();
-        local_auth::create_first_admin(&pool, "test-admin", None, OLD)
+        local_auth::create_first_admin(&pool, "test-admin", None, &OLD)
             .await
             .unwrap();
         (pool, dir)
@@ -86,7 +92,7 @@ mod tests {
         let other = issue(&k, &id, "admin", 0, now).unwrap();
         let current = issue(&k, &id, "admin", 0, now).unwrap();
 
-        let row = change_password(&pool, &id, OLD, NEW).await.unwrap();
+        let row = change_password(&pool, &id, &OLD, &NEW).await.unwrap();
         // The current session is replaced by one carrying the new token_version.
         let fresh = issue(&k, &id, "admin", row.token_version, now).unwrap();
 
@@ -112,9 +118,9 @@ mod tests {
     async fn new_password_is_the_one_that_works() {
         let (pool, dir) = seeded("new-pass").await;
         let id = user_id(&pool).await;
-        change_password(&pool, &id, OLD, NEW).await.unwrap();
-        let old_login = local_auth::login(&pool, "test-admin", OLD).await;
-        let new_login = local_auth::login(&pool, "test-admin", NEW).await;
+        change_password(&pool, &id, &OLD, &NEW).await.unwrap();
+        let old_login = local_auth::login(&pool, "test-admin", &OLD).await;
+        let new_login = local_auth::login(&pool, "test-admin", &NEW).await;
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(old_login.err(), Some(AppError::InvalidCredentials));
@@ -125,8 +131,8 @@ mod tests {
     async fn wrong_current_password_is_refused_and_changes_nothing() {
         let (pool, dir) = seeded("wrong-current").await;
         let id = user_id(&pool).await;
-        let result = change_password(&pool, &id, "test-not-the-password", NEW).await;
-        let still_old = local_auth::login(&pool, "test-admin", OLD).await;
+        let result = change_password(&pool, &id, &WRONG, &NEW).await;
+        let still_old = local_auth::login(&pool, "test-admin", &OLD).await;
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(result.err(), Some(AppError::InvalidCredentials));
@@ -140,7 +146,7 @@ mod tests {
     async fn short_new_password_is_refused_with_password_too_short() {
         let (pool, dir) = seeded("short-new").await;
         let id = user_id(&pool).await;
-        let result = change_password(&pool, &id, OLD, "test-short").await;
+        let result = change_password(&pool, &id, &OLD, &SHORT).await;
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(result.err(), Some(AppError::PasswordTooShort));
@@ -156,7 +162,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let result = change_password(&pool, "test-oidc-id", OLD, NEW).await;
+        let result = change_password(&pool, "test-oidc-id", &OLD, &NEW).await;
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(result.err(), Some(AppError::Forbidden));
