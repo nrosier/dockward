@@ -1,5 +1,7 @@
 //! SQL for the `users` table used by per-request authentication.
 
+use std::fmt;
+
 use sqlx::SqlitePool;
 
 use crate::error::AppError;
@@ -50,8 +52,9 @@ pub async fn set_role(pool: &SqlitePool, user_id: &str, role: &str) -> Result<()
         .map_err(|_| AppError::InternalError)
 }
 
-/// Full row for login and the `User` response.
-#[derive(Debug, Clone)]
+/// Full row for login and the `User` response. `Debug` is hand-written so the
+/// password hash is never printed.
+#[derive(Clone)]
 pub struct UserRow {
     pub id: String,
     pub username: String,
@@ -62,6 +65,24 @@ pub struct UserRow {
     pub token_version: i64,
     pub created_at: Option<i64>,
 }
+
+impl fmt::Debug for UserRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UserRow")
+            .field("id", &self.id)
+            .field("username", &self.username)
+            .field("email", &self.email)
+            .field("password_hash", &REDACTED)
+            .field("role", &self.role)
+            .field("auth_provider", &self.auth_provider)
+            .field("token_version", &self.token_version)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
+/// Placeholder printed in place of a secret-bearing field.
+const REDACTED: &str = "<redacted>";
 
 /// Finds a user by username for login. Returns `None` when no such user exists.
 pub async fn find_by_username(
@@ -283,4 +304,34 @@ pub async fn insert_oidc(
     .await
     .map(|_| ())
     .map_err(|_| AppError::InternalError)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_row_debug_redacts_password_hash() {
+        // Fixed fake value. Not a real hash.
+        const FAKE_HASH: &str = "fake-password-hash-value";
+
+        let row = UserRow {
+            id: "fake-user-id".to_owned(),
+            username: "fake-user".to_owned(),
+            email: Some("fake@example.test".to_owned()),
+            password_hash: Some(FAKE_HASH.to_owned()),
+            role: "user".to_owned(),
+            auth_provider: "local".to_owned(),
+            token_version: 1,
+            created_at: Some(0),
+        };
+        let text = format!("{row:?}");
+        assert!(!text.contains(FAKE_HASH), "password hash leaked: {text}");
+        assert!(text.contains("fake-user"), "username missing: {text}");
+        assert!(text.contains("fake@example.test"), "email missing: {text}");
+        assert!(
+            text.contains("<redacted>"),
+            "redaction marker missing: {text}"
+        );
+    }
 }
