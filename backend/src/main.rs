@@ -210,6 +210,14 @@ mod tests {
     /// A router over a fresh database, with the session and CSRF keys derived from
     /// the test key. Test values only.
     async fn test_router(name: &str) -> (Router, sqlx::SqlitePool, std::path::PathBuf) {
+        test_router_with_throttle(name, services::throttle::LoginThrottle::new()).await
+    }
+
+    /// Like `test_router`, with the given login throttle (for example a frozen clock).
+    async fn test_router_with_throttle(
+        name: &str,
+        login_throttle: services::throttle::LoginThrottle,
+    ) -> (Router, sqlx::SqlitePool, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("harborgate-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -221,7 +229,7 @@ mod tests {
             session_key: Arc::new(auth::crypto::session_key(&root).unwrap()),
             csrf_key: Arc::new(auth::crypto::csrf_key(&root).unwrap()),
             public_url: "https://harborgate.example.com".to_owned(),
-            login_throttle: services::throttle::LoginThrottle::new(),
+            login_throttle,
             login_limiter: api::hardening::RateLimiter::new(10, Duration::from_secs(60)),
             credentials_key: Arc::new(auth::crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
@@ -319,12 +327,17 @@ mod tests {
 
     /// Five wrong passwords, then the sixth attempt is refused inside the delay with
     /// the same 401 as a wrong password. The same account from another IP still gets a
-    /// password check and is not delayed.
+    /// password check and is not delayed. Time is frozen, so the result does not depend
+    /// on scheduling.
     #[tokio::test]
     async fn failed_login_delay_is_per_account_and_client_ip() {
         use axum::http::StatusCode;
 
-        let (router, pool, dir) = test_router("login-throttle").await;
+        // A frozen clock: real time never advances, so the sixth attempt is always inside
+        // the 1-second wait, under any CPU load.
+        let frozen = std::time::Instant::now();
+        let throttle = services::throttle::LoginThrottle::with_clock(Arc::new(move || frozen));
+        let (router, pool, dir) = test_router_with_throttle("login-throttle", throttle).await;
         services::auth::create_first_admin(&pool, "test-admin", None, "test-password-fifteen")
             .await
             .unwrap();
