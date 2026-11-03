@@ -491,14 +491,50 @@ pub async fn complete_callback<P: Provider>(
     }
 
     let groups = groups_from_claims(&claims, role_claim);
-    let role = role_from_groups(
+    let Some(role) = role_from_groups(
         &groups,
         settings.admin_group.as_deref(),
         settings.user_group.as_deref(),
-    )
-    .ok_or(AppError::Forbidden)?;
+    ) else {
+        refuse_sign_in(pool, &issuer_raw, &claims).await?;
+        return Err(AppError::Forbidden);
+    };
 
     upsert_user(pool, &issuer_raw, &claims, role).await
+}
+
+/// A sign-in with no allowed group is refused. An existing user loses every session:
+/// `token_version` is bumped and the change is audited as `user.role_change` (`to: null`),
+/// in one transaction. A user who does not exist has no session, so nothing is written.
+async fn refuse_sign_in(
+    pool: &SqlitePool,
+    issuer: &str,
+    claims: &IdClaims,
+) -> Result<(), AppError> {
+    let mut tx = begin_sign_in(pool).await?;
+    let Some(row) = users::find_by_oidc(&mut tx, issuer, &claims.sub).await? else {
+        return Ok(());
+    };
+    users::bump_token_version_tx(&mut tx, &row.id).await?;
+    let actor = Actor {
+        user_id: Some(row.id.clone()),
+        username: row.username.clone(),
+    };
+    audit::record(
+        &mut tx,
+        &actor,
+        "user.role_change",
+        &format!("user:{}", row.id),
+        Some(&serde_json::json!({
+            "username": row.username,
+            "from": row.role,
+            "to": null,
+            "source": "oidc",
+        })),
+    )
+    .await?;
+    tx.commit().await.map_err(|_| AppError::InternalError)?;
+    Ok(())
 }
 
 /// The settings a sign-in needs. Fails with `404` when OIDC is not fully configured.
@@ -528,43 +564,34 @@ fn parse_endpoint(raw: &str) -> Result<Url, AppError> {
     Ok(url)
 }
 
+/// Begins a sign-in transaction as `BEGIN IMMEDIATE`. SQLite takes the database write
+/// lock at the `BEGIN`, so a second first login for the same `sub` waits here until the
+/// first one commits, and then reads the row it created. A deferred transaction reads
+/// first and takes the write lock only on its first write. In WAL mode, if another
+/// connection committed after that read, the upgrade fails at once with `SQLITE_BUSY`
+/// (code 5). The busy timeout does not retry that case, so a deferred transaction
+/// cannot wait for the lock and read the new row.
+async fn begin_sign_in(
+    pool: &SqlitePool,
+) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, AppError> {
+    pool.begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| AppError::InternalError)
+}
+
 /// Finds the OIDC user for `(issuer, sub)`, creates it on first login, and sets its
-/// role from the group claim. A role change is audited as `user.role_change`.
+/// role from the group claim. A role change is audited as `user.role_change`. The read
+/// and the write run in one `BEGIN IMMEDIATE` transaction (see `begin_sign_in`).
 async fn upsert_user(
     pool: &SqlitePool,
     issuer: &str,
     claims: &IdClaims,
     role: Role,
 ) -> Result<users::UserRow, AppError> {
-    let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
-    let existing = users::find_by_oidc(pool, issuer, &claims.sub).await?;
+    let mut tx = begin_sign_in(pool).await?;
+    let existing = users::find_by_oidc(&mut tx, issuer, &claims.sub).await?;
     let row = match existing {
-        Some(row) => {
-            if row.role != role.as_str() {
-                users::update_role(&mut tx, &row.id, role.as_str()).await?;
-                let actor = Actor {
-                    user_id: Some(row.id.clone()),
-                    username: row.username.clone(),
-                };
-                audit::record(
-                    &mut tx,
-                    &actor,
-                    "user.role_change",
-                    &format!("user:{}", row.id),
-                    Some(&serde_json::json!({
-                        "username": row.username,
-                        "from": row.role,
-                        "to": role.as_str(),
-                        "source": "oidc",
-                    })),
-                )
-                .await?;
-            }
-            users::UserRow {
-                role: role.as_str().to_owned(),
-                ..row
-            }
-        }
+        Some(row) => set_role_if_changed(&mut tx, row, role).await?,
         None => {
             let id = ids::new_id();
             let username = free_username(&mut tx, &username_base(claims)).await?;
@@ -583,6 +610,39 @@ async fn upsert_user(
     };
     tx.commit().await.map_err(|_| AppError::InternalError)?;
     Ok(row)
+}
+
+/// Sets the role from the group claim when it differs, and audits the change. Runs
+/// inside the caller's transaction.
+async fn set_role_if_changed(
+    conn: &mut sqlx::SqliteConnection,
+    row: users::UserRow,
+    role: Role,
+) -> Result<users::UserRow, AppError> {
+    if row.role != role.as_str() {
+        users::update_role(conn, &row.id, role.as_str()).await?;
+        let actor = Actor {
+            user_id: Some(row.id.clone()),
+            username: row.username.clone(),
+        };
+        audit::record(
+            conn,
+            &actor,
+            "user.role_change",
+            &format!("user:{}", row.id),
+            Some(&serde_json::json!({
+                "username": row.username,
+                "from": row.role,
+                "to": role.as_str(),
+                "source": "oidc",
+            })),
+        )
+        .await?;
+    }
+    Ok(users::UserRow {
+        role: role.as_str().to_owned(),
+        ..row
+    })
 }
 
 /// Encrypts the client secret for `system_config` (`is_encrypted = 1`).
@@ -922,7 +982,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_with_no_allowed_group_is_forbidden_and_not_created() {
+    async fn concurrent_first_logins_create_one_user() {
+        let (pool, dir) = fresh_pool("concurrent").await;
+        let first = Pending::new();
+        let p1 = provider_for(id_token(
+            "test-sub-race",
+            &first.nonce,
+            json!({"preferred_username": "test-race", "groups": ["test-users"]}),
+        ));
+        let second = Pending::new();
+        let p2 = provider_for(id_token(
+            "test-sub-race",
+            &second.nonce,
+            json!({"preferred_username": "test-race", "groups": ["test-users"]}),
+        ));
+        let (a, b) = tokio::join!(
+            run(&pool, &p1, &first, &first.state),
+            run(&pool, &p2, &second, &second.state),
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE oidc_subject = 'test-sub-race'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(a.is_ok(), "first concurrent login must succeed: {a:?}");
+        assert!(b.is_ok(), "second concurrent login must succeed: {b:?}");
+        assert_eq!(count, 1, "concurrent first logins must create one user");
+    }
+
+    #[tokio::test]
+    async fn refused_existing_user_loses_their_sessions() {
+        let (pool, dir) = fresh_pool("refused").await;
+        let first = Pending::new();
+        let p1 = provider_for(id_token(
+            "test-sub-refused",
+            &first.nonce,
+            json!({"preferred_username": "test-carol", "groups": ["test-users"]}),
+        ));
+        let created = run(&pool, &p1, &first, &first.state).await.unwrap();
+        let key = crypto::session_key(
+            &crate::config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+                .unwrap(),
+        )
+        .unwrap();
+        let now = crate::auth::session::now_unix().unwrap();
+        let token = crate::auth::session::issue(
+            &key,
+            &created.id,
+            &created.role,
+            created.token_version,
+            now,
+        )
+        .unwrap();
+        assert!(
+            crate::services::sessions::authenticate(&pool, &key, &token, now)
+                .await
+                .is_ok(),
+            "the session is valid before the refusal"
+        );
+
+        let second = Pending::new();
+        let p2 = provider_for(id_token(
+            "test-sub-refused",
+            &second.nonce,
+            json!({"preferred_username": "test-carol", "groups": ["test-unrelated"]}),
+        ));
+        let refused = run(&pool, &p2, &second, &second.state).await;
+        let after = crate::services::sessions::authenticate(&pool, &key, &token, now).await;
+        let audit: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'user.role_change'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(refused.err(), Some(AppError::Forbidden));
+        assert_eq!(
+            after.err(),
+            Some(AppError::Unauthenticated),
+            "the old session must fail after a refused sign-in"
+        );
+        assert_eq!(audit, 1, "the session revoke is audited once");
+    }
+
+    #[tokio::test]
+    async fn refused_new_user_creates_no_row() {
         let (pool, dir) = fresh_pool("no-group").await;
         let pending = Pending::new();
         let provider = provider_for(id_token(

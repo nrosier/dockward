@@ -82,15 +82,22 @@ pub async fn put_settings(
 pub struct CallbackQuery {
     pub code: Option<String>,
     pub state: Option<String>,
+    /// The provider's `error` parameter, for example when the user denied consent.
+    pub error: Option<String>,
 }
 
 const REDACTED: &str = "<redacted>";
+
+/// The `oidc_error` value for a provider `error` parameter. The provider's own text is
+/// never copied into the redirect URL.
+const PROVIDER_ERROR_CODE: &str = "provider_error";
 
 impl fmt::Debug for CallbackQuery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CallbackQuery")
             .field("code", &REDACTED)
             .field("state", &REDACTED)
+            .field("error", &REDACTED)
             .finish()
     }
 }
@@ -129,7 +136,10 @@ pub async fn start(State(state): State<AppState>) -> Result<Response, AppError> 
 }
 
 /// `GET /api/v1/auth/oidc/callback`. Verifies `state`, exchanges the code, verifies the
-/// ID token and `nonce`, provisions or updates the user, and signs them in.
+/// ID token and `nonce`, provisions or updates the user, and signs them in. Returns `404`
+/// while OIDC is not configured. Every other outcome is `302`: success goes to `/`, and a
+/// failure or a provider `error` goes to `/?oidc_error=<code>`. The sign-in cookie is
+/// cleared on every outcome.
 pub async fn callback(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -139,22 +149,42 @@ pub async fn callback(
     if !settings.is_complete() {
         return Err(AppError::NotFound);
     }
+    let mut response = if query.error.is_some() {
+        error_redirect(PROVIDER_ERROR_CODE)?
+    } else {
+        match sign_in(&state, &settings, &headers, &query).await {
+            Ok(response) => response,
+            Err(err) => error_redirect(err.code())?,
+        }
+    };
+    clear_pending(&mut response)?;
+    Ok(response)
+}
+
+/// The sign-in itself: checks the query, completes the callback, and sets the session
+/// cookies on the `302` to `/`.
+async fn sign_in(
+    state: &AppState,
+    settings: &OidcSettings,
+    headers: &HeaderMap,
+    query: &CallbackQuery,
+) -> Result<Response, AppError> {
     let code = query.code.as_deref().ok_or(AppError::InvalidRequest(
         "The sign-in response is missing a code.".to_owned(),
     ))?;
     let state_param = query.state.as_deref().ok_or(AppError::InvalidRequest(
         "The sign-in response is missing a state.".to_owned(),
     ))?;
-    let cookie = crate::auth::session::read_cookie(&headers, OIDC_COOKIE);
-    let secret_stored = oidc_secret(&state).await?;
+    let cookie = crate::auth::session::read_cookie(headers, OIDC_COOKIE);
+    let secret_stored = oidc_secret(state).await?;
     let client_secret = oidc::open_client_secret(&state.credentials_key, &secret_stored)?;
-    let provider = http_provider(&state)?;
-    let redirect = redirect_uri(&state);
+    let provider = http_provider(state)?;
+    let redirect = redirect_uri(state);
     let row = oidc::complete_callback(
         &state.pool,
         &provider,
         &state.jwks,
-        &settings,
+        settings,
         Callback {
             cookie,
             state: state_param,
@@ -166,12 +196,21 @@ pub async fn callback(
     .await?;
     let view = User::try_from(row.clone())?;
     let mut response =
-        session_response(&state, &row, StatusCode::FOUND, UserResponse { user: view })?;
+        session_response(state, &row, StatusCode::FOUND, UserResponse { user: view })?;
     *response.body_mut() = axum::body::Body::empty();
     response
         .headers_mut()
         .insert(LOCATION, HeaderValue::from_static("/"));
-    clear_pending(&mut response)?;
+    Ok(response)
+}
+
+/// A `302` to the login page with the error code. `code` is a fixed snake_case value
+/// from `AppError::code` or `PROVIDER_ERROR_CODE`, so it is safe in the URL.
+fn error_redirect(code: &str) -> Result<Response, AppError> {
+    let location = HeaderValue::try_from(format!("/?oidc_error={code}"))
+        .map_err(|_| AppError::InternalError)?;
+    let mut response = StatusCode::FOUND.into_response();
+    response.headers_mut().insert(LOCATION, location);
     Ok(response)
 }
 
@@ -198,7 +237,7 @@ fn http_provider(state: &AppState) -> Result<HttpProvider, AppError> {
 #[cfg(test)]
 mod tests {
     use axum::body::{Body, to_bytes};
-    use axum::http::{Request, StatusCode};
+    use axum::http::{Request, StatusCode, header::LOCATION, header::SET_COOKIE};
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -211,21 +250,24 @@ mod tests {
     use crate::services::throttle::LoginThrottle;
     use std::time::Duration;
 
-    use super::{CallbackQuery, OidcSettingsView};
+    use super::{CallbackQuery, OIDC_COOKIE, OidcSettingsView};
 
     #[test]
     fn callback_query_debug_redacts_code_and_state() {
         // Fixed fake values. Not real credentials.
         const FAKE_CODE: &str = "fake-auth-code-value";
         const FAKE_STATE: &str = "fake-state-value";
+        const FAKE_ERROR: &str = "fake-provider-error-text";
 
         let query = CallbackQuery {
             code: Some(FAKE_CODE.to_owned()),
             state: Some(FAKE_STATE.to_owned()),
+            error: Some(FAKE_ERROR.to_owned()),
         };
         let text = format!("{query:?}");
         assert!(!text.contains(FAKE_CODE), "code leaked: {text}");
         assert!(!text.contains(FAKE_STATE), "state leaked: {text}");
+        assert!(!text.contains(FAKE_ERROR), "error leaked: {text}");
         assert!(
             text.contains("CallbackQuery"),
             "struct name missing: {text}"
@@ -402,5 +444,121 @@ mod tests {
             "the secret value is never serialised"
         );
         assert!(!text.contains("client_secret_encrypted"));
+    }
+
+    /// Stores complete OIDC settings with a sealed client secret. Test values only. No
+    /// callback in these tests reaches the provider.
+    async fn configure_oidc(pool: &sqlx::SqlitePool) {
+        let root = parse_encryption_key(TEST_KEY_B64).unwrap();
+        let key = crypto::credentials_key(&root).unwrap();
+        let sealed = crate::services::oidc::seal_client_secret(&key, "test-client-secret").unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        for (name, value) in [
+            (crate::services::oidc::ISSUER_KEY, "https://idp.example.com"),
+            (crate::services::oidc::CLIENT_ID_KEY, "harborgate-test"),
+            (crate::services::oidc::ROLE_CLAIM_KEY, "groups"),
+            (crate::services::oidc::USER_GROUP_KEY, "test-users"),
+        ] {
+            crate::db::config::upsert(&mut conn, name, value, false)
+                .await
+                .unwrap();
+        }
+        crate::db::config::upsert(
+            &mut conn,
+            crate::services::oidc::CLIENT_SECRET_KEY,
+            &sealed,
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Sends a callback request with the given query and the sign-in cookie for `pending`.
+    async fn callback_response(
+        router: &axum::Router,
+        query: &str,
+        cookie: &str,
+    ) -> axum::response::Response {
+        let request = peer(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/auth/oidc/callback?{query}"))
+                .header("cookie", format!("{OIDC_COOKIE}={cookie}")),
+        )
+        .body(Body::empty())
+        .unwrap();
+        router.clone().oneshot(request).await.unwrap()
+    }
+
+    /// True when some `Set-Cookie` header clears the sign-in cookie.
+    fn clears_oidc_cookie(response: &axum::response::Response) -> bool {
+        response
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .any(|value| value.starts_with(&format!("{OIDC_COOKIE}=; Max-Age=0")))
+    }
+
+    #[tokio::test]
+    async fn failed_callback_clears_the_cookie_and_redirects() {
+        let (router, pool, dir) = router("failed-callback").await;
+        configure_oidc(&pool).await;
+        // The cookie holds a different state from the query, so the callback fails before
+        // any provider request.
+        let pending = crate::services::oidc::Pending::new();
+        let response = callback_response(
+            &router,
+            "code=test-code&state=test-other-state",
+            &pending.to_cookie(),
+        )
+        .await;
+        let status = response.status();
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let cleared = clears_oidc_cookie(&response);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(status, StatusCode::FOUND);
+        assert_eq!(location.as_deref(), Some("/?oidc_error=unauthenticated"));
+        assert!(
+            cleared,
+            "the sign-in cookie must be cleared on a failed callback"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_error_redirects_with_provider_error() {
+        let (router, pool, dir) = router("provider-error").await;
+        configure_oidc(&pool).await;
+        let pending = crate::services::oidc::Pending::new();
+        // The provider's own text is not copied into the redirect.
+        let response = callback_response(
+            &router,
+            &format!(
+                "error=access_denied&error_description=test-consent-text&state={}",
+                pending.state
+            ),
+            &pending.to_cookie(),
+        )
+        .await;
+        let status = response.status();
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let cleared = clears_oidc_cookie(&response);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(status, StatusCode::FOUND);
+        assert_eq!(location.as_deref(), Some("/?oidc_error=provider_error"));
+        assert!(
+            cleared,
+            "the sign-in cookie must be cleared on a provider error"
+        );
     }
 }
