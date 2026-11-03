@@ -184,7 +184,26 @@ pub struct ClientIp(pub IpAddr);
 #[derive(Clone)]
 pub struct TrustedProxies(pub Arc<Vec<Cidr>>);
 
-/// Stores the resolved client IP as a request extension.
+/// Where the resolved client IP came from: the TCP peer, or a trusted
+/// `X-Forwarded-For` entry. Shown on the admin health route so operators can check
+/// `HARBORGATE_TRUSTED_PROXIES` (`specs/api.md`, Health).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClientIpSource {
+    Peer,
+    XForwardedFor,
+}
+
+impl ClientIpSource {
+    /// The wire value: `peer` or `x-forwarded-for`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClientIpSource::Peer => "peer",
+            ClientIpSource::XForwardedFor => "x-forwarded-for",
+        }
+    }
+}
+
+/// Stores the resolved client IP and its source as request extensions.
 pub async fn resolve_client_ip(
     State(trusted): State<TrustedProxies>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -196,7 +215,13 @@ pub async fn resolve_client_ip(
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok());
     let ip = client_ip(peer.ip(), forwarded, &trusted.0);
+    let source = if ip == peer.ip() {
+        ClientIpSource::Peer
+    } else {
+        ClientIpSource::XForwardedFor
+    };
     request.extensions_mut().insert(ClientIp(ip));
+    request.extensions_mut().insert(source);
     next.run(request).await
 }
 
@@ -383,6 +408,55 @@ mod tests {
             let response = app.clone().oneshot(request).await.expect_test_request();
             assert_security_headers(response.headers());
         }
+    }
+
+    /// Runs one request through `resolve_client_ip` and returns the stored source.
+    /// The router echoes the extension, so the test reads what the middleware stored.
+    async fn source_for(trusted: Vec<Cidr>, peer: &str, forwarded: Option<&str>) -> String {
+        use axum::{Router, body::Body, routing::get};
+        use tower::ServiceExt;
+
+        async fn echo(axum::Extension(source): axum::Extension<ClientIpSource>) -> &'static str {
+            source.as_str()
+        }
+
+        let app = Router::new()
+            .route("/x", get(echo))
+            .layer(axum::middleware::from_fn_with_state(
+                TrustedProxies(Arc::new(trusted)),
+                resolve_client_ip,
+            ));
+        let mut builder = axum::http::Request::builder().uri("/x");
+        if let Some(value) = forwarded {
+            builder = builder.header("x-forwarded-for", value);
+        }
+        let mut request = builder.body(Body::empty()).expect_test_request();
+        let peer_addr = SocketAddr::new(ip(peer), 8080);
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(peer_addr));
+        let response = app.oneshot(request).await.expect_test_request();
+        let bytes = axum::body::to_bytes(response.into_body(), 64)
+            .await
+            .expect_test_request();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn client_ip_source_is_peer_without_trusted_forwarding() {
+        // No trusted proxies: the header is ignored and the source is the peer.
+        let source = source_for(Vec::new(), "203.0.113.9", Some("127.0.0.1")).await;
+        assert_eq!(source, "peer");
+        // A trusted peer with no header also resolves to the peer.
+        let source = source_for(vec![cidr("172.18.0.0/16")], "172.18.0.2", None).await;
+        assert_eq!(source, "peer");
+    }
+
+    #[tokio::test]
+    async fn client_ip_source_is_forwarded_from_trusted_proxy() {
+        let trusted = vec![cidr("172.18.0.0/16")];
+        let source = source_for(trusted, "172.18.0.2", Some("198.51.100.7")).await;
+        assert_eq!(source, "x-forwarded-for");
     }
 
     fn assert_security_headers(headers: &axum::http::HeaderMap) {
