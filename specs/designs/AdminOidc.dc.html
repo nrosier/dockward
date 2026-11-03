@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Admin: OIDC settings</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}a:hover{color:#c4b8fd;text-decoration:underline}
+:focus-visible{outline:2px solid #a390fb;outline-offset:2px}
+h1,h2,p{margin:0}
+.muted{color:#9b98b8}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:0 16px;border-radius:8px;border:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:500 13.5px/1 'Inter',sans-serif;cursor:pointer;white-space:nowrap}
+.btn-primary{background:#a390fb;border-color:#a390fb;color:#0b0c18;font-weight:600}
+.field{display:flex;flex-direction:column;gap:6px}
+.label{font-weight:600;font-size:13px}
+.help{color:#9b98b8;font-size:12.5px}
+.input{min-height:40px;border-radius:8px;border:1px solid #2e3056;background:#0f1022;color:#eceafa;padding:0 12px;font:14px 'Inter',sans-serif;width:100%;box-sizing:border-box}
+.switch{width:44px;height:26px;border-radius:999px;border:1px solid #a390fb;background:#a390fb;position:relative;cursor:pointer;padding:0;flex:none}
+.switch span{position:absolute;top:3px;left:21px;width:18px;height:18px;border-radius:50%;background:#0b0c18}
+.copyrow{display:flex;align-items:stretch;border:1px solid #2e3056;border-radius:8px;background:#0f1022;overflow:hidden}
+.copyrow code{flex:1;min-width:0;padding:10px 12px;font:13px/1.5 'JetBrains Mono',monospace;word-break:break-all}
+.copyrow button{border:0;border-left:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:500 13px 'Inter',sans-serif;padding:0 14px;cursor:pointer}
+</style>
+</helmet>
+<div style="min-height: 760px; display: flex; flex-wrap: wrap; background: #0b0c18">
+  <nav aria-label="Main" style="flex: 1 1 232px; background: #0f1020; border-right: 1px solid #22233f">
+    <dc-import name="Rail" active="admin" hint-size="232px,620px"></dc-import>
+  </nav>
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="position: sticky; top: 0; z-index: 5">
+      <dc-import name="Topbar" hint-size="100%,56px"></dc-import>
+    </header>
+    <main style="padding: 28px 32px 56px">
+      <div style="max-width: 64rem; margin: 0 auto; display: flex; flex-direction: column; gap: 20px">
+        <h1 style="font-size: 24px; font-weight: 650; letter-spacing: -0.01em">Admin</h1>
+        <dc-import name="AdminTabs" active="settings" sub="oidc" hint-size="100%,92px"></dc-import>
+
+        <form style="display: flex; flex-direction: column; gap: 20px">
+          <section class="card" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 18px" aria-labelledby="idp">
+            <h2 id="idp" style="font-size: 15px; font-weight: 600">Identity provider</h2>
+            <div class="field">
+              <span class="label" id="ru">Redirect URI</span>
+              <span class="help">Register this in your identity provider.</span>
+              <div class="copyrow"><code aria-labelledby="ru">https://harborgate.example.org/api/v1/auth/oidc/callback</code><button type="button">Copy</button></div>
+            </div>
+            <div class="field"><label class="label" for="iss">Issuer URL</label><span class="help">HTTPS only.</span><input id="iss" class="input" value="https://login.example.org/realms/platform"></div>
+            <div class="field"><label class="label" for="cid">Client ID</label><input id="cid" class="input" value="harborgate"></div>
+            <div class="field">
+              <label class="label" for="cs">Client secret</label>
+              <span class="help">A secret is saved. It is never shown. Enter a new one only to replace it.</span>
+              <input id="cs" class="input" type="password" placeholder="Saved. Leave empty to keep it.">
+            </div>
+          </section>
+
+          <section class="card" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 18px" aria-labelledby="roles">
+            <div style="display: flex; flex-direction: column; gap: 4px">
+              <h2 id="roles" style="font-size: 15px; font-weight: 600">Roles from groups</h2>
+              <p class="help">The role is read from this claim at every sign-in. A user in neither group cannot sign in.</p>
+            </div>
+            <div class="field"><label class="label" for="rc">Group claim</label><input id="rc" class="input" value="groups"></div>
+            <div class="field"><label class="label" for="ag">Admin group</label><input id="ag" class="input" value="harborgate-admins"></div>
+            <div class="field"><label class="label" for="ug">User group</label><input id="ug" class="input" value="harborgate-users"></div>
+          </section>
+
+          <section class="card" style="padding: 20px 22px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px" aria-label="Sign-in restriction">
+            <div class="field">
+              <span class="label" id="oo">Single sign-on only for regular users</span>
+              <span class="help">Regular users can no longer sign in with a local password. Admins can always sign in locally as a break-glass path.</span>
+            </div>
+            <button type="button" class="switch" role="switch" aria-checked="true" aria-labelledby="oo"><span></span></button>
+          </section>
+
+          <div style="display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px">
+            <button type="button" class="btn">Discard changes</button>
+            <button type="button" class="btn btn-primary">Save OIDC settings</button>
+          </div>
+        </form>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":1120}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

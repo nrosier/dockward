@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CVE-2024-45337</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}a:hover{color:#c4b8fd;text-decoration:underline}
+:focus-visible{outline:2px solid #a390fb;outline-offset:2px}
+h1,h2,h3,p,dl,dd{margin:0}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px}
+.muted{color:#9b98b8}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:0 14px;border-radius:8px;border:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:500 13px/1 'Inter',sans-serif;cursor:pointer;white-space:nowrap;text-decoration:none}
+.btn:hover{background:#23244a;text-decoration:none;color:#eceafa}
+.btn-primary{background:#a390fb;border-color:#a390fb;color:#0b0c18;font-weight:600}
+.btn-primary:hover{background:#b6a6fc;color:#0b0c18}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+.pill{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:999px;font:600 11.5px/1 'Inter',sans-serif;letter-spacing:.05em;text-transform:uppercase;border:1px solid;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.crit{color:#fca5a5;background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.45)}
+.ok{color:#6ee7b7;background:rgba(16,185,129,.12);border-color:rgba(16,185,129,.45)}
+.open{color:#eceafa;background:rgba(236,234,250,.06);border-color:#4a4c78}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font:600 11px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#9b98b8;padding:12px 14px;border-bottom:1px solid #25264a;white-space:nowrap}
+td{padding:11px 14px;border-bottom:1px solid #1d1e38;vertical-align:middle}
+tr:last-child td{border-bottom:0}
+dt{font:600 11px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#9b98b8;margin-bottom:6px}
+</style>
+</helmet>
+<div style="min-height: 760px; display: flex; flex-wrap: wrap; background: #0b0c18">
+  <nav aria-label="Main" style="flex: 1 1 232px; background: #0f1020; border-right: 1px solid #22233f">
+    <dc-import name="Rail" active="cves" hint-size="232px,620px"></dc-import>
+  </nav>
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="position: sticky; top: 0; z-index: 5">
+      <dc-import name="Topbar" hint-size="100%,56px"></dc-import>
+    </header>
+    <main style="padding: 28px 32px 56px">
+      <div style="max-width: 64rem; margin: 0 auto; display: flex; flex-direction: column; gap: 22px">
+
+        <section class="card" style="padding: 22px 24px; display: flex; flex-direction: column; gap: 18px" aria-labelledby="cve-h">
+          <a href="Cves.dc.html" style="font-size: 13px">← CVEs</a>
+          <div style="display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 16px">
+            <div style="display: flex; flex-direction: column; gap: 10px; min-width: 0">
+              <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px">
+                <h1 id="cve-h" style="font-family: 'JetBrains Mono', monospace; font-size: 24px; font-weight: 500; letter-spacing: -0.01em">CVE-2024-45337</h1>
+                <span class="pill crit">Critical</span>
+                <span class="pill open">Open</span>
+              </div>
+              <p style="color: #d6d3ee; max-width: 40rem">golang.org/x/crypto/ssh: misuse of ServerConfig.PublicKeyCallback may cause an authorization bypass.</p>
+            </div>
+            <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center">
+              <a class="btn" href="https://github.com/">
+                <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></svg>
+                GitHub issue #214
+              </a>
+              <button type="button" class="btn" disabled title="An open issue already exists for this CVE">Create issue</button>
+              <a class="btn btn-primary" href="CveAccept.dc.html">Accept risk</a>
+            </div>
+          </div>
+          <dl style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; padding-top: 16px; border-top: 1px solid #25264a">
+            <div><dt>Package</dt><dd>golang.org/x/crypto <span class="mono muted">v0.25.0</span></dd></div>
+            <div><dt>Mapping</dt><dd>platform/api-gateway → <span class="mono">example-org/api-gateway</span></dd></div>
+            <div><dt>First seen</dt><dd>2026-10-14</dd></div>
+            <div><dt>Risk acceptance</dt><dd class="muted">Not accepted</dd></div>
+          </dl>
+        </section>
+
+        <section class="card" aria-labelledby="tags-h">
+          <div style="display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; padding: 16px 18px 8px">
+            <h2 id="tags-h" style="font-size: 15px; font-weight: 600">Tracked tags</h2>
+            <span class="muted" style="font-size: 12.5px">Open in 4 of the last 10 tags. The issue closes when no tracked tag reports it.</span>
+          </div>
+          <div style="overflow-x: auto">
+            <table>
+              <thead><tr><th>Tag</th><th>Status</th><th>Last scan</th><th>Fixed in</th></tr></thead>
+              <tbody>
+                <tr><td class="mono" style="font-size: 13px">1.42.0</td><td><span class="pill open">Open</span></td><td class="muted">2026-11-03 14:58</td><td class="mono">v0.31.0</td></tr>
+                <tr><td class="mono" style="font-size: 13px">1.41.3</td><td><span class="pill open">Open</span></td><td class="muted">2026-11-03 13:40</td><td class="mono">v0.31.0</td></tr>
+                <tr><td class="mono" style="font-size: 13px">1.41.2</td><td><span class="pill open">Open</span></td><td class="muted">2026-10-29 09:12</td><td class="mono">v0.31.0</td></tr>
+                <tr><td class="mono" style="font-size: 13px">1.41.0</td><td><span class="pill open">Open</span></td><td class="muted">2026-10-21 16:05</td><td class="mono">v0.31.0</td></tr>
+                <tr><td class="mono" style="font-size: 13px">1.40.2</td><td><span class="pill ok">Fixed</span></td><td class="muted">2026-10-18 11:30</td><td class="mono">v0.31.0</td></tr>
+                <tr><td class="mono" style="font-size: 13px">1.40.1</td><td><span class="pill ok">Fixed</span></td><td class="muted">2026-10-15 08:47</td><td class="mono">v0.31.0</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

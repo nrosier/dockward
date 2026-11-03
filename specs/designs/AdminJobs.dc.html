@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Admin: Jobs</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}a:hover{color:#c4b8fd;text-decoration:underline}
+:focus-visible{outline:2px solid #a390fb;outline-offset:2px}
+h1,h2,p{margin:0}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px}
+.muted{color:#9b98b8}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.pill{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px;border-radius:999px;font:600 11px/1 'Inter',sans-serif;letter-spacing:.05em;text-transform:uppercase;border:1px solid;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.crit{color:#fca5a5;background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.45)}
+.ok{color:#6ee7b7;background:rgba(16,185,129,.12);border-color:rgba(16,185,129,.45)}
+.tag{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:6px;background:#1b1c34;border:1px solid #2e3056;font:500 12px 'JetBrains Mono',monospace;color:#d6d3ee}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font:600 11px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#9b98b8;padding:12px 14px;border-bottom:1px solid #25264a;white-space:nowrap}
+td{padding:11px 14px;border-bottom:1px solid #1d1e38;vertical-align:top}
+tr:last-child td{border-bottom:0}
+.seg{display:inline-flex;border:1px solid #2e3056;border-radius:8px;overflow:hidden}
+.seg button{background:transparent;border:0;color:#c9c6e4;font:500 12.5px 'Inter',sans-serif;padding:0 12px;min-height:32px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:#2a2b52;color:#eceafa}
+</style>
+</helmet>
+<div style="min-height: 760px; display: flex; flex-wrap: wrap; background: #0b0c18">
+  <nav aria-label="Main" style="flex: 1 1 232px; background: #0f1020; border-right: 1px solid #22233f">
+    <dc-import name="Rail" active="admin" hint-size="232px,620px"></dc-import>
+  </nav>
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="position: sticky; top: 0; z-index: 5">
+      <dc-import name="Topbar" hint-size="100%,56px"></dc-import>
+    </header>
+    <main style="padding: 28px 32px 56px">
+      <div style="max-width: 64rem; margin: 0 auto; display: flex; flex-direction: column; gap: 20px">
+        <h1 style="font-size: 24px; font-weight: 650; letter-spacing: -0.01em">Admin</h1>
+        <dc-import name="AdminTabs" active="jobs" hint-size="100%,46px"></dc-import>
+
+        <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px">
+          <p class="muted">Housekeeping runs: polling, cleanup and retention. Sync jobs have their own page.</p>
+          <div class="seg" role="group" aria-label="Kind">
+            <button type="button" aria-pressed="true">All</button>
+            <button type="button" aria-pressed="false">Poll</button>
+            <button type="button" aria-pressed="false">Cleanup</button>
+            <button type="button" aria-pressed="false">Retention</button>
+          </div>
+        </div>
+
+        <section class="card" aria-label="Housekeeping runs">
+          <div style="overflow-x: auto">
+            <table>
+              <thead><tr><th>Kind</th><th>Status</th><th>Started</th><th>Duration</th><th>Result</th></tr></thead>
+              <tbody>
+                <tr><td><span class="tag">poll</span></td><td><span class="pill ok">Done</span></td><td class="muted">15:00</td><td class="muted">4.2 s</td><td>12 repositories checked, 1 new digest queued</td></tr>
+                <tr><td><span class="tag">poll</span></td><td><span class="pill ok">Done</span></td><td class="muted">14:45</td><td class="muted">3.9 s</td><td>12 repositories checked, nothing new</td></tr>
+                <tr><td><span class="tag">poll</span></td><td><span class="pill crit">Failed</span></td><td class="muted">14:30</td><td class="muted">10.0 s</td><td><div>11 of 12 repositories checked</div><div style="color: #fca5a5; font-size: 12.5px; margin-top: 4px">data/etl-runner: Harbor did not answer within 10 seconds.</div></td></tr>
+                <tr><td><span class="tag">cleanup</span></td><td><span class="pill ok">Done</span></td><td class="muted">06:00</td><td class="muted">0.3 s</td><td>14 rows removed</td></tr>
+                <tr><td><span class="tag">retention</span></td><td><span class="pill ok">Done</span></td><td class="muted">Yesterday 15:05</td><td class="muted">1.1 s</td><td>318 rows past retention deleted</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Admin tabs</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: 14px; font-family: 'Inter', system-ui, sans-serif; color: #eceafa; background: #0b0c18">
+  <div role="tablist" aria-label="Admin" style="display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid #25264a">
+    <a role="tab" href="AdminJobs.dc.html" aria-selected="{{t.jobs.sel}}" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; font-size: 14px; font-weight: 500; text-decoration: none; margin-bottom: -1px; border-bottom: 2px solid {{t.jobs.line}}; color: {{t.jobs.fg}}">Jobs</a>
+    <a role="tab" href="AdminFailed.dc.html" aria-selected="{{t.failed.sel}}" style="display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 14px; font-size: 14px; font-weight: 500; text-decoration: none; margin-bottom: -1px; border-bottom: 2px solid {{t.failed.line}}; color: {{t.failed.fg}}">Failed syncs <span style="min-width: 20px; height: 20px; padding: 0 6px; box-sizing: border-box; border-radius: 999px; background: rgba(239,68,68,.16); color: #fca5a5; font-size: 11.5px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center">2</span></a>
+    <a role="tab" href="AdminAudit.dc.html" aria-selected="{{t.audit.sel}}" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; font-size: 14px; font-weight: 500; text-decoration: none; margin-bottom: -1px; border-bottom: 2px solid {{t.audit.line}}; color: {{t.audit.fg}}">Audit log</a>
+    <a role="tab" href="AdminHealth.dc.html" aria-selected="{{t.health.sel}}" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; font-size: 14px; font-weight: 500; text-decoration: none; margin-bottom: -1px; border-bottom: 2px solid {{t.health.line}}; color: {{t.health.fg}}">Health</a>
+    <a role="tab" href="AdminOidc.dc.html" aria-selected="{{t.settings.sel}}" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; font-size: 14px; font-weight: 500; text-decoration: none; margin-bottom: -1px; border-bottom: 2px solid {{t.settings.line}}; color: {{t.settings.fg}}">Settings</a>
+  </div>
+  <sc-if value="{{showSub}}" hint-placeholder-val="{{ true }}">
+    <nav aria-label="Settings sections" style="display: flex; flex-wrap: wrap; gap: 6px">
+      <a href="AdminOidc.dc.html" aria-current="{{s.oidc.cur}}" style="display: inline-flex; align-items: center; min-height: 32px; padding: 0 12px; border-radius: 999px; font-size: 13px; font-weight: 500; text-decoration: none; border: 1px solid {{s.oidc.bd}}; background: {{s.oidc.bg}}; color: {{s.oidc.fg}}">OIDC</a>
+      <a href="AdminUsers.dc.html" aria-current="{{s.users.cur}}" style="display: inline-flex; align-items: center; min-height: 32px; padding: 0 12px; border-radius: 999px; font-size: 13px; font-weight: 500; text-decoration: none; border: 1px solid {{s.users.bd}}; background: {{s.users.bg}}; color: {{s.users.fg}}">Users</a>
+      <a href="AdminAlerts.dc.html" aria-current="{{s.alerts.cur}}" style="display: inline-flex; align-items: center; min-height: 32px; padding: 0 12px; border-radius: 999px; font-size: 13px; font-weight: 500; text-decoration: none; border: 1px solid {{s.alerts.bd}}; background: {{s.alerts.bg}}; color: {{s.alerts.fg}}">Alerts</a>
+      <a href="AdminBackup.dc.html" aria-current="{{s.backup.cur}}" style="display: inline-flex; align-items: center; min-height: 32px; padding: 0 12px; border-radius: 999px; font-size: 13px; font-weight: 500; text-decoration: none; border: 1px solid {{s.backup.bd}}; background: {{s.backup.bg}}; color: {{s.backup.fg}}">Backup and restore</a>
+    </nav>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"active":{"editor":"enum","options":["jobs","failed","audit","health","settings"],"default":"settings"},"sub":{"editor":"enum","options":["oidc","users","alerts","backup"],"default":"oidc"},"$preview":{"width":1024,"height":104}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const active = this.props.active ?? 'settings';
+    const sub = this.props.sub ?? 'oidc';
+    const t = {};
+    ['jobs', 'failed', 'audit', 'health', 'settings'].forEach((k) => {
+      const on = k === active;
+      t[k] = { sel: on ? 'true' : 'false', line: on ? '#a390fb' : 'transparent', fg: on ? '#eceafa' : '#9b98b8' };
+    });
+    const s = {};
+    ['oidc', 'users', 'alerts', 'backup'].forEach((k) => {
+      const on = k === sub;
+      s[k] = { cur: on ? 'page' : 'false', bd: on ? '#a390fb' : '#2e3056', bg: on ? 'rgba(163,144,251,.14)' : 'transparent', fg: on ? '#eceafa' : '#b4b1d0' };
+    });
+    return { t, s, showSub: active === 'settings' };
+  }
+}
+</script>
+</body>
+</html>

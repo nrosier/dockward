@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Admin: Audit log</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}a:hover{color:#c4b8fd;text-decoration:underline}
+:focus-visible{outline:2px solid #a390fb;outline-offset:2px}
+h1,h2,p{margin:0}
+.muted{color:#9b98b8}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:0 14px;border-radius:8px;border:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:500 13px/1 'Inter',sans-serif;cursor:pointer;white-space:nowrap}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+.act{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:6px;background:#1b1c34;border:1px solid #2e3056;font:500 12px 'JetBrains Mono',monospace;color:#d6d3ee;white-space:nowrap}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font:600 11px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#9b98b8;padding:12px 14px;border-bottom:1px solid #25264a;white-space:nowrap}
+td{padding:11px 14px;border-bottom:1px solid #1d1e38;vertical-align:top}
+tr:last-child td{border-bottom:0}
+.input{min-height:36px;border-radius:8px;border:1px solid #2e3056;background:#0f1022;color:#eceafa;padding:0 12px;font:13.5px 'Inter',sans-serif;box-sizing:border-box}
+.sr{position:absolute;left:-9999px}
+</style>
+</helmet>
+<div style="min-height: 760px; display: flex; flex-wrap: wrap; background: #0b0c18">
+  <nav aria-label="Main" style="flex: 1 1 232px; background: #0f1020; border-right: 1px solid #22233f">
+    <dc-import name="Rail" active="admin" hint-size="232px,620px"></dc-import>
+  </nav>
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="position: sticky; top: 0; z-index: 5">
+      <dc-import name="Topbar" hint-size="100%,56px"></dc-import>
+    </header>
+    <main style="padding: 28px 32px 56px">
+      <div style="max-width: 64rem; margin: 0 auto; display: flex; flex-direction: column; gap: 20px">
+        <h1 style="font-size: 24px; font-weight: 650; letter-spacing: -0.01em">Admin</h1>
+        <dc-import name="AdminTabs" active="audit" hint-size="100%,46px"></dc-import>
+
+        <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center">
+          <label class="sr" for="fa">Action</label>
+          <select id="fa" class="input"><option>All actions</option><option>user.create</option><option>user.role_change</option><option>oidc.config_change</option><option>cve.accept</option></select>
+          <label class="sr" for="fu">Actor</label>
+          <select id="fu" class="input"><option>All actors</option><option>ops-admin</option><option>j.devries</option><option>cli</option></select>
+        </div>
+
+        <section class="card" aria-label="Audit log">
+          <div style="overflow-x: auto">
+            <table>
+              <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th></tr></thead>
+              <tbody>
+                <tr><td class="muted" style="white-space: nowrap">2026-11-03 14:52</td><td>j.devries</td><td><span class="act">cve.accept</span></td><td>CVE-2024-3094 · platform/billing-worker</td><td class="muted">Expires 2026-12-31</td></tr>
+                <tr><td class="muted" style="white-space: nowrap">2026-11-03 11:20</td><td>ops-admin</td><td><span class="act">oidc.config_change</span></td><td>OIDC settings</td><td class="muted">Changed: admin_group, oidc_only_users (on)</td></tr>
+                <tr><td class="muted" style="white-space: nowrap">2026-11-03 09:41</td><td>m.kaya</td><td><span class="act">user.role_change</span></td><td>m.kaya</td><td class="muted">user → admin, source oidc</td></tr>
+                <tr><td class="muted" style="white-space: nowrap">2026-11-02 17:05</td><td>ops-admin</td><td><span class="act">mapping.auth_secret_rotate</span></td><td>platform/api-gateway</td><td class="muted">—</td></tr>
+                <tr><td class="muted" style="white-space: nowrap">2026-11-02 16:58</td><td>ops-admin</td><td><span class="act">mapping.delete</span></td><td>platform/legacy-api</td><td class="muted">Open issues left on GitHub: #12, #15, #31</td></tr>
+                <tr><td class="muted" style="white-space: nowrap">2026-11-01 08:00</td><td>ops-admin</td><td><span class="act">user.create</span></td><td>j.devries</td><td class="muted">Role user, local account</td></tr>
+                <tr><td class="muted" style="white-space: nowrap">2026-10-31 22:14</td><td><span style="font-family: 'JetBrains Mono', monospace; font-size: 12.5px">cli</span></td><td><span class="act">restore.run</span></td><td>Database</td><td class="muted">harborgate-20261031T200000Z.hgbk</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div style="display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; align-items: center; padding: 12px 14px; border-top: 1px solid #25264a; font-size: 12.5px">
+            <span class="muted">1–7 of 134</span>
+            <div style="display: flex; gap: 8px">
+              <button type="button" class="btn" disabled>Previous</button>
+              <button type="button" class="btn">Next</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

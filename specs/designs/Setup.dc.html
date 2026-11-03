@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Set up HarborGate</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}a:hover{color:#c4b8fd;text-decoration:underline}
+:focus-visible{outline:2px solid #a390fb;outline-offset:2px}
+h1,p{margin:0}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;min-height:44px;padding:0 16px;border-radius:8px;border:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:500 14px/1 'Inter',sans-serif;cursor:pointer;white-space:nowrap;text-decoration:none;width:100%;box-sizing:border-box}
+.btn-primary{background:#a390fb;border-color:#a390fb;color:#0b0c18;font-weight:600}
+.btn-primary:hover{background:#b6a6fc;color:#0b0c18;text-decoration:none}
+.field{display:flex;flex-direction:column;gap:6px}
+.label{font-weight:600;font-size:13px}
+.help{color:#9b98b8;font-size:12.5px}
+.input{min-height:44px;border-radius:8px;border:1px solid #2e3056;background:#0f1022;color:#eceafa;padding:0 12px;font:14px 'Inter',sans-serif;width:100%;box-sizing:border-box}
+.meter{display:flex;gap:4px}
+.meter span{flex:1;height:4px;border-radius:2px;background:#2e3056}
+</style>
+</helmet>
+<div style="min-height: 900px; box-sizing: border-box; padding: 48px 16px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 28px; background: #0b0c18">
+  <div style="display: flex; align-items: center; gap: 12px">
+    <span style="width: 40px; height: 40px; border-radius: 10px; background: #a390fb; color: #0b0c18; display: flex; align-items: center; justify-content: center">
+      <svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V8l8-5 8 5v13"></path><path d="M9 21v-7h6v7"></path></svg>
+    </span>
+    <span style="font-size: 20px; font-weight: 700; letter-spacing: -0.01em">HarborGate</span>
+  </div>
+
+  <main style="width: 100%; max-width: 440px; box-sizing: border-box; background: #15162a; border: 1px solid #25264a; border-radius: 12px; padding: 28px; display: flex; flex-direction: column; gap: 20px">
+    <div style="display: flex; flex-direction: column; gap: 6px">
+      <span style="font: 600 11px/1 'Inter', sans-serif; letter-spacing: .08em; text-transform: uppercase; color: #a390fb">First-run setup</span>
+      <h1 style="font-size: 20px; font-weight: 650">Create the first admin</h1>
+      <p style="color: #9b98b8; font-size: 13px">This page is only available until the first account exists. This account is a local admin and can always sign in, even after single sign-on is set up.</p>
+    </div>
+
+    <form style="display: flex; flex-direction: column; gap: 16px">
+      <div class="field">
+        <label class="label" for="u">Username</label>
+        <input id="u" class="input" value="ops-admin" autocomplete="username">
+      </div>
+      <div class="field">
+        <label class="label" for="e">Email</label>
+        <input id="e" class="input" type="email" value="ops@example.org" autocomplete="email">
+      </div>
+      <div class="field">
+        <label class="label" for="p">Password</label>
+        <span class="help" id="p-h">15 to 64 characters. A passphrase works well.</span>
+        <input id="p" class="input" type="password" value="correct-horse-battery" aria-describedby="p-h p-c" autocomplete="new-password">
+        <div class="meter" aria-hidden="true"><span style="background: #10b981"></span><span style="background: #10b981"></span><span style="background: #10b981"></span><span></span></div>
+        <span id="p-c" style="font-size: 12.5px; color: #6ee7b7">21 characters</span>
+      </div>
+      <div class="field">
+        <label class="label" for="p2">Confirm password</label>
+        <input id="p2" class="input" type="password" value="correct-horse-battery" autocomplete="new-password">
+      </div>
+      <a class="btn btn-primary" href="Main.dc.html">Create admin and sign in</a>
+    </form>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

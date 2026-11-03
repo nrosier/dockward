@@ -108,7 +108,7 @@ Decisions are marked `Decided (<date>)`. On 2026-11-03 the user delegated every 
 - Webhooks are the primary trigger.
 - Backup polling runs every 15 minutes across all mapped Harbor projects. The 15-minute interval is a user decision.
 - Polling lists artifacts per mapping and uses the digest to decide whether to sync.
-- Decided (2026-11-03, user): polling considers only artifacts with at least one tag, and queues one job per (digest, tag) pair. The job payload has the same shape as a webhook job: `{"repo_full_name","digest","tag"}`.
+- Decided (2026-11-03, user): polling considers only artifacts with at least one tag, and queues one job per (digest, tag) pair. The job payload has the same shape as a webhook job: `{"repo_full_name","digest","tag"}`. Decided (2026-11-03, user, #35): a polling job's payload also has `"trigger": "poll"`. Webhook jobs omit the field, and readers treat a missing `trigger` as `webhook`. The sync handler ignores the field.
 - Decided: polling skips an image whose digest already has a successful sync for that mapping and tag. "Successful" means `sync_jobs.status = 'done'` and `sarif_status = 'success'` on the linked report (Decided 2026-11-03 in [database.md](database.md)).
 - Source for the artifact list endpoint: Harbor swagger, `GET /api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts`, with `page` and `page_size` query parameters. The artifact object includes `digest`, `tags`, `push_time`, and `pull_time` (verified in this session).
 - Note: "backup polling" here means Harbor polling. It is not the admin backup command. See [security.md](security.md).

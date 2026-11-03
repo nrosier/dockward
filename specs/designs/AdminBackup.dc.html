@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Admin: Backup and restore</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}a:hover{color:#c4b8fd;text-decoration:underline}
+:focus-visible{outline:2px solid #a390fb;outline-offset:2px}
+h1,h2,p,ol{margin:0}
+.muted{color:#9b98b8}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:0 16px;border-radius:8px;border:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:500 13.5px/1 'Inter',sans-serif;cursor:pointer;white-space:nowrap}
+.btn-primary{background:#a390fb;border-color:#a390fb;color:#0b0c18;font-weight:600}
+.help{color:#9b98b8;font-size:12.5px}
+code{font-family:'JetBrains Mono',monospace;font-size:12.5px}
+pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12.5px/1.7 'JetBrains Mono',monospace;color:#d6d3ee;background:#0f1022;border:1px solid #25264a;border-radius:8px;padding:12px 14px}
+</style>
+</helmet>
+<div style="min-height: 760px; display: flex; flex-wrap: wrap; background: #0b0c18">
+  <nav aria-label="Main" style="flex: 1 1 232px; background: #0f1020; border-right: 1px solid #22233f">
+    <dc-import name="Rail" active="admin" hint-size="232px,620px"></dc-import>
+  </nav>
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="position: sticky; top: 0; z-index: 5">
+      <dc-import name="Topbar" hint-size="100%,56px"></dc-import>
+    </header>
+    <main style="padding: 28px 32px 56px">
+      <div style="max-width: 64rem; margin: 0 auto; display: flex; flex-direction: column; gap: 20px">
+        <h1 style="font-size: 24px; font-weight: 650; letter-spacing: -0.01em">Admin</h1>
+        <dc-import name="AdminTabs" active="settings" sub="backup" hint-size="100%,92px"></dc-import>
+
+        <section class="card" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 16px" aria-labelledby="bk">
+          <div style="display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px">
+            <div style="display: flex; flex-direction: column; gap: 4px; max-width: 28rem">
+              <h2 id="bk" style="font-size: 15px; font-weight: 600">Backup</h2>
+              <p class="help">Writes an encrypted copy of the database to the backup folder on the server. Only the same encryption key can restore it.</p>
+            </div>
+            <button type="button" class="btn btn-primary">Create backup</button>
+          </div>
+          <div role="status" style="display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 8px; border: 1px solid rgba(16,185,129,.45); background: rgba(16,185,129,.08)">
+            <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex: none; margin-top: 1px"><circle cx="12" cy="12" r="10"></circle><path d="m9 12 2 2 4-4"></path></svg>
+            <div style="display: flex; flex-direction: column; gap: 2px">
+              <span style="color: #6ee7b7; font-weight: 600">Backup written</span>
+              <code>/data/backups/harborgate-20261103T140512Z.hgbk</code>
+            </div>
+          </div>
+          <p class="help">Keep your encryption key for as long as you keep backups made with it. After a key rotation, older backups still need the old key.</p>
+        </section>
+
+        <section class="card" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 14px" aria-labelledby="rs">
+          <div style="display: flex; flex-direction: column; gap: 4px">
+            <h2 id="rs" style="font-size: 15px; font-weight: 600">Restore</h2>
+            <p class="help">Restore runs from the command line with HarborGate stopped. It is not available in the browser.</p>
+          </div>
+          <ol style="padding-left: 20px; display: flex; flex-direction: column; gap: 10px; color: #d6d3ee">
+            <li>Stop the HarborGate container.</li>
+            <li>Run the restore command with the same <code>HARBORGATE_ENCRYPTION_KEY</code> that made the backup:
+              <pre style="margin-top: 8px">harborgate restore /data/backups/harborgate-20261103T140512Z.hgbk</pre>
+            </li>
+            <li>Start HarborGate again. The audit log records the restore.</li>
+          </ol>
+          <p class="help">Full steps are in <a href="https://github.com/">docs/SETUP.md</a>.</p>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

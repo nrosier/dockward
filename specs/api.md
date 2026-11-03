@@ -82,6 +82,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 | DELETE | `/api/v1/credentials/:id` | session (owner only) | none | empty | 204, 404, 409 `conflict` (in use by a mapping) |
 | POST | `/api/v1/credentials/:id/test` | session (owner only) | Harbor: none. GitHub: `{"owner","repo"}` (Decided 2026-11-03: the repository is given per request, see below) | `{"ok": bool, "checks": [{"name","ok","detail","warning"?}]}` | 200, 404, 502 `upstream_unreachable` |
 
+- Decided (2026-11-03, user, #35): items of `GET /credentials` add `"mapping_count"`, the number of mappings that use the credential as their Harbor or GitHub credential. The Account page shows it as "Used by". Other credential responses do not carry it.
 - `base_url` and `username` apply to Harbor credentials. `base_url` must be HTTPS and must pass the address check in [security.md](security.md) (Outbound HTTP).
 - `DELETE` returns `409` while a mapping references the credential (`ON DELETE RESTRICT`, [database.md](database.md)).
 - Audit: create, update of the token, and delete write `credential.create`, `credential.rotate`, and `credential.delete`.
@@ -105,6 +106,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 | POST | `/api/v1/mappings/:id/rotate-webhook-token` | session (owner only) | none | `{"webhook_url": "<new, shown once>"}` | 200, 404 |
 | POST | `/api/v1/mappings/:id/rotate-auth-secret` | session (owner only) | none | `{"auth_secret": "<shown once>"}` | 200, 404 |
 
+- Decided (2026-11-03, user, #35): items of `GET /mappings` add `"open_cves": {"critical","high"}` and `"last_sync": {"status","updated_at"} or null`. `open_cves` follows the dashboard counting rules in [cve-lifecycle.md](cve-lifecycle.md) for that one mapping. `last_sync` is the mapping's most recently updated `sync_jobs` row. `GET /mappings/:id` does not carry these fields.
 - The duplicate error for the GitHub target is shown inline in the form ([frontend.md](frontend.md)). The `409` body names the conflicting mapping's label. Decided (2026-11-03, delegated): only if that mapping is owned by the caller; otherwise the message is generic, so another tenant's mapping is not revealed.
 - Both credentials must be owned by the caller. A credential of another user returns `404`.
 - `min_issue_severity` accepts `CRITICAL` or `HIGH`.
@@ -117,6 +119,8 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 `{id}` identifies one CVE within one mapping, because acceptance and issues are per mapping and `cve_findings` has one row per tag. Decided (2026-11-03, delegated): `{id}` is `<mapping_id>:<cve_id>`, URL-encoded (`:` is `%3A`). Neither a UUID nor a CVE id contains a colon. No external source. Alternative: nest the routes under `/mappings/:mapping_id/cves/:cve_id`. The paths below follow the form the user gave for `POST /api/v1/cves/{id}/issue`.
 
 `CveSummary` is `{"id","mapping_id","cve_id","severity","status","package","first_seen_at","last_seen_at","github_issue_url","accepted"}`. `status` is `open` or `fixed`, `accepted` is derived (see [cve-lifecycle.md](cve-lifecycle.md)). `CveDetail` adds `"tags": [{"image_tag","status","last_scan_at","fixed_in_version"}]` with up to 10 tags, and `"acceptance": {...} or null`.
+
+Decided (2026-11-03, user, #35): `CveSummary` also has `"fixed_in_version"` (from the most recently scanned tag that reports the CVE; `null` when unknown), `"open_tags"` (tracked tags where the CVE is open), `"tracked_tags"` (tracked tags of the mapping, at most 10), `"github_issue_number"`, and `"github_issue_status"` (`open`, `closed`, or `null` when there is no issue). `CveDetail` also has `"description"` (the Harbor vulnerability description, or `null`; see [database.md](database.md), `cve_findings.description`).
 
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |
@@ -136,6 +140,8 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 ## Sync jobs
 
 `SyncJob` is `{"id","mapping_id","status","attempts","next_attempt_at","last_error","created_at","updated_at","report": {...} or null}`. `report` is the linked `sync_reports` row (`image_tag`, `image_digest`, `commit_sha`, `vulnerability_summary`, `sarif_status`, `synced_at`).
+
+Decided (2026-11-03, user, #35): `SyncJob` also has `"trigger"` (`webhook` or `poll`, read from `payload.trigger`; a payload without the field is `webhook`) and `"image": {"repo_full_name","tag","digest"}` from the job payload, so queued and running jobs show their image before a report exists.
 
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |
@@ -197,6 +203,7 @@ All routes below are `admin`.
 
 - `/healthz` is the liveness check used by the compose healthcheck and the docker-smoke check (decided in [deployment.md](deployment.md), "Health"). It is a process liveness check only. It returns 200 without touching SQLite, Harbor, or GitHub, so a Harbor outage does not mark the container unhealthy. Decided (2026-11-03, delegated), no external source. It is excluded from rate limits, because health checks must not be throttled.
 - `Check` is `{"credential_id","label","reachable": bool,"missing_permissions": [string],"code_scanning": "ok" | "no_analysis_yet" | "unavailable" | null,"detail"}`. `code_scanning` is `null` for Harbor checks. The permission check and response classification are in [security.md](security.md), "GitHub token scope".
+- Decided (2026-11-03, delegated, #35): `Check` also has `"ok": bool` (every probe passed and nothing is missing) and `"target"` (`"<owner>/<repo>"` for GitHub checks, `null` for Harbor). `harbor` has one `Check` per Harbor credential. `github` has one `Check` per mapping, probed with that mapping's GitHub credential against its target, because code scanning and permissions are per repository. `missing_permissions` uses the names `metadata`, `code_scanning_alerts`, and `issues`. `robot_accounts` lists every Harbor credential, soonest expiry first, with `expires_at` and `days_left` `null` when there is no expiry. The probes run one after another; the frontend fetches this route at most once every 10 minutes ([frontend.md](frontend.md)).
 - `request` (Decided (2026-11-03, delegated)): the client IP HarborGate derived for this request, and `source`, which is `peer` or `x-forwarded-for`. Operators use it to check `HARBORGATE_TRUSTED_PROXIES` ([deployment.md](deployment.md), "Client IP behind Cloudflare and Traefik"). It shows only the caller's own address.
 - The robot account warning window is 14 days before `expires_at` (Decided 2026-11-03, see [integrations.md](integrations.md)).
 

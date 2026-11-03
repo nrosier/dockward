@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>New mapping</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}a:hover{color:#c4b8fd;text-decoration:underline}
+:focus-visible{outline:2px solid #a390fb;outline-offset:2px}
+h1,h2,h3,p{margin:0}
+.muted{color:#9b98b8}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:0 16px;border-radius:8px;border:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:500 13.5px/1 'Inter',sans-serif;cursor:pointer;white-space:nowrap;text-decoration:none}
+.btn:hover{background:#23244a;text-decoration:none;color:#eceafa}
+.btn-primary{background:#a390fb;border-color:#a390fb;color:#0b0c18;font-weight:600}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+.field{display:flex;flex-direction:column;gap:6px}
+.label{font-weight:600;font-size:13px}
+.help{color:#9b98b8;font-size:12.5px}
+.input{min-height:40px;border-radius:8px;border:1px solid #2e3056;background:#0f1022;color:#eceafa;padding:0 12px;font:14px 'Inter',sans-serif;width:100%;box-sizing:border-box}
+.input-err{border-color:#ef4444;box-shadow:0 0 0 1px #ef4444}
+.err{color:#fca5a5;font-size:12.5px;display:flex;gap:6px;align-items:flex-start}
+.switch{width:44px;height:26px;border-radius:999px;border:1px solid #a390fb;background:#a390fb;position:relative;cursor:pointer;padding:0;flex:none}
+.switch span{position:absolute;top:3px;left:21px;width:18px;height:18px;border-radius:50%;background:#0b0c18}
+fieldset{border:0;margin:0;padding:0}
+legend{padding:0}
+</style>
+</helmet>
+<div style="min-height: 760px; display: flex; flex-wrap: wrap; background: #0b0c18">
+  <nav aria-label="Main" style="flex: 1 1 232px; background: #0f1020; border-right: 1px solid #22233f">
+    <dc-import name="Rail" active="mappings" hint-size="232px,620px"></dc-import>
+  </nav>
+  <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="position: sticky; top: 0; z-index: 5">
+      <dc-import name="Topbar" hint-size="100%,56px"></dc-import>
+    </header>
+    <main style="padding: 28px 32px 56px">
+      <div style="max-width: 64rem; margin: 0 auto; display: flex; flex-direction: column; gap: 24px">
+
+        <div style="display: flex; flex-direction: column; gap: 6px">
+          <a href="Mappings.dc.html" style="font-size: 13px">← Mappings</a>
+          <h1 style="font-size: 24px; font-weight: 650; letter-spacing: -0.01em">New mapping</h1>
+          <p class="muted">Connect one Harbor repository to one GitHub repository.</p>
+        </div>
+
+        <form style="display: flex; flex-direction: column; gap: 20px">
+          <fieldset class="card" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 18px">
+            <legend style="float: left; font-size: 15px; font-weight: 600; margin-bottom: 2px">Harbor source</legend>
+            <div class="field" style="clear: both">
+              <label class="label" for="hp">Harbor project</label>
+              <input id="hp" class="input" value="platform">
+            </div>
+            <div class="field">
+              <label class="label" for="hr">Harbor repository</label>
+              <span class="help">The name inside the project, without the project prefix.</span>
+              <input id="hr" class="input" value="billing-api">
+            </div>
+            <div class="field">
+              <label class="label" for="hc">Harbor credential</label>
+              <select id="hc" class="input"><option>harbor-robot · harbor.example.org</option></select>
+              <span class="help">Credentials are managed on the <a href="Account.dc.html">Account</a> page.</span>
+            </div>
+          </fieldset>
+
+          <fieldset class="card" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 18px">
+            <legend style="float: left; font-size: 15px; font-weight: 600; margin-bottom: 2px">GitHub target</legend>
+            <div class="field" style="clear: both">
+              <label class="label" for="gc">GitHub credential</label>
+              <select id="gc" class="input"><option>github-app-token · github.com</option></select>
+            </div>
+            <div class="field">
+              <label class="label" for="go">GitHub owner</label>
+              <input id="go" class="input" value="example-org">
+            </div>
+            <div class="field">
+              <label class="label" for="gr">GitHub repository</label>
+              <input id="gr" class="input input-err" value="billing" aria-invalid="true" aria-describedby="gr-err">
+              <span id="gr-err" class="err">
+                <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex: none; margin-top: 1px"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v4"></path><path d="M12 16h.01"></path></svg>
+                Already used by mapping platform/billing-worker. Choose another repository.
+              </span>
+            </div>
+            <div class="field">
+              <label class="label" for="gb">Default branch</label>
+              <span class="help">Used when the image has no HarborGate branch label.</span>
+              <input id="gb" class="input" value="main">
+            </div>
+          </fieldset>
+
+          <fieldset class="card" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 18px">
+            <legend style="float: left; font-size: 15px; font-weight: 600; margin-bottom: 2px">Issues</legend>
+            <div style="clear: both; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px">
+              <div class="field">
+                <span class="label" id="ai-l">Create GitHub issues automatically</span>
+                <span class="help">One issue per CVE in the target repository. The token needs the Issues permission.</span>
+              </div>
+              <button type="button" class="switch" role="switch" aria-checked="true" aria-labelledby="ai-l"><span></span></button>
+            </div>
+            <div class="field">
+              <label class="label" for="ms">Minimum severity</label>
+              <select id="ms" class="input"><option>HIGH and CRITICAL</option><option>CRITICAL only</option></select>
+            </div>
+          </fieldset>
+
+          <div style="display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px">
+            <a class="btn" href="Mappings.dc.html">Cancel</a>
+            <button type="button" class="btn btn-primary" disabled>Save mapping</button>
+          </div>
+        </form>
+
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":1160}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>
