@@ -15,7 +15,9 @@ use crate::error::AppError;
 use crate::models::role::Role;
 use crate::services::audit::Actor;
 use crate::services::credential_probe::{self, HarborProbe, OutboundHarborProbe};
-use crate::services::credentials::{self, Credential, CredentialPatch, ListQuery, NewCredential};
+use crate::services::credentials::{
+    self, Credential, CredentialListItem, CredentialPatch, ListQuery, NewCredential,
+};
 use crate::services::pagination::Page;
 use crate::services::sessions::AuthUser;
 
@@ -48,7 +50,7 @@ pub async fn list(
     State(state): State<AppState>,
     user: AuthUser,
     Query(params): Query<CredentialListParams>,
-) -> Result<Json<Page<Credential>>, AppError> {
+) -> Result<Json<Page<CredentialListItem>>, AppError> {
     let all_users = match params.scope.as_deref() {
         None => false,
         Some("all") if user.role == Role::Admin => true,
@@ -245,7 +247,7 @@ mod tests {
         let encrypted = crate::auth::crypto::encrypt(
             key,
             &crate::auth::crypto::aad("user_credentials", "encrypted_token", "cred-1"),
-            b"test-robot-secret-value",
+            crate::services::ids::new_id().as_bytes(),
         )
         .unwrap();
         CredentialRow {
@@ -340,6 +342,148 @@ mod tests {
         );
         assert!(checks.iter().all(|check| check.ok));
         assert_eq!(checks[2].warning, Some("issues_permission_missing"));
+    }
+
+    /// Creates an owner and one Harbor credential through the service, then returns
+    /// the owner id and the credential id.
+    async fn owner_with_harbor_credential(state: &AppState) -> (String, String) {
+        let owner = crate::services::users::create_local(
+            &state.pool,
+            &Actor::cli(),
+            "owner",
+            None,
+            &crate::services::ids::new_id(),
+            Role::User,
+        )
+        .await
+        .unwrap();
+        let actor = Actor {
+            user_id: Some(owner.clone()),
+            username: "owner".to_owned(),
+        };
+        let created = credentials::create(
+            &state.pool,
+            &state.credentials_key,
+            &actor,
+            &owner,
+            NewCredential {
+                service_type: "harbor".to_owned(),
+                label: "primary".to_owned(),
+                base_url: Some("https://harbor.example.com".to_owned()),
+                username: Some("robot$harborgate".to_owned()),
+                token: crate::services::ids::new_id(),
+                expires_at: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        (owner, created.id)
+    }
+
+    #[tokio::test]
+    async fn list_items_have_mapping_count() {
+        let state = test_state("list-count").await;
+        let (owner, harbor_id) = owner_with_harbor_credential(&state).await;
+        let actor = Actor {
+            user_id: Some(owner.clone()),
+            username: "owner".to_owned(),
+        };
+        let github_id = credentials::create(
+            &state.pool,
+            &state.credentials_key,
+            &actor,
+            &owner,
+            NewCredential {
+                service_type: "github".to_owned(),
+                label: "gh".to_owned(),
+                base_url: None,
+                username: None,
+                token: crate::services::ids::new_id(),
+                expires_at: None,
+            },
+            false,
+        )
+        .await
+        .unwrap()
+        .id;
+        // One mapping uses the Harbor credential on its Harbor side.
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url,
+                harbor_project, harbor_repository, github_owner, github_repo,
+                webhook_token_hash, webhook_auth_secret_hash)
+             VALUES ('m1', ?, ?, ?, 'https://harbor.example.com', 'p', 'r', 'o', 'g', 'h1', 'h2')",
+        )
+        .bind(&owner)
+        .bind(&harbor_id)
+        .bind(&github_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let user = AuthUser {
+            id: owner,
+            username: "owner".to_owned(),
+            role: Role::User,
+        };
+        let Json(page) = list(
+            State(state.clone()),
+            user,
+            Query(CredentialListParams {
+                page: None,
+                page_size: None,
+                sort: None,
+                order: None,
+                service_type: None,
+                scope: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let value = serde_json::to_value(&page).unwrap();
+        let items = value["items"].as_array().unwrap();
+        let harbor_item = items.iter().find(|item| item["id"] == harbor_id).unwrap();
+        assert_eq!(harbor_item["label"], "primary");
+        assert_eq!(harbor_item["mapping_count"], 1);
+        // The same mapping uses the GitHub credential on its GitHub side.
+        let github_item = items.iter().find(|item| item["id"] == github_id).unwrap();
+        assert_eq!(github_item["mapping_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn create_response_has_no_mapping_count() {
+        let state = test_state("create-no-count").await;
+        let owner = crate::services::users::create_local(
+            &state.pool,
+            &Actor::cli(),
+            "owner",
+            None,
+            &crate::services::ids::new_id(),
+            Role::User,
+        )
+        .await
+        .unwrap();
+        let user = AuthUser {
+            id: owner,
+            username: "owner".to_owned(),
+            role: Role::User,
+        };
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "service_type": "harbor",
+                "label": "primary",
+                "base_url": "https://harbor.example.com",
+                "username": "robot$harborgate",
+                "token": crate::services::ids::new_id(),
+            })
+            .to_string(),
+        );
+        let response = create(State(state.clone()), user, body).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 65_536)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["label"], "primary");
+        assert!(value.get("mapping_count").is_none());
     }
 
     async fn test_state(name: &str) -> AppState {

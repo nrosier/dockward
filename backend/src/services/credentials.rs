@@ -37,6 +37,16 @@ pub struct Credential {
     pub created_at: Option<String>,
 }
 
+/// One item of the list route. The `Credential` fields are flattened in, and
+/// `mapping_count` is the number of mappings that use the credential as their Harbor
+/// or GitHub credential (`specs/api.md`, Credentials). Other responses do not carry it.
+#[derive(Debug, Serialize)]
+pub struct CredentialListItem {
+    #[serde(flatten)]
+    pub credential: Credential,
+    pub mapping_count: i64,
+}
+
 /// A create request. `token` is the plaintext secret: it is encrypted on write and
 /// dropped. `Debug` is hand-written so the token is never printed.
 #[derive(serde::Deserialize)]
@@ -255,13 +265,13 @@ fn normalize_base_url_field(value: Option<&str>, allow_private: bool) -> Result<
     }
 }
 
-/// Returns one page of credentials. `all_users` is honored only for admins; the
-/// route checks the role before calling this.
+/// Returns one page of credentials, each with its `mapping_count`. `all_users` is
+/// honored only for admins; the route checks the role before calling this.
 pub async fn list(
     pool: &SqlitePool,
     user_id: &str,
     query: &ListQuery,
-) -> Result<Page<Credential>, AppError> {
+) -> Result<Page<CredentialListItem>, AppError> {
     let paging = Pagination::parse(
         query.page,
         query.page_size,
@@ -283,10 +293,15 @@ pub async fn list(
     };
     let rows = db::list_owned(pool, &filter).await?;
     let total = db::count_owned(pool, scope, query.service_type.as_deref()).await?;
-    let items = rows
-        .into_iter()
-        .map(to_response)
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mapping_count = db::mapping_refs(&mut conn, &row.id).await?;
+        items.push(CredentialListItem {
+            credential: to_response(row)?,
+            mapping_count,
+        });
+    }
     Ok(Page {
         items,
         page: paging.page,
@@ -739,13 +754,139 @@ mod tests {
         };
         let page = list(&pool, &owner, &query).await.unwrap();
         assert_eq!(page.total, 3);
-        let labels: Vec<&str> = page.items.iter().map(|c| c.label.as_str()).collect();
+        let labels: Vec<&str> = page
+            .items
+            .iter()
+            .map(|c| c.credential.label.as_str())
+            .collect();
         assert_eq!(labels, vec!["a", "b"]);
         let github_only = ListQuery {
             service_type: Some(SERVICE_GITHUB.to_owned()),
             ..ListQuery::default()
         };
         assert_eq!(list(&pool, &owner, &github_only).await.unwrap().total, 0);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Inserts a mapping row directly. Mapping CRUD is issue #22, so the test rows are
+    /// written here. Each argument that is unique in `repo_mappings` is distinct.
+    async fn insert_mapping(
+        pool: &SqlitePool,
+        id: &str,
+        owner: &str,
+        harbor_cred: &str,
+        github_cred: &str,
+        repository: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url,
+                harbor_project, harbor_repository, github_owner, github_repo,
+                webhook_token_hash, webhook_auth_secret_hash)
+             VALUES (?, ?, ?, ?, 'https://harbor.example.com', 'p', ?, 'o', ?, ?, 'h2')",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(harbor_cred)
+        .bind(github_cred)
+        .bind(repository)
+        .bind(repository)
+        .bind(format!("hash-{id}"))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_counts_mappings_on_either_side() {
+        let (pool, dir) = fresh_pool("mapping-count").await;
+        let owner = user(&pool, "owner").await;
+        // harbor_used: Harbor side of two mappings. github_used: GitHub side of one.
+        // github_second: GitHub side of one. unused: no mapping.
+        let harbor_used = create(&pool, &key(), &actor(&owner), &owner, harbor("h"), false)
+            .await
+            .unwrap();
+        let github_used = create(
+            &pool,
+            &key(),
+            &actor(&owner),
+            &owner,
+            NewCredential {
+                service_type: SERVICE_GITHUB.to_owned(),
+                label: "gh-used".to_owned(),
+                base_url: None,
+                username: None,
+                token: TOKEN.to_owned(),
+                expires_at: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let github_second = create(
+            &pool,
+            &key(),
+            &actor(&owner),
+            &owner,
+            NewCredential {
+                service_type: SERVICE_GITHUB.to_owned(),
+                label: "gh-second".to_owned(),
+                base_url: None,
+                username: None,
+                token: TOKEN.to_owned(),
+                expires_at: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let unused = create(
+            &pool,
+            &key(),
+            &actor(&owner),
+            &owner,
+            NewCredential {
+                service_type: SERVICE_GITHUB.to_owned(),
+                label: "unused".to_owned(),
+                base_url: None,
+                username: None,
+                token: TOKEN.to_owned(),
+                expires_at: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        insert_mapping(
+            &pool,
+            "m1",
+            &owner,
+            &harbor_used.id,
+            &github_used.id,
+            "repo-one",
+        )
+        .await;
+        insert_mapping(
+            &pool,
+            "m2",
+            &owner,
+            &harbor_used.id,
+            &github_second.id,
+            "repo-two",
+        )
+        .await;
+        let page = list(&pool, &owner, &ListQuery::default()).await.unwrap();
+        let count_of = |id: &str| -> i64 {
+            page.items
+                .iter()
+                .find(|item| item.credential.id == id)
+                .map(|item| item.mapping_count)
+                .unwrap()
+        };
+        assert_eq!(count_of(&harbor_used.id), 2);
+        assert_eq!(count_of(&github_used.id), 1);
+        assert_eq!(count_of(&github_second.id), 1);
+        assert_eq!(count_of(&unused.id), 0);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
