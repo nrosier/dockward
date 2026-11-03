@@ -51,8 +51,8 @@ pub fn fingerprint(vuln_id: &str, package: &str) -> String {
         .collect()
 }
 
-/// `runAutomationDetails.id`: `harborgate/<project>/<repository>/`. The trailing `/` keeps
-/// the whole path as the category (`specs/integrations.md`).
+/// `automationDetails.id` (SARIF 2.1.0 run property): `harborgate/<project>/<repository>/`.
+/// The trailing `/` keeps the whole path as the category (`specs/integrations.md`).
 pub fn automation_id(project: &str, repository: &str) -> String {
     format!("harborgate/{project}/{repository}/")
 }
@@ -135,7 +135,7 @@ pub fn convert(report: &Value, project: &str, repository: &str) -> Result<Value,
                     "rules": rules.into_values().collect::<Vec<Value>>()
                 }
             },
-            "runAutomationDetails": { "id": automation_id(project, repository) },
+            "automationDetails": { "id": automation_id(project, repository) },
             "results": results
         }]
     }))
@@ -183,7 +183,7 @@ mod tests {
     fn automation_id_keeps_the_repository_path_as_category() {
         let doc = convert(&report(), "proj", "team/app").unwrap();
         assert_eq!(
-            doc["runs"][0]["runAutomationDetails"]["id"],
+            doc["runs"][0]["automationDetails"]["id"],
             "harborgate/proj/team/app/"
         );
     }
@@ -286,5 +286,76 @@ mod tests {
             2
         );
         assert_eq!(doc["runs"][0]["results"].as_array().unwrap().len(), 3);
+    }
+
+    /// The vendored OASIS SARIF 2.1.0 schema (errata 01), draft-04.
+    fn schema() -> Value {
+        serde_json::from_str(include_str!("../../tests/schemas/sarif-schema-2.1.0.json"))
+            .expect("the vendored SARIF schema is valid JSON")
+    }
+
+    /// Validates `doc` against the vendored schema and returns every error, one per line.
+    /// An empty list means the document is valid.
+    fn schema_errors(doc: &Value) -> Vec<String> {
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft4)
+            .build(&schema())
+            .unwrap_or_else(|err| panic!("the vendored SARIF schema does not compile: {err}"));
+        validator
+            .iter_errors(doc)
+            .map(|err| format!("{err} (at {})", err.instance_path()))
+            .collect()
+    }
+
+    fn assert_schema_valid(doc: &Value) {
+        let errors = schema_errors(doc);
+        assert!(
+            errors.is_empty(),
+            "SARIF output failed schema validation:\n{}",
+            errors.join("\n")
+        );
+    }
+
+    #[test]
+    fn output_validates_against_the_sarif_schema() {
+        // Fixture 1: one CVE with a CVSS v3 score.
+        let single = json!({
+            "vulnerabilities": [{
+                "id": "CVE-2026-0001",
+                "package": "libfake",
+                "version": "1.0.0",
+                "fix_version": "1.0.1",
+                "severity": "Critical",
+                "description": "A fake critical flaw.",
+                "preferred_cvss": { "score_v3": 9.8 }
+            }]
+        });
+        assert_schema_valid(&convert(&single, "proj", "app").unwrap());
+
+        // Fixture 2: several CVEs, one of them a duplicate id, with and without a fix.
+        let mut several = report();
+        let copy = several["vulnerabilities"][0].clone();
+        several["vulnerabilities"]
+            .as_array_mut()
+            .unwrap()
+            .push(copy);
+        assert_schema_valid(&convert(&several, "proj", "team/app").unwrap());
+    }
+
+    #[test]
+    fn empty_report_validates_against_the_sarif_schema() {
+        let empty = json!({ "vulnerabilities": [] });
+        assert_schema_valid(&convert(&empty, "proj", "app").unwrap());
+    }
+
+    #[test]
+    fn schema_rejects_a_broken_document() {
+        // Removing the required `version` must fail. This proves the validator really runs.
+        let mut doc = convert(&report(), "proj", "app").unwrap();
+        doc.as_object_mut().unwrap().remove("version");
+        assert!(
+            !schema_errors(&doc).is_empty(),
+            "a SARIF document without `version` passed validation"
+        );
     }
 }
