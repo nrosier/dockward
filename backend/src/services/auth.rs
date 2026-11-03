@@ -59,7 +59,7 @@ pub async fn create_first_admin(
     password_plain: &str,
 ) -> Result<String, AppError> {
     check_password_length(password_plain)?;
-    let hash = password::hash_password(password_plain)?;
+    let hash = password::hash_password(password_plain).await?;
     let id = ids::new_id();
     if setup::insert_first_admin(pool, &id, username, email, &hash).await? {
         Ok(id)
@@ -80,13 +80,13 @@ pub async fn login(
     let row = users::find_by_username(pool, username).await?;
     let Some(row) = row else {
         // Unknown user: same Argon2 cost as a real check, then the same error.
-        password::verify_dummy(password_plain)?;
+        password::verify_dummy(password_plain).await?;
         return Err(AppError::InvalidCredentials);
     };
 
     let Some(stored_hash) = row.password_hash.clone() else {
         // OIDC-only accounts have no local password. Same cost, same error.
-        password::verify_dummy(password_plain)?;
+        password::verify_dummy(password_plain).await?;
         return Err(AppError::InvalidCredentials);
     };
 
@@ -94,7 +94,7 @@ pub async fn login(
     let oidc_only = config::get(pool, OIDC_ONLY_USERS_KEY).await? == Some("true".to_owned());
     let restricted = oidc_only && role == Role::User;
 
-    let password_ok = password::verify_password(password_plain, &stored_hash)?;
+    let password_ok = password::verify_password(password_plain, &stored_hash).await?;
     if !password_ok || restricted {
         return Err(AppError::InvalidCredentials);
     }
@@ -282,7 +282,7 @@ mod tests {
         .await
         .unwrap();
         // Use a real hash for the regular user so only the toggle can refuse it.
-        let real = password::hash_password(PASSWORD).unwrap();
+        let real = password::hash_password(PASSWORD).await.unwrap();
         sqlx::query!(
             "UPDATE users SET password_hash = ? WHERE username = 'test-user'",
             real

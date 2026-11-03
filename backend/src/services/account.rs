@@ -28,11 +28,11 @@ pub async fn change_password(
         return Err(AppError::Forbidden);
     }
     let stored = row.password_hash.clone().ok_or(AppError::Forbidden)?;
-    if !password::verify_password(current, &stored)? {
+    if !password::verify_password(current, &stored).await? {
         return Err(AppError::InvalidCredentials);
     }
     local_auth::check_password_length(new)?;
-    let new_hash = password::hash_password(new)?;
+    let new_hash = password::hash_password(new).await?;
     users::set_password_hash(pool, user_id, &new_hash).await?;
     sessions::revoke_all(pool, user_id).await?;
     users::find_by_id(pool, user_id)

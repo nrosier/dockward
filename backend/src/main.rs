@@ -137,6 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Refuse to start without a valid key or settings. This runs before the port is bound.
     let encryption_key = config::load_encryption_key()?;
     let settings = config::load_settings()?;
+    auth::password::warm_dummy_hash().map_err(|_| "could not compute the dummy password hash")?;
     let pool = db::open(&settings.data_dir)
         .await
         .map_err(|_| "could not open or migrate the database in HARBORGATE_DATA_DIR")?;
