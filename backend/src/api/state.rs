@@ -12,4 +12,5 @@ use crate::auth::crypto::DerivedKey;
 pub struct AppState {
     pub pool: SqlitePool,
     pub session_key: Arc<DerivedKey>,
+    pub csrf_key: Arc<DerivedKey>,
 }

@@ -44,6 +44,10 @@ fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppState) -> Route
         .route("/api/v1/auth/logout", post(api::auth::logout))
         .route("/api/v1/auth/logout-all", post(api::auth::logout_all))
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::csrf::guard,
+        ))
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
             api::hardening::TrustedProxies(std::sync::Arc::new(trusted_proxies)),
@@ -81,7 +85,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth::crypto::session_key(&encryption_key)
             .map_err(|_| "could not derive the session key")?,
     );
-    let state = api::state::AppState { pool, session_key };
+    let csrf_key = Arc::new(
+        auth::crypto::csrf_key(&encryption_key).map_err(|_| "could not derive the CSRF key")?,
+    );
+    let state = api::state::AppState {
+        pool,
+        session_key,
+        csrf_key,
+    };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
 
@@ -130,9 +141,11 @@ mod tests {
         let root =
             config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
         let session_key = Arc::new(auth::crypto::session_key(&root).unwrap());
+        let csrf_key = Arc::new(auth::crypto::csrf_key(&root).unwrap());
         let state = api::state::AppState {
             pool: pool.clone(),
             session_key,
+            csrf_key,
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -150,6 +163,85 @@ mod tests {
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A router over a fresh database, with the session and CSRF keys derived from
+    /// the test key. Test values only.
+    async fn test_router(name: &str) -> (Router, sqlx::SqlitePool, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("harborgate-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = db::open(&dir).await.unwrap();
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let state = api::state::AppState {
+            pool: pool.clone(),
+            session_key: Arc::new(auth::crypto::session_key(&root).unwrap()),
+            csrf_key: Arc::new(auth::crypto::csrf_key(&root).unwrap()),
+        };
+        (app(Vec::new(), state), pool, dir)
+    }
+
+    fn with_peer(builder: axum::http::request::Builder) -> axum::http::request::Builder {
+        builder.extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            8080,
+        ))))
+    }
+
+    /// A state-changing `/api` route returns `403 csrf_invalid` with no token, and with
+    /// a header that does not match the cookie. A matching token passes the guard.
+    #[tokio::test]
+    async fn state_changing_route_needs_a_matching_csrf_token() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, pool, dir) = test_router("csrf-route").await;
+        let k = auth::crypto::csrf_key(
+            &config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap(),
+        )
+        .unwrap();
+        let good = auth::csrf::issue(&k).unwrap();
+        let cookie = format!("__Host-harborgate_csrf={good}");
+
+        let missing = with_peer(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/logout")
+                .header("cookie", &cookie),
+        )
+        .body(Body::empty())
+        .unwrap();
+        let mismatch = with_peer(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/logout")
+                .header("cookie", &cookie)
+                .header("x-csrf-token", "other.value"),
+        )
+        .body(Body::empty())
+        .unwrap();
+        let matching = with_peer(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/logout")
+                .header("cookie", &cookie)
+                .header("x-csrf-token", &good),
+        )
+        .body(Body::empty())
+        .unwrap();
+
+        let r1 = router.clone().oneshot(missing).await.unwrap();
+        let r2 = router.clone().oneshot(mismatch).await.unwrap();
+        let r3 = router.oneshot(matching).await.unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(r1.status(), StatusCode::FORBIDDEN);
+        assert_eq!(r2.status(), StatusCode::FORBIDDEN);
+        // The matching token passes the guard. The logout handler then returns 401,
+        // because no session cookie is present, so the response is not 403.
+        assert_eq!(r3.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
