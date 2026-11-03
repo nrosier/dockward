@@ -191,10 +191,10 @@ All routes below are `admin`.
 
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |
-| GET | `/healthz` | public | none | `{"status": "ok"}` | 200, 503 |
+| GET | `/healthz` | public | none | `{"status": "ok"}` | 200 |
 | GET | `/api/v1/admin/health` | admin | none | `{"harbor": [Check], "github": [Check], "robot_accounts": [{"credential_id","label","expires_at","days_left"}], "request": {"client_ip","source"}}` | 200 |
 
-- `/healthz` is the liveness check used by the compose healthcheck and the docker-smoke check ([deployment.md](deployment.md), provisional). It returns 200 without touching Harbor or GitHub, so a Harbor outage does not mark the container unhealthy. Decided (2026-11-03, delegated), no external source. It is excluded from rate limits, because health checks must not be throttled.
+- `/healthz` is the liveness check used by the compose healthcheck and the docker-smoke check (decided in [deployment.md](deployment.md), "Health"). It is a process liveness check only. It returns 200 without touching SQLite, Harbor, or GitHub, so a Harbor outage does not mark the container unhealthy. Decided (2026-11-03, delegated), no external source. It is excluded from rate limits, because health checks must not be throttled.
 - `Check` is `{"credential_id","label","reachable": bool,"missing_permissions": [string],"code_scanning": "ok" | "no_analysis_yet" | "unavailable" | null,"detail"}`. `code_scanning` is `null` for Harbor checks. The permission check and response classification are in [security.md](security.md), "GitHub token scope".
 - `request` (Decided (2026-11-03, delegated)): the client IP HarborGate derived for this request, and `source`, which is `peer` or `x-forwarded-for`. Operators use it to check `HARBORGATE_TRUSTED_PROXIES` ([deployment.md](deployment.md), "Client IP behind Cloudflare and Traefik"). It shows only the caller's own address.
 - The robot account warning window is 14 days before `expires_at` (Decided 2026-11-03, see [integrations.md](integrations.md)).

@@ -63,7 +63,9 @@ Use the narrowest ranges that work. Trusting the whole `proxy` subnet lets any c
 
 ## Health
 
-- Health endpoint: `GET /healthz`. Provisional.
+- Health endpoint: `GET /healthz`. Decided (2026-11-03, delegated): a liveness check of the HarborGate process only. It returns `200 {"status":"ok"}` when the HTTP server answers. It does not query SQLite, Harbor, GitHub, or the OIDC provider. Dependency state is on Admin > Health (`/api/v1/admin/health`). This matches `healthz` in `backend/src/main.rs`.
+  - Why: Kubernetes' probe guidance says a liveness check must indicate unrecoverable failure only, because checking dependencies "can lead to cascading failures" (https://kubernetes.io/docs/concepts/workloads/pods/probes/). Verified (2026-11-03) in Traefik's Docker provider (`pkg/provider/docker/config.go`): a container whose health is set and is not `healthy`, including `starting`, gets an empty load balancer. A failing `/healthz` therefore takes HarborGate off the network, webhooks included. A database check that times out under write load would do that for no reason.
+  - Verified (2026-11-03), Dockerfile reference, `HEALTHCHECK` (moby/buildkit `frontend/dockerfile/docs/reference.md`): the status starts as `starting`. Exit 0 means healthy, and `retries` consecutive failures mean unhealthy. During `start_period`, checks run every `start_interval` (default 5s, Docker Engine 25.0 or later) and failures do not count. With the compose values (`start_period: 10s`, `interval: 30s`), the first check runs about 5 seconds after start, so Traefik routes to HarborGate within seconds. On Docker Engine older than 25.0, the first check runs only after `interval`, so Docker Engine 25.0 or later is required.
 - Used by the docker-smoke check and the compose healthcheck.
 - Decided: `docker-compose.yml` has a healthcheck that runs `wget -qO- http://127.0.0.1:8080/healthz` (busybox wget in the alpine runtime image), with interval 30s, timeout 3s, retries 3, and start_period 10s.
 
