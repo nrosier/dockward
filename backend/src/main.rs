@@ -81,6 +81,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/mappings/{id}/rotate-auth-secret",
             post(api::mappings::rotate_auth_secret),
         )
+        .route("/api/v1/sync-jobs/{id}/retry", post(api::sync_jobs::retry))
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
         .route(
             "/api/v1/admin/oidc",
@@ -161,12 +162,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
 
+    // Jobs left `running` by a previous process go back to `queued` before the worker
+    // starts (`specs/backend.md`, Durable job queue).
+    let requeued = db::sync_jobs::requeue_running(&state.pool, worker::now_secs())
+        .await
+        .map_err(|_| "could not re-queue running sync jobs")?;
+    if requeued > 0 {
+        tracing::info!(requeued, "re-queued sync jobs left running at startup");
+    }
+
     // The stop flag flips to true on the first signal. The server stops accepting
     // connections and drains in-flight requests. A separate timer caps the drain.
     let (stop_tx, stop_rx) = watch::channel(false);
     tokio::spawn(async move {
         shutdown_signal(terminate).await;
         let _ = stop_tx.send(true);
+    });
+
+    // The worker stops taking jobs on the same signal. A job it already took finishes.
+    let worker_pool = state.pool.clone();
+    let worker_stop = stop_rx.clone();
+    let worker_task = tokio::spawn(async move {
+        worker::run(worker_pool, worker::NoopHandler, worker_stop).await;
     });
 
     let mut graceful = stop_rx.clone();
@@ -185,6 +202,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         result = serve => result?,
         _ = drain_limit => {}
     }
+    // Give the worker its turn to finish the job it holds, within the drain limit.
+    let _ = tokio::time::timeout(DRAIN_TIMEOUT, worker_task).await;
     Ok(())
 }
 

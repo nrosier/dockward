@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE sync_jobs SET status = ?, attempts = ?, next_attempt_at = ?, last_error = ?, updated_at = ?\n         WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "dc02231c5fa121842df3fb42e45768f52b0e71c5a900c1dc91b6a4ae0786b600"
+}

@@ -16,6 +16,8 @@ pub mod mappings;
 pub mod pagination;
 #[allow(dead_code)] // Used by the session extractor and logout routes.
 pub mod sessions;
+#[allow(dead_code)] // Used by the job worker and the retry route.
+pub mod sync_jobs;
 #[allow(dead_code)] // Used by the login service.
 pub mod throttle;
 #[allow(dead_code)] // Used by the user response shape.
