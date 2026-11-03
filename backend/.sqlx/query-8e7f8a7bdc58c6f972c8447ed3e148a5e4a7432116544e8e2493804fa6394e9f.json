@@ -1,0 +1,194 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", user_id AS \"user_id!\", harbor_cred_id AS \"harbor_cred_id!\",\n                  github_cred_id AS \"github_cred_id!\", harbor_base_url AS \"harbor_base_url!\",\n                  harbor_project AS \"harbor_project!\", harbor_repository AS \"harbor_repository!\",\n                  github_owner AS \"github_owner!\", github_repo AS \"github_repo!\",\n                  webhook_token_hash AS \"webhook_token_hash!\",\n                  webhook_auth_secret_hash AS \"webhook_auth_secret_hash!\",\n                  auto_create_issues, min_issue_severity, default_branch AS \"default_branch!\",\n                  created_at\n           FROM repo_mappings WHERE id = ? AND user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "user_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "harbor_cred_id!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "harbor_cred_id"
+          }
+        }
+      },
+      {
+        "name": "github_cred_id!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "github_cred_id"
+          }
+        }
+      },
+      {
+        "name": "harbor_base_url!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "harbor_base_url"
+          }
+        }
+      },
+      {
+        "name": "harbor_project!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "harbor_project"
+          }
+        }
+      },
+      {
+        "name": "harbor_repository!",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "harbor_repository"
+          }
+        }
+      },
+      {
+        "name": "github_owner!",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "github_owner"
+          }
+        }
+      },
+      {
+        "name": "github_repo!",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "github_repo"
+          }
+        }
+      },
+      {
+        "name": "webhook_token_hash!",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "webhook_token_hash"
+          }
+        }
+      },
+      {
+        "name": "webhook_auth_secret_hash!",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "webhook_auth_secret_hash"
+          }
+        }
+      },
+      {
+        "name": "auto_create_issues",
+        "ordinal": 11,
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "auto_create_issues"
+          }
+        }
+      },
+      {
+        "name": "min_issue_severity",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "min_issue_severity"
+          }
+        }
+      },
+      {
+        "name": "default_branch!",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "default_branch"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 14,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "8e7f8a7bdc58c6f972c8447ed3e148a5e4a7432116544e8e2493804fa6394e9f"
+}

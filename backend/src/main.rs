@@ -65,6 +65,22 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/credentials/{id}/test",
             post(api::credentials::test),
         )
+        .route(
+            "/api/v1/mappings",
+            get(api::mappings::list).post(api::mappings::create),
+        )
+        .route(
+            "/api/v1/mappings/{id}",
+            get(api::mappings::get).delete(api::mappings::delete),
+        )
+        .route(
+            "/api/v1/mappings/{id}/rotate-webhook-token",
+            post(api::mappings::rotate_webhook_token),
+        )
+        .route(
+            "/api/v1/mappings/{id}/rotate-auth-secret",
+            post(api::mappings::rotate_auth_secret),
+        )
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
         .route(
             "/api/v1/admin/oidc",

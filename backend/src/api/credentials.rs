@@ -177,6 +177,17 @@ mod tests {
         ) -> Result<u16, AppError> {
             Ok(self.0)
         }
+
+        async fn artifacts_status(
+            &self,
+            _base: &reqwest::Url,
+            _username: &str,
+            _secret: &[u8],
+            _project: &str,
+            _repository: &str,
+        ) -> Result<u16, AppError> {
+            Ok(self.0)
+        }
     }
 
     /// A stored Harbor row whose token is encrypted under `key`, as the service

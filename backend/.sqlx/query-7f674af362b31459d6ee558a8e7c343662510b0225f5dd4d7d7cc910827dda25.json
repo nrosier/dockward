@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", user_id AS \"user_id!\" FROM repo_mappings\n           WHERE id <> ?\n             AND ((harbor_base_url = ? AND harbor_project = ? AND harbor_repository = ?)\n               OR (github_owner = ? AND github_repo = ?))\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "user_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "7f674af362b31459d6ee558a8e7c343662510b0225f5dd4d7d7cc910827dda25"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE repo_mappings SET webhook_token_hash = ? WHERE id = ? AND user_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "e60e53e3b7312c177924ba9040193baa6df1593e27a0ae21b86226d80fd2cd88"
+}

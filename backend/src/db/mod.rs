@@ -7,6 +7,7 @@ pub mod audit;
 #[allow(dead_code)] // Used by the login service and the OIDC settings in #18.
 pub mod config;
 pub mod credentials;
+pub mod mappings;
 #[allow(dead_code)] // Used by the setup and login services.
 pub mod setup;
 #[allow(dead_code)] // Used by the session service and the account and admin routes.
