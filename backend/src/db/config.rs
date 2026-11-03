@@ -24,3 +24,36 @@ pub async fn exists(pool: &SqlitePool, key: &str) -> Result<bool, AppError> {
     .map_err(|_| AppError::InternalError)?;
     Ok(row.exists_flag != 0)
 }
+
+/// Inserts or replaces one key on `conn`. The OIDC settings save runs it inside its
+/// transaction, so the settings and the audit row commit together.
+pub async fn upsert(
+    conn: &mut sqlx::SqliteConnection,
+    key: &str,
+    value: &str,
+    is_encrypted: bool,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "INSERT INTO system_config (key, value, is_encrypted) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+             value = excluded.value,
+             is_encrypted = excluded.is_encrypted,
+             updated_at = unixepoch()",
+        key,
+        value,
+        is_encrypted
+    )
+    .execute(&mut *conn)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Removes one key on `conn`. A missing row is not an error.
+pub async fn delete(conn: &mut sqlx::SqliteConnection, key: &str) -> Result<(), AppError> {
+    sqlx::query!("DELETE FROM system_config WHERE key = ?", key)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(|_| AppError::InternalError)
+}

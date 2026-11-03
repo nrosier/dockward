@@ -19,4 +19,9 @@ pub mod time;
 pub mod users;
 
 #[allow(dead_code)] // The Harbor, OIDC, and alert clients are built in later issues.
+pub mod oidc;
+pub mod oidc_jwt;
+pub mod oidc_settings;
+#[cfg(test)]
+pub mod oidc_test_support;
 pub mod outbound;

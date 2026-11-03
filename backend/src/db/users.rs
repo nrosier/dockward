@@ -240,3 +240,47 @@ pub async fn set_password_hash(
     .map(|_| ())
     .map_err(|_| AppError::InternalError)
 }
+
+/// Finds the user that an OIDC issuer asserted for `subject`. Identity is the pair
+/// `(oidc_issuer, oidc_subject)` (`specs/security.md`, OIDC).
+pub async fn find_by_oidc(
+    pool: &SqlitePool,
+    issuer: &str,
+    subject: &str,
+) -> Result<Option<UserRow>, AppError> {
+    sqlx::query_as!(
+        UserRow,
+        r#"SELECT id AS "id!", username, email, password_hash, role,
+                  auth_provider, token_version, created_at
+           FROM users WHERE oidc_issuer = ? AND oidc_subject = ?"#,
+        issuer,
+        subject
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Inserts a just-in-time OIDC user on `conn`. The password hash stays NULL.
+pub async fn insert_oidc(
+    conn: &mut sqlx::SqliteConnection,
+    id: &str,
+    username: &str,
+    issuer: &str,
+    subject: &str,
+    role: &str,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "INSERT INTO users (id, username, role, auth_provider, oidc_issuer, oidc_subject)
+         VALUES (?, ?, ?, 'oidc', ?, ?)",
+        id,
+        username,
+        role,
+        issuer,
+        subject
+    )
+    .execute(&mut *conn)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}

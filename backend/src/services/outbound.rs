@@ -17,8 +17,11 @@ use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 /// Outbound target classes. Each has its own opt-out variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetClass {
+    // Harbor and Alerts clients are built in later issues.
+    #[allow(dead_code)]
     Harbor,
     Oidc,
+    #[allow(dead_code)]
     Alerts,
     /// Fixed host `api.github.com`. Private ranges are never allowed for it.
     GitHub,

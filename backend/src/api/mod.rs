@@ -4,5 +4,7 @@ pub mod admin;
 pub mod auth;
 #[allow(dead_code)] // The limiter and client IP are attached to routes in later issues.
 pub mod hardening;
+#[allow(dead_code)] // The OIDC routes are mounted by the app router.
+pub mod oidc;
 #[allow(dead_code)] // Shared by the extractor and the routes.
 pub mod state;
