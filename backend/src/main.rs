@@ -54,6 +54,14 @@ async fn shutdown_signal(mut terminate: Signal) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Logs go to stdout. The access log records route templates, so tokens in paths stay out.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     // Refuse to start without a valid key or settings. This runs before the port is bound.
     let _encryption_key = config::load_encryption_key()?;
     let settings = config::load_settings()?;
