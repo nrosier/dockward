@@ -6,7 +6,15 @@ use tokio::net::TcpListener;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::watch;
 
+mod api;
+mod auth;
 mod config;
+mod db;
+#[allow(dead_code)] // Used by handlers and services added in later issues.
+mod error;
+mod models;
+mod services;
+mod worker;
 
 const BIND_ADDR: &str = "0.0.0.0:8080";
 
