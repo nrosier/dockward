@@ -244,10 +244,19 @@ pub async fn login(
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct PasswordBody {
     pub current_password: String,
     pub new_password: String,
+}
+
+impl fmt::Debug for PasswordBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PasswordBody")
+            .field("current_password", &REDACTED)
+            .field("new_password", &REDACTED)
+            .finish()
+    }
 }
 
 /// `GET /api/v1/account/me`. The signed-in user.
@@ -323,5 +332,27 @@ mod tests {
             "password leaked: {out}"
         );
         assert!(out.contains("fake-user"), "username missing: {out}");
+    }
+
+    #[test]
+    fn password_body_debug_redacts_both_passwords() {
+        let body = PasswordBody {
+            current_password: "FAKE_PASSWORD_CURRENT_1".to_owned(),
+            new_password: "FAKE_PASSWORD_NEW_1".to_owned(),
+        };
+        let out = format!("{body:?}");
+        assert!(
+            !out.contains("FAKE_PASSWORD_CURRENT_1"),
+            "current password leaked: {out}"
+        );
+        assert!(
+            !out.contains("FAKE_PASSWORD_NEW_1"),
+            "new password leaked: {out}"
+        );
+        assert!(out.contains("PasswordBody"), "struct name missing: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker missing: {out}"
+        );
     }
 }

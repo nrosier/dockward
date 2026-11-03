@@ -3,6 +3,8 @@
 //! are public. Every failure is a generic error, so the response does not say which
 //! check failed.
 
+use std::fmt;
+
 use axum::{
     Json,
     extract::{Query, State},
@@ -76,10 +78,21 @@ pub async fn put_settings(
     Ok(Json(saved.into()))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CallbackQuery {
     pub code: Option<String>,
     pub state: Option<String>,
+}
+
+const REDACTED: &str = "<redacted>";
+
+impl fmt::Debug for CallbackQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CallbackQuery")
+            .field("code", &REDACTED)
+            .field("state", &REDACTED)
+            .finish()
+    }
 }
 
 /// The redirect URI sent to the provider. It is built from `HARBORGATE_PUBLIC_URL`.
@@ -198,7 +211,30 @@ mod tests {
     use crate::services::throttle::LoginThrottle;
     use std::time::Duration;
 
-    use super::OidcSettingsView;
+    use super::{CallbackQuery, OidcSettingsView};
+
+    #[test]
+    fn callback_query_debug_redacts_code_and_state() {
+        // Fixed fake values. Not real credentials.
+        const FAKE_CODE: &str = "fake-auth-code-value";
+        const FAKE_STATE: &str = "fake-state-value";
+
+        let query = CallbackQuery {
+            code: Some(FAKE_CODE.to_owned()),
+            state: Some(FAKE_STATE.to_owned()),
+        };
+        let text = format!("{query:?}");
+        assert!(!text.contains(FAKE_CODE), "code leaked: {text}");
+        assert!(!text.contains(FAKE_STATE), "state leaked: {text}");
+        assert!(
+            text.contains("CallbackQuery"),
+            "struct name missing: {text}"
+        );
+        assert!(
+            text.contains("<redacted>"),
+            "redaction marker missing: {text}"
+        );
+    }
 
     /// Test-only key material. The value is fake and never logged.
     const TEST_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";

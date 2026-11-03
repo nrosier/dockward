@@ -105,10 +105,19 @@ pub struct Discovery {
     pub jwks_uri: String,
 }
 
-/// The token endpoint response. Only the ID token is used.
-#[derive(Debug, Deserialize)]
+/// The token endpoint response. Only the ID token is used. `Debug` is hand-written so the
+/// ID token is never printed.
+#[derive(Deserialize)]
 pub struct TokenResponse {
     pub id_token: String,
+}
+
+impl fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("id_token", &REDACTED)
+            .finish()
+    }
 }
 
 /// The network calls the flow makes. Production uses [`HttpProvider`]. Tests use a fake,
@@ -767,6 +776,29 @@ mod tests {
         }
         assert!(text.contains("<redacted>"));
         assert!(text.contains("https://harbor.example.com/auth/oidc/callback"));
+    }
+
+    #[test]
+    fn token_response_debug_redacts_id_token() {
+        // Fixed fake value. Not a real token.
+        const FAKE_ID_TOKEN: &str = "fake-id-token-value";
+
+        let response = TokenResponse {
+            id_token: FAKE_ID_TOKEN.to_owned(),
+        };
+        let text = format!("{response:?}");
+        assert!(
+            !text.contains(FAKE_ID_TOKEN),
+            "TokenResponse Debug output leaked the ID token"
+        );
+        assert!(
+            text.contains("TokenResponse"),
+            "struct name missing: {text}"
+        );
+        assert!(
+            text.contains("<redacted>"),
+            "redaction marker missing: {text}"
+        );
     }
 
     #[test]
