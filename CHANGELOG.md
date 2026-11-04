@@ -4,6 +4,14 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.9.1
+
+### Fixed
+- The container serves the web app. In 0.9.0 the release binary embedded no frontend files, so `/` returned a 404. The frontend is now embedded (#122).
+
+### Added
+- A startup log line with the version, bind address and non-secret settings. No key, token or secret is logged (#122).
+
 ## 0.9.0
 
 First release candidate for HarborGate. Everything below is built on `main`; the live smoke test against real Harbor and GitHub (#43) is still open.
