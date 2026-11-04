@@ -772,4 +772,358 @@ mod tests {
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Thirty failed authentications from one IP are each `401`. The thirty-first request
+    /// from that IP is `429` with `Retry-After`, even with valid credentials, because the
+    /// per-IP failure budget is checked before anything else.
+    #[tokio::test]
+    async fn webhook_ip_failure_limit_returns_429_through_the_router() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("webhook-ip-429").await;
+        webhook_fixture(&pool, "tok-ip-fake", "sec-ip-fake").await;
+        for n in 0..30 {
+            let response = router
+                .clone()
+                .oneshot(webhook_request(
+                    &format!("tok-ip-unknown-{n}-fake"),
+                    Some("Bearer sec-ip-fake"),
+                    WEBHOOK_BODY,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "failure {n}");
+        }
+        let limited = router
+            .oneshot(webhook_request(
+                "tok-ip-fake",
+                Some("Bearer sec-ip-fake"),
+                WEBHOOK_BODY,
+            ))
+            .await
+            .unwrap();
+        let retry = limited.headers().get("retry-after").cloned();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(retry.is_some(), "429 must carry Retry-After");
+    }
+
+    /// Sixty requests with a valid token and secret are each `202`. The sixty-first
+    /// request for the same mapping is `429` with `Retry-After`.
+    #[tokio::test]
+    async fn webhook_token_budget_returns_429_through_the_router() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("webhook-budget-429").await;
+        webhook_fixture(&pool, "tok-budget-fake", "sec-budget-fake").await;
+        for n in 0..60 {
+            let response = router
+                .clone()
+                .oneshot(webhook_request(
+                    "tok-budget-fake",
+                    Some("Bearer sec-budget-fake"),
+                    WEBHOOK_BODY,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::ACCEPTED,
+                "request {n} should be within the budget"
+            );
+        }
+        let limited = router
+            .oneshot(webhook_request(
+                "tok-budget-fake",
+                Some("Bearer sec-budget-fake"),
+                WEBHOOK_BODY,
+            ))
+            .await
+            .unwrap();
+        let retry = limited.headers().get("retry-after").cloned();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(retry.is_some(), "429 must carry Retry-After");
+    }
+
+    /// `GET /api/v1/admin/audit-log` filters by `action` and `actor_user_id`, and pages with
+    /// `page` and `page_size`, through the router. Five rows: two actions, two actors.
+    #[tokio::test]
+    async fn audit_log_filters_and_pages_over_http() {
+        use axum::http::StatusCode;
+        let (router, pool, dir) = test_router("audit-http").await;
+        let mut conn = pool.acquire().await.unwrap();
+        db::users::insert_local(&mut conn, "adm-1", "test-admin", None, "h", "admin")
+            .await
+            .unwrap();
+        db::users::insert_local(&mut conn, "act-2", "test-regular", None, "h", "user")
+            .await
+            .unwrap();
+        let first = services::audit::Actor {
+            user_id: Some("adm-1".to_owned()),
+            username: "test-admin".to_owned(),
+        };
+        let second = services::audit::Actor {
+            user_id: Some("act-2".to_owned()),
+            username: "test-regular".to_owned(),
+        };
+        for (actor, action, target) in [
+            (&first, "user.create", "user:a"),
+            (&second, "user.create", "user:b"),
+            (&first, "mapping.create", "mapping:c"),
+            (&second, "mapping.create", "mapping:d"),
+            (&first, "mapping.create", "mapping:e"),
+        ] {
+            services::audit::record(&mut conn, actor, action, target, None)
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        let cookie = session_cookie("adm-1", "admin", 0);
+
+        let (status, all) = get_json(&router, "/api/v1/admin/audit-log", &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(all["total"], 5);
+
+        let (status, by_action) = get_json(
+            &router,
+            "/api/v1/admin/audit-log?action=user.create",
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(by_action["total"], 2);
+        let actions = by_action["items"].as_array().unwrap();
+        assert!(
+            actions.iter().all(|item| item["action"] == "user.create"),
+            "action filter let another action through"
+        );
+
+        let (status, by_actor) = get_json(
+            &router,
+            "/api/v1/admin/audit-log?actor_user_id=act-2",
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(by_actor["total"], 2);
+        let actors = by_actor["items"].as_array().unwrap();
+        assert!(
+            actors.iter().all(|item| item["actor_user_id"] == "act-2"),
+            "actor filter let another actor through"
+        );
+
+        // Paging: pages of two over five rows give 2, 2, 1, then an empty page. The
+        // three pages together hold every row exactly once.
+        let mut seen = Vec::new();
+        for (page, expected) in [(1, 2), (2, 2), (3, 1), (4, 0)] {
+            let uri = format!("/api/v1/admin/audit-log?page={page}&page_size=2");
+            let (status, body) = get_json(&router, &uri, &cookie).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["page"], page);
+            assert_eq!(body["page_size"], 2);
+            assert_eq!(body["total"], 5);
+            let items = body["items"].as_array().unwrap();
+            assert_eq!(items.len(), expected, "page {page} size");
+            seen.extend(items.iter().map(|item| item["id"].clone()));
+        }
+        let distinct: std::collections::HashSet<String> =
+            seen.iter().map(|id| id.to_string()).collect();
+        assert_eq!(distinct.len(), 5, "paging repeated or dropped a row");
+
+        // Filter and paging together: three mapping rows, page two holds the last one.
+        let (status, filtered) = get_json(
+            &router,
+            "/api/v1/admin/audit-log?action=mapping.create&page=2&page_size=2",
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(filtered["total"], 3);
+        assert_eq!(filtered["items"].as_array().unwrap().len(), 1);
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Login and setup refuse a cross-site request with `403 csrf_invalid`, on both routes:
+    /// a foreign `Origin`, a cross-site `Sec-Fetch-Site` with no `Origin`, and neither
+    /// header. The database is empty, so a request that got past the check would reach the
+    /// handler and return `401` (login) or `201` (setup). A `403` shows the check refused it.
+    #[tokio::test]
+    async fn login_and_setup_refuse_cross_site_requests() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("cross-site").await;
+        let body = format!(
+            r#"{{"username":"test-x","password":"{}"}}"#,
+            runtime_password()
+        );
+        let mut failures = Vec::new();
+        for uri in ["/api/v1/auth/login", "/api/v1/auth/setup"] {
+            for (label, origin, fetch_site) in [
+                ("foreign origin", Some("https://evil.example.com"), None),
+                (
+                    "cross-site fetch metadata, no origin",
+                    None,
+                    Some("cross-site"),
+                ),
+                ("neither header", None, None),
+            ] {
+                let mut builder = with_peer(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json"),
+                );
+                if let Some(value) = origin {
+                    builder = builder.header("origin", value);
+                }
+                if let Some(value) = fetch_site {
+                    builder = builder.header("sec-fetch-site", value);
+                }
+                let request = builder.body(Body::from(body.clone())).unwrap();
+                let response = router.clone().oneshot(request).await.unwrap();
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                failures.push((uri, label, status, json["error"]["code"].clone()));
+            }
+        }
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        for (uri, label, status, code) in failures {
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {label}");
+            assert_eq!(code, "csrf_invalid", "{uri}: {label}");
+        }
+    }
+
+    /// Two sessions of one user, each from a real login. After `POST /api/v1/account/password`
+    /// with session A, session B gets `401` on `GET /api/v1/account/me`. The cookie issued by
+    /// the password change response gets `200`.
+    #[tokio::test]
+    async fn password_change_signs_out_other_sessions_over_http() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("password-http").await;
+        let current = runtime_password();
+        let next = runtime_password();
+        services::auth::create_first_admin(&pool, "test-admin", None, &current)
+            .await
+            .unwrap();
+        let login_a = post_login(&router, [192, 0, 2, 20], "test-admin", &current).await;
+        assert_eq!(login_a.status(), StatusCode::OK);
+        let login_b = post_login(&router, [192, 0, 2, 20], "test-admin", &current).await;
+        assert_eq!(login_b.status(), StatusCode::OK);
+        let session_a = set_cookie_value(&login_a, auth::session::SESSION_COOKIE).unwrap();
+        let session_b = set_cookie_value(&login_b, auth::session::SESSION_COOKIE).unwrap();
+        let csrf = set_cookie_value(&login_a, auth::csrf::CSRF_COOKIE).unwrap();
+        assert_ne!(session_a, session_b, "two logins must give two sessions");
+
+        let change = with_peer(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/account/password")
+                .header("content-type", "application/json")
+                .header(
+                    "cookie",
+                    format!(
+                        "{}={session_a}; {}={csrf}",
+                        auth::session::SESSION_COOKIE,
+                        auth::csrf::CSRF_COOKIE
+                    ),
+                )
+                .header("x-csrf-token", &csrf),
+        )
+        .body(Body::from(format!(
+            r#"{{"current_password":"{current}","new_password":"{next}"}}"#
+        )))
+        .unwrap();
+        let changed = router.clone().oneshot(change).await.unwrap();
+        assert_eq!(changed.status(), StatusCode::NO_CONTENT);
+        let session_c = set_cookie_value(&changed, auth::session::SESSION_COOKIE).unwrap();
+
+        let (status_b, _) = get_json(
+            &router,
+            "/api/v1/account/me",
+            &format!("{}={session_b}", auth::session::SESSION_COOKIE),
+        )
+        .await;
+        let (status_c, _) = get_json(
+            &router,
+            "/api/v1/account/me",
+            &format!("{}={session_c}", auth::session::SESSION_COOKIE),
+        )
+        .await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(status_b, StatusCode::UNAUTHORIZED, "other session survived");
+        assert_eq!(status_c, StatusCode::OK, "the fresh session must work");
+    }
+
+    /// A test password drawn from the OS RNG at run time, so no password literal sits in
+    /// the source. Length is well over the 15-character minimum.
+    fn runtime_password() -> String {
+        format!("test-pw-{}", services::ids::new_id())
+    }
+
+    /// A signed session cookie for `user_id`, issued the way login issues one. Test key only.
+    fn session_cookie(user_id: &str, role: &str, token_version: i64) -> String {
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let key = auth::crypto::session_key(&root).unwrap();
+        let now = auth::session::now_unix().unwrap();
+        let token = auth::session::issue(&key, user_id, role, token_version, now).unwrap();
+        format!("{}={token}", auth::session::SESSION_COOKIE)
+    }
+
+    /// A GET with the given `cookie` header. Returns the status and the parsed JSON body.
+    async fn get_json(
+        router: &Router,
+        uri: &str,
+        cookie: &str,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let request = with_peer(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header("cookie", cookie),
+        )
+        .body(Body::empty())
+        .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// The value of the `Set-Cookie` named `name` on `response`, without its attributes.
+    fn set_cookie_value(
+        response: &axum::http::Response<axum::body::Body>,
+        name: &str,
+    ) -> Option<String> {
+        response
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .find_map(|value| {
+                let pair = value.to_str().ok()?.split(';').next()?;
+                let (key, val) = pair.split_once('=')?;
+                (key == name).then(|| val.to_owned())
+            })
+    }
 }
