@@ -147,7 +147,7 @@ async fn record_run(
     job_runs::insert(
         pool,
         &JobRun {
-            id: ids::new_id(),
+            id: ids::new_id()?,
             job_kind: "retention".to_owned(),
             started_at: now,
             // The real finish time, never before the start.

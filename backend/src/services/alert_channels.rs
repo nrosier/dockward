@@ -231,7 +231,7 @@ pub async fn create(
     config: serde_json::Value,
 ) -> Result<Channel, AppError> {
     let config = Config::parse(kind, config, allow_private)?;
-    let id = ids::new_id();
+    let id = ids::new_id()?;
     let sealed = seal(credentials_key, &id, &config)?;
 
     let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;

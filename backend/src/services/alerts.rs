@@ -177,7 +177,8 @@ impl Notifier {
             .acquire()
             .await
             .map_err(|_| AppError::InternalError)?;
-        deliveries::claim(&mut conn, &ids::new_id(), channel_id, dedupe_key, now).await
+        let id = ids::new_id()?;
+        deliveries::claim(&mut conn, &id, channel_id, dedupe_key, now).await
     }
 
     async fn release(&self, channel_id: &str, dedupe_key: &str, now: i64) -> Result<(), AppError> {

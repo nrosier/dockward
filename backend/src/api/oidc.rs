@@ -515,7 +515,10 @@ mod tests {
         configure_oidc(&pool).await;
         // The cookie holds a different state from the query, so the callback fails before
         // any provider request.
-        let pending = crate::services::oidc::Pending::new();
+        let pending = match crate::services::oidc::Pending::new() {
+            Ok(p) => p,
+            Err(_) => panic!("the OS random source must work in tests"),
+        };
         let response = callback_response(
             &router,
             "code=test-code&state=test-other-state",
@@ -543,7 +546,10 @@ mod tests {
     async fn provider_error_redirects_with_provider_error() {
         let (router, pool, dir) = router("provider-error").await;
         configure_oidc(&pool).await;
-        let pending = crate::services::oidc::Pending::new();
+        let pending = match crate::services::oidc::Pending::new() {
+            Ok(p) => p,
+            Err(_) => panic!("the OS random source must work in tests"),
+        };
         // The provider's own text is not copied into the redirect.
         let response = callback_response(
             &router,

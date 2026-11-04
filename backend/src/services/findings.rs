@@ -92,7 +92,7 @@ pub async fn apply_scan(
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty());
         let description = cap_description(item.get("description").and_then(Value::as_str));
-        let row_id = ids::new_id();
+        let row_id = ids::new_id()?;
         findings::upsert(
             &mut tx,
             &Finding {
@@ -130,7 +130,7 @@ pub async fn apply_scan(
         job_runs::insert(
             pool,
             &JobRun {
-                id: ids::new_id(),
+                id: ids::new_id()?,
                 job_kind: "cleanup".to_owned(),
                 started_at: now,
                 finished_at: Some(now),
@@ -207,7 +207,7 @@ mod tests {
                 "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest, vulnerability_summary, sarif_status, synced_at)
                  VALUES (?, 'm1', 'app', ?, 'sha256:aaaa', '{}', 'success', ?)",
             )
-            .bind(ids::new_id())
+            .bind(ids::new_id().unwrap_or_default())
             .bind(tag)
             .bind(at)
             .execute(&self.pool)

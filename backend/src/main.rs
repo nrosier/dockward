@@ -399,7 +399,10 @@ async fn restore_database(
     })?;
     drop(sealed);
 
-    let temp_path = data_dir.join(format!("restore-{}.tmp", services::ids::new_id()));
+    let restore_id = services::ids::new_id().map_err(|_| {
+        "could not draw a random name for the restore; nothing was changed".to_owned()
+    })?;
+    let temp_path = data_dir.join(format!("restore-{restore_id}.tmp"));
     let staged = stage_and_swap(data_dir, &temp_path, &plain).await;
     remove_temp_files(&temp_path);
     drop(plain);
@@ -1589,7 +1592,7 @@ mod tests {
     /// A test password drawn from the OS RNG at run time, so no password literal sits in
     /// the source. Length is well over the 15-character minimum.
     fn runtime_password() -> String {
-        format!("test-pw-{}", services::ids::new_id())
+        format!("test-pw-{}", services::ids::new_id().unwrap_or_default())
     }
 
     /// A signed session cookie for `user_id`, issued the way login issues one. Test key only.

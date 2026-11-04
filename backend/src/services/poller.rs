@@ -84,7 +84,7 @@ pub async fn poll_once<H: HarborFetch>(
     job_runs::insert(
         pool,
         &JobRun {
-            id: ids::new_id(),
+            id: ids::new_id()?,
             job_kind: "poll".to_owned(),
             started_at: now,
             finished_at: Some(now_secs().max(now)),
@@ -147,7 +147,7 @@ async fn poll_mapping<H: HarborFetch>(
                     "trigger": "poll",
                 })
                 .to_string();
-                sync_jobs::enqueue(pool, &ids::new_id(), &mapping.id, &payload, now).await?;
+                sync_jobs::enqueue(pool, &ids::new_id()?, &mapping.id, &payload, now).await?;
                 queued += 1;
             }
         }
@@ -371,7 +371,7 @@ mod tests {
                     "INSERT INTO sync_reports (id, mapping_id, sync_job_id, harbor_repository, image_tag, image_digest, vulnerability_summary, sarif_status)
                      SELECT ?, id, ?, harbor_repository, ?, ?, '{}', 'success' FROM repo_mappings WHERE id = ?",
                 )
-                .bind(ids::new_id())
+                .bind(ids::new_id().unwrap_or_default())
                 .bind(&job_id)
                 .bind(value["tag"].as_str().unwrap())
                 .bind(value["digest"].as_str().unwrap())

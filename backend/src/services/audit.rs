@@ -149,7 +149,7 @@ pub async fn record(
         }
         None => None,
     };
-    let id = ids::new_id();
+    let id = ids::new_id()?;
     audit::insert(
         conn,
         NewAudit {

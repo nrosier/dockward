@@ -284,7 +284,7 @@ pub async fn accept<G: IssueApi>(
 
     let actor = caller.actor();
     let target = audit_target(&mapping.id, cve_id);
-    let new_id = ids::new_id();
+    let new_id = ids::new_id()?;
     // Read before the write lock, so a 404 does not take it.
     {
         let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
@@ -479,7 +479,7 @@ mod tests {
             db::findings::upsert(
                 &mut conn,
                 &db::findings::Finding {
-                    id: &ids::new_id(),
+                    id: &ids::new_id().unwrap_or_default(),
                     mapping_id: "m1",
                     harbor_repository: "m1",
                     image_tag: "v1",

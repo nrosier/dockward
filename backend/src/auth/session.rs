@@ -68,7 +68,7 @@ pub fn issue(
         role: role.to_owned(),
         iat: now,
         exp: now + SESSION_LIFETIME_SECS,
-        jti: ids::new_id(),
+        jti: ids::new_id()?,
         ver: token_version,
     };
     let payload = serde_json::to_vec(&claims).map_err(|_| AppError::InternalError)?;

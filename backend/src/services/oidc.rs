@@ -14,7 +14,6 @@ use std::fmt;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::jwk::JwkSet;
-use rand::RngCore;
 use reqwest::Url;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -263,12 +262,13 @@ impl fmt::Debug for Pending {
 const REDACTED: &str = "<redacted>";
 
 impl Pending {
-    pub fn new() -> Self {
-        Self {
-            state: random_token(),
-            nonce: random_token(),
-            verifier: random_token(),
-        }
+    /// Draws the three values from the OS CSPRNG. A failure returns `AppError`.
+    pub fn new() -> Result<Self, AppError> {
+        Ok(Self {
+            state: random_token()?,
+            nonce: random_token()?,
+            verifier: random_token()?,
+        })
     }
 
     /// The PKCE S256 challenge for this attempt's verifier (RFC 7636 section 4.2).
@@ -298,16 +298,9 @@ impl Pending {
     }
 }
 
-impl Default for Pending {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-fn random_token() -> String {
-    let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
+fn random_token() -> Result<String, AppError> {
+    let bytes = ids::os_random_bytes::<32>()?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 /// Builds the authorization request URL (OpenID Connect Core 3.1.2.1, RFC 7636 section 4.3).
@@ -406,7 +399,7 @@ pub async fn begin_login<P: Provider>(
     let doc = provider.discovery(&issuer).await?;
     check_discovery(issuer_raw, &doc)?;
     let endpoint = parse_endpoint(&doc.authorization_endpoint)?;
-    let pending = Pending::new();
+    let pending = Pending::new()?;
     let url = authorization_url(&endpoint, client_id, redirect_uri, &pending);
     Ok((url, pending))
 }
@@ -593,7 +586,7 @@ async fn upsert_user(
     let row = match existing {
         Some(row) => set_role_if_changed(&mut tx, row, role).await?,
         None => {
-            let id = ids::new_id();
+            let id = ids::new_id()?;
             let username = free_username(&mut tx, &username_base(claims)).await?;
             users::insert_oidc(&mut tx, &id, &username, issuer, &claims.sub, role.as_str()).await?;
             users::UserRow {
@@ -667,6 +660,14 @@ fn client_secret_aad() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh `Pending` for a test. A failed OS draw fails the test.
+    fn test_pending() -> Pending {
+        match Pending::new() {
+            Ok(p) => p,
+            Err(_) => panic!("the OS random source must work in tests"),
+        }
+    }
     use crate::services::oidc_test_support::{
         FakeProvider, TEST_CLIENT_ID, TEST_ISSUER, TEST_REDIRECT, ec_jwk, es256_token, jwk_set,
         jwks_uri, rs256_token, rsa_jwk, test_keys, unix_now,
@@ -759,7 +760,7 @@ mod tests {
     #[test]
     fn authorization_url_carries_pkce_s256_state_and_nonce() {
         let endpoint = Url::parse("https://idp.example.com/authorize").unwrap();
-        let pending = Pending::new();
+        let pending = test_pending();
         let url = authorization_url(&endpoint, TEST_CLIENT_ID, TEST_REDIRECT, &pending);
         let pairs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(
@@ -863,7 +864,7 @@ mod tests {
 
     #[test]
     fn pending_cookie_round_trips_and_rejects_other_shapes() {
-        let pending = Pending::new();
+        let pending = test_pending();
         assert_eq!(Pending::from_cookie(&pending.to_cookie()), Some(pending));
         assert_eq!(Pending::from_cookie("only.two"), None);
         assert_eq!(Pending::from_cookie("a.b.c.d"), None);
@@ -954,7 +955,7 @@ mod tests {
     async fn wrong_state_is_refused_before_any_token_request() {
         let (pool, dir) = fresh_pool("state").await;
         let provider = provider_for(id_token("test-sub", "n", json!({})));
-        let pending = Pending::new();
+        let pending = test_pending();
         let outcome = run(&pool, &provider, &pending, "test-other-state").await;
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -969,7 +970,7 @@ mod tests {
     #[tokio::test]
     async fn wrong_nonce_is_refused() {
         let (pool, dir) = fresh_pool("nonce").await;
-        let pending = Pending::new();
+        let pending = test_pending();
         let provider = provider_for(id_token(
             "test-sub",
             "test-wrong-nonce",
@@ -984,13 +985,13 @@ mod tests {
     #[tokio::test]
     async fn concurrent_first_logins_create_one_user() {
         let (pool, dir) = fresh_pool("concurrent").await;
-        let first = Pending::new();
+        let first = test_pending();
         let p1 = provider_for(id_token(
             "test-sub-race",
             &first.nonce,
             json!({"preferred_username": "test-race", "groups": ["test-users"]}),
         ));
-        let second = Pending::new();
+        let second = test_pending();
         let p2 = provider_for(id_token(
             "test-sub-race",
             &second.nonce,
@@ -1015,7 +1016,7 @@ mod tests {
     #[tokio::test]
     async fn refused_existing_user_loses_their_sessions() {
         let (pool, dir) = fresh_pool("refused").await;
-        let first = Pending::new();
+        let first = test_pending();
         let p1 = provider_for(id_token(
             "test-sub-refused",
             &first.nonce,
@@ -1043,7 +1044,7 @@ mod tests {
             "the session is valid before the refusal"
         );
 
-        let second = Pending::new();
+        let second = test_pending();
         let p2 = provider_for(id_token(
             "test-sub-refused",
             &second.nonce,
@@ -1070,7 +1071,7 @@ mod tests {
     #[tokio::test]
     async fn refused_new_user_creates_no_row() {
         let (pool, dir) = fresh_pool("no-group").await;
-        let pending = Pending::new();
+        let pending = test_pending();
         let provider = provider_for(id_token(
             "test-sub-none",
             &pending.nonce,
@@ -1091,7 +1092,7 @@ mod tests {
     #[tokio::test]
     async fn first_login_creates_the_user_and_role_changes_on_the_next_login() {
         let (pool, dir) = fresh_pool("role-change").await;
-        let first = Pending::new();
+        let first = test_pending();
         let p1 = provider_for(id_token(
             "test-sub-r",
             &first.nonce,
@@ -1102,7 +1103,7 @@ mod tests {
         assert_eq!(created.username, "test-alice");
         assert_eq!(created.auth_provider, "oidc");
 
-        let second = Pending::new();
+        let second = test_pending();
         let p2 = provider_for(id_token(
             "test-sub-r",
             &second.nonce,
@@ -1133,7 +1134,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let pending = Pending::new();
+        let pending = test_pending();
         let provider = provider_for(id_token(
             "test-sub-b",
             &pending.nonce,
@@ -1149,7 +1150,7 @@ mod tests {
     async fn es256_provider_signs_in_through_the_same_flow() {
         let (pool, dir) = fresh_pool("es256").await;
         let keys = test_keys();
-        let pending = Pending::new();
+        let pending = test_pending();
         let claims = json!({
             "iss": TEST_ISSUER,
             "aud": TEST_CLIENT_ID,

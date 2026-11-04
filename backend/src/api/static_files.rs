@@ -12,10 +12,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use rand::RngCore;
 use rust_embed::RustEmbed;
 
 use crate::error::AppError;
+use crate::services::ids::os_random_bytes;
 
 /// The fixed value Vite writes for `html.cspNonce` in `vite.config.ts`.
 pub const NONCE_PLACEHOLDER: &str = "HG_CSP_NONCE";
@@ -26,10 +26,9 @@ pub const NONCE_PLACEHOLDER: &str = "HG_CSP_NONCE";
 struct Assets;
 
 /// A new nonce: 16 random bytes, base64 (standard alphabet). One per HTML response.
-pub fn fresh_nonce() -> String {
-    let mut bytes = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    STANDARD.encode(bytes)
+pub fn fresh_nonce() -> Result<String, AppError> {
+    let bytes = os_random_bytes::<16>()?;
+    Ok(STANDARD.encode(bytes))
 }
 
 /// Replaces every placeholder in the template with `nonce`.
@@ -48,7 +47,9 @@ pub fn html_csp(nonce: &str) -> String {
 
 /// One HTML response: a fresh nonce in the body and in the CSP header, never cached.
 pub fn spa_response(template: &str) -> Response {
-    let nonce = fresh_nonce();
+    let Ok(nonce) = fresh_nonce() else {
+        return AppError::InternalError.into_response();
+    };
     let body = render_index(template, &nonce);
     let Ok(policy) = HeaderValue::from_str(&html_csp(&nonce)) else {
         return AppError::InternalError.into_response();

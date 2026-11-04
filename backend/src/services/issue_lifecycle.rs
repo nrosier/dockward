@@ -381,7 +381,7 @@ impl<G: IssueApi> Ctx<'_, G> {
             }
         };
         let number = i64::try_from(issue.number).map_err(|_| AppError::InternalError)?;
-        let id = ids::new_id();
+        let id = ids::new_id()?;
         let mut conn = self
             .pool
             .acquire()
@@ -1117,7 +1117,7 @@ mod tests {
             db::findings::upsert(
                 &mut conn,
                 &db::findings::Finding {
-                    id: &ids::new_id(),
+                    id: &ids::new_id().unwrap_or_default(),
                     mapping_id,
                     harbor_repository: "app",
                     image_tag: tag,

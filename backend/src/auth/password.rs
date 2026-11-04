@@ -9,11 +9,30 @@
 
 use argon2::{
     Algorithm, Argon2, Params, Version,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
-use rand::distributions::{Alphanumeric, DistString};
 
 use crate::error::AppError;
+use crate::services::ids::os_random_bytes;
+
+/// The 62 ASCII letters and digits. Used for the random dummy and test passwords.
+const ALPHANUMERIC: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+/// `len` random ASCII letters and digits from the OS CSPRNG. Each character is drawn
+/// with rejection sampling, so every character of the 62 is equally likely.
+fn random_alphanumeric(len: usize) -> Result<String, AppError> {
+    // Bytes at or above this value are rejected, so the rest map evenly onto 62 symbols.
+    const LIMIT: u8 = 248; // 62 * 4
+    let mut out = String::with_capacity(len);
+    while out.len() < len {
+        let byte = os_random_bytes::<1>()?[0];
+        if byte < LIMIT {
+            let index = usize::from(byte) % ALPHANUMERIC.len();
+            out.push(char::from(ALPHANUMERIC[index]));
+        }
+    }
+    Ok(out)
+}
 
 const MEMORY_KIB: u32 = 19456;
 const ITERATIONS: u32 = 2;
@@ -35,7 +54,7 @@ fn dummy_hash() -> Result<&'static str, AppError> {
         return Ok(existing.as_str());
     }
     // A random value that no account can have, generated at runtime.
-    let generated = hash_blocking(&Alphanumeric.sample_string(&mut OsRng, 32))?;
+    let generated = hash_blocking(&random_alphanumeric(32)?)?;
     Ok(DUMMY_HASH.get_or_init(|| generated).as_str())
 }
 
@@ -77,9 +96,10 @@ where
 }
 
 fn hash_blocking(password: &str) -> Result<String, AppError> {
-    let salt = SaltString::generate(&mut OsRng);
+    // A fresh 16-byte salt from the OS CSPRNG, as `specs/security.md` requires.
+    let salt = os_random_bytes::<16>()?;
     let hash = hasher()?
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password_with_salt(password.as_bytes(), &salt)
         .map_err(|_| AppError::InternalError)?;
     Ok(hash.to_string())
 }
@@ -125,7 +145,7 @@ pub async fn verify_dummy(password: &str) -> Result<(), AppError> {
 /// at runtime so that no password literal appears in the source.
 #[cfg(test)]
 pub(crate) fn random_test_password(len: usize) -> String {
-    Alphanumeric.sample_string(&mut OsRng, len)
+    random_alphanumeric(len).unwrap_or_default()
 }
 
 /// Test-only count of Argon2id verifications. Thread-local, so parallel tests cannot
@@ -276,9 +296,8 @@ mod tests {
         let Some(salt) = parsed.salt else {
             panic!("the generated hash has no salt");
         };
-        let mut buf = [0u8; 64];
-        let decoded_len = salt.decode_b64(&mut buf).map(<[u8]>::len).ok();
-        assert_eq!(decoded_len, Some(16), "the salt is not 16 bytes");
+        // `Salt` derefs to the decoded bytes, so its length is the raw salt length.
+        assert_eq!(salt.len(), 16, "the salt is not 16 bytes");
         assert!(phc.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
     }
 

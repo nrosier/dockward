@@ -236,7 +236,7 @@ pub async fn create(
     } else {
         None
     };
-    let id = ids::new_id();
+    let id = ids::new_id()?;
     let row = CredentialRow {
         id: id.clone(),
         service_type: input.service_type.clone(),

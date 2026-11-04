@@ -328,7 +328,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
         let report_id = match existing {
             Some(report) => report.id,
             None => {
-                let id = ids::new_id();
+                let id = ids::new_id().map_err(database)?;
                 let repository = context.mapping.harbor_repository.as_str();
                 let new = NewReport {
                     id: &id,

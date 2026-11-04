@@ -7,7 +7,6 @@
 use axum::http::header::HeaderName;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, KeyInit, Mac};
-use rand::RngCore;
 use sha2::Sha256;
 
 use crate::auth::crypto::DerivedKey;
@@ -31,8 +30,7 @@ fn tag(key: &DerivedKey, nonce: &str) -> Result<Vec<u8>, AppError> {
 
 /// Issues a new token value: 32 random bytes plus their HMAC tag.
 pub fn issue(key: &DerivedKey) -> Result<String, AppError> {
-    let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let bytes = crate::services::ids::os_random_bytes::<32>()?;
     let nonce = URL_SAFE_NO_PAD.encode(bytes);
     let signature = URL_SAFE_NO_PAD.encode(tag(key, &nonce)?);
     Ok(format!("{nonce}.{signature}"))

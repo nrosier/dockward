@@ -107,7 +107,7 @@ pub async fn create(
 ) -> Result<String, AppError> {
     check_backup_dir(backup_dir)?;
     let file_name = file_name_for(now)?;
-    let temp_path = data_dir.join(format!("backup-{}.tmp", ids::new_id()));
+    let temp_path = data_dir.join(format!("backup-{}.tmp", ids::new_id()?));
 
     let result = write_backup(pool, key, &temp_path, backup_dir, &file_name).await;
     // The temporary copy holds the whole database in plain text. Remove it on every
@@ -172,7 +172,7 @@ async fn write_backup(
 
 /// Confirms `dir` exists and accepts a new file. The probe file is removed at once.
 fn check_backup_dir(dir: &Path) -> Result<(), AppError> {
-    let probe = dir.join(format!(".write-check-{}", ids::new_id()));
+    let probe = dir.join(format!(".write-check-{}", ids::new_id()?));
     let writable = OpenOptions::new()
         .write(true)
         .create_new(true)
