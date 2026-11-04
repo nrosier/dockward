@@ -34,8 +34,8 @@ describe("AdminFailedPage", () => {
           total: 1,
         });
       }
-      if (path === "/api/v1/admin/users?page_size=200") {
-        return json({ items: [{ ...user("user"), id: "u7", username: "j.devries" }], page: 1, page_size: 200, total: 1 });
+      if (path === "/api/v1/admin/users") {
+        return json([{ ...user("user"), id: "u7", username: "j.devries" }]);
       }
       if (path === "/api/v1/sync-jobs/j1/retry" && init?.method === "POST") {
         failed = [];

@@ -8,7 +8,7 @@ import { ErrorMessage, LoadingMessage } from "../components/ui/StatusMessage";
 import { t } from "../i18n";
 import { api } from "../lib/api";
 import { useMe, type Role, type User } from "../lib/session";
-import type { OidcSettings, Page } from "../types/api";
+import type { OidcSettings } from "../types/api";
 import { OIDC_KEY } from "./AdminOidcPage";
 
 const USERS_KEY = ["admin", "users", "all"] as const;
@@ -141,7 +141,7 @@ export default function AdminUsersPage() {
   const me = useMe();
   const users = useQuery({
     queryKey: USERS_KEY,
-    queryFn: () => api<Page<User>>("GET", "/admin/users?page_size=200"),
+    queryFn: () => api<User[]>("GET", "/admin/users"),
   });
   const oidc = useQuery({ queryKey: OIDC_KEY, queryFn: () => api<OidcSettings>("GET", "/admin/oidc") });
   const [rowError, setRowError] = useState<string | null>(null);
@@ -188,7 +188,7 @@ export default function AdminUsersPage() {
               </tr>
             </thead>
             <tbody>
-              {users.data.items.map((user) => {
+              {users.data.map((user) => {
                 const self = user.id === me.data?.id;
                 const group = user.role === "admin" ? oidc.data?.admin_group : oidc.data?.user_group;
                 return (

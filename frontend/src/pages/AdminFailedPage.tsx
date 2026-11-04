@@ -24,7 +24,7 @@ export default function AdminFailedPage() {
   });
   const users = useQuery({
     queryKey: ["admin", "users", "all"],
-    queryFn: () => api<Page<User>>("GET", "/admin/users?page_size=200"),
+    queryFn: () => api<User[]>("GET", "/admin/users"),
   });
   const retry = useMutation({
     mutationFn: (id: string) => api<unknown>("POST", `/sync-jobs/${id}/retry`),
@@ -42,7 +42,7 @@ export default function AdminFailedPage() {
   }
 
   const mappingById = new Map((mappings.data?.items ?? []).map((m) => [m.id, m]));
-  const nameById = new Map((users.data?.items ?? []).map((u) => [u.id, u.username]));
+  const nameById = new Map((users.data ?? []).map((u) => [u.id, u.username]));
 
   return (
     <div className="flex flex-col gap-4">

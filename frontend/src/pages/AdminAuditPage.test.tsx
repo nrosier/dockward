@@ -29,14 +29,16 @@ describe("AdminAuditPage", () => {
           total: 1,
         });
       }
-      if (path.startsWith("/api/v1/admin/users")) {
-        return json({ items: [], page: 1, page_size: 200, total: 0 });
+      if (path === "/api/v1/admin/users") {
+        return json([{ id: "u1", username: "ops-admin", email: "o@example.test", role: "admin", auth_provider: "local", created_at: "2026-11-03T09:00:00Z" }]);
       }
       return undefined;
     });
     const { container } = renderAt(<AdminAuditPage />, "/admin/audit");
     expect(await screen.findByText(`note: ${hostile}, role: user`)).toBeInTheDocument();
     expect(container.querySelector("img")).toBeNull();
+    // The actor filter is filled from the bare user array.
+    expect(await screen.findByRole("option", { name: "ops-admin" })).toBeInTheDocument();
   });
 
   it("describes details as key and value pairs", () => {

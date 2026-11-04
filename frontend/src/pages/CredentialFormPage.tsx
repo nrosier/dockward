@@ -107,7 +107,7 @@ function CredentialForm({ id, loaded }: { id: string | undefined; loaded: Creden
     onError: (failure) => {
       setToken("");
       setResult(null);
-      setSaveError(statusOf(failure) === 422 ? messageOf(failure) : messageOf(failure));
+      setSaveError(messageOf(failure));
     },
   });
 

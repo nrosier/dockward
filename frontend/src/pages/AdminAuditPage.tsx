@@ -53,7 +53,7 @@ export default function AdminAuditPage() {
 
   const users = useQuery({
     queryKey: ["admin", "users", "all"],
-    queryFn: () => api<Page<User>>("GET", "/admin/users?page_size=200"),
+    queryFn: () => api<User[]>("GET", "/admin/users"),
   });
   const log = useQuery({
     queryKey: ["admin", "audit", action, actor, page],
@@ -102,7 +102,7 @@ export default function AdminAuditPage() {
             onChange={(e) => setFilter("actor_user_id", e.target.value)}
           >
             <option value="">{t("admin.audit.allActors")}</option>
-            {(users.data?.items ?? []).map((u) => (
+            {(users.data ?? []).map((u) => (
               <option key={u.id} value={u.id}>
                 {u.username}
               </option>

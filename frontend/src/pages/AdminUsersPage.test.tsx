@@ -22,8 +22,8 @@ const oidc = {
 
 function stub(role?: (init?: RequestInit) => Response) {
   return stubApi((path, init) => {
-    if (path === "/api/v1/admin/users?page_size=200") {
-      return json({ items: [admin, local, sso], page: 1, page_size: 200, total: 3 });
+    if (path === "/api/v1/admin/users") {
+      return json([admin, local, sso]);
     }
     if (path === "/api/v1/admin/oidc") {
       return json(oidc);
