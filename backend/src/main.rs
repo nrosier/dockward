@@ -551,6 +551,19 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
+    // Startup line: version, bind address and non-secret settings only. The encryption key,
+    // tokens and secrets are never logged.
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        bind = BIND_ADDR,
+        public_url = %settings.public_url,
+        data_dir = %settings.data_dir.display(),
+        backup_dir = %settings.backup_dir.display(),
+        allow_private_harbor = settings.allow_private_harbor,
+        allow_private_oidc = settings.allow_private_oidc,
+        allow_private_alerts = settings.allow_private_alerts,
+        "HarborGate starting"
+    );
 
     // Jobs left `running` by a previous process go back to `queued` before the worker
     // starts (`specs/backend.md`, Durable job queue).
