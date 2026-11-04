@@ -11,6 +11,8 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 mod api;
 #[allow(dead_code)] // Crypto helpers are used by the credential and backup paths in later issues.
@@ -456,10 +458,13 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // The stop flag flips to true on the first signal. The server stops accepting
-    // connections and drains in-flight requests. A separate timer caps the drain.
+    // connections and drains in-flight requests. The instant of the signal is sent first,
+    // so one 8-second budget (`drain`) covers the server and the background tasks.
     let (stop_tx, stop_rx) = watch::channel(false);
+    let (stop_at_tx, mut stop_at_rx) = watch::channel(None::<Instant>);
     tokio::spawn(async move {
         shutdown_signal(terminate).await;
+        let _ = stop_at_tx.send(Some(Instant::now()));
         let _ = stop_tx.send(true);
     });
 
@@ -490,25 +495,139 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
         let _ = graceful.wait_for(|stopped| *stopped).await;
     });
-    let drain_limit = async move {
-        let mut limit = stop_rx;
-        let _ = limit.wait_for(|stopped| *stopped).await;
-        tokio::time::sleep(DRAIN_TIMEOUT).await;
-    };
+    let tasks = vec![worker_task, poller_task];
 
-    tokio::select! {
-        result = serve => result?,
-        _ = drain_limit => {}
+    let mut serve = Box::pin(std::future::IntoFuture::into_future(serve));
+    let first = tokio::select! {
+        result = &mut serve => Phase::Served(result),
+        at = stop_instant(&mut stop_at_rx) => Phase::Stopped(at),
+    };
+    match first {
+        Phase::Stopped(stop_at) => drain(serve, tasks, stop_at).await?,
+        Phase::Served(result) => {
+            // The server ended on its own, as with a listener error: exit at once.
+            result?;
+            let stop_at = (*stop_at_rx.borrow()).unwrap_or_else(Instant::now);
+            drain(std::future::ready(Ok(())), tasks, stop_at).await?;
+        }
     }
-    // Give the worker its turn to finish the job it holds, within the drain limit.
-    let _ = tokio::time::timeout(DRAIN_TIMEOUT, worker_task).await;
-    let _ = tokio::time::timeout(DRAIN_TIMEOUT, poller_task).await;
     Ok(())
+}
+
+/// What ended first: the server, or the stop signal.
+enum Phase {
+    Served(std::io::Result<()>),
+    Stopped(Instant),
+}
+
+/// Resolves with the instant of the stop signal. A closed channel counts as now.
+async fn stop_instant(stop_at: &mut watch::Receiver<Option<Instant>>) -> Instant {
+    match stop_at.wait_for(|at| at.is_some()).await {
+        Ok(at) => (*at).unwrap_or_else(Instant::now),
+        Err(_) => Instant::now(),
+    }
+}
+
+/// Drains within one `DRAIN_TIMEOUT` counted from `stop_at`, the instant of the stop
+/// signal. The server and then each background task wait only until that one deadline, so
+/// a stop never takes longer than the budget. A task that is still running at the deadline
+/// is left to the process exit, and its job is re-queued at the next start.
+async fn drain(
+    serve: impl Future<Output = std::io::Result<()>>,
+    tasks: Vec<JoinHandle<()>>,
+    stop_at: Instant,
+) -> std::io::Result<()> {
+    let deadline = stop_at + DRAIN_TIMEOUT;
+    let served = tokio::time::timeout_at(deadline, serve).await;
+    for task in tasks {
+        let _ = tokio::time::timeout_at(deadline, task).await;
+    }
+    served.unwrap_or(Ok(()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Real time, no clock pausing: `stop_at` lies 7 s in the past, so about 1 s of the
+    /// 8 s budget remains and each drain test takes about 1 s.
+    fn stop_seven_seconds_ago() -> Instant {
+        Instant::now() - Duration::from_secs(7)
+    }
+
+    /// A server that never ends and a worker that sleeps 20 s: `drain` still returns at
+    /// the end of the one budget, not after a second 8 s.
+    #[tokio::test]
+    async fn drain_never_exceeds_the_budget() {
+        let worker = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+        });
+        let started = Instant::now();
+        let result = drain(
+            std::future::pending::<std::io::Result<()>>(),
+            vec![worker],
+            stop_seven_seconds_ago(),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(result.is_ok());
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "returned before the budget ended: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "waited past the single budget: {elapsed:?}"
+        );
+    }
+
+    /// The server ends at once, so the worker gets only what remains of the budget: a
+    /// worker that needs 3 s is cut off at about 1 s, and one that needs 0.3 s finishes.
+    #[tokio::test]
+    async fn worker_gets_only_the_remaining_budget() {
+        let slow_done = Arc::new(AtomicBool::new(false));
+        let slow_flag = slow_done.clone();
+        let slow = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            slow_flag.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let result = drain(
+            std::future::ready(Ok(())),
+            vec![slow],
+            stop_seven_seconds_ago(),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(result.is_ok());
+        assert!(
+            elapsed < Duration::from_millis(2500),
+            "the worker got more than the remaining budget: {elapsed:?}"
+        );
+        assert!(
+            !slow_done.load(Ordering::SeqCst),
+            "the slow worker should have been cut off"
+        );
+
+        let quick_done = Arc::new(AtomicBool::new(false));
+        let quick_flag = quick_done.clone();
+        let quick = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            quick_flag.store(true, Ordering::SeqCst);
+        });
+        let result = drain(
+            std::future::ready(Ok(())),
+            vec![quick],
+            stop_seven_seconds_ago(),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert!(
+            quick_done.load(Ordering::SeqCst),
+            "a worker inside the remaining budget must finish"
+        );
+    }
 
     /// The admin audit route rejects a request with no session cookie with 401.
     #[tokio::test]

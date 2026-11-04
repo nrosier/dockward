@@ -149,8 +149,13 @@ pub async fn record_failure(
 }
 
 /// Resets a `failed` job for another run: `queued`, `attempts` 0, no error, due now.
-/// Returns the rows changed. Zero means the job was not `failed`.
-pub async fn reset_failed(pool: &SqlitePool, id: &str, now: i64) -> Result<u64, AppError> {
+/// Returns the rows changed. Zero means the job was not `failed`. It takes a connection so
+/// the caller can run the reset and its audit row in one transaction.
+pub async fn reset_failed(
+    conn: &mut SqliteConnection,
+    id: &str,
+    now: i64,
+) -> Result<u64, AppError> {
     sqlx::query!(
         "UPDATE sync_jobs SET status = 'queued', attempts = 0, last_error = NULL, next_attempt_at = ?, updated_at = ?
          WHERE id = ? AND status = 'failed'",
@@ -158,7 +163,7 @@ pub async fn reset_failed(pool: &SqlitePool, id: &str, now: i64) -> Result<u64, 
         now,
         id
     )
-    .execute(pool)
+    .execute(conn)
     .await
     .map(|done| done.rows_affected())
     .map_err(|_| AppError::InternalError)

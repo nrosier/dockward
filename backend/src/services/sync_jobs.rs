@@ -77,17 +77,19 @@ use sqlx::SqlitePool;
 
 use crate::db::sync_jobs as db;
 use crate::error::AppError;
+use crate::services::audit::{self, Actor};
 
 /// Manual retry (`POST /api/v1/sync-jobs/:id/retry`, `specs/api.md`). The mapping owner
 /// or an admin may retry. Only a `failed` job can be retried; any other status is `409`.
-/// No audit entry is written: `sync_job.retry` is not in the audit vocabulary yet.
+/// The reset and the `sync_job.retry` audit row commit in one transaction.
 pub async fn retry(
     pool: &SqlitePool,
-    caller_id: &str,
+    actor: &Actor,
     caller_is_admin: bool,
     id: &str,
     now: i64,
 ) -> Result<db::SyncJobView, AppError> {
+    let caller_id = actor.user_id.as_deref().unwrap_or_default();
     let owner = db::owner_of_job(pool, id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -95,12 +97,27 @@ pub async fn retry(
         // Another tenant's job is not revealed: it looks the same as a missing one.
         return Err(AppError::NotFound);
     }
-    let changed = db::reset_failed(pool, id, now).await?;
+    let mapping_id = db::view(pool, id)
+        .await?
+        .ok_or(AppError::NotFound)?
+        .mapping_id;
+    let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
+    let changed = db::reset_failed(&mut tx, id, now).await?;
     if changed == 0 {
+        // Dropping the transaction rolls it back.
         return Err(AppError::Conflict(
             "only a failed sync job can be retried.".to_owned(),
         ));
     }
+    audit::record(
+        &mut tx,
+        actor,
+        "sync_job.retry",
+        &format!("sync_job:{id}"),
+        Some(&serde_json::json!({ "job_id": id, "mapping_id": mapping_id })),
+    )
+    .await?;
+    tx.commit().await.map_err(|_| AppError::InternalError)?;
     db::view(pool, id).await?.ok_or(AppError::NotFound)
 }
 
@@ -108,6 +125,18 @@ pub async fn retry(
 mod retry_tests {
     use super::*;
     use crate::db;
+
+    /// An actor with a user id, as the API handler builds it from the session.
+    fn actor_of(id: &str) -> Actor {
+        Actor {
+            user_id: Some(id.to_owned()),
+            username: id.to_owned(),
+        }
+    }
+
+    fn owner_actor() -> Actor {
+        actor_of("owner")
+    }
 
     async fn fresh_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
@@ -160,7 +189,7 @@ mod retry_tests {
     async fn retry_of_a_non_failed_job_is_a_conflict() {
         let (pool, dir) = fresh_pool("conflict").await;
         job_with_status(&pool, "queued").await;
-        let result = retry(&pool, "owner", false, "job-1", 2_000).await;
+        let result = retry(&pool, &owner_actor(), false, "job-1", 2_000).await;
         assert!(matches!(result, Err(AppError::Conflict(_))), "{result:?}");
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -170,7 +199,9 @@ mod retry_tests {
     async fn retry_of_a_failed_job_resets_attempts_and_error() {
         let (pool, dir) = fresh_pool("reset").await;
         job_with_status(&pool, "failed").await;
-        let view = retry(&pool, "owner", false, "job-1", 2_000).await.unwrap();
+        let view = retry(&pool, &owner_actor(), false, "job-1", 2_000)
+            .await
+            .unwrap();
         assert_eq!(view.status, "queued");
         assert_eq!(view.attempts, 0);
         assert_eq!(view.last_error, None);
@@ -183,7 +214,7 @@ mod retry_tests {
     async fn another_tenant_cannot_retry_and_sees_not_found() {
         let (pool, dir) = fresh_pool("tenant").await;
         job_with_status(&pool, "failed").await;
-        let result = retry(&pool, "stranger", false, "job-1", 2_000).await;
+        let result = retry(&pool, &actor_of("stranger"), false, "job-1", 2_000).await;
         assert!(matches!(result, Err(AppError::NotFound)), "{result:?}");
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -193,10 +224,45 @@ mod retry_tests {
     async fn an_admin_may_retry_any_tenants_failed_job() {
         let (pool, dir) = fresh_pool("admin").await;
         job_with_status(&pool, "failed").await;
-        let view = retry(&pool, "admin-user", true, "job-1", 2_000)
+        // The audit row's actor is a foreign key, so the admin must exist.
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, token_version)
+             VALUES ('admin-user', 'admin-user', NULL, 'admin', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let view = retry(&pool, &actor_of("admin-user"), true, "job-1", 2_000)
             .await
             .unwrap();
         assert_eq!(view.status, "queued");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn retry_writes_a_sync_job_retry_audit_row() {
+        let (pool, dir) = fresh_pool("audit").await;
+        job_with_status(&pool, "failed").await;
+        retry(&pool, &owner_actor(), false, "job-1", 2_000)
+            .await
+            .unwrap();
+        let row = sqlx::query_as::<_, (Option<String>, String, String, Option<String>)>(
+            "SELECT actor_user_id, actor_username, target, details FROM audit_log
+             WHERE action = 'sync_job.retry'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (actor_user_id, actor_username, target, details) = row;
+        assert_eq!(actor_user_id.as_deref(), Some("owner"));
+        assert_eq!(actor_username, "owner");
+        assert_eq!(target, "sync_job:job-1");
+        let details: serde_json::Value = serde_json::from_str(details.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            details,
+            serde_json::json!({ "job_id": "job-1", "mapping_id": "m1" })
+        );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
