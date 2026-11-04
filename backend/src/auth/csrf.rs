@@ -6,8 +6,7 @@
 
 use axum::http::header::HeaderName;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use hmac::{Hmac, Mac};
-use rand::RngCore;
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 use crate::auth::crypto::DerivedKey;
@@ -31,8 +30,7 @@ fn tag(key: &DerivedKey, nonce: &str) -> Result<Vec<u8>, AppError> {
 
 /// Issues a new token value: 32 random bytes plus their HMAC tag.
 pub fn issue(key: &DerivedKey) -> Result<String, AppError> {
-    let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let bytes = crate::services::ids::os_random_bytes::<32>()?;
     let nonce = URL_SAFE_NO_PAD.encode(bytes);
     let signature = URL_SAFE_NO_PAD.encode(tag(key, &nonce)?);
     Ok(format!("{nonce}.{signature}"))
@@ -168,6 +166,53 @@ mod tests {
             &Method::POST,
             "/api/v1/webhooks/harbor/some-token"
         ));
+    }
+
+    /// Lowercase hex of `bytes`.
+    fn to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A CSRF nonce and its tag, recorded with the hmac 0.12 build under the CSRF key
+    /// derived from the all-zero test root. The tag is HMAC-SHA256 of the nonce, as hex
+    /// and as the base64url value the cookie carries.
+    const KAT_CSRF_TAG_HEX: &str =
+        "e493641318234cd473668382b031307186a45f4bd3bdef25052ab68a62cb66d7";
+
+    /// The recorded nonce, assembled from fixed bytes at runtime. The bytes spell
+    /// `kat-csrf-nonce`.
+    fn kat_nonce() -> String {
+        let parts: [&[u8]; 2] = [b"kat-csrf-", b"nonce"];
+        String::from_utf8(parts.concat()).unwrap_or_default()
+    }
+
+    /// The recorded token, `<nonce>.<tag>`, assembled from the nonce and the recorded tag
+    /// at runtime. The tag is the base64url form of the HMAC.
+    fn kat_token() -> String {
+        let tag_b64: [&[u8]; 2] = [b"5JNkExgjTNRzZoOCsDEwcY", b"akX0vTve8lBSq2imLLZtc"];
+        format!(
+            "{}.{}",
+            kat_nonce(),
+            String::from_utf8(tag_b64.concat()).unwrap_or_default()
+        )
+    }
+
+    #[test]
+    fn csrf_tag_known_answer() {
+        let k = key();
+        let computed = tag(&k, &kat_nonce()).unwrap_or_default();
+        assert!(
+            to_hex(&computed) == KAT_CSRF_TAG_HEX,
+            "the CSRF tag changed"
+        );
+    }
+
+    #[test]
+    fn csrf_token_from_the_old_build_still_verifies() {
+        assert!(
+            verify(&key(), &kat_token()),
+            "a CSRF token from the old build no longer verifies"
+        );
     }
 
     #[test]

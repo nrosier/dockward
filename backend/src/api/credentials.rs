@@ -247,7 +247,9 @@ mod tests {
         let encrypted = crate::auth::crypto::encrypt(
             key,
             &crate::auth::crypto::aad("user_credentials", "encrypted_token", "cred-1"),
-            crate::services::ids::new_id().as_bytes(),
+            crate::services::ids::new_id()
+                .unwrap_or_default()
+                .as_bytes(),
         )
         .unwrap();
         CredentialRow {
@@ -352,7 +354,7 @@ mod tests {
             &Actor::cli(),
             "owner",
             None,
-            &crate::services::ids::new_id(),
+            &crate::services::ids::new_id().unwrap_or_default(),
             Role::User,
         )
         .await
@@ -371,7 +373,7 @@ mod tests {
                 label: "primary".to_owned(),
                 base_url: Some("https://harbor.example.com".to_owned()),
                 username: Some("robot$harborgate".to_owned()),
-                token: crate::services::ids::new_id(),
+                token: crate::services::ids::new_id().unwrap_or_default(),
                 expires_at: None,
             },
             false,
@@ -399,7 +401,7 @@ mod tests {
                 label: "gh".to_owned(),
                 base_url: None,
                 username: None,
-                token: crate::services::ids::new_id(),
+                token: crate::services::ids::new_id().unwrap_or_default(),
                 expires_at: None,
             },
             false,
@@ -457,7 +459,7 @@ mod tests {
             &Actor::cli(),
             "owner",
             None,
-            &crate::services::ids::new_id(),
+            &crate::services::ids::new_id().unwrap_or_default(),
             Role::User,
         )
         .await
@@ -473,7 +475,7 @@ mod tests {
                 "label": "primary",
                 "base_url": "https://harbor.example.com",
                 "username": "robot$harborgate",
-                "token": crate::services::ids::new_id(),
+                "token": crate::services::ids::new_id().unwrap_or_default(),
             })
             .to_string(),
         );

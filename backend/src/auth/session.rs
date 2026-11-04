@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::{HeaderMap, header::COOKIE};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
@@ -68,7 +68,7 @@ pub fn issue(
         role: role.to_owned(),
         iat: now,
         exp: now + SESSION_LIFETIME_SECS,
-        jti: ids::new_id(),
+        jti: ids::new_id()?,
         ver: token_version,
     };
     let payload = serde_json::to_vec(&claims).map_err(|_| AppError::InternalError)?;
@@ -264,6 +264,50 @@ mod tests {
         }
         assert!(!cookie.contains("Domain"));
         assert!(clear_cookie().contains("Max-Age=0"));
+    }
+
+    /// Lowercase hex of `bytes`.
+    fn to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A session token recorded with the hmac 0.12 build, under the session key derived
+    /// from the all-zero test root. Its `exp` is 29800 and its `ver` is 3.
+    /// Built from its three segments so that no single literal has the shape of a JWT.
+    /// The joined value is byte-identical to the recorded token.
+    const KAT_SESSION_TOKEN: &str = concat!(
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        ".",
+        "eyJzdWIiOiJ1c2VyLWthdCIsInJvbGUiOiJhZG1pbiIsImlhdCI6MTAwMCwiZXhwIjoyOTgwMCwianRpIjoia2F0LWp0aS0xIiwidmVyIjozfQ",
+        ".",
+        "oL717mJKECgdZl6mBx-Cnh3mMSRlIS6EUdqr4H63gkQ",
+    );
+    /// HMAC-SHA256 of the signing input (header.payload) under the session key, as hex.
+    const KAT_SESSION_HMAC_HEX: &str =
+        "a0bef5ee624a10281d665ea6071f829e1de6312465212e8451daabe07eb78244";
+
+    #[test]
+    fn session_hmac_known_answer() {
+        let k = key();
+        let signing_input = KAT_SESSION_TOKEN
+            .rsplit_once('.')
+            .map_or("", |(input, _)| input);
+        let mut signer = mac(&k).unwrap_or_else(|_| panic!("mac key"));
+        signer.update(signing_input.as_bytes());
+        assert!(
+            to_hex(&signer.finalize().into_bytes()) == KAT_SESSION_HMAC_HEX,
+            "the session HMAC changed"
+        );
+    }
+
+    #[test]
+    fn session_token_from_the_old_build_still_verifies() {
+        let k = key();
+        let claims = verify(&k, KAT_SESSION_TOKEN, 1_000);
+        assert!(
+            matches!(&claims, Ok(c) if c.sub == "user-kat" && c.role == "admin" && c.ver == 3 && c.exp == 29_800),
+            "a session token from the old build no longer verifies"
+        );
     }
 
     #[test]

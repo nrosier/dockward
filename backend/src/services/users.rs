@@ -31,7 +31,7 @@ pub async fn create_local(
     }
     local_auth::check_password_length(password_plain)?;
     let hash = password::hash_password(password_plain).await?;
-    let id = ids::new_id();
+    let id = ids::new_id()?;
 
     let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
     if users::find_by_username_tx(&mut tx, username)

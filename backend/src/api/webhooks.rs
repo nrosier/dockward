@@ -91,7 +91,7 @@ pub async fn receive(
     let authorization = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
-    let job_id = crate::services::ids::new_id();
+    let job_id = crate::services::ids::new_id()?;
     match harbor_webhook::receive_for(
         &state.pool,
         &mapping_id,

@@ -60,7 +60,7 @@ pub async fn create_first_admin(
 ) -> Result<String, AppError> {
     check_password_length(password_plain)?;
     let hash = password::hash_password(password_plain).await?;
-    let id = ids::new_id();
+    let id = ids::new_id()?;
     if setup::insert_first_admin(pool, &id, username, email, &hash).await? {
         Ok(id)
     } else {

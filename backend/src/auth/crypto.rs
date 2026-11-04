@@ -5,8 +5,8 @@
 //! See `specs/security.md` (Encryption and keys, Derived keys).
 
 use aes_gcm::{
-    AeadCore, Aes256Gcm, Key,
-    aead::{Aead, KeyInit, OsRng, Payload},
+    Aes256Gcm,
+    aead::{Aead, Generate, KeyInit, Nonce, Payload},
 };
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -72,8 +72,9 @@ pub fn aad(table: &str, column: &str, row_id: &str) -> String {
 
 /// Encrypts `plaintext` with `key` and binds it to `aad`. Returns the `v1:` string.
 pub fn encrypt(key: &DerivedKey, aad: &str, plaintext: &[u8]) -> Result<String, AppError> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|_| AppError::InternalError)?;
+    // A fresh 12-byte nonce from the OS CSPRNG for every call.
+    let nonce = Nonce::<Aes256Gcm>::try_generate().map_err(|_| AppError::InternalError)?;
     let ciphertext = cipher
         .encrypt(
             &nonce,
@@ -101,12 +102,15 @@ pub fn decrypt(key: &DerivedKey, aad: &str, stored: &str) -> Result<Zeroizing<Ve
     if blob.len() < NONCE_LEN + TAG_LEN {
         return Err(AppError::InternalError);
     }
-    let (nonce, ciphertext) = blob.split_at(NONCE_LEN);
+    let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
+    let nonce: &Nonce<Aes256Gcm> = nonce_bytes
+        .try_into()
+        .map_err(|_| AppError::InternalError)?;
 
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
+    let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|_| AppError::InternalError)?;
     let plaintext = cipher
         .decrypt(
-            nonce.into(),
+            nonce,
             Payload {
                 msg: ciphertext,
                 aad: aad.as_bytes(),
@@ -223,6 +227,27 @@ mod tests {
         assert_ne!(first, second);
     }
 
+    /// The first 12 bytes of each `v1:` value are the nonce. Two encryptions of the same
+    /// plaintext under the same key and AAD must draw different nonces. A fixed nonce
+    /// would make this fail.
+    #[test]
+    fn each_encryption_draws_a_fresh_nonce() {
+        let key = cred();
+        let a = aad("t", "c", "1");
+        let nonce_of = |stored: &str| -> Vec<u8> {
+            let encoded = stored.strip_prefix(V1_PREFIX).unwrap_or_default();
+            base64_decode(encoded).unwrap_or_default()[..NONCE_LEN].to_vec()
+        };
+        let first = encrypt(&key, &a, b"same").unwrap_or_default();
+        let second = encrypt(&key, &a, b"same").unwrap_or_default();
+        assert_eq!(nonce_of(&first).len(), NONCE_LEN, "nonce is not 12 bytes");
+        assert_ne!(
+            nonce_of(&first),
+            nonce_of(&second),
+            "two encryptions reused a nonce"
+        );
+    }
+
     #[test]
     fn derived_keys_differ_per_label() {
         let root = root();
@@ -251,5 +276,93 @@ mod tests {
         let root = root();
         let derived = credentials_key(&root).unwrap_or_else(|_| panic!("derivation"));
         assert_ne!(derived.as_bytes(), root.as_bytes());
+    }
+
+    /// Lowercase hex of `bytes`.
+    fn to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Known-answer vectors recorded with the hkdf 0.12 build. The root key is 32 zero
+    /// bytes, the salt is absent, and each output is 32 bytes. Assertions print no
+    /// key bytes. Test values only.
+    const KAT_HKDF_CREDENTIALS: &str =
+        "903052f15afc94615e653837fd963ea1308221f2a78e288ce35bee6d63d9ab7c";
+    const KAT_HKDF_SESSION: &str =
+        "d6b8e87ab1be6ee9ff84c47538e25f3ae088edf20d481adb12992b67ba8babb5";
+    const KAT_HKDF_BACKUP: &str =
+        "3ff22b0bdd4edc2113e02adf9368e9fd8d07ff877e9ef7db3acac2f9d5861adb";
+    const KAT_HKDF_CSRF: &str = "3ade9c704ec82e0cb8479adc0463e794282466fa5ac03f5693cf9bfddda28a25";
+
+    #[test]
+    fn hkdf_known_answers_per_label() {
+        let root = root();
+        let cases = [
+            (LABEL_CREDENTIALS, KAT_HKDF_CREDENTIALS),
+            (LABEL_SESSION, KAT_HKDF_SESSION),
+            (LABEL_BACKUP, KAT_HKDF_BACKUP),
+            (LABEL_CSRF, KAT_HKDF_CSRF),
+        ];
+        for (label, expected) in cases {
+            let derived = match derive_key(&root, label) {
+                Ok(k) => k,
+                Err(_) => panic!("derivation must succeed"),
+            };
+            assert!(
+                to_hex(derived.as_bytes()) == expected,
+                "an HKDF output changed for a label"
+            );
+        }
+    }
+
+    /// SHA-256 of "abc" and of the 56-byte NIST FIPS 180-2 message.
+    const KAT_SHA256_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    const KAT_SHA256_NIST_56: &str =
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1";
+
+    /// A `v1:` value recorded with the aes-gcm 0.10 build. The credentials key is
+    /// derived from the all-zero test root. The nonce is 0x2a repeated 12 times, and the
+    /// row AAD is `user_credentials:encrypted_token:7`. The plaintext is
+    /// `ghp_example_token`. Test values only.
+    const KAT_V1_CIPHERTEXT: &str =
+        "v1:KioqKioqKioqKioqOHCcMU+svq3pC6xXZLCeGTRz5JKQ5ggW19BUnTLaoKQy";
+    const KAT_V1_AAD: &str = "user_credentials:encrypted_token:7";
+    const KAT_V1_PLAINTEXT: &[u8] = b"ghp_example_token";
+
+    #[test]
+    fn v1_ciphertext_from_the_old_build_still_decrypts() {
+        let key = cred();
+        let out = decrypt(&key, KAT_V1_AAD, KAT_V1_CIPHERTEXT);
+        assert!(
+            matches!(out, Ok(ref v) if v.as_slice() == KAT_V1_PLAINTEXT),
+            "a v1 value recorded with the old build no longer decrypts"
+        );
+    }
+
+    #[test]
+    fn v1_ciphertext_from_the_old_build_is_bound_to_its_row() {
+        let key = cred();
+        assert!(
+            decrypt(
+                &key,
+                "user_credentials:encrypted_token:8",
+                KAT_V1_CIPHERTEXT
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sha256_known_answers() {
+        use sha2::Digest;
+        assert!(
+            to_hex(&Sha256::digest(b"abc")) == KAT_SHA256_ABC,
+            "SHA-256 of abc changed"
+        );
+        let nist = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        assert!(
+            to_hex(&Sha256::digest(nist)) == KAT_SHA256_NIST_56,
+            "SHA-256 of the NIST message changed"
+        );
     }
 }

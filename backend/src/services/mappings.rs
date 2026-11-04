@@ -7,8 +7,6 @@
 //! They are returned once, at create and at rotation.
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::RngCore;
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
@@ -94,10 +92,9 @@ pub struct ListQuery {
 }
 
 /// Generates 256 random bits from the OS CSPRNG, base64url without padding.
-pub fn new_secret() -> String {
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
+pub fn new_secret() -> Result<String, AppError> {
+    let bytes = ids::os_random_bytes::<32>()?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 /// SHA-256 of `value` as lowercase hex.
@@ -333,9 +330,9 @@ pub async fn create<P: HarborProbe, G: GithubProbe>(
         .unwrap_or_else(|| "CRITICAL".to_owned());
     validate_severity(&severity)?;
 
-    let id = ids::new_id();
-    let token = new_secret();
-    let secret = new_secret();
+    let id = ids::new_id()?;
+    let token = new_secret()?;
+    let secret = new_secret()?;
     let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
     let harbor_base = harbor_base_of(&mut tx, user_id, &input.harbor_cred_id).await?;
     check_github(&mut tx, user_id, &input.github_cred_id).await?;
@@ -489,7 +486,7 @@ pub async fn rotate_webhook_token(
     public_url: &str,
     id: &str,
 ) -> Result<String, AppError> {
-    let token = new_secret();
+    let token = new_secret()?;
     let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
     let changed = db::set_token_hash(&mut tx, user_id, id, &digest(&token)).await?;
     if changed == 0 {
@@ -515,7 +512,7 @@ pub async fn rotate_auth_secret(
     user_id: &str,
     id: &str,
 ) -> Result<String, AppError> {
-    let secret = new_secret();
+    let secret = new_secret()?;
     let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
     let changed = db::set_auth_secret_hash(&mut tx, user_id, id, &digest(&secret)).await?;
     if changed == 0 {
@@ -711,7 +708,7 @@ mod tests {
 
     #[test]
     fn secrets_are_256_bit_base64url() {
-        let token = new_secret();
+        let token = new_secret().unwrap_or_default();
         // 32 bytes encode to 43 base64url characters without padding.
         assert_eq!(token.len(), 43);
         assert!(
@@ -719,7 +716,7 @@ mod tests {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         );
-        assert_ne!(token, new_secret());
+        assert_ne!(token, new_secret().unwrap_or_default());
     }
 
     #[test]

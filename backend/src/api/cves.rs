@@ -232,7 +232,7 @@ mod tests {
         db::findings::upsert(
             &mut conn,
             &db::findings::Finding {
-                id: &crate::services::ids::new_id(),
+                id: &crate::services::ids::new_id().unwrap_or_default(),
                 mapping_id: "m1",
                 harbor_repository: "m1",
                 image_tag: tag,
@@ -465,7 +465,7 @@ mod tests {
         store(
             state,
             &db::findings::Finding {
-                id: &crate::services::ids::new_id(),
+                id: &crate::services::ids::new_id().unwrap_or_default(),
                 mapping_id: mapping,
                 harbor_repository: mapping,
                 image_tag: tag,
@@ -514,7 +514,7 @@ mod tests {
                                        vulnerability_summary, sarif_status, synced_at)
              VALUES (?, ?, ?, ?, 'sha256:00', '{}', ?, ?)",
         )
-        .bind(crate::services::ids::new_id())
+        .bind(crate::services::ids::new_id().unwrap_or_default())
         .bind(mapping)
         .bind(mapping)
         .bind(tag)
@@ -703,7 +703,7 @@ mod tests {
             store(
                 &state,
                 &db::findings::Finding {
-                    id: &crate::services::ids::new_id(),
+                    id: &crate::services::ids::new_id().unwrap_or_default(),
                     mapping_id: "m1",
                     harbor_repository: "m1",
                     image_tag: tag,
@@ -1055,7 +1055,7 @@ mod tests {
             store(
                 &state,
                 &db::findings::Finding {
-                    id: &crate::services::ids::new_id(),
+                    id: &crate::services::ids::new_id().unwrap_or_default(),
                     mapping_id: "m1",
                     harbor_repository: "m1",
                     image_tag: tag,

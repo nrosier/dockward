@@ -12,8 +12,8 @@ use std::io::Write;
 use std::path::Path;
 
 use aes_gcm::{
-    Aes256Gcm, Key,
-    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
+    Aes256Gcm,
+    aead::{Aead, Generate, KeyInit, Nonce, Payload},
 };
 use sqlx::SqlitePool;
 use zeroize::Zeroizing;
@@ -41,8 +41,9 @@ fn not_verified() -> AppError {
 /// Encrypts `plain` and returns `MAGIC || nonce || ciphertext || tag`. The nonce is
 /// fresh and random for every call.
 pub fn seal(key: &DerivedKey, plain: &[u8]) -> Result<Vec<u8>, AppError> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|_| AppError::InternalError)?;
+    // A fresh 12-byte nonce from the OS CSPRNG for every call.
+    let nonce = Nonce::<Aes256Gcm>::try_generate().map_err(|_| AppError::InternalError)?;
     let ciphertext = cipher
         .encrypt(
             &nonce,
@@ -68,12 +69,13 @@ pub fn open(key: &DerivedKey, file: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppErro
         return Err(not_verified());
     }
     let (magic, rest) = file.split_at(MAGIC_LEN);
-    let (nonce, ciphertext) = rest.split_at(NONCE_LEN);
+    let (nonce_bytes, ciphertext) = rest.split_at(NONCE_LEN);
+    let nonce: &Nonce<Aes256Gcm> = nonce_bytes.try_into().map_err(|_| not_verified())?;
 
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
+    let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|_| AppError::InternalError)?;
     let plain = cipher
         .decrypt(
-            nonce.into(),
+            nonce,
             Payload {
                 msg: ciphertext,
                 aad: magic,
@@ -105,7 +107,7 @@ pub async fn create(
 ) -> Result<String, AppError> {
     check_backup_dir(backup_dir)?;
     let file_name = file_name_for(now)?;
-    let temp_path = data_dir.join(format!("backup-{}.tmp", ids::new_id()));
+    let temp_path = data_dir.join(format!("backup-{}.tmp", ids::new_id()?));
 
     let result = write_backup(pool, key, &temp_path, backup_dir, &file_name).await;
     // The temporary copy holds the whole database in plain text. Remove it on every
@@ -170,7 +172,7 @@ async fn write_backup(
 
 /// Confirms `dir` exists and accepts a new file. The probe file is removed at once.
 fn check_backup_dir(dir: &Path) -> Result<(), AppError> {
-    let probe = dir.join(format!(".write-check-{}", ids::new_id()));
+    let probe = dir.join(format!(".write-check-{}", ids::new_id()?));
     let writable = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -238,6 +240,24 @@ mod tests {
         db::users::insert_local(&mut conn, id, username, None, "test-hash", "user")
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn each_seal_draws_a_fresh_nonce() {
+        let key = key();
+        let first = seal(&key, b"same").unwrap_or_default();
+        let second = seal(&key, b"same").unwrap_or_default();
+        // The nonce follows the 5-byte magic and is 12 bytes long.
+        let nonce_range = MAGIC_LEN..MAGIC_LEN + NONCE_LEN;
+        assert_eq!(
+            first.get(nonce_range.clone()).map(<[u8]>::len),
+            Some(NONCE_LEN)
+        );
+        assert_ne!(
+            first.get(nonce_range.clone()),
+            second.get(nonce_range),
+            "two seals reused a nonce"
+        );
     }
 
     #[test]
@@ -360,6 +380,30 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "temporary copies left: {leftovers:?}");
         assert_eq!(std::fs::read(&taken).unwrap(), b"existing");
+    }
+
+    /// An `HGBK1` file recorded with the aes-gcm 0.10 build, as lowercase hex. The backup
+    /// key is derived from the all-zero test root. The nonce is 0x2b repeated 12 times,
+    /// and the plaintext is `database bytes`. Test values only.
+    const KAT_HGBK1_HEX: &str = "4847424b312b2b2b2b2b2b2b2b2b2b2b2bb94ab0bc2c33bec3bcaf58cf15178f96bbc433e09b036161efdff639e857";
+
+    fn hex_decode(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .filter_map(|i| text.get(i..i + 2))
+            .filter_map(|pair| u8::from_str_radix(pair, 16).ok())
+            .collect()
+    }
+
+    #[test]
+    fn hgbk1_file_from_the_old_build_still_restores() {
+        let file = hex_decode(KAT_HGBK1_HEX);
+        assert!(file.starts_with(MAGIC), "the recorded file lost its header");
+        let plain = open(&key(), &file);
+        assert!(
+            matches!(plain, Ok(ref p) if p.as_slice() == b"database bytes"),
+            "an HGBK1 file recorded with the old build no longer opens"
+        );
     }
 
     #[test]
