@@ -9,6 +9,7 @@ pub mod backup;
 #[allow(dead_code)] // Used by the login service and the OIDC settings in #18.
 pub mod config;
 pub mod credentials;
+pub mod findings;
 pub mod job_runs;
 pub mod mappings;
 pub mod retention;

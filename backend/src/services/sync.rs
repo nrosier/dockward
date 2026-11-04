@@ -33,7 +33,7 @@ use crate::services::harbor_client::{
     HarborGet, ReportState, TRIVY_REPORT_MIME, artifact_url, branch_for, check_source,
     parse_labels, parse_report, require_revision, vulnerabilities_url,
 };
-use crate::services::{ids, sarif};
+use crate::services::{findings, ids, sarif};
 use crate::worker::{JobHandler, JobOutcome, now_secs};
 
 /// Waits between processing polls: 5 s, then 10 s, then every 15 s.
@@ -293,13 +293,15 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
         if let Some(report) = &existing
             && let Some(sarif_id) = &report.github_sarif_id
         {
-            // A retry after a pending wait: poll the same upload, never upload twice.
+            // A retry after a pending wait: poll the same upload, never upload twice. The
+            // Harbor report is fetched again only if GitHub reports `Complete`.
             return self
-                .wait_for_processing(&context, &report.id, sarif_id)
+                .wait_for_processing(&context, &report.id, sarif_id, None)
                 .await;
         }
 
-        let (sarif_b64, summary, revision, branch) = self.read_and_convert(&context).await?;
+        let (sarif_b64, summary, revision, branch, vuln_report) =
+            self.read_and_convert(&context).await?;
 
         // A pending report left by an earlier attempt that never uploaded is reused.
         let report_id = match existing {
@@ -358,7 +360,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
         report_db::set_sarif_id(&self.pool, &report_id, &sarif_id)
             .await
             .map_err(database)?;
-        self.wait_for_processing(&context, &report_id, &sarif_id)
+        self.wait_for_processing(&context, &report_id, &sarif_id, Some(&vuln_report))
             .await
     }
 
@@ -405,11 +407,11 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
 
     /// Reads the labels and the report from Harbor and converts the report. Returns the
     /// encoded SARIF (`None` when it is over 10 MB compressed), the severity summary, the
-    /// commit SHA and the branch.
+    /// commit SHA, the branch and the parsed Harbor report.
     async fn read_and_convert(
         &self,
         context: &Context,
-    ) -> Flow<(Option<String>, String, String, String)> {
+    ) -> Flow<(Option<String>, String, String, String, Value)> {
         let mapping = &context.mapping;
         let base = base_for_join(&mapping.harbor_base_url).map_err(database)?;
         let digest = context.payload.digest.as_str();
@@ -433,11 +435,29 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
             .map_err(|e| validation_message(e, "the image source label does not match"))?;
         let branch = branch_for(&labels, &mapping.default_branch);
 
+        let report = self.fetch_report(context).await?;
+
+        let document = sarif::convert(&report, &mapping.harbor_project, &mapping.harbor_repository)
+            .map_err(|_| failed("the Harbor report could not be converted to SARIF"))?;
+        let summary = summarize(&report);
+        let encoded = match encode_sarif(&document) {
+            Ok(encoded) => Some(encoded),
+            Err(ScanError::TooLarge) => None,
+            Err(other) => return Err(scan_outcome(other)),
+        };
+        Ok((encoded, summary, revision, branch, report))
+    }
+
+    /// Reads and parses the Trivy report from Harbor. `NotYet` and a `404` fail the job for
+    /// backoff.
+    async fn fetch_report(&self, context: &Context) -> Flow<Value> {
+        let mapping = &context.mapping;
+        let base = base_for_join(&mapping.harbor_base_url).map_err(database)?;
         let report_url = vulnerabilities_url(
             &base,
             &mapping.harbor_project,
             &mapping.harbor_repository,
-            digest,
+            &context.payload.digest,
         )
         .map_err(|e| validation_message(e, "the Harbor names are not valid"))?;
         let body = self
@@ -448,22 +468,12 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
                 "the Harbor report",
             )
             .await?;
-        let report = match parse_report(&body)
+        match parse_report(&body)
             .map_err(|_| failed("Harbor returned a report that could not be read"))?
         {
-            ReportState::Ready(report) => report,
-            ReportState::NotYet => return Err(failed(MSG_NOT_YET)),
-        };
-
-        let document = sarif::convert(&report, &mapping.harbor_project, &mapping.harbor_repository)
-            .map_err(|_| failed("the Harbor report could not be converted to SARIF"))?;
-        let summary = summarize(&report);
-        let encoded = match encode_sarif(&document) {
-            Ok(encoded) => Some(encoded),
-            Err(ScanError::TooLarge) => None,
-            Err(other) => return Err(scan_outcome(other)),
-        };
-        Ok((encoded, summary, revision, branch))
+            ReportState::Ready(report) => Ok(report),
+            ReportState::NotYet => Err(failed(MSG_NOT_YET)),
+        }
     }
 
     /// One Harbor GET. `404` on the report is the backoff case; any other non-200 fails.
@@ -493,12 +503,16 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
         }
     }
 
-    /// Polls GitHub after 5 s, 10 s, then every 15 s, for at most 300 s in total.
+    /// Polls GitHub after 5 s, 10 s, then every 15 s, for at most 300 s in total. On
+    /// `Complete` the report is marked `success` and the findings of the tag are updated
+    /// from `vuln_report`. A retry has no report in hand (`None`), so it is fetched from
+    /// Harbor again, before the report is marked `success`.
     async fn wait_for_processing(
         &self,
         context: &Context,
         report_id: &str,
         sarif_id: &str,
+        vuln_report: Option<&Value>,
     ) -> Flow<()> {
         let mapping = &context.mapping;
         let mut waited = Duration::ZERO;
@@ -522,9 +536,29 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
             match processing {
                 Processing::Pending => {}
                 Processing::Complete => {
+                    let fetched;
+                    let vuln_report = match vuln_report {
+                        Some(report) => report,
+                        None => {
+                            fetched = self.fetch_report(context).await?;
+                            &fetched
+                        }
+                    };
                     report_db::finish(&self.pool, report_id, "success", None, self.clock.now())
                         .await
                         .map_err(database)?;
+                    // The result of the scan is not used yet: #33 adds the alert for
+                    // `new_critical`.
+                    let _applied = findings::apply_scan(
+                        &self.pool,
+                        &mapping.id,
+                        &mapping.harbor_repository,
+                        &context.payload.tag,
+                        vuln_report,
+                        self.clock.now(),
+                    )
+                    .await
+                    .map_err(database)?;
                     return Ok(());
                 }
                 Processing::Failed(errors) => {
@@ -887,6 +921,18 @@ mod tests {
             json!({"critical": 1, "high": 2, "medium": 0, "low": 0, "unknown": 1})
         );
         assert_eq!(lock(&fx.sleeps).clone(), vec![FIRST_WAIT]);
+        // Complete applies the report to cve_findings.
+        let applied: Vec<(String, String)> = sqlx::query_as(
+            "SELECT cve_id, severity FROM cve_findings WHERE image_tag = 'v1' ORDER BY cve_id",
+        )
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!(applied.len(), 4);
+        assert_eq!(
+            applied[0],
+            ("CVE-2026-0001".to_owned(), "CRITICAL".to_owned())
+        );
     }
 
     #[tokio::test]
@@ -1006,11 +1052,53 @@ mod tests {
         let outcome = fx.handler(&harbor, &scanner).run(fx.job()).await;
         assert_eq!(outcome, JobOutcome::Done);
         assert_eq!(scanner.uploads(), 0);
-        assert_eq!(harbor.calls(), 0);
+        // Only the Harbor report is read again, and only because GitHub said Complete.
+        // The artifact labels are not read again.
+        assert_eq!(harbor.calls(), 1);
         assert_eq!(scanner.status_calls.load(Ordering::SeqCst), 1);
         let (status, sarif_id, _, _, _) = fx.report().await.unwrap();
         assert_eq!(status, "success");
         assert_eq!(sarif_id.as_deref(), Some("sarif-9"));
+        // The findings of the tag are applied on Complete, on the retry path too.
+        let applied: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cve_findings WHERE mapping_id = 'm1' AND image_tag = 'v1' AND status = 'open'",
+        )
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!(applied, 4);
+    }
+
+    #[tokio::test]
+    async fn retry_with_sarif_id_that_stays_pending_applies_no_findings() {
+        let fx = Fixture::new("retry-pending").await;
+        let new = NewReport {
+            id: "r1",
+            mapping_id: "m1",
+            sync_job_id: "j1",
+            harbor_repository: "app",
+            image_tag: "v1",
+            image_digest: "sha256:aaaa",
+            commit_sha: Some(REVISION),
+            vulnerability_summary: "{}",
+        };
+        let mut conn = fx.pool.acquire().await.unwrap();
+        report_db::insert_pending(&mut conn, &new).await.unwrap();
+        drop(conn);
+        report_db::set_sarif_id(&fx.pool, "r1", "sarif-9")
+            .await
+            .unwrap();
+
+        let harbor = ok_harbor();
+        let scanner = FakeScanner::new(Ok("unused".to_owned()), vec![Ok(Processing::Pending)]);
+        let outcome = fx.handler(&harbor, &scanner).run(fx.job()).await;
+        assert_eq!(outcome, JobOutcome::Failed(MSG_PENDING.to_owned()));
+        assert_eq!(harbor.calls(), 0);
+        let findings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cve_findings")
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+        assert_eq!(findings, 0);
     }
 
     #[tokio::test]
@@ -1053,6 +1141,12 @@ mod tests {
             error.as_deref(),
             Some("rule id is missing; too many results")
         );
+        // A report GitHub refused changes no findings.
+        let findings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cve_findings")
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+        assert_eq!(findings, 0);
     }
 
     #[tokio::test]

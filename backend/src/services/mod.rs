@@ -10,6 +10,7 @@ pub mod backup;
 #[allow(dead_code)] // Used by the credential routes.
 pub mod credential_probe;
 pub mod credentials;
+pub mod findings;
 #[allow(dead_code)] // Used by the issue lifecycle (#30).
 pub mod github_issues;
 #[allow(dead_code)] // Used by the SARIF upload worker (#53).
