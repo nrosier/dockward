@@ -1,0 +1,76 @@
+import { Navigate, createBrowserRouter, type RouteObject } from "react-router";
+import { AdminLayout } from "./components/shell/AdminLayout";
+import { AppShell } from "./components/shell/AppShell";
+import { NotFoundMessage } from "./components/ui/StatusMessage";
+import { RequireAdmin, RequireAuth } from "./lib/session";
+import AccountPage from "./pages/AccountPage";
+import AdminAlertsPage from "./pages/AdminAlertsPage";
+import AdminAuditPage from "./pages/AdminAuditPage";
+import AdminBackupPage from "./pages/AdminBackupPage";
+import AdminFailedPage from "./pages/AdminFailedPage";
+import AdminHealthPage from "./pages/AdminHealthPage";
+import AdminJobsPage from "./pages/AdminJobsPage";
+import AdminOidcPage from "./pages/AdminOidcPage";
+import AdminUsersPage from "./pages/AdminUsersPage";
+import CredentialFormPage from "./pages/CredentialFormPage";
+import CveDetailPage from "./pages/CveDetailPage";
+import CvesPage from "./pages/CvesPage";
+import DashboardPage from "./pages/DashboardPage";
+import LoginPage from "./pages/LoginPage";
+import MappingFormPage from "./pages/MappingFormPage";
+import MappingsPage from "./pages/MappingsPage";
+import SetupPage from "./pages/SetupPage";
+import SyncJobsPage from "./pages/SyncJobsPage";
+
+// The route table from specs/frontend.md ("Screen designs"), plus the edit
+// screens for mappings and credentials.
+export const routes: RouteObject[] = [
+  { path: "/login", element: <LoginPage /> },
+  { path: "/setup", element: <SetupPage /> },
+  {
+    element: <RequireAuth />,
+    children: [
+      {
+        element: <AppShell />,
+        children: [
+          { index: true, element: <DashboardPage /> },
+          { path: "mappings", element: <MappingsPage /> },
+          { path: "mappings/new", element: <MappingFormPage /> },
+          { path: "mappings/:id", element: <MappingFormPage /> },
+          { path: "cves", element: <CvesPage /> },
+          { path: "cves/:id", element: <CveDetailPage /> },
+          { path: "sync-jobs", element: <SyncJobsPage /> },
+          { path: "account", element: <AccountPage /> },
+          { path: "account/credentials/new", element: <CredentialFormPage /> },
+          { path: "account/credentials/:id", element: <CredentialFormPage /> },
+          {
+            path: "admin",
+            element: <RequireAdmin />,
+            children: [
+              { index: true, element: <Navigate to="/admin/jobs" replace /> },
+              {
+                element: <AdminLayout />,
+                children: [
+                  { path: "jobs", element: <AdminJobsPage /> },
+                  { path: "failed", element: <AdminFailedPage /> },
+                  { path: "audit", element: <AdminAuditPage /> },
+                  { path: "health", element: <AdminHealthPage /> },
+                  { path: "settings", element: <Navigate to="/admin/settings/oidc" replace /> },
+                  { path: "settings/oidc", element: <AdminOidcPage /> },
+                  { path: "settings/users", element: <AdminUsersPage /> },
+                  { path: "settings/alerts", element: <AdminAlertsPage /> },
+                  { path: "settings/backup", element: <AdminBackupPage /> },
+                ],
+              },
+            ],
+          },
+          { path: "*", element: <NotFoundMessage /> },
+        ],
+      },
+    ],
+  },
+];
+
+export function createRouter() {
+  return createBrowserRouter(routes);
+}

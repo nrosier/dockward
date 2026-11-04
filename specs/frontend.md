@@ -137,6 +137,20 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 - House style, dark-first. Dark is the default theme. Light is a full peer theme, with every token defined.
 - Dark: background `#0b0c18`, surface `#15162a`, text `#eceafa`, accent `#a390fb`.
 - Light: background `#fbfaff`, surface `#f3f1fa`, text `#16152b`, accent `#5b3fd4`.
+- Dark `surface-2` is `#1b1c34`, border `#25264a`, muted text `#9b98b8` (values from the approved artboards).
+- Light `surface-2`, border and muted text (Decided (2026-11-04, user, #36): derived from the existing palette, for the user's review before merge): `surface-2` `#e9e6f4`, border `#d9d5ea`, muted `#5d5a7a`. Muted is the dark muted hue, darkened until it reaches WCAG 2.x contrast of at least 4.5:1 (SC 1.4.3) on both light backgrounds. The artboards are dark only, so these have no artboard.
+- Contrast ratios (WCAG 2.x relative luminance, computed 2026-11-04):
+
+| Pair | Dark | Light |
+| --- | --- | --- |
+| Muted on background | 7.02 | 6.30 |
+| Muted on surface | 6.42 | 5.85 |
+| Muted on surface-2 | 6.00 | 5.33 |
+| Text on background | 16.40 | 17.19 |
+| Accent on background | 7.35 | 6.51 |
+| Accent on surface | 6.73 | 6.04 |
+
+- The text colour on a primary button (`on-accent`) is `#0b0c18` in dark and `#ffffff` in light.
 - Focus: a visible 2px ring in the accent colour.
 - Status colours come from the list below, not from Astraya's element or aspect colours.
 
@@ -144,9 +158,21 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 
 - Critical: `#ef4444`
 - High: `#f97316`
-- Medium: `#eab308`
+- Medium: `#ca8a04` (Decided (2026-11-04, user, #36): was `#eab308`, adjusted because its pill text failed contrast on light; see below)
 - Low: `#3b82f6`
 - Success: `#10b981`
+- One set for both themes (Decided (2026-11-04, user, #36)). The five values above are the dots, borders and tinted fills of a pill. The pill text is a lighter tint in dark and a darker shade in light, so the text keeps its contrast on the tinted fill. Colour is never the only signal (see "Status pills").
+- Pill text on its tinted fill, WCAG 2.x contrast (computed 2026-11-04; fill is the status colour at 12% over the page background, 10% for Medium, as in the artboards; each cell is "on background / on surface"):
+
+| Status | Dark text | Dark | Light text | Light |
+| --- | --- | --- | --- | --- |
+| Critical | `#fca5a5` | 9.27 / 8.37 | `#8d2f39` | 6.66 / 6.22 |
+| High | `#fdba74` | 10.08 / 9.04 | `#93491f` | 5.60 / 5.23 |
+| Medium | `#fde047` | 13.24 / 11.90 | `#795516` | 5.87 / 5.47 |
+| Low | `#93c5fd` | 9.55 / 8.55 | `#2a519b` | 6.44 / 6.01 |
+| Success | `#6ee7b7` | 10.97 / 9.80 | `#136f5a` | 5.24 / 4.89 |
+
+- The light text is the status colour mixed 55% with the light text colour. Every pair is at least 4.5:1. With the original Medium `#eab308` the light text reached only 4.47 / 4.18 on background / surface, which fails, so only Medium was changed. The other four values are unchanged.
 
 ## Status pills (decided)
 

@@ -45,6 +45,7 @@ async fn healthz() -> Json<Health> {
 pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/assets/{*path}", get(api::static_files::asset))
         .route("/api/v1/auth/setup-status", get(api::auth::setup_status))
         .route("/api/v1/auth/setup", post(api::auth::setup))
         .route("/api/v1/auth/login", post(api::auth::login))
@@ -122,6 +123,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             state.clone(),
             auth::csrf::guard,
         ))
+        .fallback(api::static_files::spa)
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
             api::hardening::TrustedProxies(std::sync::Arc::new(trusted_proxies)),
