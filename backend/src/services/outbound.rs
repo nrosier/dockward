@@ -36,6 +36,8 @@ pub enum OutboundError {
     NotHttps,
     /// The client could not be built.
     ClientBuild,
+    /// The host name did not resolve.
+    Resolve,
 }
 
 impl fmt::Display for OutboundError {
@@ -48,6 +50,7 @@ impl fmt::Display for OutboundError {
             OutboundError::ClientBuild => {
                 f.write_str("the outbound HTTP client could not be built")
             }
+            OutboundError::Resolve => f.write_str("the target host could not be resolved"),
         }
     }
 }
@@ -130,6 +133,22 @@ pub fn filter_addresses(
     } else {
         Ok(allowed)
     }
+}
+
+/// Resolves `host` with the system resolver and applies [`filter_addresses`]. A caller that
+/// connects by itself instead of through [`OutboundClient`] (SMTP) must call this before
+/// every connection and connect only to an address it returns, so a DNS answer that changes
+/// between calls is checked again.
+pub async fn resolve_checked(
+    host: &str,
+    port: u16,
+    class: TargetClass,
+    allow_private: bool,
+) -> Result<Vec<SocketAddr>, OutboundError> {
+    let found = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|_| OutboundError::Resolve)?;
+    filter_addresses(found.collect(), class, allow_private)
 }
 
 /// Resolves a host with the system resolver and applies [`filter_addresses`].
@@ -429,6 +448,35 @@ mod tests {
         assert!(
             message.contains("blocked private or local address"),
             "expected the address filter to refuse it, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_checked_refuses_private_hosts() {
+        // `localhost` and the IP literals resolve without network access.
+        for host in ["localhost", "127.0.0.1", "10.0.0.5", "::1"] {
+            assert_eq!(
+                resolve_checked(host, 465, TargetClass::Alerts, false).await,
+                Err(OutboundError::BlockedAddress),
+                "a private host was not refused"
+            );
+        }
+        // The control: the class opt-out lets the same host through, and the port is kept.
+        let allowed = resolve_checked("127.0.0.1", 465, TargetClass::Alerts, true).await;
+        assert_eq!(
+            allowed,
+            Ok(vec![SocketAddr::new(v4("127.0.0.1"), 465)]),
+            "the opt-out did not allow the host"
+        );
+        // GitHub never gets the opt-out.
+        assert_eq!(
+            resolve_checked("127.0.0.1", 465, TargetClass::GitHub, true).await,
+            Err(OutboundError::BlockedAddress)
+        );
+        // A public IP literal passes with the default settings.
+        assert_eq!(
+            resolve_checked("8.8.8.8", 587, TargetClass::Alerts, false).await,
+            Ok(vec![SocketAddr::new(v4("8.8.8.8"), 587)])
         );
     }
 
