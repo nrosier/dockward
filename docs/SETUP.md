@@ -282,20 +282,23 @@ Restored sessions and sync jobs are those in the backup. Credentials in the back
 
 Rotation replaces `HARBORGATE_ENCRYPTION_KEY` with a new key and re-encrypts every stored secret under it: Harbor and GitHub credentials, the OIDC client secret, and the alert channel settings. It is a command-line command that runs with HarborGate stopped. It is not an HTTP route and not in the admin UI.
 
-1. **Make a backup first.** Create one in the admin UI (Settings > Backup and restore). A backup is encrypted with the key that was current when it was made, so keep the old key as long as you keep that backup.
-2. **Generate the new key** with `openssl rand -base64 32` and store it in your secrets store.
-3. **Stop HarborGate.** Stop the app yourself first. The command also checks that port 8080 is free in its own container and prints `stop HarborGate before rotating the key` if it is not. That check cannot see an app running in another container, so do not rely on it.
-4. **Run the command** in a one-off container with the same data volume. Pass the old key as `HARBORGATE_OLD_ENCRYPTION_KEY` and the new key as `HARBORGATE_ENCRYPTION_KEY`. For the compose setup, with the new key already in `.env` and the old key in your shell:
+Do the steps in this order. The backup needs the app running; the rotation needs it stopped.
+
+1. **Use the same image version as the app.** The command never migrates the database, so a failed run leaves it exactly as it was. Run it with the same HarborGate image version the app runs, and only after the app has started at least once on that version, so its migrations are already applied. An image older than the database could leave a newer encrypted column under the old key without noticing. An image newer than the database fails and rolls back. To upgrade and rotate, upgrade first, start the app once, then rotate.
+2. **Make a backup while the app is running.** Create one in the admin UI (Settings > Backup and restore). A backup is encrypted with the key that was current when it was made, so keep the old key as long as you keep that backup.
+3. **Generate the new key** with `openssl rand -base64 32` and store it in your secrets store.
+4. **Stop HarborGate.** Stop the app yourself. The command also checks that port 8080 is free in its own container and prints `stop HarborGate before rotating the key` if it is not. That check cannot see an app running in another container, so do not rely on it.
+5. **Run the command** in a one-off container with the same data volume. Pass the old key as `HARBORGATE_OLD_ENCRYPTION_KEY` and the new key as `HARBORGATE_ENCRYPTION_KEY`. For the compose setup, put the new key in `.env` and export the old key in your shell (for example, read it from your secrets store into the variable). Then pass the variable by name only:
 
    ```bash
    docker compose stop harborgate
-   docker compose run --rm -e HARBORGATE_OLD_ENCRYPTION_KEY="$OLD_KEY" harborgate rotate-key
+   docker compose run --rm -e HARBORGATE_OLD_ENCRYPTION_KEY harborgate rotate-key
    ```
 
-   The command takes the other settings from the environment (`HARBORGATE_PUBLIC_URL`, `HARBORGATE_DATA_DIR`). It does not bind the port.
-5. **What it does.** In one database transaction it decrypts each stored value with the old key and encrypts it with the new key. If any value does not open with the old key, or the two keys are the same, the command exits with code 1, prints the reason, and the database is unchanged. On success it prints only the number of values it re-encrypted, and it appends one `key.rotate` entry to the audit log with actor `cli` and that count. The command never prints a key.
-6. **Start HarborGate** with `HARBORGATE_ENCRYPTION_KEY` set to the new key, and remove `HARBORGATE_OLD_ENCRYPTION_KEY` from the environment. Sessions are signed with a key derived from the encryption key, so users sign in again.
-7. **Check the result.** Open the audit log and look for the `key.rotate` entry, then use the test button on one credential.
+   `-e HARBORGATE_OLD_ENCRYPTION_KEY` with no `=value` copies the variable from your shell into the container. Do not write the key itself on the command line (`-e NAME=value`): it would be visible in the process list, your shell history, and `docker inspect`. The command takes the other settings from the environment (`HARBORGATE_PUBLIC_URL`, `HARBORGATE_DATA_DIR`). It does not bind the port.
+6. **What it does.** In one database transaction it decrypts each stored value with the old key and encrypts it with the new key. If any value does not open with the old key, or the two keys are the same, the command exits with code 1, prints the reason, and the database is unchanged. On success it prints only the number of values it re-encrypted, and it appends one `key.rotate` entry to the audit log with actor `cli` and that count. The command never prints a key. A count of 0 means nothing was stored to re-encrypt (no credentials, OIDC client secret, or alert channels). In that case the command cannot tell whether the old key was the right one.
+7. **Start HarborGate** with `HARBORGATE_ENCRYPTION_KEY` set to the new key, and remove `HARBORGATE_OLD_ENCRYPTION_KEY` from the environment (`unset HARBORGATE_OLD_ENCRYPTION_KEY` in your shell). Sessions are signed with a key derived from the encryption key, so users sign in again.
+8. **Check the result.** Open the audit log and look for the `key.rotate` entry, then use the test button on one credential.
 
 Backups made before the rotation open only with the old key.
 

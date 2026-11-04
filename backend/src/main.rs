@@ -182,37 +182,68 @@ async fn run_rotate_key() -> Result<(), String> {
     let old_key = config::load_old_encryption_key().map_err(|err| err.to_string())?;
     let new_key = config::load_encryption_key().map_err(|err| err.to_string())?;
     let settings = config::load_settings().map_err(|err| err.to_string())?;
-    let old = auth::crypto::credentials_key(&old_key)
-        .map_err(|_| "could not derive the old credential key".to_owned())?;
-    let new = auth::crypto::credentials_key(&new_key)
-        .map_err(|_| "could not derive the new credential key".to_owned())?;
-    if !db::database_path(&settings.data_dir).is_file() {
-        return Err("no database was found in HARBORGATE_DATA_DIR; nothing was changed".to_owned());
-    }
-    // No migrations here: a failed rotation must leave the database exactly as it was.
-    // Every table rotation touches exists since the first migration.
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .connect_with(db::connect_options(&db::database_path(&settings.data_dir)))
-        .await
-        .map_err(|_| "could not open the database; nothing was changed".to_owned())?;
-    let rotated = services::key_rotation::rotate(&pool, &old, &new).await;
-    pool.close().await;
-    match rotated {
+    match rotate_database(&settings.data_dir, &old_key, &new_key).await {
         Ok(rows) => {
             println!("Re-encrypted {rows} stored values under the new key.");
             Ok(())
         }
-        Err(error::AppError::InvalidRequest(_)) => Err(
-            "HARBORGATE_OLD_ENCRYPTION_KEY and HARBORGATE_ENCRYPTION_KEY are the same key; \
-             nothing was changed"
-                .to_owned(),
-        ),
-        Err(_) => Err(
-            "a stored value could not be re-encrypted. Check that HARBORGATE_OLD_ENCRYPTION_KEY \
-             is the key that wrote the data. The database was not changed."
-                .to_owned(),
-        ),
+        Err(failure) => Err(failure.message().to_owned()),
     }
+}
+
+/// Why a rotation did not run or did not finish. Each variant has a fixed message.
+#[derive(Debug, PartialEq, Eq)]
+enum RotateFailure {
+    NoDatabase,
+    SameKey,
+    CouldNotOpen,
+    Failed,
+}
+
+impl RotateFailure {
+    fn message(&self) -> &'static str {
+        match self {
+            RotateFailure::NoDatabase => {
+                "no database was found in HARBORGATE_DATA_DIR; nothing was changed"
+            }
+            RotateFailure::SameKey => {
+                "HARBORGATE_OLD_ENCRYPTION_KEY and HARBORGATE_ENCRYPTION_KEY are the same key; \
+                 nothing was changed"
+            }
+            RotateFailure::CouldNotOpen => "could not open the database; nothing was changed",
+            RotateFailure::Failed => {
+                "the rotation failed and the database was not changed. Check that \
+                 HARBORGATE_OLD_ENCRYPTION_KEY is the key that wrote the data, and that this \
+                 image version is the one the app last ran on."
+            }
+        }
+    }
+}
+
+/// Re-encrypts the database in `data_dir` from `old_key` to `new_key`. The database is
+/// opened without running migrations: a failed rotation must leave the file exactly as
+/// it was, and the command must run with the image version the app last ran on.
+async fn rotate_database(
+    data_dir: &Path,
+    old_key: &config::EncryptionKey,
+    new_key: &config::EncryptionKey,
+) -> Result<u64, RotateFailure> {
+    let old = auth::crypto::credentials_key(old_key).map_err(|_| RotateFailure::Failed)?;
+    let new = auth::crypto::credentials_key(new_key).map_err(|_| RotateFailure::Failed)?;
+    if services::harbor_webhook::constant_time_eq(old.as_bytes(), new.as_bytes()) {
+        return Err(RotateFailure::SameKey);
+    }
+    let path = db::database_path(data_dir);
+    if !path.is_file() {
+        return Err(RotateFailure::NoDatabase);
+    }
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(db::connect_options(&path))
+        .await
+        .map_err(|_| RotateFailure::CouldNotOpen)?;
+    let rotated = services::key_rotation::rotate(&pool, &old, &new).await;
+    pool.close().await;
+    rotated.map_err(|_| RotateFailure::Failed)
 }
 
 /// The offline restore command. It never binds the HTTP port, and it refuses to run
@@ -1749,5 +1780,93 @@ mod tests {
         assert_eq!(usernames(&live).await, vec!["live"]);
         assert_eq!(restore_audit_count(&live).await, 0);
         assert!(stray_temp_files(&live).is_empty(), "temporary copy left");
+    }
+
+    #[tokio::test]
+    async fn rotate_key_refuses_a_missing_database() {
+        let empty = restore_dir("rotate-missing");
+        let old = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+        let new = config::parse_encryption_key(OTHER_KEY_B64).unwrap();
+
+        let result = rotate_database(&empty, &old, &new).await;
+
+        assert_eq!(result, Err(RotateFailure::NoDatabase));
+        assert!(
+            !db::database_path(&empty).exists(),
+            "the command created a database"
+        );
+    }
+
+    /// The migrations history and the schema of the latest migration, as plain rows.
+    async fn schema_state(pool: &sqlx::SqlitePool) -> (Vec<i64>, i64) {
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        let description_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('cve_findings') WHERE name = 'description'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        (versions, description_columns)
+    }
+
+    /// A database that is one migration behind would be changed by `db::open`. The
+    /// rotation must leave the migrations history and the schema as they were.
+    #[tokio::test]
+    async fn rotate_key_does_not_migrate_the_database() {
+        let dir = restore_dir("rotate-schema");
+        let pool = db::open(&dir).await.unwrap();
+        sqlx::query("ALTER TABLE cve_findings DROP COLUMN description")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = schema_state(&pool).await;
+        pool.close().await;
+        assert!(
+            before == (vec![1], 0),
+            "the setup did not remove migration 2"
+        );
+
+        let old = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+        let new = config::parse_encryption_key(OTHER_KEY_B64).unwrap();
+        let rows = rotate_database(&dir, &old, &new).await;
+        assert_eq!(rows, Ok(0), "an empty database did not rotate");
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_with(db::connect_options(&db::database_path(&dir)))
+            .await
+            .unwrap();
+        assert!(
+            schema_state(&pool).await == before,
+            "the rotation changed the migrations or the schema"
+        );
+        let audits: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'key.rotate'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(audits, 1, "the rotation was not audited");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn rotate_key_with_equal_keys_reports_same_key() {
+        let dir = restore_dir("rotate-same");
+        db::open(&dir).await.unwrap().close().await;
+        let old = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+        let new = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+
+        let result = rotate_database(&dir, &old, &new).await;
+
+        assert_eq!(result, Err(RotateFailure::SameKey));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
