@@ -243,6 +243,45 @@ mod tests {
         );
     }
 
+    /// A PHC Argon2id hash recorded with the argon2 0.5 build. It uses the project
+    /// parameters (m=19456, t=2, p=1), a fixed 16-byte salt, and the test password
+    /// `kat-password-0001`. Test values only.
+    const KAT_PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$0WguUnRpOPo63uGHPCE51k91B0aJq52FfSNXR92+N3M";
+    const KAT_PASSWORD: &str = "kat-password-0001";
+
+    #[tokio::test]
+    async fn phc_hash_from_the_old_build_still_verifies() {
+        assert!(
+            matches!(verify_password(KAT_PASSWORD, KAT_PHC).await, Ok(true)),
+            "a PHC hash recorded with the old build no longer verifies"
+        );
+    }
+
+    #[tokio::test]
+    async fn phc_hash_from_the_old_build_rejects_a_wrong_password() {
+        assert!(matches!(
+            verify_password("kat-password-0002", KAT_PHC).await,
+            Ok(false)
+        ));
+    }
+
+    /// A generated hash carries a 16-byte salt and the project parameters.
+    #[tokio::test]
+    async fn generated_salt_is_16_bytes() {
+        let phc = hash_password(&random_test_password(20))
+            .await
+            .unwrap_or_default();
+        let parsed =
+            PasswordHash::new(&phc).unwrap_or_else(|_| panic!("generated hash must parse"));
+        let Some(salt) = parsed.salt else {
+            panic!("the generated hash has no salt");
+        };
+        let mut buf = [0u8; 64];
+        let decoded_len = salt.decode_b64(&mut buf).map(<[u8]>::len).ok();
+        assert_eq!(decoded_len, Some(16), "the salt is not 16 bytes");
+        assert!(phc.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
+    }
+
     #[test]
     fn dummy_hash_is_ready_after_warm_up() {
         warm_dummy_hash().unwrap();
