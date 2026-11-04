@@ -7,7 +7,7 @@
 services:
   harborgate:
     # Pin a version tag for production instead of latest.
-    image: ghcr.io/nrosier/harborgate:latest
+    image: ghcr.io/nrosier/harborgate:latest@sha256:6ad41b09db319c621ff10f48f4daf26b4b6a86a9395ac89a425c07931b2faeb0
     container_name: harborgate
     restart: unless-stopped
     # PID 1 does not reap children or forward signals on its own.
