@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", kind AS \"kind!\", config_encrypted AS \"config_encrypted!\",\n                  enabled AS \"enabled!: bool\", created_at AS \"created_at!: i64\",\n                  updated_at AS \"updated_at!: i64\"\n           FROM alert_channels WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "alert_channels",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "kind!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "alert_channels",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "config_encrypted!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "alert_channels",
+            "name": "config_encrypted"
+          }
+        }
+      },
+      {
+        "name": "enabled!: bool",
+        "ordinal": 3,
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "alert_channels",
+            "name": "enabled"
+          }
+        }
+      },
+      {
+        "name": "created_at!: i64",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "alert_channels",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "updated_at!: i64",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "alert_channels",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "695bcc1943ce6e1e630c799ddd92305fef7c21f97cddd713338daed9af73372f"
+}

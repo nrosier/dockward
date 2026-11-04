@@ -239,9 +239,10 @@ pub fn client_trusting(
 /// an IP literal, that address must pass the same range check as a resolved address.
 ///
 /// reqwest and hyper skip the DNS resolver for an IP-literal host, so the resolver
-/// alone never sees `https://127.0.0.1/`. This check covers that path. Private to this
-/// module: [`OutboundClient`] is the only caller.
-fn check_target(
+/// alone never sees `https://127.0.0.1/`. This check covers that path. [`OutboundClient`]
+/// calls it before every request, and the alert channel save calls it to validate a
+/// webhook URL.
+pub(crate) fn check_target(
     url: &reqwest::Url,
     class: TargetClass,
     allow_private: bool,

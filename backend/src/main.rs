@@ -94,6 +94,14 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         .route("/api/v1/admin/health", get(api::admin::health))
         .route("/api/v1/admin/backup", post(api::admin::backup))
         .route(
+            "/api/v1/admin/alert-channels",
+            get(api::admin::list_alert_channels).post(api::admin::create_alert_channel),
+        )
+        .route(
+            "/api/v1/admin/alert-channels/{id}",
+            axum::routing::put(api::admin::update_alert_channel),
+        )
+        .route(
             "/api/v1/admin/oidc",
             get(api::oidc::get_settings).put(api::oidc::put_settings),
         )
@@ -438,6 +446,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         credentials_key,
         allow_private_oidc: settings.allow_private_oidc,
         allow_private_harbor: settings.allow_private_harbor,
+        allow_private_alerts: settings.allow_private_alerts,
         jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
         webhook_token_limiter: api::webhooks::new_token_limiter(),
         webhook_failure_limiter: api::webhooks::new_failure_limiter(),
@@ -660,6 +669,7 @@ mod tests {
             credentials_key: Arc::new(auth::crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
             allow_private_harbor: false,
+            allow_private_alerts: false,
             jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
             webhook_token_limiter: api::webhooks::new_token_limiter(),
             webhook_failure_limiter: api::webhooks::new_failure_limiter(),
@@ -731,6 +741,7 @@ mod tests {
             credentials_key: Arc::new(auth::crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
             allow_private_harbor: false,
+            allow_private_alerts: false,
             jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
             webhook_token_limiter,
             webhook_failure_limiter: api::webhooks::new_failure_limiter(),
