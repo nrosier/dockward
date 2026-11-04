@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO alert_deliveries (id, channel_id, dedupe_key, sent_at)\n         VALUES (?, ?, ?, ?)\n         ON CONFLICT (channel_id, dedupe_key) DO UPDATE SET sent_at = excluded.sent_at\n         WHERE alert_deliveries.sent_at < excluded.sent_at - 86400",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "5719564200668b00ec963fcdc12297164900b98285ac6fe0b678c6041b2bef95"
+}

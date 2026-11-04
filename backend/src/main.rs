@@ -566,6 +566,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         state.pool.clone(),
         state.credentials_key.clone(),
         state.allow_private_harbor,
+        state.allow_private_alerts,
     )
     .map_err(|_| "could not build the sync job handler")?;
     let worker_task = tokio::spawn(async move {

@@ -36,7 +36,6 @@ const MAX_RFC3339_SECS: i64 = 253_402_300_799;
 
 /// What happened. The two events of `specs/alerts.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Chosen by the alert dispatcher (#33). Nothing constructs it until then.
 pub enum AlertEvent {
     SyncFailed,
     CriticalCve,
@@ -55,7 +54,6 @@ impl AlertEvent {
 /// One alert to deliver. It carries no token, key, or URL. `error` is text the caller has
 /// already made safe.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Built by the alert dispatcher (#33). Nothing constructs it until then.
 pub struct Alert {
     pub event: AlertEvent,
     /// Unix seconds.
@@ -187,7 +185,6 @@ impl From<OutboundError> for SendError {
 }
 
 /// Delivers `alert` to a webhook through the guarded `alerts` client.
-#[allow(dead_code)] // Entry point for the alert dispatcher (#33). Nothing calls it until then.
 pub async fn send_webhook(
     config: &WebhookConfig,
     alert: &Alert,
@@ -298,7 +295,6 @@ fn smtp_message(config: &SmtpConfig, alert: &Alert) -> Result<Message, SendError
 ///
 /// The host is resolved and checked by [`outbound::resolve_checked`] on every call, and the
 /// connection goes to the first checked address.
-#[allow(dead_code)] // Entry point for the alert dispatcher (#33). Nothing calls it until then.
 pub async fn send_smtp(
     config: &SmtpConfig,
     alert: &Alert,
@@ -322,19 +318,24 @@ pub async fn send_smtp(
     };
     let transport = smtp_transport(&target, credentials)?;
     let message = smtp_message(config, alert)?;
-    transport.send(message).await.map(|_| ()).map_err(|error| {
-        if error.is_timeout() {
-            SendError::Timeout
-        } else if error.is_tls() {
-            SendError::Tls
-        } else if error.is_transient() {
-            SendError::Rejected { transient: true }
-        } else if error.is_permanent() {
-            SendError::Rejected { transient: false }
-        } else {
-            SendError::Connection
-        }
-    })
+    // lettre's own timeout covers only the TCP connect, so the whole send is bounded here.
+    tokio::time::timeout(SEND_TIMEOUT, transport.send(message))
+        .await
+        .map_err(|_| SendError::Timeout)?
+        .map(|_| ())
+        .map_err(|error| {
+            if error.is_timeout() {
+                SendError::Timeout
+            } else if error.is_tls() {
+                SendError::Tls
+            } else if error.is_transient() {
+                SendError::Rejected { transient: true }
+            } else if error.is_permanent() {
+                SendError::Rejected { transient: false }
+            } else {
+                SendError::Connection
+            }
+        })
 }
 
 #[cfg(test)]
@@ -425,6 +426,31 @@ mod tests {
             );
             assert!(!text.contains("https://"), "the text carries a URL");
         }
+    }
+
+    #[test]
+    fn subject_has_no_line_break_even_if_the_repository_name_has_one() {
+        let mut item = alert(AlertEvent::SyncFailed);
+        item.harbor = "a\r\nBcc: x".to_owned();
+        let subject = item.subject();
+        assert!(!subject.contains('\r') && !subject.contains('\n'));
+        assert_eq!(subject, "[HarborGate] sync_failed a  Bcc: x");
+
+        // In the built message the text stays inside the Subject header: there is no
+        // header of its own named Bcc.
+        let config = smtp_config("mail.example.com", TlsMode::Implicit);
+        let message = match smtp_message(&config, &item) {
+            Ok(message) => message,
+            Err(_) => panic!("message build failed"),
+        };
+        let raw = String::from_utf8_lossy(&message.formatted()).into_owned();
+        // The headers end at the first blank line. The body may hold the name as text.
+        let headers = raw.split("\r\n\r\n").next().unwrap_or_default();
+        assert!(
+            !headers.lines().any(|line| line.starts_with("Bcc:")),
+            "a line break in the name started a new header"
+        );
+        assert!(headers.contains("Subject: [HarborGate] sync_failed a  Bcc: x"));
     }
 
     #[test]

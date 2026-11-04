@@ -25,6 +25,7 @@ use crate::db::mappings::{self as mapping_db, MappingRow};
 use crate::db::sync_jobs::ClaimedJob;
 use crate::db::sync_reports::{self as report_db, NewReport};
 use crate::error::AppError;
+use crate::services::alerts::Notifier;
 use crate::services::credentials::{base_for_join, decrypt_token};
 use crate::services::github_issues::GithubIssues;
 use crate::services::github_scanning::{
@@ -153,6 +154,7 @@ pub struct SyncHandler<H = HarborGet, G = GithubScanning, C = SystemClock, I = G
     github: G,
     clock: C,
     issues: I,
+    alerts: Notifier,
 }
 
 impl SyncHandler {
@@ -162,7 +164,9 @@ impl SyncHandler {
         pool: SqlitePool,
         credentials_key: Arc<DerivedKey>,
         allow_private_harbor: bool,
+        allow_private_alerts: bool,
     ) -> Result<Self, AppError> {
+        let alerts = Notifier::new(pool.clone(), credentials_key.clone(), allow_private_alerts);
         Ok(Self {
             pool,
             credentials_key,
@@ -170,6 +174,7 @@ impl SyncHandler {
             github: GithubScanning::new()?,
             clock: SystemClock,
             issues: GithubIssues::new()?,
+            alerts,
         })
     }
 }
@@ -184,6 +189,8 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
         clock: C,
         issues: I,
     ) -> Self {
+        // No alert channel exists in these tests, so this notifier sends nothing.
+        let alerts = Notifier::new(pool.clone(), credentials_key.clone(), false);
         Self {
             pool,
             credentials_key,
@@ -191,7 +198,15 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
             github,
             clock,
             issues,
+            alerts,
         }
+    }
+
+    /// Replaces the notifier, so a test can record alerts instead of sending them.
+    #[cfg(test)]
+    fn with_alerts(mut self, alerts: Notifier) -> Self {
+        self.alerts = alerts;
+        self
     }
 }
 
@@ -591,9 +606,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
                     report_db::finish(&self.pool, report_id, "success", None, self.clock.now())
                         .await
                         .map_err(database)?;
-                    // The result of the scan is not used yet: #33 adds the alert for
-                    // `new_critical`.
-                    let _applied = findings::apply_scan(
+                    let applied = findings::apply_scan(
                         &self.pool,
                         &mapping.id,
                         &mapping.harbor_repository,
@@ -603,6 +616,11 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
                     )
                     .await
                     .map_err(database)?;
+                    self.alerts.spawn_new_critical(
+                        mapping,
+                        &context.payload.tag,
+                        &applied.new_critical,
+                    );
                     self.reconcile_issues(context).await;
                     return Ok(());
                 }
@@ -636,6 +654,10 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> JobHandler
             Err(outcome) => outcome,
         }
     }
+
+    fn on_give_up(&self, job: &ClaimedJob, now: i64) {
+        self.alerts.spawn_sync_failed(&job.id, &job.mapping_id, now);
+    }
 }
 
 #[cfg(test)]
@@ -648,6 +670,9 @@ mod tests {
     use crate::auth::crypto::{self, credentials_key};
     use crate::config;
     use crate::db;
+    use crate::services::alert_channels;
+    use crate::services::alert_send::{Alert, AlertEvent};
+    use crate::services::audit::Actor;
     use crate::services::issue_lifecycle::test_support::{FakeGithub, FakeIssues};
 
     // Test values only. The root key and the tokens are obviously fake.
@@ -1313,5 +1338,183 @@ mod tests {
             .unwrap();
         assert_eq!(findings, 4);
         assert_eq!(github.requests(), 0);
+    }
+
+    /// A notifier whose sender records every alert and makes no network connection.
+    fn recording_notifier(pool: &SqlitePool) -> (Notifier, Arc<Mutex<Vec<Alert>>>) {
+        let sent: Arc<Mutex<Vec<Alert>>> = Arc::new(Mutex::new(Vec::new()));
+        let log = sent.clone();
+        let notifier =
+            Notifier::with_sender(pool.clone(), Arc::new(key()), move |_config, alert| {
+                lock(&log).push(alert);
+                Box::pin(async { Ok(()) })
+            });
+        (notifier, sent)
+    }
+
+    /// One enabled webhook channel. Its URL is never contacted: the sender is a recorder.
+    async fn seed_channel(pool: &SqlitePool) {
+        let actor = Actor {
+            user_id: Some("u1".to_owned()),
+            username: "u1".to_owned(),
+        };
+        alert_channels::create(
+            pool,
+            &key(),
+            &actor,
+            false,
+            "webhook",
+            true,
+            json!({"url": "https://hooks.example.test/services/FAKE_URL_TOKEN_1"}),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The `alert_deliveries` dedupe keys, sorted.
+    async fn delivery_keys(pool: &SqlitePool) -> Vec<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT dedupe_key FROM alert_deliveries ORDER BY dedupe_key",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Waits until `wanted` is among the delivery keys. The alert tasks run in the
+    /// background, so the rows appear shortly after the handler returns.
+    async fn wait_for_key(pool: &SqlitePool, wanted: &str) {
+        for _ in 0..200 {
+            if delivery_keys(pool).await.iter().any(|key| key == wanted) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("the expected delivery row did not appear");
+    }
+
+    #[tokio::test]
+    async fn a_complete_scan_alerts_each_new_critical_cve_once_across_mappings() {
+        let fx = Fixture::new("alert-critical").await;
+        seed_channel(&fx.pool).await;
+        let (notifier, sent) = recording_notifier(&fx.pool);
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+
+        // Mapping m1 finds CVE-2026-0001 as CRITICAL.
+        let harbor = ok_harbor();
+        let outcome = fx
+            .handler(&harbor, &scanner)
+            .with_alerts(notifier.clone())
+            .run(fx.job())
+            .await;
+        assert_eq!(outcome, JobOutcome::Done);
+        wait_for_key(&fx.pool, "CVE-2026-0001").await;
+        assert_eq!(delivery_keys(&fx.pool).await, vec!["CVE-2026-0001"]);
+        {
+            let alerts = lock(&sent);
+            assert_eq!(alerts.len(), 1);
+            assert_eq!(alerts[0].event, AlertEvent::CriticalCve);
+            assert_eq!(alerts[0].cve_id.as_deref(), Some("CVE-2026-0001"));
+            assert_eq!(alerts[0].image_tag.as_deref(), Some("v1"));
+            assert_eq!(alerts[0].mapping_id, "m1");
+            assert_eq!(alerts[0].harbor, "proj/app");
+            assert_eq!(alerts[0].github, "octo/app");
+        }
+
+        // A second mapping finds the same CVE, and one more that is new. The alerts run in
+        // order, so once the second key is stored the first one has been decided.
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash, auto_create_issues, min_issue_severity, default_branch)
+             VALUES ('m2', 'u1', 'c1', 'c2', 'https://harbor.example.com', 'proj', 'other', 'octo', 'other', 'h3', 'h4', 0, 'CRITICAL', 'main')",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        let labels = artifact(&format!(
+            r#"{{"org.opencontainers.image.revision": "{REVISION}"}}"#
+        ));
+        let report = format!(
+            r#"{{"{TRIVY_REPORT_MIME}": {{"vulnerabilities": [
+                {{"id": "CVE-2026-0001", "package": "openssl", "version": "1", "severity": "Critical"}},
+                {{"id": "CVE-2026-0099", "package": "curl", "version": "1", "severity": "Critical"}}
+            ]}}}}"#
+        );
+        let harbor_two = Arc::new(FakeHarbor::new(&labels, (200, &report)));
+        let scanner_two =
+            FakeScanner::new(Ok("sarif-2".to_owned()), vec![Ok(Processing::Complete)]);
+        let mut job = fx.job();
+        job.id = "j2".to_owned();
+        job.mapping_id = "m2".to_owned();
+        db::sync_jobs::enqueue(&fx.pool, "j2", "m2", &job.payload, 1_000)
+            .await
+            .unwrap();
+        let outcome = fx
+            .handler(&harbor_two, &scanner_two)
+            .with_alerts(notifier)
+            .run(job)
+            .await;
+        assert_eq!(outcome, JobOutcome::Done);
+        wait_for_key(&fx.pool, "CVE-2026-0099").await;
+
+        // The shared CVE was not sent a second time, and the new one was.
+        assert_eq!(
+            delivery_keys(&fx.pool).await,
+            vec!["CVE-2026-0001", "CVE-2026-0099"]
+        );
+        let alerts = lock(&sent);
+        let ids: Vec<&str> = alerts
+            .iter()
+            .filter_map(|alert| alert.cve_id.as_deref())
+            .collect();
+        assert_eq!(ids, vec!["CVE-2026-0001", "CVE-2026-0099"]);
+        assert_eq!(alerts[1].mapping_id, "m2");
+    }
+
+    #[tokio::test]
+    async fn the_sync_handler_alerts_when_the_worker_gives_up_a_job() {
+        let fx = Fixture::new("alert-give-up").await;
+        seed_channel(&fx.pool).await;
+        let (notifier, sent) = recording_notifier(&fx.pool);
+        // The report never becomes available, so every attempt fails. This is the last one.
+        sqlx::query("UPDATE sync_jobs SET attempts = 7 WHERE id = 'j1'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        let harbor = Arc::new(FakeHarbor::new(&good_artifact(), (200, "{}")));
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![]);
+        let handler = Arc::new(fx.handler(&harbor, &scanner).with_alerts(notifier));
+
+        let step = crate::worker::step(&fx.pool, &handler, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(step, crate::worker::Step::GaveUp);
+        wait_for_key(&fx.pool, "sync_failed:j1").await;
+
+        assert_eq!(delivery_keys(&fx.pool).await, vec!["sync_failed:j1"]);
+        let alerts = lock(&sent);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].event, AlertEvent::SyncFailed);
+        assert_eq!(alerts[0].mapping_id, "m1");
+        assert_eq!(alerts[0].harbor, "proj/app");
+        assert_eq!(alerts[0].github, "octo/app");
+    }
+
+    #[tokio::test]
+    async fn a_failed_attempt_that_will_retry_sends_no_alert() {
+        let fx = Fixture::new("alert-retry").await;
+        seed_channel(&fx.pool).await;
+        let (notifier, sent) = recording_notifier(&fx.pool);
+        let harbor = Arc::new(FakeHarbor::new(&good_artifact(), (200, "{}")));
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![]);
+        let handler = Arc::new(fx.handler(&harbor, &scanner).with_alerts(notifier));
+
+        let step = crate::worker::step(&fx.pool, &handler, 1_000)
+            .await
+            .unwrap();
+        assert!(matches!(step, crate::worker::Step::Retry { .. }));
+        // Nothing was spawned, so a short wait is enough to see that nothing arrives.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(delivery_keys(&fx.pool).await.is_empty());
+        assert!(lock(&sent).is_empty());
     }
 }
