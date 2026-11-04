@@ -88,6 +88,8 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         )
         .route("/api/v1/sync-jobs/{id}/retry", post(api::sync_jobs::retry))
         .route("/api/v1/cves/{id}/issue", post(api::cves::issue))
+        .route("/api/v1/cves/{id}/accept", post(api::cves::accept))
+        .route("/api/v1/cves/{id}/unaccept", post(api::cves::unaccept))
         .route(
             "/api/v1/webhooks/harbor/{mapping_token}",
             post(api::webhooks::receive),
@@ -1978,5 +1980,130 @@ mod tests {
         assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
         assert_ne!(owner.status(), StatusCode::NOT_FOUND);
         assert_eq!(issues, 0);
+    }
+
+    /// `POST /api/v1/cves/:id/accept` and `/unaccept` through the full router: a missing
+    /// `X-CSRF-Token` is `403`, a CSRF token with no session is `401`, and another user's
+    /// mapping in the percent-encoded `<mapping_id>%3A<cve_id>` form is `404` with nothing
+    /// stored. The owner gets `201` and then `204`.
+    #[tokio::test]
+    async fn cve_accept_routes_check_csrf_session_and_tenancy() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, pool, dir) = test_router("cve-accept-route").await;
+        let mut conn = pool.acquire().await.unwrap();
+        for id in ["owner-1", "other-2"] {
+            db::users::insert_local(&mut conn, id, id, None, "h", "user")
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        sqlx::query(
+            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
+             VALUES ('rc1', 'owner-1', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
+                    ('rc2', 'owner-1', 'github', 'g', NULL, NULL, 'v1:fake')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+             VALUES ('rm1', 'owner-1', 'rc1', 'rc2', 'https://harbor.example.com', 'proj', 'app', 'octo', 'app', 'h1', 'h2')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, severity, status)
+             VALUES ('rf1', 'rm1', 'app', 'v1', 'CVE-2026-0001', 'CRITICAL', 'open')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let key = auth::crypto::csrf_key(
+            &config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap(),
+        )
+        .unwrap();
+        let csrf = auth::csrf::issue(&key).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let other = format!("{}; {csrf_cookie}", session_cookie("other-2", "user", 0));
+        let owner = format!("{}; {csrf_cookie}", session_cookie("owner-1", "user", 0));
+        let post = |action: &str, cookie: &str, token: Option<&str>| {
+            let mut builder = with_peer(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/cves/rm1%3ACVE-2026-0001/{action}"))
+                    .header("cookie", cookie)
+                    .header("content-type", "application/json"),
+            );
+            if let Some(token) = token {
+                builder = builder.header("x-csrf-token", token);
+            }
+            let body = if action == "accept" {
+                Body::from(r#"{"reason":"vendor fix scheduled","expires_at":null}"#)
+            } else {
+                Body::empty()
+            };
+            builder.body(body).unwrap()
+        };
+
+        let mut statuses = Vec::new();
+        for (action, cookie, token) in [
+            ("accept", other.as_str(), None),
+            ("unaccept", other.as_str(), None),
+            ("accept", csrf_cookie.as_str(), Some(csrf.as_str())),
+            ("unaccept", csrf_cookie.as_str(), Some(csrf.as_str())),
+            ("accept", other.as_str(), Some(csrf.as_str())),
+            ("unaccept", other.as_str(), Some(csrf.as_str())),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(post(action, cookie, token))
+                .await
+                .unwrap();
+            statuses.push(response.status());
+        }
+        let stored_before_owner: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cve_acceptances")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let owner_accept = router
+            .clone()
+            .oneshot(post("accept", &owner, Some(&csrf)))
+            .await
+            .unwrap()
+            .status();
+        let foreign_unaccept_after = router
+            .clone()
+            .oneshot(post("unaccept", &other, Some(&csrf)))
+            .await
+            .unwrap()
+            .status();
+        let owner_unaccept = router
+            .oneshot(post("unaccept", &owner, Some(&csrf)))
+            .await
+            .unwrap()
+            .status();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            statuses,
+            [
+                StatusCode::FORBIDDEN,
+                StatusCode::FORBIDDEN,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::NOT_FOUND,
+                StatusCode::NOT_FOUND,
+            ]
+        );
+        assert_eq!(stored_before_owner, 0);
+        assert_eq!(owner_accept, StatusCode::CREATED);
+        assert_eq!(foreign_unaccept_after, StatusCode::NOT_FOUND);
+        assert_eq!(owner_unaccept, StatusCode::NO_CONTENT);
     }
 }

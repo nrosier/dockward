@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 
+pub mod acceptances;
 pub mod alert_channels;
 #[allow(dead_code)] // Used by the audit writer and the admin audit list.
 pub mod audit;

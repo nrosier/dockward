@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE cve_acceptances SET revoked_at = ?, revoked_by = ?\n         WHERE id = ? AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "371337bd7909b8256ff1326d41c9d71692c2636a8940d2c87eeefdb0968bc327"
+}

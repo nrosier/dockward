@@ -1,5 +1,5 @@
-//! CVE routes. This file holds the manual issue route only (`specs/api.md`, CVEs); the read
-//! routes and the accept routes belong to other issues.
+//! CVE routes. This file holds the manual issue route and the accept and un-accept routes
+//! (`specs/api.md`, CVEs); the read routes belong to another issue.
 
 use axum::{
     Json,
@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::api::state::AppState;
 use crate::error::AppError;
+use crate::services::acceptance::{self, AcceptInput, Acceptance, Caller};
 use crate::services::issue_lifecycle::{self, IssueApi};
 use crate::services::sessions::AuthUser;
 use crate::worker::now_secs;
@@ -56,6 +57,71 @@ async fn issue_with<G: IssueApi>(
             github_issue_number: created.number,
         }),
     ))
+}
+
+/// The answer of `POST /api/v1/cves/:id/accept`.
+#[derive(Debug, Serialize)]
+pub struct Accepted {
+    pub acceptance: Acceptance,
+}
+
+/// `POST /api/v1/cves/:id/accept`. `:id` is `<mapping_id>:<cve_id>`; the body is
+/// `{"reason","expires_at"}`. The caller must own the mapping. Returns `201`; `400` for a body
+/// that is not JSON; `404` for an unknown or foreign mapping or CVE; `409` when the CVE is
+/// already accepted; `422` for an empty reason or a past expiry.
+pub async fn accept(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<Accepted>), AppError> {
+    accept_with(&state, &user, &id, &body, state.issues_client.as_ref()).await
+}
+
+/// The route's work with the GitHub client passed in, so tests use a fake.
+async fn accept_with<G: IssueApi>(
+    state: &AppState,
+    user: &AuthUser,
+    id: &str,
+    body: &[u8],
+    gh: &G,
+) -> Result<(StatusCode, Json<Accepted>), AppError> {
+    let input: AcceptInput = serde_json::from_slice(body)
+        .map_err(|_| AppError::InvalidRequest("The request body is not valid.".to_owned()))?;
+    let acceptance = acceptance::accept(
+        &state.pool,
+        &state.credentials_key,
+        gh,
+        &Caller {
+            id: &user.id,
+            username: &user.username,
+        },
+        id,
+        input,
+        now_secs(),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(Accepted { acceptance })))
+}
+
+/// `POST /api/v1/cves/:id/unaccept`. The caller must own the mapping. Returns `204`; `404`
+/// for an unknown or foreign mapping or when no acceptance is active.
+pub async fn unaccept(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    acceptance::unaccept(
+        &state.pool,
+        &Caller {
+            id: &user.id,
+            username: &user.username,
+        },
+        &id,
+        now_secs(),
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
@@ -219,6 +285,82 @@ mod tests {
             .unwrap();
         let (status, _) = call(&state, "u1", "m1:CVE-2026-0001", &gh).await.unwrap();
         assert_eq!(status, StatusCode::CREATED);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    async fn accept_call(
+        state: &AppState,
+        who: &str,
+        id: &str,
+        body: &str,
+        gh: &FakeIssues,
+    ) -> Result<(StatusCode, Json<Accepted>), AppError> {
+        accept_with(state, &user(who), id, body.as_bytes(), gh).await
+    }
+
+    #[tokio::test]
+    async fn another_tenant_cannot_accept() {
+        let (state, dir, github, gh) = setup("accept-tenant").await;
+        finding(&state, "v1", "CVE-2026-0001", "CRITICAL").await;
+        let body = r#"{"reason":"not theirs to accept"}"#;
+
+        // Another tenant gets 404 on accept and on unaccept, and nothing is written.
+        let foreign = accept_call(&state, "u2", "m1:CVE-2026-0001", body, &gh)
+            .await
+            .unwrap_err();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        let foreign_unaccept = acceptance::unaccept(
+            &state.pool,
+            &Caller {
+                id: "u2",
+                username: "u2",
+            },
+            "m1:CVE-2026-0001",
+            now_secs(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(foreign_unaccept.status(), StatusCode::NOT_FOUND);
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cve_acceptances")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!((rows, audits), (0, 0));
+        assert_eq!(github.requests(), 0);
+
+        // The owner can: 201 with the acceptance, then the foreign user still cannot undo it.
+        let (status, Json(accepted)) = accept_call(&state, "u1", "m1:CVE-2026-0001", body, &gh)
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(accepted.acceptance.cve_id, "CVE-2026-0001");
+        let still = acceptance::unaccept(
+            &state.pool,
+            &Caller {
+                id: "u2",
+                username: "u2",
+            },
+            "m1:CVE-2026-0001",
+            now_secs(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(still.status(), StatusCode::NOT_FOUND);
+        let active: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM cve_acceptances WHERE revoked_at IS NULL")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(active, 1);
+
+        // A body that is not JSON is 400, for the owner.
+        let bad = accept_call(&state, "u1", "m1:CVE-2026-0001", "not json", &gh)
+            .await
+            .unwrap_err();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
