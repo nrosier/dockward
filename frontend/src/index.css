@@ -1,1 +1,75 @@
 @import "tailwindcss";
+@import "@fontsource-variable/inter/wght.css";
+@import "@fontsource/jetbrains-mono/latin-400.css";
+@import "@fontsource/jetbrains-mono/latin-500.css";
+
+/*
+ * Theme tokens. Dark is the default. The light values are under
+ * :root[data-theme="light"] below. Values and contrast ratios are recorded in
+ * specs/frontend.md ("Visual direction" and "Status colours").
+ *
+ * The status colours (crit, high, med, low, ok) are one set for both themes.
+ * The "-ink" tokens are the text colour on a status pill's tinted fill.
+ */
+@theme {
+  --color-bg: #0b0c18;
+  --color-surface: #15162a;
+  --color-surface-2: #1b1c34;
+  --color-border: #25264a;
+  --color-text: #eceafa;
+  --color-muted: #9b98b8;
+  --color-accent: #a390fb;
+  --color-on-accent: #0b0c18;
+
+  --color-crit: #ef4444;
+  --color-high: #f97316;
+  --color-med: #ca8a04;
+  --color-low: #3b82f6;
+  --color-ok: #10b981;
+
+  --color-crit-ink: #fca5a5;
+  --color-high-ink: #fdba74;
+  --color-med-ink: #fde047;
+  --color-low-ink: #93c5fd;
+  --color-ok-ink: #6ee7b7;
+
+  --font-sans: "Inter Variable", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-bg: #fbfaff;
+  --color-surface: #f3f1fa;
+  --color-surface-2: #e9e6f4;
+  --color-border: #d9d5ea;
+  --color-text: #16152b;
+  --color-muted: #5d5a7a;
+  --color-accent: #5b3fd4;
+  --color-on-accent: #ffffff;
+
+  --color-crit-ink: #8d2f39;
+  --color-high-ink: #93491f;
+  --color-med-ink: #795516;
+  --color-low-ink: #2a519b;
+  --color-ok-ink: #136f5a;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+/* Visible 2px ring in the accent colour. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}

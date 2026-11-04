@@ -31,10 +31,13 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     if is_api {
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
-    );
+    // The HTML handler sets its own policy, with the page nonce. Keep it.
+    if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        );
+    }
     headers.insert(
         HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),
@@ -414,6 +417,58 @@ mod tests {
             let response = app.clone().oneshot(request).await.expect_test_request();
             assert_security_headers(response.headers());
         }
+    }
+
+    #[tokio::test]
+    async fn html_csp_is_not_overwritten() {
+        use axum::{Router, body::Body, routing::get};
+        use tower::ServiceExt;
+
+        const HTML_POLICY: &str = "default-src 'self'; style-src 'self' 'nonce-abc'";
+        let app = Router::new()
+            .route(
+                "/page",
+                get(|| async { ([(header::CONTENT_SECURITY_POLICY, HTML_POLICY)], "ok") }),
+            )
+            .route("/plain", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(security_headers));
+
+        let page = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/page")
+                    .body(Body::empty())
+                    .expect_test_request(),
+            )
+            .await
+            .expect_test_request();
+        let policies: Vec<_> = page
+            .headers()
+            .get_all(header::CONTENT_SECURITY_POLICY)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        // Exactly one header, and it is the handler's policy.
+        assert_eq!(policies, [HTML_POLICY]);
+
+        // A response without a policy still gets the default.
+        let plain = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/plain")
+                    .body(Body::empty())
+                    .expect_test_request(),
+            )
+            .await
+            .expect_test_request();
+        assert_eq!(
+            plain
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .and_then(|v| v.to_str().ok()),
+            Some(CONTENT_SECURITY_POLICY)
+        );
     }
 
     #[tokio::test]
