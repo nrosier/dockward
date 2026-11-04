@@ -2,17 +2,23 @@ use std::path::{Path, PathBuf};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 
+pub mod alert_channels;
 #[allow(dead_code)] // Used by the audit writer and the admin audit list.
 pub mod audit;
 pub mod backup;
 #[allow(dead_code)] // Used by the login service and the OIDC settings in #18.
 pub mod config;
 pub mod credentials;
+pub mod findings;
+pub mod job_runs;
+pub mod key_rotation;
 pub mod mappings;
+pub mod retention;
 #[allow(dead_code)] // Used by the setup and login services.
 pub mod setup;
 #[allow(dead_code)] // Used by the job worker and the retry route.
 pub mod sync_jobs;
+pub mod sync_reports;
 #[allow(dead_code)] // Used by the session service and the account and admin routes.
 pub mod users;
 

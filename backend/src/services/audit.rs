@@ -30,6 +30,7 @@ pub const ACTIONS: &[&str] = &[
     "restore.run",
     "key.rotate",
     "retention.run",
+    "sync_job.retry",
 ];
 
 /// Key names (lowercased) that mark a value as a secret. Any key that contains
@@ -58,6 +59,14 @@ impl Actor {
         Self {
             user_id: None,
             username: "cli".to_owned(),
+        }
+    }
+
+    /// The background workers, as recorded by the retention run.
+    pub fn system() -> Self {
+        Self {
+            user_id: None,
+            username: "system".to_owned(),
         }
     }
 }

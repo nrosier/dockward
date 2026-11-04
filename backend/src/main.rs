@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
@@ -10,10 +11,13 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 mod api;
 #[allow(dead_code)] // Crypto helpers are used by the credential and backup paths in later issues.
 mod auth;
+mod cli;
 mod config;
 #[allow(dead_code)] // Pool is consumed by handlers and workers added in later issues.
 mod db;
@@ -90,6 +94,14 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         .route("/api/v1/admin/health", get(api::admin::health))
         .route("/api/v1/admin/backup", post(api::admin::backup))
         .route(
+            "/api/v1/admin/alert-channels",
+            get(api::admin::list_alert_channels).post(api::admin::create_alert_channel),
+        )
+        .route(
+            "/api/v1/admin/alert-channels/{id}",
+            axum::routing::put(api::admin::update_alert_channel),
+        )
+        .route(
             "/api/v1/admin/oidc",
             get(api::oidc::get_settings).put(api::oidc::put_settings),
         )
@@ -136,6 +148,346 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    let args: Vec<String> = std::env::args().collect();
+    let command = match cli::parse(args.get(1..).unwrap_or_default()) {
+        Ok(command) => command,
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    };
+    match command {
+        cli::Command::Serve => serve().await,
+        cli::Command::Restore(file) => {
+            if let Err(message) = run_restore(&file).await {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        cli::Command::RotateKey => {
+            if let Err(message) = run_rotate_key().await {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The offline key rotation command. It never binds the HTTP port, refuses to run
+/// while the app holds the port, and prints only the number of rows it rewrote.
+async fn run_rotate_key() -> Result<(), String> {
+    ensure_app_stopped("rotating the key")?;
+    let old_key = config::load_old_encryption_key().map_err(|err| err.to_string())?;
+    let new_key = config::load_encryption_key().map_err(|err| err.to_string())?;
+    let settings = config::load_settings().map_err(|err| err.to_string())?;
+    match rotate_database(&settings.data_dir, &old_key, &new_key).await {
+        Ok(rows) => {
+            println!("Re-encrypted {rows} stored values under the new key.");
+            Ok(())
+        }
+        Err(failure) => Err(failure.message().to_owned()),
+    }
+}
+
+/// Why a rotation did not run or did not finish. Each variant has a fixed message.
+#[derive(Debug, PartialEq, Eq)]
+enum RotateFailure {
+    NoDatabase,
+    SameKey,
+    CouldNotOpen,
+    Failed,
+}
+
+impl RotateFailure {
+    fn message(&self) -> &'static str {
+        match self {
+            RotateFailure::NoDatabase => {
+                "no database was found in HARBORGATE_DATA_DIR; nothing was changed"
+            }
+            RotateFailure::SameKey => {
+                "HARBORGATE_OLD_ENCRYPTION_KEY and HARBORGATE_ENCRYPTION_KEY are the same key; \
+                 nothing was changed"
+            }
+            RotateFailure::CouldNotOpen => "could not open the database; nothing was changed",
+            RotateFailure::Failed => {
+                "the rotation failed and the database was not changed. Check that \
+                 HARBORGATE_OLD_ENCRYPTION_KEY is the key that wrote the data, and that this \
+                 image version is the one the app last ran on."
+            }
+        }
+    }
+}
+
+/// Re-encrypts the database in `data_dir` from `old_key` to `new_key`. The database is
+/// opened without running migrations: a failed rotation must leave the file exactly as
+/// it was, and the command must run with the image version the app last ran on.
+async fn rotate_database(
+    data_dir: &Path,
+    old_key: &config::EncryptionKey,
+    new_key: &config::EncryptionKey,
+) -> Result<u64, RotateFailure> {
+    let old = auth::crypto::credentials_key(old_key).map_err(|_| RotateFailure::Failed)?;
+    let new = auth::crypto::credentials_key(new_key).map_err(|_| RotateFailure::Failed)?;
+    if services::harbor_webhook::constant_time_eq(old.as_bytes(), new.as_bytes()) {
+        return Err(RotateFailure::SameKey);
+    }
+    let path = db::database_path(data_dir);
+    if !path.is_file() {
+        return Err(RotateFailure::NoDatabase);
+    }
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(db::connect_options(&path))
+        .await
+        .map_err(|_| RotateFailure::CouldNotOpen)?;
+    let rotated = services::key_rotation::rotate(&pool, &old, &new).await;
+    pool.close().await;
+    rotated.map_err(|_| RotateFailure::Failed)
+}
+
+/// The offline restore command. It never binds the HTTP port, and it refuses to run
+/// while the app holds the port.
+async fn run_restore(file: &Path) -> Result<(), String> {
+    ensure_app_stopped("restoring")?;
+    let encryption_key = config::load_encryption_key().map_err(|err| err.to_string())?;
+    let settings = config::load_settings().map_err(|err| err.to_string())?;
+    restore_database(&encryption_key, &settings.data_dir, file).await?;
+    println!("Restored the database from {}.", file.display());
+    Ok(())
+}
+
+/// Fails when something already listens on the app port. The listener is dropped at
+/// once, so the port is free again for the app.
+fn ensure_app_stopped(activity: &str) -> Result<(), String> {
+    match std::net::TcpListener::bind(BIND_ADDR) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(_) => Err(format!("stop HarborGate before {activity}")),
+    }
+}
+
+/// The backup `created_at` for the `restore.run` audit row (decided on issue #58).
+/// It is the UTC timestamp in the file name `harborgate-<yyyymmddThhmmssZ>.hgbk`.
+/// A file that does not match that pattern falls back to its modification time.
+/// Returns `None` when neither is available.
+fn backup_created_at(file: &Path) -> Option<String> {
+    let from_name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(timestamp_from_file_name);
+    from_name.or_else(|| {
+        let modified = std::fs::metadata(file)
+            .and_then(|meta| meta.modified())
+            .ok()?;
+        let secs = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        services::time::rfc3339(i64::try_from(secs).ok()?).ok()
+    })
+}
+
+/// Parses `harborgate-<yyyymmddThhmmssZ>.hgbk` into an RFC 3339 string. A stamp that
+/// is not a real calendar instant returns `None`.
+fn timestamp_from_file_name(name: &str) -> Option<String> {
+    let stamp = name.strip_prefix("harborgate-")?.strip_suffix(".hgbk")?;
+    let bytes = stamp.as_bytes();
+    if bytes.len() != 16 || bytes[8] != b'T' || bytes[15] != b'Z' {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| -> Option<i64> {
+        let part = stamp.get(range)?;
+        if !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        part.parse().ok()
+    };
+    let (year, month, day) = (number(0..4)?, number(4..6)?, number(6..8)?);
+    let (hour, minute, second) = (number(9..11)?, number(11..13)?, number(13..15)?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    // Days since 1970-01-01 (Howard Hinnant's `days_from_civil`).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let unix = days * 86_400 + hour * 3600 + minute * 60 + second;
+    let text = services::time::rfc3339(unix).ok()?;
+    // A day that does not exist (such as 30 February) rolls over to another date, so
+    // the round trip no longer matches the stamp.
+    let expected = format!(
+        "{}-{}-{}T{}:{}:{}Z",
+        stamp.get(0..4)?,
+        stamp.get(4..6)?,
+        stamp.get(6..8)?,
+        stamp.get(9..11)?,
+        stamp.get(11..13)?,
+        stamp.get(13..15)?
+    );
+    (text == expected).then_some(text)
+}
+
+/// Removes the plaintext temporary database and any SQLite side files it left. A
+/// missing file is not an error.
+fn remove_temp_files(temp_path: &Path) {
+    let _ = std::fs::remove_file(temp_path);
+    for suffix in ["-wal", "-shm"] {
+        let mut side = temp_path.as_os_str().to_owned();
+        side.push(suffix);
+        let _ = std::fs::remove_file(side);
+    }
+}
+
+/// Replaces `<data_dir>/harborgate.db` with the database in the backup `file`.
+///
+/// The live database is untouched unless the backup passes every check: the GCM tag
+/// (`backup::open`), then `PRAGMA integrity_check` and the migrations on a temporary
+/// copy in `data_dir`. Only then are the live `-wal` and `-shm` files removed and the
+/// copy renamed over the live file (same directory, so the rename is atomic). The
+/// `restore.run` audit row is appended to the restored database last. The temporary
+/// copy holds the whole database in plain text and is removed on every path.
+///
+/// Errors are messages for the operator and name no key or file content.
+async fn restore_database(
+    encryption_key: &config::EncryptionKey,
+    data_dir: &Path,
+    file: &Path,
+) -> Result<(), String> {
+    let file_name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "the backup path has no usable file name".to_owned())?
+        .to_owned();
+    let created_at = backup_created_at(file);
+    let sealed = std::fs::read(file).map_err(|err| {
+        format!(
+            "could not read the backup file ({:?}); nothing was changed",
+            err.kind()
+        )
+    })?;
+    let backup_key = auth::crypto::backup_key(encryption_key)
+        .map_err(|_| "could not derive the backup key".to_owned())?;
+    let plain = services::backup::open(&backup_key, &sealed).map_err(|_| {
+        "the backup file failed verification; check the file and that HARBORGATE_ENCRYPTION_KEY \
+         is the key that created it. The live database was not changed."
+            .to_owned()
+    })?;
+    drop(sealed);
+
+    let temp_path = data_dir.join(format!("restore-{}.tmp", services::ids::new_id()));
+    let staged = stage_and_swap(data_dir, &temp_path, &plain).await;
+    remove_temp_files(&temp_path);
+    drop(plain);
+    staged?;
+
+    // The database is replaced. Append the audit row to the restored database.
+    let pool = db::open(data_dir).await.map_err(|_| {
+        "the database was restored, but it could not be reopened to record the audit row".to_owned()
+    })?;
+    let details = serde_json::json!({ "file": file_name, "created_at": created_at });
+    let recorded = record_restore(&pool, &file_name, &details).await;
+    pool.close().await;
+    recorded.map_err(|_| {
+        "the database was restored, but the restore.run audit row could not be written".to_owned()
+    })
+}
+
+/// Writes the plaintext to `temp_path`, checks it, and swaps it in for the live file.
+async fn stage_and_swap(data_dir: &Path, temp_path: &Path, plain: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Owner-only: the file holds the whole database in plain text.
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(temp_path)
+        .map_err(|_| "could not create the temporary file in HARBORGATE_DATA_DIR".to_owned())?;
+    out.write_all(plain)
+        .and_then(|()| out.sync_all())
+        .map_err(|_| "could not write the temporary file in HARBORGATE_DATA_DIR".to_owned())?;
+    drop(out);
+
+    let checked = check_candidate(temp_path).await;
+    checked?;
+
+    let live = db::database_path(data_dir);
+    let live_text = live.to_string_lossy().into_owned();
+    for suffix in ["-wal", "-shm"] {
+        let side = std::path::PathBuf::from(format!("{live_text}{suffix}"));
+        match std::fs::remove_file(&side) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(
+                    "could not remove the old write-ahead log; the live database was not replaced"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    std::fs::rename(temp_path, &live).map_err(|_| "could not replace the live database".to_owned())
+}
+
+/// Opens the candidate database, runs `PRAGMA integrity_check` (expects `ok`) and the
+/// migrations, then closes it so SQLite checkpoints and removes its own log files.
+async fn check_candidate(temp_path: &Path) -> Result<(), String> {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(db::connect_options(temp_path))
+        .await
+        .map_err(|_| "the backup does not contain a usable database".to_owned())?;
+    // A PRAGMA result has no column type the `query!` macro can check, so this read
+    // is a plain query.
+    let verdict = sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+        .fetch_one(&pool)
+        .await;
+    let result = match verdict {
+        Ok(text) if text == "ok" => db::migrate(&pool).await.map_err(|_| {
+            "the backup database could not be migrated; it may come from a newer HarborGate"
+                .to_owned()
+        }),
+        _ => Err("the backup database failed the integrity check".to_owned()),
+    };
+    pool.close().await;
+    result
+}
+
+/// Appends the `restore.run` audit row (actor `cli`) in one transaction.
+async fn record_restore(
+    pool: &sqlx::SqlitePool,
+    file_name: &str,
+    details: &serde_json::Value,
+) -> Result<(), error::AppError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| error::AppError::InternalError)?;
+    services::audit::record(
+        &mut tx,
+        &services::audit::Actor::cli(),
+        "restore.run",
+        &format!("backup:{file_name}"),
+        Some(details),
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|_| error::AppError::InternalError)
+}
+
+async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     // Refuse to start without a valid key or settings. This runs before the port is bound.
     let encryption_key = config::load_encryption_key()?;
     let settings = config::load_settings()?;
@@ -167,6 +519,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         credentials_key,
         allow_private_oidc: settings.allow_private_oidc,
         allow_private_harbor: settings.allow_private_harbor,
+        allow_private_alerts: settings.allow_private_alerts,
         jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
         webhook_token_limiter: api::webhooks::new_token_limiter(),
         webhook_failure_limiter: api::webhooks::new_failure_limiter(),
@@ -187,19 +540,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // The stop flag flips to true on the first signal. The server stops accepting
-    // connections and drains in-flight requests. A separate timer caps the drain.
+    // connections and drains in-flight requests. The instant of the signal is sent first,
+    // so one 8-second budget (`drain`) covers the server and the background tasks.
     let (stop_tx, stop_rx) = watch::channel(false);
+    let (stop_at_tx, mut stop_at_rx) = watch::channel(None::<Instant>);
     tokio::spawn(async move {
         shutdown_signal(terminate).await;
+        let _ = stop_at_tx.send(Some(Instant::now()));
         let _ = stop_tx.send(true);
     });
 
     // The worker stops taking jobs on the same signal. A job it already took finishes.
     let worker_pool = state.pool.clone();
     let worker_stop = stop_rx.clone();
+    let sync_handler = services::sync::SyncHandler::new(
+        state.pool.clone(),
+        state.credentials_key.clone(),
+        state.allow_private_harbor,
+    )
+    .map_err(|_| "could not build the sync job handler")?;
     let worker_task = tokio::spawn(async move {
-        worker::run(worker_pool, Arc::new(worker::NoopHandler), worker_stop).await;
+        worker::run(worker_pool, Arc::new(sync_handler), worker_stop).await;
     });
+
+    // Backup polling queues jobs for tagged artifacts without a successful sync.
+    let poller_task = tokio::spawn(services::poller::run(
+        state.pool.clone(),
+        state.credentials_key.clone(),
+        state.allow_private_harbor,
+        stop_rx.clone(),
+    ));
+
+    // Retention deletes rows past their age limit, 5 minutes after start and then daily.
+    let retention_task = tokio::spawn(services::retention::run(
+        state.pool.clone(),
+        stop_rx.clone(),
+    ));
 
     let mut graceful = stop_rx.clone();
     let router = app(settings.trusted_proxies.clone(), state)
@@ -207,24 +583,139 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
         let _ = graceful.wait_for(|stopped| *stopped).await;
     });
-    let drain_limit = async move {
-        let mut limit = stop_rx;
-        let _ = limit.wait_for(|stopped| *stopped).await;
-        tokio::time::sleep(DRAIN_TIMEOUT).await;
-    };
+    let tasks = vec![worker_task, poller_task, retention_task];
 
-    tokio::select! {
-        result = serve => result?,
-        _ = drain_limit => {}
+    let mut serve = Box::pin(std::future::IntoFuture::into_future(serve));
+    let first = tokio::select! {
+        result = &mut serve => Phase::Served(result),
+        at = stop_instant(&mut stop_at_rx) => Phase::Stopped(at),
+    };
+    match first {
+        Phase::Stopped(stop_at) => drain(serve, tasks, stop_at).await?,
+        Phase::Served(result) => {
+            // The server ended on its own, as with a listener error: exit at once.
+            result?;
+            let stop_at = (*stop_at_rx.borrow()).unwrap_or_else(Instant::now);
+            drain(std::future::ready(Ok(())), tasks, stop_at).await?;
+        }
     }
-    // Give the worker its turn to finish the job it holds, within the drain limit.
-    let _ = tokio::time::timeout(DRAIN_TIMEOUT, worker_task).await;
     Ok(())
+}
+
+/// What ended first: the server, or the stop signal.
+enum Phase {
+    Served(std::io::Result<()>),
+    Stopped(Instant),
+}
+
+/// Resolves with the instant of the stop signal. A closed channel counts as now.
+async fn stop_instant(stop_at: &mut watch::Receiver<Option<Instant>>) -> Instant {
+    match stop_at.wait_for(|at| at.is_some()).await {
+        Ok(at) => (*at).unwrap_or_else(Instant::now),
+        Err(_) => Instant::now(),
+    }
+}
+
+/// Drains within one `DRAIN_TIMEOUT` counted from `stop_at`, the instant of the stop
+/// signal. The server and then each background task wait only until that one deadline, so
+/// a stop never takes longer than the budget. A task that is still running at the deadline
+/// is left to the process exit, and its job is re-queued at the next start.
+async fn drain(
+    serve: impl Future<Output = std::io::Result<()>>,
+    tasks: Vec<JoinHandle<()>>,
+    stop_at: Instant,
+) -> std::io::Result<()> {
+    let deadline = stop_at + DRAIN_TIMEOUT;
+    let served = tokio::time::timeout_at(deadline, serve).await;
+    for task in tasks {
+        let _ = tokio::time::timeout_at(deadline, task).await;
+    }
+    served.unwrap_or(Ok(()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Real time, no clock pausing: `stop_at` lies 7 s in the past, so about 1 s of the
+    /// 8 s budget remains and each drain test takes about 1 s.
+    fn stop_seven_seconds_ago() -> Instant {
+        Instant::now() - Duration::from_secs(7)
+    }
+
+    /// A server that never ends and a worker that sleeps 20 s: `drain` still returns at
+    /// the end of the one budget, not after a second 8 s.
+    #[tokio::test]
+    async fn drain_never_exceeds_the_budget() {
+        let worker = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+        });
+        let started = Instant::now();
+        let result = drain(
+            std::future::pending::<std::io::Result<()>>(),
+            vec![worker],
+            stop_seven_seconds_ago(),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(result.is_ok());
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "returned before the budget ended: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "waited past the single budget: {elapsed:?}"
+        );
+    }
+
+    /// The server ends at once, so the worker gets only what remains of the budget: a
+    /// worker that needs 3 s is cut off at about 1 s, and one that needs 0.3 s finishes.
+    #[tokio::test]
+    async fn worker_gets_only_the_remaining_budget() {
+        let slow_done = Arc::new(AtomicBool::new(false));
+        let slow_flag = slow_done.clone();
+        let slow = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            slow_flag.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let result = drain(
+            std::future::ready(Ok(())),
+            vec![slow],
+            stop_seven_seconds_ago(),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(result.is_ok());
+        assert!(
+            elapsed < Duration::from_millis(2500),
+            "the worker got more than the remaining budget: {elapsed:?}"
+        );
+        assert!(
+            !slow_done.load(Ordering::SeqCst),
+            "the slow worker should have been cut off"
+        );
+
+        let quick_done = Arc::new(AtomicBool::new(false));
+        let quick_flag = quick_done.clone();
+        let quick = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            quick_flag.store(true, Ordering::SeqCst);
+        });
+        let result = drain(
+            std::future::ready(Ok(())),
+            vec![quick],
+            stop_seven_seconds_ago(),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert!(
+            quick_done.load(Ordering::SeqCst),
+            "a worker inside the remaining budget must finish"
+        );
+    }
 
     /// The admin audit route rejects a request with no session cookie with 401.
     #[tokio::test]
@@ -251,6 +742,7 @@ mod tests {
             credentials_key: Arc::new(auth::crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
             allow_private_harbor: false,
+            allow_private_alerts: false,
             jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
             webhook_token_limiter: api::webhooks::new_token_limiter(),
             webhook_failure_limiter: api::webhooks::new_failure_limiter(),
@@ -322,6 +814,7 @@ mod tests {
             credentials_key: Arc::new(auth::crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
             allow_private_harbor: false,
+            allow_private_alerts: false,
             jwks: Arc::new(services::oidc_jwt::JwksCache::new()),
             webhook_token_limiter,
             webhook_failure_limiter: api::webhooks::new_failure_limiter(),
@@ -1125,5 +1618,255 @@ mod tests {
                 let (key, val) = pair.split_once('=')?;
                 (key == name).then(|| val.to_owned())
             })
+    }
+
+    // Base64 of 32 zero bytes, and of 32 bytes of 0x01. Test values only.
+    const RESTORE_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    const OTHER_KEY_B64: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+    /// 2001-09-09T01:46:40Z, the instant in the backup file name below.
+    const BACKUP_AT: i64 = 1_000_000_000;
+
+    fn restore_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("harborgate-restore-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    async fn add_user(pool: &sqlx::SqlitePool, username: &str) {
+        let mut conn = pool.acquire().await.unwrap();
+        db::users::insert_local(&mut conn, username, username, None, "test-hash", "user")
+            .await
+            .unwrap();
+    }
+
+    async fn usernames(data_dir: &Path) -> Vec<String> {
+        let pool = db::open(data_dir).await.unwrap();
+        let names: Vec<String> = sqlx::query_scalar("SELECT username FROM users ORDER BY username")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        names
+    }
+
+    async fn restore_audit_count(data_dir: &Path) -> i64 {
+        let pool = db::open(data_dir).await.unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'restore.run'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        pool.close().await;
+        count
+    }
+
+    /// A live data directory holding user `live`, and a backup directory holding a
+    /// backup of a database with user `backed-up`, sealed under `RESTORE_KEY_B64`.
+    /// Returns (live data dir, backup file path).
+    async fn live_and_backup(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let live = restore_dir(&format!("{name}-live"));
+        let source = restore_dir(&format!("{name}-source"));
+        let backups = restore_dir(&format!("{name}-backups"));
+
+        let live_pool = db::open(&live).await.unwrap();
+        add_user(&live_pool, "live").await;
+        live_pool.close().await;
+
+        let source_pool = db::open(&source).await.unwrap();
+        add_user(&source_pool, "backed-up").await;
+        let root = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+        let key = auth::crypto::backup_key(&root).unwrap();
+        let file_name = services::backup::create(&source_pool, &key, &source, &backups, BACKUP_AT)
+            .await
+            .unwrap();
+        source_pool.close().await;
+        (live, backups.join(file_name))
+    }
+
+    fn stray_temp_files(data_dir: &Path) -> Vec<String> {
+        std::fs::read_dir(data_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("restore-"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn restore_replaces_the_database_and_appends_restore_run() {
+        let (live, backup) = live_and_backup("replace").await;
+        assert_eq!(usernames(&live).await, vec!["live"]);
+        let root = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+
+        restore_database(&root, &live, &backup).await.unwrap();
+
+        assert_eq!(usernames(&live).await, vec!["backed-up"]);
+        assert!(stray_temp_files(&live).is_empty(), "temporary copy left");
+
+        let pool = db::open(&live).await.unwrap();
+        let row: (String, String, Option<String>, String) = sqlx::query_as(
+            "SELECT actor_username, action, actor_user_id, details FROM audit_log
+             WHERE action = 'restore.run'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        assert_eq!(row.0, "cli");
+        assert_eq!(row.1, "restore.run");
+        assert_eq!(row.2, None);
+        let details: serde_json::Value = serde_json::from_str(&row.3).unwrap();
+        assert_eq!(
+            details,
+            serde_json::json!({
+                "file": "harborgate-20010909T014640Z.hgbk",
+                "created_at": "2001-09-09T01:46:40Z",
+            })
+        );
+    }
+
+    /// The decided source of `created_at`: the file name first, then the file's
+    /// modification time.
+    #[test]
+    fn backup_created_at_prefers_the_name_then_the_modification_time() {
+        assert_eq!(
+            timestamp_from_file_name("harborgate-20010909T014640Z.hgbk").as_deref(),
+            Some("2001-09-09T01:46:40Z")
+        );
+        assert_eq!(
+            timestamp_from_file_name("harborgate-20010230T014640Z.hgbk"),
+            None
+        );
+        assert_eq!(timestamp_from_file_name("renamed.hgbk"), None);
+
+        let dir = restore_dir("created-at");
+        let renamed = dir.join("renamed.hgbk");
+        std::fs::write(&renamed, b"x").unwrap();
+        let fallback = backup_created_at(&renamed).unwrap();
+        assert!(
+            fallback.ends_with('Z') && fallback.len() == 20,
+            "{fallback}"
+        );
+        assert_eq!(backup_created_at(&dir.join("missing.hgbk")), None);
+    }
+
+    #[tokio::test]
+    async fn bad_tag_leaves_the_live_database_untouched() {
+        let (live, backup) = live_and_backup("bad-tag").await;
+        let mut bytes = std::fs::read(&backup).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        std::fs::write(&backup, bytes).unwrap();
+        let root = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+
+        let result = restore_database(&root, &live, &backup).await;
+
+        assert!(result.is_err(), "a tampered backup was restored");
+        assert_eq!(usernames(&live).await, vec!["live"]);
+        assert_eq!(restore_audit_count(&live).await, 0);
+        assert!(stray_temp_files(&live).is_empty(), "temporary copy left");
+    }
+
+    #[tokio::test]
+    async fn wrong_key_leaves_the_live_database_untouched() {
+        let (live, backup) = live_and_backup("wrong-key").await;
+        let other = config::parse_encryption_key(OTHER_KEY_B64).unwrap();
+
+        let result = restore_database(&other, &live, &backup).await;
+
+        assert!(result.is_err(), "a backup restored under the wrong key");
+        assert_eq!(usernames(&live).await, vec!["live"]);
+        assert_eq!(restore_audit_count(&live).await, 0);
+        assert!(stray_temp_files(&live).is_empty(), "temporary copy left");
+    }
+
+    #[tokio::test]
+    async fn rotate_key_refuses_a_missing_database() {
+        let empty = restore_dir("rotate-missing");
+        let old = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+        let new = config::parse_encryption_key(OTHER_KEY_B64).unwrap();
+
+        let result = rotate_database(&empty, &old, &new).await;
+
+        assert_eq!(result, Err(RotateFailure::NoDatabase));
+        assert!(
+            !db::database_path(&empty).exists(),
+            "the command created a database"
+        );
+    }
+
+    /// The migrations history and the schema of the latest migration, as plain rows.
+    async fn schema_state(pool: &sqlx::SqlitePool) -> (Vec<i64>, i64) {
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        let description_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('cve_findings') WHERE name = 'description'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        (versions, description_columns)
+    }
+
+    /// A database that is one migration behind would be changed by `db::open`. The
+    /// rotation must leave the migrations history and the schema as they were.
+    #[tokio::test]
+    async fn rotate_key_does_not_migrate_the_database() {
+        let dir = restore_dir("rotate-schema");
+        let pool = db::open(&dir).await.unwrap();
+        sqlx::query("ALTER TABLE cve_findings DROP COLUMN description")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = schema_state(&pool).await;
+        pool.close().await;
+        assert!(
+            before == (vec![1], 0),
+            "the setup did not remove migration 2"
+        );
+
+        let old = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+        let new = config::parse_encryption_key(OTHER_KEY_B64).unwrap();
+        let rows = rotate_database(&dir, &old, &new).await;
+        assert_eq!(rows, Ok(0), "an empty database did not rotate");
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_with(db::connect_options(&db::database_path(&dir)))
+            .await
+            .unwrap();
+        assert!(
+            schema_state(&pool).await == before,
+            "the rotation changed the migrations or the schema"
+        );
+        let audits: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'key.rotate'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(audits, 1, "the rotation was not audited");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn rotate_key_with_equal_keys_reports_same_key() {
+        let dir = restore_dir("rotate-same");
+        db::open(&dir).await.unwrap().close().await;
+        let old = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+        let new = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+
+        let result = rotate_database(&dir, &old, &new).await;
+
+        assert_eq!(result, Err(RotateFailure::SameKey));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

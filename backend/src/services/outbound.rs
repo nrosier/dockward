@@ -36,6 +36,8 @@ pub enum OutboundError {
     NotHttps,
     /// The client could not be built.
     ClientBuild,
+    /// The host name did not resolve.
+    Resolve,
 }
 
 impl fmt::Display for OutboundError {
@@ -48,6 +50,7 @@ impl fmt::Display for OutboundError {
             OutboundError::ClientBuild => {
                 f.write_str("the outbound HTTP client could not be built")
             }
+            OutboundError::Resolve => f.write_str("the target host could not be resolved"),
         }
     }
 }
@@ -132,6 +135,22 @@ pub fn filter_addresses(
     }
 }
 
+/// Resolves `host` with the system resolver and applies [`filter_addresses`]. A caller that
+/// connects by itself instead of through [`OutboundClient`] (SMTP) must call this before
+/// every connection and connect only to an address it returns, so a DNS answer that changes
+/// between calls is checked again.
+pub async fn resolve_checked(
+    host: &str,
+    port: u16,
+    class: TargetClass,
+    allow_private: bool,
+) -> Result<Vec<SocketAddr>, OutboundError> {
+    let found = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|_| OutboundError::Resolve)?;
+    filter_addresses(found.collect(), class, allow_private)
+}
+
 /// Resolves a host with the system resolver and applies [`filter_addresses`].
 /// It runs on every connection, so DNS rebinding is checked each time.
 struct GuardedResolver {
@@ -155,7 +174,7 @@ impl Resolve for GuardedResolver {
 }
 
 /// The only outbound client. The inner reqwest client is private, and requests are built
-/// only through [`OutboundClient::get`] and [`OutboundClient::post`]. Both run
+/// only through [`OutboundClient::get`], [`OutboundClient::post`] and [`OutboundClient::patch`]. Each runs
 /// [`check_target`] before a request builder is returned, so a caller cannot send a
 /// request that skipped the check, including one to an IP literal.
 pub struct OutboundClient {
@@ -175,6 +194,12 @@ impl OutboundClient {
     pub fn post(&self, url: &reqwest::Url) -> Result<reqwest::RequestBuilder, OutboundError> {
         check_target(url, self.class, self.allow_private)?;
         Ok(self.inner.post(url.as_str()))
+    }
+
+    /// A PATCH request builder for `url`, after the target check.
+    pub fn patch(&self, url: &reqwest::Url) -> Result<reqwest::RequestBuilder, OutboundError> {
+        check_target(url, self.class, self.allow_private)?;
+        Ok(self.inner.patch(url.as_str()))
     }
 }
 
@@ -233,9 +258,10 @@ pub fn client_trusting(
 /// an IP literal, that address must pass the same range check as a resolved address.
 ///
 /// reqwest and hyper skip the DNS resolver for an IP-literal host, so the resolver
-/// alone never sees `https://127.0.0.1/`. This check covers that path. Private to this
-/// module: [`OutboundClient`] is the only caller.
-fn check_target(
+/// alone never sees `https://127.0.0.1/`. This check covers that path. [`OutboundClient`]
+/// calls it before every request, and the alert channel save calls it to validate a
+/// webhook URL.
+pub(crate) fn check_target(
     url: &reqwest::Url,
     class: TargetClass,
     allow_private: bool,
@@ -422,6 +448,35 @@ mod tests {
         assert!(
             message.contains("blocked private or local address"),
             "expected the address filter to refuse it, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_checked_refuses_private_hosts() {
+        // `localhost` and the IP literals resolve without network access.
+        for host in ["localhost", "127.0.0.1", "10.0.0.5", "::1"] {
+            assert_eq!(
+                resolve_checked(host, 465, TargetClass::Alerts, false).await,
+                Err(OutboundError::BlockedAddress),
+                "a private host was not refused"
+            );
+        }
+        // The control: the class opt-out lets the same host through, and the port is kept.
+        let allowed = resolve_checked("127.0.0.1", 465, TargetClass::Alerts, true).await;
+        assert_eq!(
+            allowed,
+            Ok(vec![SocketAddr::new(v4("127.0.0.1"), 465)]),
+            "the opt-out did not allow the host"
+        );
+        // GitHub never gets the opt-out.
+        assert_eq!(
+            resolve_checked("127.0.0.1", 465, TargetClass::GitHub, true).await,
+            Err(OutboundError::BlockedAddress)
+        );
+        // A public IP literal passes with the default settings.
+        assert_eq!(
+            resolve_checked("8.8.8.8", 587, TargetClass::Alerts, false).await,
+            Ok(vec![SocketAddr::new(v4("8.8.8.8"), 587)])
         );
     }
 
@@ -646,6 +701,27 @@ pub(crate) mod socket_tests {
         let client = client_trusting(TargetClass::Oidc, false, root).unwrap();
         assert_eq!(client.get(&url).err(), Some(OutboundError::BlockedAddress));
         assert_eq!(client.post(&url).err(), Some(OutboundError::BlockedAddress));
+        assert_eq!(
+            client.patch(&url).err(),
+            Some(OutboundError::BlockedAddress)
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_refuses_plain_http_and_reaches_an_opted_out_server() {
+        let http = reqwest::Url::parse("http://example.com/").unwrap();
+        let guarded = client(TargetClass::Oidc, false).unwrap();
+        assert_eq!(guarded.patch(&http).err(), Some(OutboundError::NotHttps));
+
+        // The control: with the opt-out, the same guarded PATCH reaches the server.
+        let (port, root) = loopback_tls_server(OK).await;
+        let url = reqwest::Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
+        let allowed = client_trusting(TargetClass::Oidc, true, root).unwrap();
+        let response = match allowed.patch(&url) {
+            Ok(builder) => builder.send().await.unwrap(),
+            Err(err) => panic!("opted-out request refused: {err}"),
+        };
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
     }
 
     #[tokio::test]

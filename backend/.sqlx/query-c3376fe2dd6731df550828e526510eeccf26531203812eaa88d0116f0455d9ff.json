@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO alert_channels (id, kind, config_encrypted, enabled) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "c3376fe2dd6731df550828e526510eeccf26531203812eaa88d0116f0455d9ff"
+}

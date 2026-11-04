@@ -259,6 +259,49 @@ Check each item before you rely on the setup:
 - To stop HarborGate from writing to GitHub, revoke the token in GitHub (**Settings > Developer settings > Personal access tokens**).
 - After revocation, new syncs fail. Each failure appears in the admin **Failed syncs** view with the error message. Fix the credential and use the retry action, or remove the mapping.
 
+## Restore from a backup
+
+Restore is a command-line command that runs with HarborGate stopped. It is not an HTTP route and not in the admin UI. A backup is made in the admin UI under Settings > Backup and restore, and is written to `HARBORGATE_BACKUP_DIR` (default `/data/backups`) as `harborgate-<yyyymmddThhmmssZ>.hgbk`.
+
+1. **Find the key.** You need the same `HARBORGATE_ENCRYPTION_KEY` that created the backup. After a key rotation, older backups need the old key. A backup made under a different key is rejected.
+2. **Stop HarborGate.** Stop the app yourself first. The command also checks that port 8080 is free in its own container and prints `stop HarborGate before restoring` if it is not. That check cannot see an app running in another container, so do not rely on it.
+3. **Run the command** in a one-off container that uses the same data volume and the same environment as the app. For the compose setup:
+
+   ```bash
+   docker compose stop harborgate
+   docker compose run --rm harborgate restore /data/backups/harborgate-20260101T030000Z.hgbk
+   ```
+
+   The image's entrypoint is the `harborgate` binary, so the words after the service name are the subcommand. The command takes the settings from the environment (`HARBORGATE_ENCRYPTION_KEY`, `HARBORGATE_PUBLIC_URL`, `HARBORGATE_DATA_DIR`). It does not bind the port.
+4. **What it checks.** It verifies the file's authentication tag first. Then it writes a temporary copy in `HARBORGATE_DATA_DIR`, runs SQLite's `PRAGMA integrity_check` on it, and applies the schema migrations. Only after all of that passes does it replace the live database. If any step fails, the command exits with code 1, prints the reason, and the live database is unchanged.
+5. **Check the result.** The command appends one `restore.run` entry to the audit log with actor `cli`, the backup file name, and the backup's creation time. The creation time comes from the file name; if the file was renamed, it comes from the file's modification time. Start HarborGate again and look for the entry in the Admin audit log.
+
+Restored sessions and sync jobs are those in the backup. Credentials in the backup open only with the key that created it.
+
+## Key rotation
+
+Rotation replaces `HARBORGATE_ENCRYPTION_KEY` with a new key and re-encrypts every stored secret under it: Harbor and GitHub credentials, the OIDC client secret, and the alert channel settings. It is a command-line command that runs with HarborGate stopped. It is not an HTTP route and not in the admin UI.
+
+Do the steps in this order. The backup needs the app running; the rotation needs it stopped.
+
+1. **Use the same image version as the app.** The command never migrates the database, so a failed run leaves it exactly as it was. Run it with the same HarborGate image version the app runs, and only after the app has started at least once on that version, so its migrations are already applied. An image older than the database could leave a newer encrypted column under the old key without noticing. An image newer than the database fails and rolls back. To upgrade and rotate, upgrade first, start the app once, then rotate.
+2. **Make a backup while the app is running.** Create one in the admin UI (Settings > Backup and restore). A backup is encrypted with the key that was current when it was made, so keep the old key as long as you keep that backup.
+3. **Generate the new key** with `openssl rand -base64 32` and store it in your secrets store.
+4. **Stop HarborGate.** Stop the app yourself. The command also checks that port 8080 is free in its own container and prints `stop HarborGate before rotating the key` if it is not. That check cannot see an app running in another container, so do not rely on it.
+5. **Run the command** in a one-off container with the same data volume. Pass the old key as `HARBORGATE_OLD_ENCRYPTION_KEY` and the new key as `HARBORGATE_ENCRYPTION_KEY`. For the compose setup, put the new key in `.env` and export the old key in your shell (for example, read it from your secrets store into the variable). Then pass the variable by name only:
+
+   ```bash
+   docker compose stop harborgate
+   docker compose run --rm -e HARBORGATE_OLD_ENCRYPTION_KEY harborgate rotate-key
+   ```
+
+   `-e HARBORGATE_OLD_ENCRYPTION_KEY` with no `=value` copies the variable from your shell into the container. Do not write the key itself on the command line (`-e NAME=value`): it would be visible in the process list, your shell history, and `docker inspect`. The command takes the other settings from the environment (`HARBORGATE_PUBLIC_URL`, `HARBORGATE_DATA_DIR`). It does not bind the port.
+6. **What it does.** In one database transaction it decrypts each stored value with the old key and encrypts it with the new key. If any value does not open with the old key, or the two keys are the same, the command exits with code 1, prints the reason, and the database is unchanged. On success it prints only the number of values it re-encrypted, and it appends one `key.rotate` entry to the audit log with actor `cli` and that count. The command never prints a key. A count of 0 means nothing was stored to re-encrypt (no credentials, OIDC client secret, or alert channels). In that case the command cannot tell whether the old key was the right one.
+7. **Start HarborGate** with `HARBORGATE_ENCRYPTION_KEY` set to the new key, and remove `HARBORGATE_OLD_ENCRYPTION_KEY` from the environment (`unset HARBORGATE_OLD_ENCRYPTION_KEY` in your shell). Sessions are signed with a key derived from the encryption key, so users sign in again.
+8. **Check the result.** Open the audit log and look for the `key.rotate` entry, then use the test button on one credential.
+
+Backups made before the rotation open only with the old key.
+
 ## 9. Troubleshooting
 
 | Symptom | Likely cause | Fix |

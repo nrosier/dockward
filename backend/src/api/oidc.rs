@@ -300,6 +300,7 @@ mod tests {
             credentials_key: Arc::new(crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
             allow_private_harbor: false,
+            allow_private_alerts: false,
             jwks: Arc::new(JwksCache::new()),
             webhook_token_limiter: crate::api::webhooks::new_token_limiter(),
             webhook_failure_limiter: crate::api::webhooks::new_failure_limiter(),

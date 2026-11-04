@@ -25,11 +25,17 @@ pub const MAX_COMPRESSED_BYTES: usize = 10 * 1024 * 1024;
 /// Seconds to wait when a rate-limited answer gives no retry time.
 const DEFAULT_WAIT_SECS: i64 = 60;
 
-/// Largest response body that is parsed. GitHub's bodies used here are small.
-const MAX_BODY: usize = 64 * 1024;
+/// Largest response body that is parsed. The upload calls return small bodies, but a page of
+/// 100 issues can carry 100 bodies of up to 65,536 characters each (GitHub's limit), about
+/// 6.5 MB. A 64 KiB cap turned such a page into `null`, so the cap is 8 MiB. Only one
+/// response is held at a time.
+const MAX_BODY: usize = 8 * 1024 * 1024;
 
 /// GitHub's REST API root. The host is fixed (`specs/security.md`, "GitHub token scope").
-const GITHUB_API: &str = "https://api.github.com/";
+pub(crate) const GITHUB_API: &str = "https://api.github.com/";
+
+/// The one host a request may reach.
+pub(crate) const API_HOST: &str = "api.github.com";
 
 /// The `tool_name` sent with each upload.
 const TOOL_NAME: &str = "HarborGate";
@@ -107,6 +113,8 @@ pub struct ScanResponse {
     pub ratelimit_remaining: Option<i64>,
     /// `x-ratelimit-reset`, in Unix seconds.
     pub ratelimit_reset: Option<i64>,
+    /// The URL of the `rel="next"` page in the `link` header, if there is one.
+    pub link_next: Option<String>,
     /// The parsed body, or `null` when it is missing, not JSON, or too large.
     pub body: Value,
 }
@@ -121,6 +129,13 @@ pub trait ScanHttp {
         token: &[u8],
         body: &Value,
     ) -> impl Future<Output = Result<ScanResponse, ScanError>> + Send;
+    /// PATCHes `body` as JSON to `path`, which is relative to `https://api.github.com/`.
+    fn patch(
+        &self,
+        path: &str,
+        token: &[u8],
+        body: &Value,
+    ) -> impl Future<Output = Result<ScanResponse, ScanError>> + Send;
     /// GETs `path`, which is relative to `https://api.github.com/`.
     fn get(
         &self,
@@ -130,8 +145,8 @@ pub trait ScanHttp {
 }
 
 /// Production HTTP: the guarded client borrowed from [`GithubScanning`].
-struct LiveHttp<'a> {
-    client: &'a OutboundClient,
+pub(crate) struct LiveHttp<'a> {
+    pub(crate) client: &'a OutboundClient,
 }
 
 impl ScanHttp for LiveHttp<'_> {
@@ -143,6 +158,22 @@ impl ScanHttp for LiveHttp<'_> {
     ) -> Result<ScanResponse, ScanError> {
         let url = api_url(path)?;
         let builder = self.client.post(&url).map_err(|_| transport())?;
+        let response = authorized(builder, token)?
+            .json(body)
+            .send()
+            .await
+            .map_err(|_| transport())?;
+        read_response(response).await
+    }
+
+    async fn patch(
+        &self,
+        path: &str,
+        token: &[u8],
+        body: &Value,
+    ) -> Result<ScanResponse, ScanError> {
+        let url = api_url(path)?;
+        let builder = self.client.patch(&url).map_err(|_| transport())?;
         let response = authorized(builder, token)?
             .json(body)
             .send()
@@ -164,7 +195,19 @@ impl ScanHttp for LiveHttp<'_> {
 
 fn api_url(path: &str) -> Result<Url, ScanError> {
     let base = Url::parse(GITHUB_API).map_err(|_| transport())?;
-    base.join(path).map_err(|_| transport())
+    let url = base.join(path).map_err(|_| transport())?;
+    // `join` lets a path such as `//host/x` or `https://host/` replace the host. The token
+    // is sent with every request, so the result must still be the API host.
+    let on_api_host = url.scheme() == "https"
+        && url.host_str() == Some(API_HOST)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none();
+    if on_api_host {
+        Ok(url)
+    } else {
+        Err(transport())
+    }
 }
 
 /// Adds the bearer token and the headers the credential probes use.
@@ -184,6 +227,11 @@ async fn read_response(response: reqwest::Response) -> Result<ScanResponse, Scan
     let retry_after = header_i64(&response, "retry-after");
     let ratelimit_remaining = header_i64(&response, "x-ratelimit-remaining");
     let ratelimit_reset = header_i64(&response, "x-ratelimit-reset");
+    let link_next = response
+        .headers()
+        .get("link")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_link_next);
     let status = response.status().as_u16();
     let bytes = response.bytes().await.map_err(|_| transport())?;
     let body = if bytes.len() <= MAX_BODY {
@@ -196,7 +244,21 @@ async fn read_response(response: reqwest::Response) -> Result<ScanResponse, Scan
         retry_after,
         ratelimit_remaining,
         ratelimit_reset,
+        link_next,
         body,
+    })
+}
+
+/// The URL marked `rel="next"` in a `link` header value, such as
+/// `<https://api.github.com/x?page=2>; rel="next", <https://api.github.com/x?page=9>; rel="last"`.
+pub fn parse_link_next(header: &str) -> Option<String> {
+    header.split(',').find_map(|part| {
+        let (target, params) = part.split_once(';')?;
+        let is_next = params
+            .split(';')
+            .any(|param| param.trim().replace(' ', "") == "rel=\"next\"");
+        let url = target.trim().strip_prefix('<')?.strip_suffix('>')?;
+        is_next.then(|| url.to_owned())
     })
 }
 
@@ -256,7 +318,7 @@ fn rate_limit_until(response: &ScanResponse, now: i64) -> i64 {
 
 /// Owner and repository names must pass the same check as the credential probes, before
 /// any request is made.
-fn check_names(owner: &str, repo: &str) -> Result<(), ScanError> {
+pub(crate) fn check_names(owner: &str, repo: &str) -> Result<(), ScanError> {
     if valid_github_name(owner) && valid_github_name(repo) {
         Ok(())
     } else {
@@ -450,6 +512,19 @@ mod tests {
             Ok(self.reply.clone())
         }
 
+        async fn patch(
+            &self,
+            path: &str,
+            _token: &[u8],
+            body: &Value,
+        ) -> Result<ScanResponse, ScanError> {
+            self.sent
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push((path.to_owned(), body.clone()));
+            Ok(self.reply.clone())
+        }
+
         async fn get(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
             self.sent
                 .lock()
@@ -465,6 +540,7 @@ mod tests {
             retry_after: None,
             ratelimit_remaining: None,
             ratelimit_reset: None,
+            link_next: None,
             body,
         }
     }
@@ -482,6 +558,38 @@ mod tests {
     async fn upload_reply(response: ScanResponse, now: i64) -> Result<String, ScanError> {
         let fake = Recorded::new(response);
         upload_with(&fake, b"token", &sample_upload(), now).await
+    }
+
+    #[test]
+    fn api_url_never_leaves_the_api_host() {
+        assert_eq!(
+            api_url("repos/octo/app/issues?page=2").map(String::from),
+            Ok("https://api.github.com/repos/octo/app/issues?page=2".to_owned())
+        );
+        for path in [
+            "//evil.example/x",
+            "///evil.example/x",
+            "https://evil.example/x",
+            "http://api.github.com/x",
+            "https://api.github.com@evil.example/x",
+            "https://api.github.com:8443/x",
+        ] {
+            assert!(api_url(path).is_err(), "{path} should be refused");
+        }
+    }
+
+    #[test]
+    fn link_header_next_is_parsed() {
+        let header = "<https://api.github.com/repositories/1/issues?page=2>; rel=\"next\", <https://api.github.com/repositories/1/issues?page=5>; rel=\"last\"";
+        assert_eq!(
+            parse_link_next(header),
+            Some("https://api.github.com/repositories/1/issues?page=2".to_owned())
+        );
+        assert_eq!(
+            parse_link_next("<https://api.github.com/x?page=1>; rel=\"prev\""),
+            None
+        );
+        assert_eq!(parse_link_next(""), None);
     }
 
     #[test]

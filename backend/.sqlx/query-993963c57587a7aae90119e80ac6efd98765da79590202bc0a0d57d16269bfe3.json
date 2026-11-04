@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", github_sarif_id\n           FROM sync_reports\n           WHERE sync_job_id = ? AND sarif_status = 'pending'\n           ORDER BY rowid DESC\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "github_sarif_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "github_sarif_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "993963c57587a7aae90119e80ac6efd98765da79590202bc0a0d57d16269bfe3"
+}

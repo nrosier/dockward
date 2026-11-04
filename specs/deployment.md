@@ -9,6 +9,7 @@ Purpose: container build, compose file, Traefik and Cloudflare routing, volumes,
 - Exposes port 8080.
 - Frontend assets are embedded in the binary. See [architecture.md](architecture.md).
 - Runtime base image: Decided (2026-11-03): `alpine:3.24`, supported until 2028-06-01. `alpine:3.20` reached end of life on 2026-04-01. Source: https://endoflife.date/alpine-linux.
+- Runtime packages: `ca-certificates`, installed with `apk add --no-cache`, so outbound TLS (reqwest and lettre, both using rustls-platform-verifier) verifies against the system roots at `/etc/ssl/certs/ca-certificates.crt`. Not pinned to an apk version: the `alpine:3.24` tag fixes the release branch, and an exact apk version is dropped from the index when Alpine ships a fix, which would break the build.
 - Build stages: `node:26-alpine` and `rust:1.99.1-alpine`, matching the toolchain pins in [testing-and-ci.md](testing-and-ci.md).
 
 ## Configuration

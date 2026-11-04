@@ -2,6 +2,8 @@
 
 #[allow(dead_code)] // Used by the account routes.
 pub mod account;
+pub mod alert_channels;
+pub mod alert_send;
 pub mod audit;
 #[allow(dead_code)] // Used by the setup and login routes.
 pub mod auth;
@@ -9,6 +11,9 @@ pub mod backup;
 #[allow(dead_code)] // Used by the credential routes.
 pub mod credential_probe;
 pub mod credentials;
+pub mod findings;
+#[allow(dead_code)] // Used by the issue lifecycle (#30).
+pub mod github_issues;
 #[allow(dead_code)] // Used by the SARIF upload worker (#53).
 pub mod github_scanning;
 #[allow(dead_code)] // Used by the sync pipeline.
@@ -18,14 +23,18 @@ pub mod harbor_webhook;
 pub mod health;
 #[allow(dead_code)] // Used by the admin routes and the auth paths added in later issues.
 pub mod ids;
+pub mod key_rotation;
 #[allow(dead_code)] // Used by the mapping routes.
 pub mod mappings;
 #[allow(dead_code)] // The list routes that use this are added with the admin routes.
 pub mod pagination;
+pub mod poller;
+pub mod retention;
 #[allow(dead_code)] // Used by the sync pipeline.
 pub mod sarif;
 #[allow(dead_code)] // Used by the session extractor and logout routes.
 pub mod sessions;
+pub mod sync;
 #[allow(dead_code)] // Used by the job worker and the retry route.
 pub mod sync_jobs;
 #[allow(dead_code)] // Used by the login service.

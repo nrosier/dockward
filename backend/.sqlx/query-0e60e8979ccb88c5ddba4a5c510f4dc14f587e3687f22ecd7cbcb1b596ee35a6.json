@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT image_tag AS \"image_tag!\"\n           FROM sync_reports\n           WHERE mapping_id = ? AND sarif_status = 'success'\n           GROUP BY image_tag\n           ORDER BY MAX(synced_at) DESC, MAX(rowid) DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "image_tag!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "image_tag"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "0e60e8979ccb88c5ddba4a5c510f4dc14f587e3687f22ecd7cbcb1b596ee35a6"
+}
