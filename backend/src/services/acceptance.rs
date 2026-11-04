@@ -25,6 +25,9 @@ use crate::services::{ids, time};
 /// The longest reason, in characters (`specs/api.md`, accept).
 const MAX_REASON_CHARS: usize = 1000;
 
+/// `9999-12-31T23:59:59Z`, the last instant [`time::rfc3339`] can format.
+const MAX_UNIX_SECS: i64 = 253_402_300_799;
+
 /// The longest CVE id or mapping id the routes accept, in bytes. Same as the issue route.
 const MAX_ID_BYTES: usize = 128;
 
@@ -165,10 +168,9 @@ fn parse_rfc3339(text: &str) -> Option<i64> {
             if zone.as_bytes()[3] != b':' {
                 return None;
             }
-            let (oh, om) = (
-                zone.get(1..3)?.parse::<i64>().ok()?,
-                zone.get(4..6)?.parse::<i64>().ok()?,
-            );
+            // `rest + 1..rest + 3` and `rest + 4..rest + 6` must be ASCII digits: `str::parse`
+            // alone would take a sign, so `++5:30` or `+-5:30` would pass.
+            let (oh, om) = (num(rest + 1, rest + 3)?, num(rest + 4, rest + 6)?);
             if oh > 23 || om > 59 {
                 return None;
             }
@@ -191,7 +193,10 @@ fn parse_rfc3339(text: &str) -> Option<i64> {
     if days_from_civil(year, month, 1) + day > next {
         return None;
     }
-    Some(days * 86_400 + hour * 3600 + minute * 60 + second.min(59) - offset)
+    let unix = days * 86_400 + hour * 3600 + minute * 60 + second.min(59) - offset;
+    // `time::rfc3339` formats only 1970 to 9999 here, so a value outside that range would be a
+    // 500 later; refuse it now so it is a 422.
+    (0..=MAX_UNIX_SECS).contains(&unix).then_some(unix)
 }
 
 /// The text of the comment on an open issue. `@` is followed by a zero-width space, so the
@@ -280,13 +285,17 @@ pub async fn accept<G: IssueApi>(
     let actor = caller.actor();
     let target = audit_target(&mapping.id, cve_id);
     let new_id = ids::new_id();
-    let mut tx = begin(pool).await?;
-    if issue_db::findings_for_cve(&mut tx, &mapping.id, cve_id)
-        .await?
-        .is_empty()
+    // Read before the write lock, so a 404 does not take it.
     {
-        return Err(AppError::NotFound);
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        if issue_db::findings_for_cve(&mut conn, &mapping.id, cve_id)
+            .await?
+            .is_empty()
+        {
+            return Err(AppError::NotFound);
+        }
     }
+    let mut tx = begin(pool).await?;
     for expired in acceptance_db::expired_unrevoked(&mut tx, &mapping.id, cve_id, now).await? {
         acceptance_db::revoke(&mut tx, &expired, caller.id, now).await?;
         audit::record(
@@ -845,8 +854,10 @@ mod tests {
 
     #[test]
     fn rfc3339_parsing() {
+        // The reference instant 2001-09-09T01:46:40Z, written in several ways.
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339("2001-09-09T01:46:40Z"), Some(1_000_000_000));
+        assert_eq!(parse_rfc3339("2001-09-09t01:46:40z"), Some(1_000_000_000));
         assert_eq!(
             parse_rfc3339("2001-09-09T01:46:40.123Z"),
             Some(1_000_000_000)
@@ -855,20 +866,101 @@ mod tests {
             parse_rfc3339("2001-09-09T03:46:40+02:00"),
             Some(1_000_000_000)
         );
+        assert_eq!(
+            parse_rfc3339("2001-09-09T07:16:40+05:30"),
+            Some(1_000_000_000)
+        );
+        assert_eq!(
+            parse_rfc3339("2001-09-08T20:16:40-05:30"),
+            Some(1_000_000_000)
+        );
+        // Second 60 (a leap second) is clamped to 59.
+        assert_eq!(
+            parse_rfc3339("2001-09-09T01:46:60Z"),
+            Some(1_000_000_000 + 19)
+        );
+        // Leap days: only a real leap year has February 29.
         assert_eq!(parse_rfc3339("2000-02-29T00:00:00Z"), Some(951_782_400));
+        assert_eq!(parse_rfc3339("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+        assert_eq!(parse_rfc3339("2100-02-29T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339("1900-02-29T00:00:00Z"), None);
+        // The range the formatter can write back: 1970-01-01 to 9999-12-31T23:59:59Z.
+        assert_eq!(parse_rfc3339("9999-12-31T23:59:59Z"), Some(MAX_UNIX_SECS));
+        assert_eq!(
+            parse_rfc3339("9999-12-31T23:59:59+01:00"),
+            Some(MAX_UNIX_SECS - 3600)
+        );
+        assert_eq!(parse_rfc3339("9999-12-31T23:59:59-01:00"), None);
+        assert_eq!(parse_rfc3339("1969-12-31T23:59:59Z"), None);
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00+01:00"), None);
+        assert_eq!(parse_rfc3339("0000-01-01T00:00:00Z"), None);
+        // Every value that parses can be formatted again.
+        assert!(time::rfc3339(MAX_UNIX_SECS).is_ok());
+        assert!(time::rfc3339(MAX_UNIX_SECS + 1).is_err());
+        // Length: 40 characters is the most accepted, 41 is refused.
+        let forty = format!("2001-09-09T01:46:40.{}Z", "0".repeat(19));
+        assert_eq!(forty.len(), 40);
+        assert_eq!(parse_rfc3339(&forty), Some(1_000_000_000));
+        let long = format!("2001-09-09T01:46:40.{}Z", "0".repeat(20));
+        assert_eq!(long.len(), 41);
+        let non_ascii = "2001-09-09T01:46:40\u{e9}\u{e9}\u{e9}";
         for bad in [
             "",
             "2001-09-09",
             "2001-09-09 01:46:40Z",
             "2001-09-09T01:46:40",
             "2001-13-09T01:46:40Z",
+            "2001-00-09T01:46:40Z",
+            "2001-09-00T01:46:40Z",
             "2001-02-29T01:46:40Z",
+            "2001-04-31T01:46:40Z",
+            "2001-09-09T24:00:00Z",
             "2001-09-09T24:46:40Z",
+            "2001-09-09T01:60:40Z",
+            "2001-09-09T01:46:61Z",
             "2001-09-09T01:46:40+0200",
             "2001-09-09T01:46:40.Z",
+            "2001-09-09T01:46:40+24:00",
+            "2001-09-09T01:46:40+02:60",
+            // Signs and other characters in the offset digits.
+            "2001-09-09T01:46:40++5:30",
+            "2001-09-09T01:46:40+-5:30",
+            "2001-09-09T01:46:40-+5:30",
+            "2001-09-09T01:46:40--5:30",
+            "2001-09-09T01:46:40+05:+5",
+            "2001-09-09T01:46:40+05:-5",
+            "2001-09-09T01:46:40+0a:30",
+            "2001-09-09T01:46:40+05;30",
+            // Signs in the date and time digits.
+            "+001-09-09T01:46:40Z",
+            "2001-+9-09T01:46:40Z",
+            "2001-09-09T+1:46:40Z",
+            // Too long (41 characters), and non-ASCII.
+            long.as_str(),
+            "2001-09-09T01:46:40ZZ",
+            non_ascii,
         ] {
-            assert_eq!(parse_rfc3339(bad), None, "{bad:?}");
+            assert_eq!(parse_rfc3339(bad), None, "input of {} bytes", bad.len());
         }
+    }
+
+    #[tokio::test]
+    async fn an_expiry_past_year_9999_is_422_not_500() {
+        let f = Fixture::new("year-overflow").await;
+
+        for text in ["9999-12-31T23:59:59-01:00", "9999-12-31T23:59:59-23:59"] {
+            let error = f.accept("u1", ID, "reason", Some(text)).await.unwrap_err();
+            assert_eq!(error.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        assert_eq!(f.count("SELECT COUNT(*) FROM cve_acceptances").await, 0);
+        assert_eq!(f.count("SELECT COUNT(*) FROM audit_log").await, 0);
+
+        // The last instant that can be written back is accepted and answers with it.
+        let last = f
+            .accept("u1", ID, "reason", Some("9999-12-31T23:59:59Z"))
+            .await
+            .unwrap();
+        assert_eq!(last.expires_at.as_deref(), Some("9999-12-31T23:59:59Z"));
     }
 
     #[test]
