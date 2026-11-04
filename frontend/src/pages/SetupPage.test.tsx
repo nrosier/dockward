@@ -66,6 +66,24 @@ describe("SetupPage", () => {
     expect(submitButton()).toBeDisabled();
   });
 
+  it("says the passwords do not match, and clears the message once they match", async () => {
+    stub();
+    renderWithRoutes(routes, "/setup");
+    await screen.findByLabelText(t("setup.confirm"));
+
+    // An empty form shows no mismatch message.
+    expect(screen.queryByText(t("setup.error.mismatch"))).toBeNull();
+
+    setPasswords("correct horse battery", "correct horse batter");
+    expect(screen.getByRole("alert").textContent).toBe(t("setup.error.mismatch"));
+    expect(submitButton()).toBeDisabled();
+    expect(screen.getByLabelText(t("setup.confirm"))).toHaveAttribute("aria-invalid", "true");
+
+    setPasswords("correct horse battery", "correct horse battery");
+    expect(screen.queryByText(t("setup.error.mismatch"))).toBeNull();
+    expect(screen.getByLabelText(t("setup.confirm"))).not.toHaveAttribute("aria-invalid");
+  });
+
   it("counts an emoji as one character", async () => {
     stub();
     renderWithRoutes(routes, "/setup");

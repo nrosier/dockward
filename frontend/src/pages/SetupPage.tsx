@@ -64,6 +64,8 @@ export default function SetupPage() {
   // Count characters, not UTF-16 units, so an emoji counts as one.
   const length = [...password].length;
   const lengthOk = length >= MIN_LENGTH && length <= MAX_LENGTH;
+  // Only report a mismatch once the confirm field has text, so an empty form shows no error.
+  const mismatch = confirm.length > 0 && password !== confirm;
   const canSubmit = lengthOk && password === confirm && !setup.isPending;
   const filled = Math.min(METER_BARS, Math.ceil(length / CHARS_PER_BAR));
   const tone = lengthOk ? "bg-ok" : "bg-crit";
@@ -189,7 +191,14 @@ export default function SetupPage() {
               required
               value={confirm}
               onChange={(event) => setConfirm(event.target.value)}
+              aria-invalid={mismatch || undefined}
+              aria-describedby={mismatch ? "setup-confirm-error" : undefined}
             />
+            {mismatch ? (
+              <p id="setup-confirm-error" role="alert" className="text-[12.5px] text-crit-ink">
+                {t("setup.error.mismatch")}
+              </p>
+            ) : null}
           </div>
           <Button type="submit" variant="primary" className="min-h-11! w-full px-4 text-sm" disabled={!canSubmit}>
             {setup.isPending ? t("setup.submitting") : t("setup.submit")}

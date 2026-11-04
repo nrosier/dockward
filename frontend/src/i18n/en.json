@@ -99,6 +99,7 @@
   "setup.submit": "Create admin and sign in",
   "setup.submitting": "Creating…",
   "setup.error.tooShort": "The password must be at least 15 characters.",
+  "setup.error.mismatch": "The passwords do not match.",
   "setup.error.done": "Setup is already done.",
   "setup.error.doneLink": "Go to sign in",
   "setup.error.generic": "Setup failed. Try again.",
