@@ -276,28 +276,45 @@ fn parse_trusted_proxies(raw: Option<String>) -> Result<Vec<Cidr>, ConfigError> 
         .collect()
 }
 
-/// Checks `HARBORGATE_PUBLIC_URL` and returns it without a trailing slash.
+/// Checks `HARBORGATE_PUBLIC_URL` and returns its canonical origin: no trailing slash,
+/// a lowercase host, and the scheme's default port removed. Browsers send `Origin` in
+/// this form, so the login same-origin check compares against it (`specs/security.md`).
 /// Accepts `https://<host>[:port]`, and `http://localhost[:port]` for development only.
 fn validate_public_url(raw: &str) -> Result<String, &'static str> {
     const SHAPE: &str = "must be an https:// origin such as https://harborgate.example.com, or http://localhost for development";
     let origin = raw.strip_suffix('/').unwrap_or(raw);
     if let Some(rest) = origin.strip_prefix("https://") {
         return if valid_host_and_port(rest) {
-            Ok(origin.to_owned())
+            Ok(canonical_origin("https", rest, 443))
         } else {
             Err(SHAPE)
         };
     }
     if let Some(rest) = origin.strip_prefix("http://") {
+        let lowered = rest.to_ascii_lowercase();
         let is_localhost =
-            rest == "localhost" || rest.strip_prefix("localhost:").is_some_and(valid_port);
+            lowered == "localhost" || lowered.strip_prefix("localhost:").is_some_and(valid_port);
         return if is_localhost {
-            Ok(origin.to_owned())
+            Ok(canonical_origin("http", rest, 80))
         } else {
             Err(SHAPE)
         };
     }
     Err(SHAPE)
+}
+
+/// Builds `scheme://host[:port]` with a lowercase host, and drops the port when it is
+/// `default_port`. The caller has already validated `rest` as `host[:port]`.
+fn canonical_origin(scheme: &str, rest: &str, default_port: u16) -> String {
+    let (host, port) = match rest.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (rest, None),
+    };
+    let host = host.to_ascii_lowercase();
+    match port.and_then(|text| text.parse::<u16>().ok()) {
+        Some(value) if value != default_port => format!("{scheme}://{host}:{value}"),
+        _ => format!("{scheme}://{host}"),
+    }
 }
 
 fn valid_host_and_port(text: &str) -> bool {
@@ -494,6 +511,28 @@ mod tests {
         let settings = load_settings_with(env_of(&[(PUBLIC_URL_VAR, "https://h.example.com/")]))
             .expect_test_ok();
         assert_eq!(settings.public_url, "https://h.example.com");
+    }
+
+    #[test]
+    fn public_url_host_is_lowercased_and_default_port_dropped() {
+        let cases = [
+            (
+                "https://Harborgate.Example.COM:443/",
+                "https://harborgate.example.com",
+            ),
+            (
+                "https://harborgate.example.com:8443",
+                "https://harborgate.example.com:8443",
+            ),
+            // 80 is not the default for https, so it stays.
+            ("https://h.example.com:80", "https://h.example.com:80"),
+            ("http://LOCALHOST:80", "http://localhost"),
+            ("http://localhost:8080/", "http://localhost:8080"),
+        ];
+        for (raw, expected) in cases {
+            let settings = load_settings_with(env_of(&[(PUBLIC_URL_VAR, raw)])).expect_test_ok();
+            assert_eq!(settings.public_url, expected, "{raw}");
+        }
     }
 
     #[test]

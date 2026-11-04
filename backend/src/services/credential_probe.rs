@@ -99,22 +99,73 @@ impl OutboundHarborProbe {
     }
 }
 
-/// Builds the artifacts URL. Each name is percent-encoded, and a `/` inside the
-/// repository name is encoded twice, as Harbor requires (`specs/integrations.md`).
+/// Checks a Harbor project or repository name against Harbor's naming rule. The name
+/// splits on `/`, and each component is lowercase alphanumerics separated by single
+/// `.`, `_`, or `-`. The whole name is 1 to 255 bytes. Anything else is refused before
+/// a request is made (`specs/integrations.md`, Harbor API).
+pub fn valid_harbor_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 255 {
+        return false;
+    }
+    name.split('/').all(valid_harbor_component)
+}
+
+/// One component of a Harbor name: `[a-z0-9]+([._-][a-z0-9]+)*`. An empty component is
+/// refused, so a leading, trailing, or doubled `/` fails.
+fn valid_harbor_component(component: &str) -> bool {
+    let bytes = component.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let is_separator = |b: u8| b == b'.' || b == b'_' || b == b'-';
+    // The first and last byte are alphanumeric. Every separator sits between two of them.
+    if !is_alnum(bytes[0]) || !is_alnum(bytes[bytes.len() - 1]) {
+        return false;
+    }
+    let mut previous_separator = false;
+    for &byte in bytes {
+        if is_separator(byte) {
+            if previous_separator {
+                return false;
+            }
+            previous_separator = true;
+        } else if is_alnum(byte) {
+            previous_separator = false;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// Builds the artifacts URL. The project is encoded as one segment. The repository is
+/// encoded per component, and the components are joined with `%252F`, which is the
+/// double encoding Harbor requires (`specs/integrations.md`).
 pub fn artifacts_url(base: &Url, project: &str, repository: &str) -> Result<Url, AppError> {
-    let encoded_repo = repository.replace('/', "%252F");
     let path = format!(
         "api/v2.0/projects/{}/repositories/{}/artifacts?page_size=1",
         encode_segment(project),
-        encoded_repo
+        encode_repository_path(repository)
     );
     base.join(&path).map_err(|_| {
         AppError::ValidationFailed("the Harbor project or repository name is not valid.".to_owned())
     })
 }
 
+/// Encodes a repository name for a URL path. Each `/`-separated component is encoded on
+/// its own, and the components are joined with `%252F`, so the name keeps its slashes
+/// through Harbor's double encoding.
+pub fn encode_repository_path(repository: &str) -> String {
+    repository
+        .split('/')
+        .map(encode_segment)
+        .collect::<Vec<_>>()
+        .join("%252F")
+}
+
 /// Percent-encodes one path segment. Unreserved characters are kept as they are.
-fn encode_segment(text: &str) -> String {
+pub fn encode_segment(text: &str) -> String {
     text.bytes()
         .map(|byte| match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
@@ -415,6 +466,47 @@ mod tests {
             "{url}"
         );
         assert!(url.as_str().ends_with("?page_size=1"));
+    }
+
+    #[test]
+    fn harbor_names_are_validated() {
+        // Valid: lowercase alphanumerics, with single `.`, `_`, or `-` between them.
+        assert!(valid_harbor_name("proj"));
+        assert!(valid_harbor_name("my-proj.v2_x"));
+        assert!(valid_harbor_name("team/app"));
+        assert!(valid_harbor_name("a/b/c"));
+        // Refused: empty, uppercase, a `/` in a project, separators at the edges or doubled.
+        assert!(!valid_harbor_name(""));
+        assert!(!valid_harbor_name("Proj"));
+        assert!(!valid_harbor_name("-proj"));
+        assert!(!valid_harbor_name("proj-"));
+        assert!(!valid_harbor_name("a..b"));
+        assert!(!valid_harbor_name("a--b"));
+        assert!(!valid_harbor_name("a//b"));
+        assert!(!valid_harbor_name("/a"));
+        assert!(!valid_harbor_name("a/"));
+        assert!(!valid_harbor_name("a?b"));
+        assert!(!valid_harbor_name("a#b"));
+        assert!(!valid_harbor_name("a%b"));
+        assert!(!valid_harbor_name("a b"));
+        // Length: 255 bytes is the most a name may have.
+        let at_limit = "a".repeat(255);
+        assert!(valid_harbor_name(&at_limit));
+        assert!(!valid_harbor_name(&format!("{at_limit}a")));
+    }
+
+    #[test]
+    fn repository_components_are_encoded() {
+        // Each component is encoded on its own, and the components join with %252F.
+        assert_eq!(encode_repository_path("team/app"), "team%252Fapp");
+        assert_eq!(encode_repository_path("a/b/c"), "a%252Fb%252Fc");
+        let base = Url::parse("https://harbor.example.com").unwrap();
+        let url = artifacts_url(&base, "proj", "team/app").unwrap();
+        assert!(
+            url.as_str()
+                .contains("/repositories/team%252Fapp/artifacts"),
+            "{url}"
+        );
     }
 
     #[test]

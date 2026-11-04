@@ -126,6 +126,22 @@ fn validate_text(name: &str, value: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// A Harbor project is one name with no `/`. A repository may have `/` between its
+/// components. Both follow Harbor's naming rule (`credential_probe::valid_harbor_name`).
+fn validate_harbor_names(project: &str, repository: &str) -> Result<(), AppError> {
+    if project.contains('/') || !credential_probe::valid_harbor_name(project) {
+        return Err(AppError::ValidationFailed(
+            "harbor_project must be a lowercase Harbor project name.".to_owned(),
+        ));
+    }
+    if !credential_probe::valid_harbor_name(repository) {
+        return Err(AppError::ValidationFailed(
+            "harbor_repository must be a lowercase Harbor repository name.".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_severity(value: &str) -> Result<(), AppError> {
     if SEVERITIES.contains(&value) {
         Ok(())
@@ -205,8 +221,7 @@ async fn check_harbor_repository<P: HarborProbe>(
     let row = cred_db::find_owned(conn, user_id, harbor_cred_id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let base = reqwest::Url::parse(row.base_url.as_deref().ok_or(AppError::InternalError)?)
-        .map_err(|_| AppError::InternalError)?;
+    let base = credentials::base_for_join(row.base_url.as_deref().ok_or(AppError::InternalError)?)?;
     let username = row.username.clone().ok_or(AppError::InternalError)?;
     let secret = credentials::decrypt_token(credentials_key, &row)?;
     let status = probe
@@ -309,6 +324,7 @@ pub async fn create<P: HarborProbe, G: GithubProbe>(
 ) -> Result<Created, AppError> {
     validate_text("harbor_project", &input.harbor_project)?;
     validate_text("harbor_repository", &input.harbor_repository)?;
+    validate_harbor_names(&input.harbor_project, &input.harbor_repository)?;
     validate_text("github_owner", &input.github_owner)?;
     validate_text("github_repo", &input.github_repo)?;
     let severity = input
@@ -728,6 +744,30 @@ mod tests {
         assert!(validate_severity("CRITICAL").is_ok());
         assert!(validate_severity("HIGH").is_ok());
         assert!(validate_severity("MEDIUM").is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_harbor_repository_is_422() {
+        let (pool, dir) = fresh_pool("bad-name").await;
+        let owner = user(&pool, "owner").await;
+        let (h, g) = creds(&pool, &owner).await;
+        // `?` changes the request path, so the name is refused before any Harbor call.
+        let result = create(
+            &pool,
+            &key(),
+            &READABLE,
+            &GH_READY,
+            &actor(&owner),
+            &owner,
+            PUBLIC,
+            input(&h, &g, "repo?x", "gh"),
+        )
+        .await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = result.err().unwrap();
+        assert!(matches!(err, AppError::ValidationFailed(_)), "{err:?}");
+        assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

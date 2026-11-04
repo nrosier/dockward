@@ -203,7 +203,7 @@ pub async fn run_harbor_probe<P: HarborProbe>(
     row: &crate::db::credentials::CredentialRow,
 ) -> Result<credential_probe::Check, AppError> {
     let base_text = row.base_url.as_deref().ok_or(AppError::InternalError)?;
-    let base = reqwest::Url::parse(base_text).map_err(|_| AppError::InternalError)?;
+    let base = credentials::base_for_join(base_text)?;
     let username = row.username.as_deref().ok_or(AppError::InternalError)?;
     let secret = credentials::decrypt_token(&state.credentials_key, row)?;
     let status = probe.users_current(&base, username, &secret).await?;

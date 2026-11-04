@@ -145,6 +145,18 @@ pub fn normalize_base_url(text: &str, allow_private: bool) -> Result<String, App
     Ok(format!("https://{host}{port}{path}"))
 }
 
+/// Parses a stored Harbor base URL for joining relative paths. The stored form has no
+/// trailing slash, and `Url::join` would replace its last segment, so a `/prefix` base
+/// would lose `prefix`. A trailing `/` is added first, so `join("api/...")` keeps the path.
+pub fn base_for_join(stored: &str) -> Result<reqwest::Url, AppError> {
+    let with_slash = if stored.ends_with('/') {
+        stored.to_owned()
+    } else {
+        format!("{stored}/")
+    };
+    reqwest::Url::parse(&with_slash).map_err(|_| AppError::InternalError)
+}
+
 fn validate_label(label: &str) -> Result<(), AppError> {
     if label.trim().is_empty() || label.len() > 200 {
         return Err(AppError::ValidationFailed(
@@ -499,6 +511,29 @@ mod tests {
         assert_eq!(
             normalize_base_url("https://harbor.example.com:8443/base/", false).unwrap(),
             "https://harbor.example.com:8443/base"
+        );
+    }
+
+    #[test]
+    fn base_path_is_kept_when_joining() {
+        let stored = normalize_base_url("https://harbor.example.com/prefix/", false).unwrap();
+        let joined = base_for_join(&stored)
+            .unwrap()
+            .join("api/v2.0/users/current")
+            .unwrap();
+        assert_eq!(
+            joined.as_str(),
+            "https://harbor.example.com/prefix/api/v2.0/users/current"
+        );
+        // Without a base path the join stays at the host root.
+        let root = normalize_base_url(HARBOR, false).unwrap();
+        let root_joined = base_for_join(&root)
+            .unwrap()
+            .join("api/v2.0/users/current")
+            .unwrap();
+        assert_eq!(
+            root_joined.as_str(),
+            "https://harbor.example.com/api/v2.0/users/current"
         );
     }
 
