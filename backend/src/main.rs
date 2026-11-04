@@ -958,7 +958,10 @@ mod tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
         let (router, pool, dir) = test_router("cross-site").await;
-        let body = r#"{"username":"test-x","password":"test-password-fifteen"}"#;
+        let body = format!(
+            r#"{{"username":"test-x","password":"{}"}}"#,
+            runtime_password()
+        );
         let mut failures = Vec::new();
         for uri in ["/api/v1/auth/login", "/api/v1/auth/setup"] {
             for (label, origin, fetch_site) in [
@@ -982,7 +985,7 @@ mod tests {
                 if let Some(value) = fetch_site {
                     builder = builder.header("sec-fetch-site", value);
                 }
-                let request = builder.body(Body::from(body)).unwrap();
+                let request = builder.body(Body::from(body.clone())).unwrap();
                 let response = router.clone().oneshot(request).await.unwrap();
                 let status = response.status();
                 let bytes = axum::body::to_bytes(response.into_body(), 4096)
@@ -1009,24 +1012,14 @@ mod tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
         let (router, pool, dir) = test_router("password-http").await;
-        services::auth::create_first_admin(&pool, "test-admin", None, "test-password-fifteen")
+        let current = runtime_password();
+        let next = runtime_password();
+        services::auth::create_first_admin(&pool, "test-admin", None, &current)
             .await
             .unwrap();
-        let login_a = post_login(
-            &router,
-            [192, 0, 2, 20],
-            "test-admin",
-            "test-password-fifteen",
-        )
-        .await;
+        let login_a = post_login(&router, [192, 0, 2, 20], "test-admin", &current).await;
         assert_eq!(login_a.status(), StatusCode::OK);
-        let login_b = post_login(
-            &router,
-            [192, 0, 2, 20],
-            "test-admin",
-            "test-password-fifteen",
-        )
-        .await;
+        let login_b = post_login(&router, [192, 0, 2, 20], "test-admin", &current).await;
         assert_eq!(login_b.status(), StatusCode::OK);
         let session_a = set_cookie_value(&login_a, auth::session::SESSION_COOKIE).unwrap();
         let session_b = set_cookie_value(&login_b, auth::session::SESSION_COOKIE).unwrap();
@@ -1048,9 +1041,9 @@ mod tests {
                 )
                 .header("x-csrf-token", &csrf),
         )
-        .body(Body::from(
-            r#"{"current_password":"test-password-fifteen","new_password":"test-new-password-xyz"}"#,
-        ))
+        .body(Body::from(format!(
+            r#"{{"current_password":"{current}","new_password":"{next}"}}"#
+        )))
         .unwrap();
         let changed = router.clone().oneshot(change).await.unwrap();
         assert_eq!(changed.status(), StatusCode::NO_CONTENT);
@@ -1072,6 +1065,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(status_b, StatusCode::UNAUTHORIZED, "other session survived");
         assert_eq!(status_c, StatusCode::OK, "the fresh session must work");
+    }
+
+    /// A test password drawn from the OS RNG at run time, so no password literal sits in
+    /// the source. Length is well over the 15-character minimum.
+    fn runtime_password() -> String {
+        format!("test-pw-{}", services::ids::new_id())
     }
 
     /// A signed session cookie for `user_id`, issued the way login issues one. Test key only.
