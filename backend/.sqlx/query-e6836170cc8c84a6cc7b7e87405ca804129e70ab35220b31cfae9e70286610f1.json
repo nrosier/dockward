@@ -1,0 +1,69 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT f.image_tag AS \"image_tag!: String\", f.status AS \"status!: String\",\n                  f.fixed_in_version AS \"fixed_in_version?: String\",\n                  f.description AS \"description?: String\",\n                  ts.scan_at AS \"last_scan_at?: i64\"\n           FROM cve_findings f\n           LEFT JOIN (\n               SELECT image_tag, MAX(synced_at) AS scan_at\n               FROM sync_reports WHERE mapping_id = ?1 AND sarif_status = 'success'\n               GROUP BY image_tag\n           ) ts ON ts.image_tag = f.image_tag\n           WHERE f.mapping_id = ?1 AND f.cve_id = ?2\n           ORDER BY COALESCE(ts.scan_at, -1) DESC, f.last_seen_at DESC, f.id DESC\n           LIMIT 10",
+  "describe": {
+    "columns": [
+      {
+        "name": "image_tag!: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "image_tag"
+          }
+        }
+      },
+      {
+        "name": "status!: String",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "fixed_in_version?: String",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "fixed_in_version"
+          }
+        }
+      },
+      {
+        "name": "description?: String",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "description"
+          }
+        }
+      },
+      {
+        "name": "last_scan_at?: i64",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "e6836170cc8c84a6cc7b7e87405ca804129e70ab35220b31cfae9e70286610f1"
+}

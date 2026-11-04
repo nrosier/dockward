@@ -86,7 +86,13 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/mappings/{id}/rotate-auth-secret",
             post(api::mappings::rotate_auth_secret),
         )
+        .route(
+            "/api/v1/mappings/{id}/cves",
+            get(api::cves::list_for_mapping),
+        )
         .route("/api/v1/sync-jobs/{id}/retry", post(api::sync_jobs::retry))
+        .route("/api/v1/cves", get(api::cves::list))
+        .route("/api/v1/cves/{id}", get(api::cves::get))
         .route("/api/v1/cves/{id}/issue", post(api::cves::issue))
         .route("/api/v1/cves/{id}/accept", post(api::cves::accept))
         .route("/api/v1/cves/{id}/unaccept", post(api::cves::unaccept))
@@ -2106,5 +2112,121 @@ mod tests {
         assert_eq!(owner_accept, StatusCode::CREATED);
         assert_eq!(foreign_unaccept_after, StatusCode::NOT_FOUND);
         assert_eq!(owner_unaccept, StatusCode::NO_CONTENT);
+    }
+
+    /// The CVE read routes through the full router: no session is `401` on all three, another
+    /// user's mapping is `404` (also in the percent-encoded `<mapping_id>%3A<cve_id>` form, and
+    /// as the `mapping_id` filter), and the owner gets `200` with no CSRF token, because a GET
+    /// needs none. `scope=all` from a user is `403`; an admin may read the owner's CVEs.
+    #[tokio::test]
+    async fn cve_read_routes_check_session_and_tenancy() {
+        let (router, pool, dir) = test_router("cve-read-routes").await;
+        let mut conn = pool.acquire().await.unwrap();
+        for (id, role) in [
+            ("owner-1", "user"),
+            ("other-2", "user"),
+            ("admin-3", "admin"),
+        ] {
+            db::users::insert_local(&mut conn, id, id, None, "h", role)
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        sqlx::query(
+            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
+             VALUES ('rc1', 'owner-1', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
+                    ('rc2', 'owner-1', 'github', 'g', NULL, NULL, 'v1:fake')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+             VALUES ('rm1', 'owner-1', 'rc1', 'rc2', 'https://harbor.example.com', 'proj', 'app', 'octo', 'app', 'h1', 'h2')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, severity, status)
+             VALUES ('rf1', 'rm1', 'app', 'v1', 'CVE-2026-0001', 'CRITICAL', 'open'),
+                    ('rf2', 'rm1', 'app', 'v2', 'CVE-2026-0001', 'HIGH', 'open'),
+                    ('rf3', 'rm1', 'app', 'v3', 'CVE-2026-0001', 'LOW', 'fixed')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let owner = session_cookie("owner-1", "user", 0);
+        let other = session_cookie("other-2", "user", 0);
+        let admin = session_cookie("admin-3", "admin", 0);
+        let mapping_list = "/api/v1/mappings/rm1/cves";
+        let all_list = "/api/v1/cves";
+        let filtered = "/api/v1/cves?mapping_id=rm1";
+        let detail = "/api/v1/cves/rm1%3ACVE-2026-0001";
+
+        let mut statuses = Vec::new();
+        for (uri, cookie) in [
+            (mapping_list, ""),
+            (all_list, ""),
+            (detail, ""),
+            (mapping_list, other.as_str()),
+            (filtered, other.as_str()),
+            (detail, other.as_str()),
+            ("/api/v1/mappings/rm1/cves?page_size=201", other.as_str()),
+            ("/api/v1/cves?scope=all", other.as_str()),
+            ("/api/v1/mappings/rm1/cves?page_size=201", owner.as_str()),
+        ] {
+            statuses.push(get_json(&router, uri, cookie).await.0);
+        }
+        let (owner_list, owner_page) = get_json(&router, mapping_list, &owner).await;
+        let (owner_all, owner_all_page) = get_json(&router, all_list, &owner).await;
+        let (other_all, other_page) = get_json(&router, all_list, &other).await;
+        let (owner_detail, owner_body) = get_json(&router, detail, &owner).await;
+        let (admin_detail, _) = get_json(&router, detail, &admin).await;
+        let (admin_all, admin_page) = get_json(&router, "/api/v1/cves?scope=all", &admin).await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        use axum::http::StatusCode;
+        assert_eq!(
+            statuses,
+            [
+                StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::NOT_FOUND,
+                StatusCode::NOT_FOUND,
+                StatusCode::NOT_FOUND,
+                StatusCode::NOT_FOUND,
+                StatusCode::FORBIDDEN,
+                StatusCode::BAD_REQUEST,
+            ]
+        );
+        assert_eq!(owner_list, StatusCode::OK);
+        assert_eq!(
+            owner_page["total"], 1,
+            "one CVE on three tags is one summary"
+        );
+        assert_eq!(owner_page["items"][0]["id"], "rm1:CVE-2026-0001");
+        assert_eq!(owner_page["items"][0]["severity"], "CRITICAL");
+        assert_eq!(owner_page["items"][0]["open_tags"], 2);
+        assert_eq!(
+            (owner_all, owner_all_page["total"].clone()),
+            (StatusCode::OK, 1.into())
+        );
+        assert_eq!(
+            (other_all, other_page["total"].clone()),
+            (StatusCode::OK, 0.into())
+        );
+        assert_eq!(owner_detail, StatusCode::OK);
+        assert_eq!(owner_body["cve_id"], "CVE-2026-0001");
+        assert_eq!(owner_body["tags"].as_array().map(Vec::len), Some(3));
+        assert!(owner_body["acceptance"].is_null());
+        assert_eq!(admin_detail, StatusCode::OK);
+        assert_eq!(
+            (admin_all, admin_page["total"].clone()),
+            (StatusCode::OK, 1.into())
+        );
     }
 }
