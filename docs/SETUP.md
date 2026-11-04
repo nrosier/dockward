@@ -98,10 +98,10 @@ https://<your-host>/api/v1/webhooks/harbor/<mapping_token>
 - `<your-host>` is the public hostname of your HarborGate instance. Use HTTPS only. HarborGate builds this URL from `HARBORGATE_PUBLIC_URL`, so the hostname here must match it.
 - `<mapping_token>` is the webhook token shown in the HarborGate mapping screen. You get it in section 5, after you create the mapping. Create the mapping first, then return here.
 
-6. Set the auth header on the webhook. In Harbor's webhook settings, set the **Auth Header** field to `Bearer <webhook-secret>`. Use the secret value shown once in the HarborGate mapping screen. Harbor sends this value as the `Authorization` header with every notification, and HarborGate checks it. Treat it as a secret. The field is labelled **Auth Header** in the Add Webhook form (verified in Harbor's string catalog).
+6. Set the auth header on the webhook. In HarborGate, copy the **Auth header value** shown once on the mapping screen. It already starts with `Bearer `. Paste it into Harbor's webhook **Auth Header** field exactly as copied. Do not add `Bearer ` yourself. Harbor sends this value as the `Authorization` header with every notification, and HarborGate checks it. Treat it as a secret. The field is labelled **Auth Header** in the Add Webhook form (verified in Harbor's string catalog).
 
 ```text
-Auth Header: Bearer <webhook-secret>
+Auth Header: Bearer <webhook-secret>   (the value copied from HarborGate, pasted as is)
 ```
 
 7. Leave **Verify Remote Certificate** checked. Harbor's tooltip: "Determine whether the webhook should verify the certificate of a remote URL. Uncheck this box when the remote URL uses a self-signed or untrusted certificate." HarborGate behind Traefik has a valid certificate, so never uncheck it.
@@ -244,7 +244,7 @@ Check each item before you rely on the setup:
 
 1. In HarborGate, open the mapping and choose **Rotate webhook URL** or **Rotate auth secret**. Confirm the dialog.
 2. HarborGate shows the new value once. Copy it before you leave the screen.
-3. In Harbor, update the project webhook: paste the new URL into the endpoint URL, or the new secret into the **Auth Header** as `Bearer <webhook-secret>`.
+3. In Harbor, update the project webhook: paste the new URL into the endpoint URL, or paste the new **Auth header value** from HarborGate into the **Auth Header**. Paste it as copied. It already includes `Bearer `.
 4. Run one test push. The old value stops working as soon as you rotate it, so a webhook that still uses it returns `401`.
 
 ### Rotate the GitHub token
@@ -312,4 +312,4 @@ Backups made before the rotation open only with the old key.
 | Sync failed: missing SHA label | The image has no `org.opencontainers.image.revision` label | Add the label at build time (section 6) and push the image again. |
 | No webhook triggers | Webhook event is not "Scanning finished" (`SCANNING_COMPLETED`), the webhook token does not match the mapping, or the pushed image has no tag (HarborGate ignores untagged pushes) | Edit the Harbor webhook so it subscribes only to Scan completed, confirm the URL contains the mapping's token, and push the image with a tag. |
 | Issue not created | Severity is below the threshold, the CVE is accepted on the mapping, auto-issues is off, or the GitHub token lacks the Issues permission | Check the mapping's minimum severity and auto-issues setting. Check the CVE's acceptance status. Check that the token has Issues (read and write). |
-| Webhook returns 401 | Authorization header missing or wrong | Compare the Auth Header value in Harbor (`Bearer <webhook-secret>`) with the HarborGate mapping screen; rotate the value if it was exposed. |
+| Webhook returns 401 | Authorization header missing or wrong | Paste the Auth header value from HarborGate into Harbor exactly as copied, with no extra `Bearer `. If it was copied wrong or exposed, rotate it and paste the new value. |

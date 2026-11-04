@@ -1163,6 +1163,29 @@ mod tests {
             .unwrap()
     }
 
+    /// The value the create and rotate responses return is the full `Authorization` header.
+    /// Pasted into Harbor unchanged, it must be accepted. The test uses the header form as
+    /// the service returns it, so the `Bearer ` prefix is part of the contract.
+    #[tokio::test]
+    async fn shown_auth_header_value_is_accepted_when_pasted_unchanged() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("pasted-auth").await;
+        let token = "tok-pasted-fake";
+        let bare = "sec-pasted-fake";
+        // The stored digest is of the bare secret, as the service writes it.
+        webhook_fixture(&pool, token, bare).await;
+        // Harbor sends the Auth Header exactly as entered: the shown value, unchanged.
+        let shown = format!("Bearer {bare}");
+        let response = router
+            .oneshot(webhook_request(token, Some(&shown), WEBHOOK_BODY))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The webhook route is exempt from the CSRF guard: a POST with no CSRF token is not
     /// refused with `403 csrf_invalid`. This is the route-level exemption, not the helper.
     #[tokio::test]
