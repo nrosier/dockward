@@ -457,6 +457,16 @@ mod tests {
     }
 
     #[test]
+    fn env_example_placeholder_is_rejected() {
+        // The placeholder in .env.example must never start the app as-is.
+        let result = parse_encryption_key("replace-with-openssl-rand-base64-32");
+        assert!(
+            result.is_err(),
+            "the .env.example placeholder must be rejected"
+        );
+    }
+
+    #[test]
     fn invalid_base64_is_rejected() {
         let result = parse_encryption_key("not base64!!");
         assert_eq!(result.err(), Some(ConfigError::InvalidBase64));

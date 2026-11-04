@@ -4,6 +4,7 @@ node_modules/
 dist/
 .env
 .env.*
+!.env.example
 data/
 *.db
 *.sqlite
@@ -14,3 +15,4 @@ master.key
 .DS_Store
 frontend/tsconfig.tsbuildinfo
 *.tsbuildinfo
+.playwright-mcp/
