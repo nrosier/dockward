@@ -10,7 +10,7 @@ RUN npm run build
 
 # The frontend is built before the backend so rust-embed can embed
 # /src/frontend/dist (relative to the backend crate: ../frontend/dist).
-FROM rust:1.99.1-alpine AS backend
+FROM rust:1.99.1-alpine@sha256:27cd9befd4a05d6f6eb407c3e28365f5092f008bfc5946207cca76ae5179ef23 AS backend
 WORKDIR /src/backend
 COPY backend/ ./
 COPY --from=frontend /build/dist /src/frontend/dist
