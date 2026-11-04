@@ -48,6 +48,7 @@ const MAX_WAIT: Duration = Duration::from_secs(300);
 
 const MSG_GONE: &str = "mapping or credential no longer exists";
 const MSG_DATABASE: &str = "the database could not be read or written";
+const MSG_INTERNAL: &str = "an internal error stopped this job; it will be retried";
 const MSG_DECRYPT: &str = "a stored credential could not be decrypted";
 const MSG_NOT_YET: &str = "Harbor report not available yet";
 const MSG_TOO_LARGE: &str = "SARIF over 10 MB compressed";
@@ -221,6 +222,12 @@ fn database(_: AppError) -> JobOutcome {
     failed(MSG_DATABASE)
 }
 
+/// A failure that is not a database fault, such as the OS random source. The text is
+/// fixed and names no internal detail.
+fn internal(_: AppError) -> JobOutcome {
+    failed(MSG_INTERNAL)
+}
+
 /// Maps a GitHub error to the job outcome. A rate limit defers the job. The other
 /// messages are fixed text that names the GitHub permission, never the token.
 fn scan_outcome(error: ScanError) -> JobOutcome {
@@ -328,7 +335,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
         let report_id = match existing {
             Some(report) => report.id,
             None => {
-                let id = ids::new_id().map_err(database)?;
+                let id = ids::new_id().map_err(internal)?;
                 let repository = context.mapping.harbor_repository.as_str();
                 let new = NewReport {
                     id: &id,

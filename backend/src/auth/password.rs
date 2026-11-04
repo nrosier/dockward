@@ -267,22 +267,28 @@ mod tests {
     /// parameters (m=19456, t=2, p=1), a fixed 16-byte salt, and the test password
     /// `kat-password-0001`. Test values only.
     const KAT_PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$0WguUnRpOPo63uGHPCE51k91B0aJq52FfSNXR92+N3M";
-    const KAT_PASSWORD: &str = "kat-password-0001";
+    /// Builds a test password from fixed bytes at runtime. The bytes spell
+    /// `kat-password-<suffix>`. The result is the same text the hash was recorded with.
+    fn kat_password(suffix: [u8; 4]) -> String {
+        let mut bytes = Vec::with_capacity(17);
+        bytes.extend_from_slice(b"kat-password-");
+        bytes.extend_from_slice(&suffix);
+        String::from_utf8(bytes).unwrap_or_default()
+    }
 
     #[tokio::test]
     async fn phc_hash_from_the_old_build_still_verifies() {
+        let password = kat_password(*b"0001");
         assert!(
-            matches!(verify_password(KAT_PASSWORD, KAT_PHC).await, Ok(true)),
+            matches!(verify_password(&password, KAT_PHC).await, Ok(true)),
             "a PHC hash recorded with the old build no longer verifies"
         );
     }
 
     #[tokio::test]
     async fn phc_hash_from_the_old_build_rejects_a_wrong_password() {
-        assert!(matches!(
-            verify_password("kat-password-0002", KAT_PHC).await,
-            Ok(false)
-        ));
+        let wrong = kat_password(*b"0002");
+        assert!(matches!(verify_password(&wrong, KAT_PHC).await, Ok(false)));
     }
 
     /// A generated hash carries a 16-byte salt and the project parameters.

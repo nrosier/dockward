@@ -43,7 +43,10 @@ mod tests {
 
     #[test]
     fn os_random_bytes_fill_the_requested_length() {
-        let bytes = os_random_bytes::<32>().unwrap_or([0u8; 32]);
-        assert_eq!(bytes.len(), 32);
+        let first = os_random_bytes::<32>();
+        let second = os_random_bytes::<32>();
+        assert!(first.is_ok(), "the OS random source failed");
+        assert!(second.is_ok(), "the OS random source failed");
+        assert_ne!(first.ok(), second.ok(), "two draws were equal");
     }
 }

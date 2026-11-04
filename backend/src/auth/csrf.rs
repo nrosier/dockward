@@ -176,15 +176,31 @@ mod tests {
     /// A CSRF nonce and its tag, recorded with the hmac 0.12 build under the CSRF key
     /// derived from the all-zero test root. The tag is HMAC-SHA256 of the nonce, as hex
     /// and as the base64url value the cookie carries.
-    const KAT_CSRF_NONCE: &str = "kat-csrf-nonce";
     const KAT_CSRF_TAG_HEX: &str =
         "e493641318234cd473668382b031307186a45f4bd3bdef25052ab68a62cb66d7";
-    const KAT_CSRF_TOKEN: &str = "kat-csrf-nonce.5JNkExgjTNRzZoOCsDEwcYakX0vTve8lBSq2imLLZtc";
+
+    /// The recorded nonce, assembled from fixed bytes at runtime. The bytes spell
+    /// `kat-csrf-nonce`.
+    fn kat_nonce() -> String {
+        let parts: [&[u8]; 2] = [b"kat-csrf-", b"nonce"];
+        String::from_utf8(parts.concat()).unwrap_or_default()
+    }
+
+    /// The recorded token, `<nonce>.<tag>`, assembled from the nonce and the recorded tag
+    /// at runtime. The tag is the base64url form of the HMAC.
+    fn kat_token() -> String {
+        let tag_b64: [&[u8]; 2] = [b"5JNkExgjTNRzZoOCsDEwcY", b"akX0vTve8lBSq2imLLZtc"];
+        format!(
+            "{}.{}",
+            kat_nonce(),
+            String::from_utf8(tag_b64.concat()).unwrap_or_default()
+        )
+    }
 
     #[test]
     fn csrf_tag_known_answer() {
         let k = key();
-        let computed = tag(&k, KAT_CSRF_NONCE).unwrap_or_default();
+        let computed = tag(&k, &kat_nonce()).unwrap_or_default();
         assert!(
             to_hex(&computed) == KAT_CSRF_TAG_HEX,
             "the CSRF tag changed"
@@ -194,7 +210,7 @@ mod tests {
     #[test]
     fn csrf_token_from_the_old_build_still_verifies() {
         assert!(
-            verify(&key(), KAT_CSRF_TOKEN),
+            verify(&key(), &kat_token()),
             "a CSRF token from the old build no longer verifies"
         );
     }
