@@ -61,6 +61,14 @@ impl Actor {
             username: "cli".to_owned(),
         }
     }
+
+    /// The background workers, as recorded by the retention run.
+    pub fn system() -> Self {
+        Self {
+            user_id: None,
+            username: "system".to_owned(),
+        }
+    }
 }
 
 /// One audit row as returned by the admin list. `details` is parsed JSON.

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM sync_reports WHERE synced_at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "69cb0002b15b7356288b0133dbe2cedc03e9473b06eb1c749202e8fd5da5256a"
+}
