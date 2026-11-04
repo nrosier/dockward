@@ -85,6 +85,46 @@ pub async fn set_sarif_id(pool: &SqlitePool, id: &str, sarif_id: &str) -> Result
     .map_err(|_| AppError::InternalError)
 }
 
+/// True when polling must not queue this `(digest, tag)` for the mapping: either a
+/// successful sync exists (`sync_jobs.status = 'done'` and `sarif_status = 'success'` on
+/// the linked report), or a `queued` or `running` job for the same digest and tag exists.
+pub async fn has_success(
+    pool: &SqlitePool,
+    mapping_id: &str,
+    harbor_repository: &str,
+    tag: &str,
+    digest: &str,
+) -> Result<bool, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT (
+               EXISTS (
+                   SELECT 1 FROM sync_reports r
+                   JOIN sync_jobs j ON j.id = r.sync_job_id
+                   WHERE r.mapping_id = ? AND r.harbor_repository = ?
+                     AND r.image_tag = ? AND r.image_digest = ?
+                     AND r.sarif_status = 'success' AND j.status = 'done'
+               )
+               OR EXISTS (
+                   SELECT 1 FROM sync_jobs q
+                   WHERE q.mapping_id = ? AND q.status IN ('queued', 'running')
+                     AND json_extract(q.payload, '$.digest') = ?
+                     AND json_extract(q.payload, '$.tag') = ?
+               )
+           ) AS "found!: i64""#,
+        mapping_id,
+        harbor_repository,
+        tag,
+        digest,
+        mapping_id,
+        digest,
+        tag
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.found != 0)
+}
+
 /// Ends a report with `sarif_status` (`success` or `failed`) and an optional error text.
 pub async fn finish(
     pool: &SqlitePool,

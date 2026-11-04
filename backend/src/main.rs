@@ -476,6 +476,14 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         worker::run(worker_pool, Arc::new(sync_handler), worker_stop).await;
     });
 
+    // Backup polling queues jobs for tagged artifacts without a successful sync.
+    let poller_task = tokio::spawn(services::poller::run(
+        state.pool.clone(),
+        state.credentials_key.clone(),
+        state.allow_private_harbor,
+        stop_rx.clone(),
+    ));
+
     let mut graceful = stop_rx.clone();
     let router = app(settings.trusted_proxies.clone(), state)
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
@@ -494,6 +502,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     }
     // Give the worker its turn to finish the job it holds, within the drain limit.
     let _ = tokio::time::timeout(DRAIN_TIMEOUT, worker_task).await;
+    let _ = tokio::time::timeout(DRAIN_TIMEOUT, poller_task).await;
     Ok(())
 }
 
