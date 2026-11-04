@@ -46,6 +46,14 @@ docker build -t harborgate:latest .
 docker run --init --env-file .env -p 8080:8080 -v harborgate_data:/data harborgate:latest
 ```
 
+## Command output (rtk)
+
+Commands run through rtk (Rust Token Killer), a Claude Code Bash hook that rewrites commands such as git, cargo, npm, docker and gh to filtered, condensed output. Output may differ from the tool's normal format.
+
+- Do not rely on exact formatting, or read missing lines as success. Judge pass/fail by exit code and summary counts.
+- If output looks truncated or incomplete, run the raw command with `rtk bypass <command>`, or fetch the elided part with `rtk recall <hash>` (hash from the recovery hint).
+- Parse machine output with `--json` or `--format` flags where the tool has them.
+
 ## Repository layout
 
 - `backend/`: Rust crate. `src/api/` (handlers), `src/services/` (Harbor, GitHub, SARIF), `src/db/` (SQL), `src/auth/`, `src/models/`, `src/worker/`, `migrations/`.
