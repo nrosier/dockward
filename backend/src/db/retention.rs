@@ -2,6 +2,7 @@
 //! deletes the rows of one table whose timestamp is strictly before `cutoff` (Unix
 //! seconds) and returns how many rows it deleted. The service picks the cutoffs.
 //!
+//! A row whose timestamp is NULL is never deleted, because `NULL < cutoff` is not true.
 //! `github_issues`, `cve_findings` and `cve_acceptances` are never touched here.
 
 use sqlx::SqliteConnection;

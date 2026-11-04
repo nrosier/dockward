@@ -20,15 +20,20 @@ use crate::services::ids;
 use crate::worker::now_secs;
 
 const DAY: i64 = 86_400;
-/// Age limit for `sync_reports`, in seconds.
+// The ages below are from `specs/cve-lifecycle.md` (Retention) and `specs/database.md`
+// (Retention). A row whose timestamp is NULL is never deleted, because `NULL < cutoff`
+// is not true in SQL.
+/// Age limit for `sync_reports`: 90 days (`specs/cve-lifecycle.md` Retention).
 const SYNC_REPORT_AGE: i64 = 90 * DAY;
-/// Age limit for finished `sync_jobs`, in seconds.
+/// Age limit for finished `sync_jobs`: 90 days (`specs/cve-lifecycle.md` Retention,
+/// `specs/database.md` Retention).
 const SYNC_JOB_AGE: i64 = 90 * DAY;
-/// Age limit for `job_runs`, in seconds.
+/// Age limit for `job_runs`: 90 days (`specs/database.md` Retention).
 const JOB_RUN_AGE: i64 = 90 * DAY;
-/// Age limit for `alert_deliveries`, in seconds.
+/// Age limit for `alert_deliveries`: 30 days (`specs/cve-lifecycle.md` Retention,
+/// `specs/database.md` Retention).
 const ALERT_DELIVERY_AGE: i64 = 30 * DAY;
-/// Age limit for `audit_log`, in seconds.
+/// Age limit for `audit_log`: 365 days (`specs/cve-lifecycle.md` Retention).
 const AUDIT_LOG_AGE: i64 = 365 * DAY;
 
 /// Delay before the first run after start.
@@ -145,7 +150,8 @@ async fn record_run(
             id: ids::new_id(),
             job_kind: "retention".to_owned(),
             started_at: now,
-            finished_at: Some(now),
+            // The real finish time, never before the start.
+            finished_at: Some(now_secs().max(now)),
             status: status.to_owned(),
             processed_count: processed,
             error_summary: error_summary.map(str::to_owned),
@@ -364,6 +370,74 @@ mod tests {
         updated_at: i64,
     ) -> Result<(), AppError> {
         insert_sync_job(pool, id, "done", updated_at).await
+    }
+
+    #[tokio::test]
+    async fn a_row_at_exactly_the_cutoff_is_kept() -> Result<(), AppError> {
+        let pool = test_pool().await?;
+        seed_parents(&pool).await?;
+        insert_sync_report(&pool, "sync_reports-edge", NOW - SYNC_REPORT_AGE).await?;
+        insert_sync_job(&pool, "sync_jobs-edge", "done", NOW - SYNC_JOB_AGE).await?;
+        insert_job_run(&pool, "job_runs-edge", NOW - JOB_RUN_AGE).await?;
+        insert_alert_delivery(&pool, "alert_deliveries-edge", NOW - ALERT_DELIVERY_AGE).await?;
+        insert_audit(&pool, "audit_log-edge", NOW - AUDIT_LOG_AGE).await?;
+
+        run_once(&pool, NOW).await?;
+
+        let checks = [
+            (
+                "sync_reports",
+                "SELECT COUNT(*) FROM sync_reports WHERE id = ?",
+            ),
+            ("sync_jobs", "SELECT COUNT(*) FROM sync_jobs WHERE id = ?"),
+            ("job_runs", "SELECT COUNT(*) FROM job_runs WHERE id = ?"),
+            (
+                "alert_deliveries",
+                "SELECT COUNT(*) FROM alert_deliveries WHERE id = ?",
+            ),
+            ("audit_log", "SELECT COUNT(*) FROM audit_log WHERE id = ?"),
+        ];
+        for (table, sql) in checks {
+            let edge = count(&pool, sql, &format!("{table}-edge")).await?;
+            assert_eq!(edge, 1, "{table}: a row exactly at the cutoff was deleted");
+        }
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deleting_a_sync_job_keeps_its_report_with_a_null_job_id() -> Result<(), AppError> {
+        let pool = test_pool().await?;
+        seed_parents(&pool).await?;
+        insert_sync_job(&pool, "job-old", "done", NOW - SYNC_JOB_AGE - 1).await?;
+        // The report is recent, so only the job is expired.
+        insert_sync_report(&pool, "report-recent", NOW).await?;
+        sqlx::query("UPDATE sync_reports SET sync_job_id = 'job-old' WHERE id = 'report-recent'")
+            .execute(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+
+        run_once(&pool, NOW).await?;
+
+        let jobs = count(
+            &pool,
+            "SELECT COUNT(*) FROM sync_jobs WHERE id = ?",
+            "job-old",
+        )
+        .await?;
+        assert_eq!(jobs, 0, "the expired job was kept");
+        let linked = count(
+            &pool,
+            "SELECT COUNT(*) FROM sync_reports WHERE id = ? AND sync_job_id IS NULL",
+            "report-recent",
+        )
+        .await?;
+        assert_eq!(
+            linked, 1,
+            "the report was deleted or still points at the job"
+        );
+        pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
