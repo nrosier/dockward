@@ -33,6 +33,19 @@ const SYNC_FAILED_TEXT: &str = "the sync job failed after all retries";
 /// Used for the mapping names when the mapping no longer exists.
 const UNKNOWN: &str = "unknown";
 
+/// Runs `task` in the background. A panic in it is logged as fixed text, so a panic after
+/// a claim was written is not silent. These tasks are not tracked by the shutdown drain, so
+/// an alert in flight at shutdown can be dropped, and a claim written just before its send
+/// would then suppress a retry for 24 hours.
+fn spawn_logged(task: impl Future<Output = ()> + Send + 'static) {
+    let handle = tokio::spawn(task);
+    tokio::spawn(async move {
+        if handle.await.is_err() {
+            tracing::warn!("an alert task stopped before it finished");
+        }
+    });
+}
+
 /// A fixed log text for a send error, so no text derived from the channel config is logged.
 fn reason(error: &SendError) -> &'static str {
     match error {
@@ -184,25 +197,27 @@ impl Notifier {
             return;
         }
         let notifier = self.clone();
-        let items: Vec<Alert> = cve_ids
+        let items: Vec<(Alert, String)> = cve_ids
             .iter()
-            .map(|cve_id| Alert {
-                event: AlertEvent::CriticalCve,
-                occurred_at: 0,
-                mapping_id: mapping.id.clone(),
-                harbor: format!("{}/{}", mapping.harbor_project, mapping.harbor_repository),
-                github: format!("{}/{}", mapping.github_owner, mapping.github_repo),
-                cve_id: Some(cve_id.clone()),
-                severity: Some("CRITICAL".to_owned()),
-                image_tag: Some(tag.to_owned()),
-                error: None,
+            .map(|cve_id| {
+                let alert = Alert {
+                    event: AlertEvent::CriticalCve,
+                    occurred_at: 0,
+                    mapping_id: mapping.id.clone(),
+                    harbor: format!("{}/{}", mapping.harbor_project, mapping.harbor_repository),
+                    github: format!("{}/{}", mapping.github_owner, mapping.github_repo),
+                    cve_id: Some(cve_id.clone()),
+                    severity: Some("CRITICAL".to_owned()),
+                    image_tag: Some(tag.to_owned()),
+                    error: None,
+                };
+                (alert, cve_id.clone())
             })
             .collect();
-        tokio::spawn(async move {
-            for mut alert in items {
+        spawn_logged(async move {
+            for (mut alert, dedupe_key) in items {
                 let now = now_secs();
                 alert.occurred_at = now;
-                let dedupe_key = alert.cve_id.clone().unwrap_or_default();
                 notifier.notify(&alert, &dedupe_key, now).await;
             }
         });
@@ -214,7 +229,7 @@ impl Notifier {
         let notifier = self.clone();
         let job_id = job_id.to_owned();
         let mapping_id = mapping_id.to_owned();
-        tokio::spawn(async move {
+        spawn_logged(async move {
             let alert = notifier.sync_failed_alert(&mapping_id, now).await;
             let dedupe_key = format!("sync_failed:{job_id}");
             notifier.notify(&alert, &dedupe_key, now).await;
