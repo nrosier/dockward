@@ -276,6 +276,10 @@
   "page.credentialEdit": "Edit credential",
 
   "common.cancel": "Cancel",
+  "account.tabs.label": "Account",
+  "account.tabs.profile": "Profile",
+  "account.tabs.appearance": "Appearance",
+  "account.tabs.credentials": "Credentials",
   "account.intro": "Your profile, sign-in, display preferences, and the credentials your mappings use.",
   "account.profile.title": "Profile",
   "account.profile.username": "Username",

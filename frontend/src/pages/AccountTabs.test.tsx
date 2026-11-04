@@ -4,7 +4,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { t } from "../i18n";
 import { ME_QUERY_KEY } from "../lib/session";
 import { json, renderAt, stubApi, testQueryClient, user } from "../test/render";
-import AccountPage from "./AccountPage";
+import { Route, Routes } from "react-router";
+import { AccountLayout } from "../components/shell/AccountLayout";
+import { ProfileTab } from "./ProfileTab";
+import { AppearanceTab } from "./AppearanceTab";
+import CredentialsTab from "./CredentialsTab";
 
 function credential(over: Record<string, unknown>) {
   return {
@@ -29,16 +33,51 @@ function stub(items: unknown[], extra?: (path: string, init?: RequestInit) => Re
   });
 }
 
-function render(role: "admin" | "user" = "admin", provider: "local" | "oidc" = "local") {
+// Mounts the real account routes at the given tab, so each test reaches its own tab.
+function render(
+  role: "admin" | "user" = "admin",
+  provider: "local" | "oidc" = "local",
+  tab: "profile" | "appearance" | "credentials" = "profile",
+) {
   const client = testQueryClient();
   client.setQueryData(ME_QUERY_KEY, { ...user(role), auth_provider: provider });
-  return renderAt(<AccountPage />, "/account", client);
+  const routes = (
+    <Routes>
+      <Route path="/account" element={<AccountLayout />}>
+        <Route path="profile" element={<ProfileTab />} />
+        <Route path="appearance" element={<AppearanceTab />} />
+        <Route path="credentials" element={<CredentialsTab />} />
+      </Route>
+    </Routes>
+  );
+  return renderAt(routes, `/account/${tab}`, client);
 }
 
-describe("AccountPage", () => {
+describe("Account tabs", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     window.localStorage.clear();
+  });
+
+  it("shows the three account tabs and marks the open one", async () => {
+    stub([]);
+    render("admin", "local", "appearance");
+    const tabs = await screen.findByRole("navigation", { name: t("account.tabs.label") });
+    const names = within(tabs).getAllByRole("link").map((link) => link.textContent);
+    expect(names).toEqual([
+      t("account.tabs.profile"),
+      t("account.tabs.appearance"),
+      t("account.tabs.credentials"),
+    ]);
+    expect(within(tabs).getByRole("link", { name: t("account.tabs.appearance") })).toHaveClass("text-text");
+  });
+
+  it("keeps the profile section off the appearance tab", async () => {
+    stub([]);
+    render("admin", "local", "appearance");
+    // The appearance heading is in the content, and no profile fields are.
+    await screen.findByRole("heading", { name: t("account.appearance.title") });
+    expect(screen.queryByText(t("account.profile.username"))).not.toBeInTheDocument();
   });
 
   it("hides the password card for single sign-on users", async () => {
@@ -56,7 +95,7 @@ describe("AccountPage", () => {
 
   it("theme switch stores the theme", async () => {
     stub([]);
-    render();
+    render("admin", "local", "appearance");
     await userEvent.click(await screen.findByRole("button", { name: t("account.appearance.light") }));
     expect(window.localStorage.getItem("hg.theme")).toBe("light");
     expect(document.documentElement.dataset.theme).toBe("light");
@@ -70,7 +109,7 @@ describe("AccountPage", () => {
       credential({ id: "c1", label: "soon", expires_at: soon, mapping_count: 4 }),
       credential({ id: "c2", label: "never", expires_at: null, mapping_count: 0 }),
     ]);
-    render();
+    render("admin", "local", "credentials");
     const soonRow = (await screen.findByText("soon")).closest("tr") as HTMLElement;
     expect(within(soonRow).getByText(t("account.credentials.days", { n: 9 }))).toBeInTheDocument();
     expect(within(soonRow).getByText(t("account.credentials.mappings", { n: 4 }))).toBeInTheDocument();
@@ -85,7 +124,7 @@ describe("AccountPage", () => {
         ? json({ error: { code: "conflict", message: "In use." } }, 409)
         : undefined,
     );
-    render();
+    render("admin", "local", "credentials");
     await userEvent.click(
       await screen.findByRole("button", { name: t("account.credentials.deleteAria", { label: "harbor-robot" }) }),
     );

@@ -3,7 +3,10 @@ import { AdminLayout } from "./components/shell/AdminLayout";
 import { AppShell } from "./components/shell/AppShell";
 import { NotFoundMessage } from "./components/ui/StatusMessage";
 import { RequireAdmin, RequireAuth } from "./lib/session";
-import AccountPage from "./pages/AccountPage";
+import { ProfileTab } from "./pages/ProfileTab";
+import { AppearanceTab } from "./pages/AppearanceTab";
+import CredentialsTab from "./pages/CredentialsTab";
+import { AccountLayout } from "./components/shell/AccountLayout";
 import AdminAlertsPage from "./pages/AdminAlertsPage";
 import AdminAuditPage from "./pages/AdminAuditPage";
 import AdminBackupPage from "./pages/AdminBackupPage";
@@ -40,7 +43,16 @@ export const routes: RouteObject[] = [
           { path: "cves", element: <CvesPage /> },
           { path: "cves/:id", element: <CveDetailPage /> },
           { path: "sync-jobs", element: <SyncJobsPage /> },
-          { path: "account", element: <AccountPage /> },
+          {
+            path: "account",
+            element: <AccountLayout />,
+            children: [
+              { index: true, element: <Navigate to="/account/profile" replace /> },
+              { path: "profile", element: <ProfileTab /> },
+              { path: "appearance", element: <AppearanceTab /> },
+              { path: "credentials", element: <CredentialsTab /> },
+            ],
+          },
           { path: "account/credentials/new", element: <CredentialFormPage /> },
           { path: "account/credentials/:id", element: <CredentialFormPage /> },
           {
