@@ -147,7 +147,7 @@ fn valid_cve_id(id: &str) -> bool {
 
 /// True for an id the mapping routes can hold: 1 to 128 bytes of ASCII letters, digits,
 /// `.`, `_` and `-`.
-pub fn valid_mapping_id(id: &str) -> bool {
+fn valid_mapping_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_ID_BYTES
         && id
@@ -158,7 +158,7 @@ pub fn valid_mapping_id(id: &str) -> bool {
 /// Splits the route id `<mapping_id>:<cve_id>` with the rules of the issue and accept routes.
 /// Any other shape, an empty part, a part over 128 bytes, or a character outside the allowed
 /// set is `404`, before any database call.
-pub fn split_id(id: &str) -> Result<(&str, &str), AppError> {
+fn split_id(id: &str) -> Result<(&str, &str), AppError> {
     match id.split_once(':') {
         Some((mapping_id, cve_id)) if valid_mapping_id(mapping_id) && valid_cve_id(cve_id) => {
             Ok((mapping_id, cve_id))

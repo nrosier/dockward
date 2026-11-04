@@ -273,6 +273,7 @@ pub async fn list_cves(
                  AND (?3 IS NULL OR f.cve_id = ?3)
                  AND length(CAST(f.cve_id AS BLOB)) BETWEEN 1 AND 128
                  AND f.cve_id NOT GLOB '*[^A-Za-z0-9._:-]*'
+                 AND instr(CAST(f.cve_id AS BLOB), x'00') = 0
            ),
            summary AS (
                SELECT mapping_id, cve_id, MAX(sev_rank) AS sev_rank,
@@ -394,6 +395,7 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
                  AND (?3 IS NULL OR f.cve_id = ?3)
                  AND length(CAST(f.cve_id AS BLOB)) BETWEEN 1 AND 128
                  AND f.cve_id NOT GLOB '*[^A-Za-z0-9._:-]*'
+                 AND instr(CAST(f.cve_id AS BLOB), x'00') = 0
            ),
            items AS (
                SELECT mapping_id, cve_id,

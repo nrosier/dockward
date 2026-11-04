@@ -822,11 +822,34 @@ mod tests {
             State(state.clone()),
             other.clone(),
             Ok(Path("m1".to_owned())),
-            query("page_size=%FF%FE"),
+            query("page=1&page=2"),
         )
         .await
         .unwrap_err();
         assert_eq!(broken.status(), StatusCode::NOT_FOUND);
+        // The query string really is unparsable (a repeated key), and the same request from the
+        // owner is 400. On `GET /cves` the `mapping_id` is inside that query string, so the
+        // ownership check cannot run and the answer is 400 for any mapping, existing or not.
+        assert!(query("page=1&page=2").is_err());
+        let owner_broken = list_for_mapping(
+            State(state.clone()),
+            user("u1"),
+            Ok(Path("m1".to_owned())),
+            query("page=1&page=2"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(owner_broken.status(), StatusCode::BAD_REQUEST);
+        for mapping in ["m1", "m9"] {
+            let error = list(
+                State(state.clone()),
+                other.clone(),
+                query(&format!("mapping_id={mapping}&page=1&page=2")),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{mapping}");
+        }
         let error = one(&state, &other, "m1:CVE-2026-0001").await.unwrap_err();
         assert_eq!(error.status(), StatusCode::NOT_FOUND);
         assert_eq!(error.message(), AppError::NotFound.message());
@@ -1085,6 +1108,10 @@ mod tests {
         seen(&state, "m1", "v3", "CVE-2026-0003", "HIGH", AT).await;
         // An id the `<mapping_id>:<cve_id>` route cannot carry is not listed.
         seen(&state, "m1", "v1", "CVE-1 -->", "CRITICAL", AT).await;
+        // SQLite's GLOB stops at a NUL byte, so an id with NUL, a line break and `-->` must be
+        // left out by a separate check. Harbor JSON can carry \u0000.
+        seen(&state, "m1", "v1", "CVE-1\u{0}\n-->", "CRITICAL", AT).await;
+        seen(&state, "m1", "v1", "RHSA-2023:1234", "MEDIUM", AT).await;
 
         let ids = |page: &Page<CveSummary>| -> Vec<String> {
             let mut ids: Vec<String> = page.items.iter().map(|item| item.cve_id.clone()).collect();
@@ -1094,9 +1121,31 @@ mod tests {
         let page = by_mapping(&state, &user("u1"), "m1", "").await.unwrap();
         assert_eq!(
             ids(&page),
-            ["CVE-2026-0001", "CVE-2026-0003", "GHSA-abcd-0002"]
+            [
+                "CVE-2026-0001",
+                "CVE-2026-0003",
+                "GHSA-abcd-0002",
+                "RHSA-2023:1234"
+            ]
         );
-        assert_eq!(page.total, 3);
+        assert_eq!(page.total, 4);
+        let stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM cve_findings WHERE cve_id LIKE 'CVE-1%'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored, 2,
+            "both unsafe ids are stored, so the list must hide them"
+        );
+        let everywhere = all_cves(&state, &user("u1"), "").await.unwrap();
+        assert_eq!(everywhere.total, 4);
+        assert!(
+            everywhere
+                .items
+                .iter()
+                .all(|item| !item.cve_id.starts_with("CVE-1"))
+        );
         // The severity filter matches the highest severity across tags.
         let high = by_mapping(&state, &user("u1"), "m1", "severity=HIGH")
             .await
@@ -1114,7 +1163,7 @@ mod tests {
             (vec!["GHSA-abcd-0002".to_owned()], 1)
         );
         let package = all_cves(&state, &user("u1"), "q=OpenSSL").await.unwrap();
-        assert_eq!(package.total, 3);
+        assert_eq!(package.total, 4);
         let none = all_cves(&state, &user("u1"), "q=%25").await.unwrap();
         assert_eq!(none.total, 0, "% is plain text, not a wildcard");
         for q in [
