@@ -183,10 +183,15 @@ pub async fn owner_of_job(pool: &SqlitePool, id: &str) -> Result<Option<String>,
     Ok(row.map(|row| row.user_id))
 }
 
-/// One job row in the `SyncJob` shape of `specs/api.md`. `report` is not joined here, so
-/// the route returns it as `null` until the sync reports exist.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct SyncJobView {
+/// How many characters of `last_error`, of each payload field and of each report text field
+/// (`image_tag`, `image_digest`, `commit_sha`) a read returns. The text is untrusted and may be
+/// long, so the cut is made in SQL.
+pub const MAX_TEXT_CHARS: i64 = 500;
+
+/// One job with its newest linked report, as the read routes need it. Times are Unix
+/// seconds. `last_error` and the payload fields are already cut to [`MAX_TEXT_CHARS`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobRow {
     pub id: String,
     pub mapping_id: String,
     pub status: String,
@@ -195,28 +200,228 @@ pub struct SyncJobView {
     pub last_error: Option<String>,
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
+    /// `payload.trigger`, or `None` when the payload has none.
+    pub trigger: Option<String>,
+    pub repo_full_name: Option<String>,
+    pub tag: Option<String>,
+    pub digest: Option<String>,
+    pub report: Option<ReportRow>,
 }
 
-/// Reads one job in the `SyncJob` shape.
-pub async fn view(pool: &SqlitePool, id: &str) -> Result<Option<SyncJobView>, AppError> {
+/// The `sync_reports` row linked to a job. `error_message` is not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportRow {
+    pub image_tag: String,
+    pub image_digest: String,
+    pub commit_sha: Option<String>,
+    /// JSON text, for example `{"critical": 0, "high": 2}`.
+    pub vulnerability_summary: String,
+    pub sarif_status: String,
+    pub synced_at: Option<i64>,
+}
+
+/// Filters and paging for [`list_jobs`] and [`count_jobs`]. Every filter is optional.
+/// `sort` is a fixed key chosen by the service from an allow-list.
+pub struct JobFilter<'a> {
+    /// `None` lists every user's jobs (admin `scope=all`).
+    pub user_id: Option<&'a str>,
+    pub id: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub mapping_id: Option<&'a str>,
+    pub sort: &'a str,
+    pub sort_sign: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// One page of jobs with their newest linked report (the highest `rowid` for the job).
+/// `ORDER BY` uses CASE terms, so every sort key stays a compile-checked query.
+pub async fn list_jobs(pool: &SqlitePool, filter: &JobFilter<'_>) -> Result<Vec<JobRow>, AppError> {
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    list_jobs_in(&mut conn, filter).await
+}
+
+/// [`list_jobs`] on a connection the caller holds, so a read can run inside a transaction.
+pub async fn list_jobs_in(
+    conn: &mut SqliteConnection,
+    filter: &JobFilter<'_>,
+) -> Result<Vec<JobRow>, AppError> {
+    let rows = sqlx::query!(
+        r#"SELECT j.id AS "id!", j.mapping_id AS "mapping_id!", j.status AS "status!",
+                  j.attempts AS "attempts!: i64", j.next_attempt_at AS "next_attempt_at?: i64",
+                  substr(CAST(j.last_error AS TEXT), 1, ?) AS "last_error?: String",
+                  j.created_at AS "created_at?: i64", j.updated_at AS "updated_at?: i64",
+                  CASE WHEN json_valid(j.payload)
+                       THEN substr(CAST(json_extract(j.payload, '$.trigger') AS TEXT), 1, ?) END AS "trigger?: String",
+                  CASE WHEN json_valid(j.payload)
+                       THEN substr(CAST(json_extract(j.payload, '$.repo_full_name') AS TEXT), 1, ?) END AS "repo_full_name?: String",
+                  CASE WHEN json_valid(j.payload)
+                       THEN substr(CAST(json_extract(j.payload, '$.tag') AS TEXT), 1, ?) END AS "tag?: String",
+                  CASE WHEN json_valid(j.payload)
+                       THEN substr(CAST(json_extract(j.payload, '$.digest') AS TEXT), 1, ?) END AS "digest?: String",
+                  substr(CAST(r.image_tag AS TEXT), 1, ?) AS "report_image_tag?: String",
+                  substr(CAST(r.image_digest AS TEXT), 1, ?) AS "report_image_digest?: String",
+                  substr(CAST(r.commit_sha AS TEXT), 1, ?) AS "report_commit_sha?: String",
+                  r.vulnerability_summary AS "report_summary?",
+                  r.sarif_status AS "report_sarif_status?",
+                  r.synced_at AS "report_synced_at?: i64"
+           FROM sync_jobs j
+           JOIN repo_mappings m ON m.id = j.mapping_id
+           LEFT JOIN sync_reports r
+             ON r.rowid = (SELECT MAX(r2.rowid) FROM sync_reports r2 WHERE r2.sync_job_id = j.id)
+           WHERE (? IS NULL OR m.user_id = ?)
+             AND (? IS NULL OR j.id = ?)
+             AND (? IS NULL OR j.status = ?)
+             AND (? IS NULL OR j.mapping_id = ?)
+           ORDER BY
+             CASE WHEN ? = 'created_at' AND ? = 1 THEN j.created_at END ASC,
+             CASE WHEN ? = 'created_at' AND ? = -1 THEN j.created_at END DESC,
+             CASE WHEN ? = 'updated_at' AND ? = 1 THEN j.updated_at END ASC,
+             CASE WHEN ? = 'updated_at' AND ? = -1 THEN j.updated_at END DESC,
+             j.id ASC
+           LIMIT ? OFFSET ?"#,
+        MAX_TEXT_CHARS,
+        MAX_TEXT_CHARS,
+        MAX_TEXT_CHARS,
+        MAX_TEXT_CHARS,
+        MAX_TEXT_CHARS,
+        MAX_TEXT_CHARS,
+        MAX_TEXT_CHARS,
+        MAX_TEXT_CHARS,
+        filter.user_id,
+        filter.user_id,
+        filter.id,
+        filter.id,
+        filter.status,
+        filter.status,
+        filter.mapping_id,
+        filter.mapping_id,
+        filter.sort,
+        filter.sort_sign,
+        filter.sort,
+        filter.sort_sign,
+        filter.sort,
+        filter.sort_sign,
+        filter.sort,
+        filter.sort_sign,
+        filter.limit,
+        filter.offset
+    )
+    .fetch_all(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let report = match (
+                row.report_image_tag,
+                row.report_image_digest,
+                row.report_summary,
+                row.report_sarif_status,
+            ) {
+                (Some(image_tag), Some(image_digest), Some(vulnerability_summary), Some(sarif)) => {
+                    Some(ReportRow {
+                        image_tag,
+                        image_digest,
+                        commit_sha: row.report_commit_sha,
+                        vulnerability_summary,
+                        sarif_status: sarif,
+                        synced_at: row.report_synced_at,
+                    })
+                }
+                _ => None,
+            };
+            JobRow {
+                id: row.id,
+                mapping_id: row.mapping_id,
+                status: row.status,
+                attempts: row.attempts,
+                next_attempt_at: row.next_attempt_at,
+                last_error: row.last_error,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+                trigger: row.trigger,
+                repo_full_name: row.repo_full_name,
+                tag: row.tag,
+                digest: row.digest,
+                report,
+            }
+        })
+        .collect())
+}
+
+/// Counts jobs for the same `user_id`, `status` and `mapping_id` filters as [`list_jobs`].
+pub async fn count_jobs(
+    pool: &SqlitePool,
+    user_id: Option<&str>,
+    status: Option<&str>,
+    mapping_id: Option<&str>,
+) -> Result<i64, AppError> {
     let row = sqlx::query!(
-        r#"SELECT id AS "id!", mapping_id AS "mapping_id!", status AS "status!",
-                  attempts AS "attempts!: i64", next_attempt_at AS "next_attempt_at?: i64",
-                  last_error, created_at AS "created_at?: i64", updated_at AS "updated_at?: i64"
-           FROM sync_jobs WHERE id = ?"#,
-        id
+        r#"SELECT COUNT(*) AS "n!: i64" FROM sync_jobs j
+           JOIN repo_mappings m ON m.id = j.mapping_id
+           WHERE (? IS NULL OR m.user_id = ?)
+             AND (? IS NULL OR j.status = ?)
+             AND (? IS NULL OR j.mapping_id = ?)"#,
+        user_id,
+        user_id,
+        status,
+        status,
+        mapping_id,
+        mapping_id
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.n)
+}
+
+/// The status and update time of a mapping's most recently updated job, if it has one.
+pub async fn latest_for_mapping(
+    pool: &SqlitePool,
+    mapping_id: &str,
+) -> Result<Option<(String, Option<i64>)>, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT status AS "status!", updated_at AS "updated_at?: i64"
+           FROM sync_jobs WHERE mapping_id = ?
+           ORDER BY updated_at DESC, rowid DESC
+           LIMIT 1"#,
+        mapping_id
     )
     .fetch_optional(pool)
     .await
     .map_err(|_| AppError::InternalError)?;
-    Ok(row.map(|row| SyncJobView {
-        id: row.id,
-        mapping_id: row.mapping_id,
-        status: row.status,
-        attempts: row.attempts,
-        next_attempt_at: row.next_attempt_at,
-        last_error: row.last_error,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    }))
+    Ok(row.map(|row| (row.status, row.updated_at)))
+}
+
+/// One job with its newest linked report, by id, with no tenancy filter. The caller has
+/// already checked ownership.
+pub async fn find(pool: &SqlitePool, id: &str) -> Result<Option<JobRow>, AppError> {
+    let filter = JobFilter {
+        user_id: None,
+        id: Some(id),
+        status: None,
+        mapping_id: None,
+        sort: "created_at",
+        sort_sign: -1,
+        limit: 1,
+        offset: 0,
+    };
+    Ok(list_jobs(pool, &filter).await?.into_iter().next())
+}
+
+/// Like [`find`], on a connection the caller already holds, so the read runs inside its
+/// transaction.
+pub async fn find_in(conn: &mut SqliteConnection, id: &str) -> Result<Option<JobRow>, AppError> {
+    let filter = JobFilter {
+        user_id: None,
+        id: Some(id),
+        status: None,
+        mapping_id: None,
+        sort: "created_at",
+        sort_sign: -1,
+        limit: 1,
+        offset: 0,
+    };
+    Ok(list_jobs_in(conn, &filter).await?.into_iter().next())
 }

@@ -4,6 +4,7 @@ pub mod admin;
 pub mod auth;
 pub mod credentials;
 pub mod cves;
+pub mod dashboard;
 #[allow(dead_code)] // The limiter and client IP are attached to routes in later issues.
 pub mod hardening;
 pub mod mappings;
