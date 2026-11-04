@@ -21,10 +21,16 @@ use crate::error::AppError;
 /// Content-Security-Policy for every response. Decided in `specs/security.md`, "Hardening".
 pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
 
-/// Adds the security headers to every response.
+/// Adds the security headers to every response. Responses under `/api/` also get
+/// `Cache-Control: no-store`, because they can carry one-time secrets and authenticated
+/// data (`specs/api.md`, Conventions).
 pub async fn security_headers(request: Request, next: Next) -> Response {
+    let is_api = request.uri().path().starts_with("/api/");
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
+    if is_api {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(CONTENT_SECURITY_POLICY),
@@ -408,6 +414,63 @@ mod tests {
             let response = app.clone().oneshot(request).await.expect_test_request();
             assert_security_headers(response.headers());
         }
+    }
+
+    #[tokio::test]
+    async fn api_responses_are_no_store() {
+        use axum::{Router, body::Body, routing::get};
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route("/api/v1/x", get(|| async { "ok" }))
+            .route("/other", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(security_headers));
+
+        let api = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/x")
+                    .body(Body::empty())
+                    .expect_test_request(),
+            )
+            .await
+            .expect_test_request();
+        assert_eq!(
+            api.headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        // A missing API route is still under `/api/`, so it is also no-store.
+        let missing_api = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/missing")
+                    .body(Body::empty())
+                    .expect_test_request(),
+            )
+            .await
+            .expect_test_request();
+        assert_eq!(
+            missing_api
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        // A non-API route does not get the header from this rule.
+        let other = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/other")
+                    .body(Body::empty())
+                    .expect_test_request(),
+            )
+            .await
+            .expect_test_request();
+        assert!(other.headers().get(header::CACHE_CONTROL).is_none());
     }
 
     /// Runs one request through `resolve_client_ip` and returns the stored source.

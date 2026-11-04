@@ -7,6 +7,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 ## Conventions
 
 - Base path: `/api/v1`. Exceptions: `GET /healthz` (see [deployment.md](deployment.md)).
+- Caching: every response under `/api/` carries `Cache-Control: no-store` (Decided 2026-11-04, #50; see [security.md](security.md), Hardening).
 - Format: JSON request and response bodies, `Content-Type: application/json`. Decided (2026-11-03, delegated): no external source.
 - Casing: Decided (2026-11-03, delegated): snake_case for all JSON fields.
 - Timestamps: Decided (2026-11-03, delegated): RFC 3339 `date-time` strings in UTC, for example `2026-11-02T09:30:00Z`. Source: RFC 3339 section 5.6 (https://www.rfc-editor.org/rfc/rfc3339).

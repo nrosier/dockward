@@ -11,6 +11,7 @@ use reqwest::Url;
 use serde::Deserialize;
 
 use crate::error::AppError;
+use crate::services::credential_probe::{encode_repository_path, encode_segment};
 
 /// MIME type the vulnerability endpoint is asked for, and the key of the response object.
 pub const TRIVY_REPORT_MIME: &str = "application/vnd.security.vulnerability.report; version=1.1";
@@ -110,7 +111,8 @@ pub fn parse_labels(body: &[u8]) -> Result<ArtifactLabels, AppError> {
     })
 }
 
-/// Builds the artifact URL for a digest. A `/` in the repository is encoded twice.
+/// Builds the artifact URL for a digest. Every name segment is encoded, and the
+/// repository components are joined with `%252F` (`specs/integrations.md`).
 pub fn artifact_url(
     base: &Url,
     project: &str,
@@ -120,13 +122,13 @@ pub fn artifact_url(
     let path = format!(
         "api/v2.0/projects/{}/repositories/{}/artifacts/{}",
         encode_segment(project),
-        encode_repository(repository),
+        encode_repository_path(repository),
         encode_segment(digest)
     );
     base.join(&path).map_err(|_| invalid_name())
 }
 
-/// Builds the vulnerability report URL for a digest.
+/// Builds the vulnerability report URL for a digest. Encoding as in [`artifact_url`].
 pub fn vulnerabilities_url(
     base: &Url,
     project: &str,
@@ -136,27 +138,10 @@ pub fn vulnerabilities_url(
     let path = format!(
         "api/v2.0/projects/{}/repositories/{}/artifacts/{}/additions/vulnerabilities",
         encode_segment(project),
-        encode_repository(repository),
+        encode_repository_path(repository),
         encode_segment(digest)
     );
     base.join(&path).map_err(|_| invalid_name())
-}
-
-/// Harbor's repository name rule: a slash is encoded twice (`specs/integrations.md`).
-fn encode_repository(repository: &str) -> String {
-    encode_segment(repository).replace("%2F", "%252F")
-}
-
-/// Percent-encodes one path segment. Unreserved characters are kept.
-fn encode_segment(text: &str) -> String {
-    text.bytes()
-        .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (byte as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect()
 }
 
 fn invalid_name() -> AppError {

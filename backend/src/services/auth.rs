@@ -136,6 +136,26 @@ mod tests {
     }
 
     #[test]
+    fn origin_matches_after_normalisation() {
+        // An operator writes an uppercase host and the default port. The browser sends
+        // `Origin` in canonical form, so the startup value must match it.
+        let raw = "https://Harborgate.Example.com:443/";
+        let settings = crate::config::load_settings_with(|name| {
+            if name == crate::config::PUBLIC_URL_VAR {
+                Ok(raw.to_owned())
+            } else {
+                Err(std::env::VarError::NotPresent)
+            }
+        })
+        .unwrap();
+        assert_eq!(settings.public_url, "https://harborgate.example.com");
+        let browser = headers(&[("origin", "https://harborgate.example.com")]);
+        assert!(check_same_origin(&browser, &settings.public_url).is_ok());
+        // The raw operator value is not what a browser sends, so it must not be stored.
+        assert_ne!(settings.public_url, raw.trim_end_matches('/'));
+    }
+
+    #[test]
     fn cross_site_origin_is_refused_with_csrf_invalid() {
         let cross = headers(&[("origin", "https://attacker.example.net")]);
         assert_eq!(check_same_origin(&cross, URL), Err(AppError::CsrfInvalid));

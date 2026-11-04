@@ -15,8 +15,8 @@ pub struct ScanEvent {
     pub repo_full_name: String,
     /// The artifact digest, `sha256:<hex>`.
     pub digest: String,
-    /// The first tag, when Harbor sends one. Only the digest drives the sync.
-    pub tag: Option<String>,
+    /// The first tag. Always non-empty: an untagged event is ignored (`specs/integrations.md`).
+    pub tag: String,
 }
 
 /// What a valid body means for the mapping.
@@ -67,7 +67,11 @@ pub fn classify(body: &[u8], repo_full_name: &str) -> Result<Outcome, AppError> 
     let Some(digest) = string_at(&data, &["resources", "0", "digest"]) else {
         return Err(bad_request());
     };
-    let tag = string_at(&data, &["resources", "0", "tag"]);
+    // An untagged event is pushed by digest. CVEs are tracked per tag, so nothing is queued.
+    let tag = match string_at(&data, &["resources", "0", "tag"]) {
+        Some(tag) if !tag.is_empty() => tag,
+        _ => return Ok(Outcome::Ignore),
+    };
     Ok(Outcome::Queue(ScanEvent {
         repo_full_name: repo_full_name.to_owned(),
         digest,
@@ -146,9 +150,24 @@ mod tests {
             Outcome::Queue(ScanEvent {
                 repo_full_name: REPO.to_owned(),
                 digest: "sha256:aaaa".to_owned(),
-                tag: Some("1.2.3".to_owned()),
+                tag: "1.2.3".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn untagged_event_is_ignored() {
+        // A missing tag and an empty tag both mean the image was pushed by digest.
+        let missing = default_vuln().replace(r#", "tag": "1.2.3""#, "");
+        assert_eq!(missing.matches("\"tag\"").count(), 0, "fixture");
+        assert_eq!(classify(missing.as_bytes(), REPO).unwrap(), Outcome::Ignore);
+        let empty = default_vuln().replace("1.2.3", "");
+        assert_eq!(classify(empty.as_bytes(), REPO).unwrap(), Outcome::Ignore);
+        // A tagged event still queues, so the rule is not too broad.
+        assert!(matches!(
+            classify(default_vuln().as_bytes(), REPO).unwrap(),
+            Outcome::Queue(_)
+        ));
     }
 
     #[test]
