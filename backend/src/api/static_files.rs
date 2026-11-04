@@ -21,7 +21,7 @@ use crate::services::ids::os_random_bytes;
 pub const NONCE_PLACEHOLDER: &str = "HG_CSP_NONCE";
 
 #[derive(RustEmbed)]
-#[folder = "$CARGO_MANIFEST_DIR/../frontend/dist/"]
+#[folder = "../frontend/dist/"]
 #[allow_missing = true]
 struct Assets;
 
