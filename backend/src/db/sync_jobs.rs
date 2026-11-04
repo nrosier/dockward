@@ -183,8 +183,9 @@ pub async fn owner_of_job(pool: &SqlitePool, id: &str) -> Result<Option<String>,
     Ok(row.map(|row| row.user_id))
 }
 
-/// How many characters of `last_error` and of each payload field a read returns. The text
-/// is untrusted and may be long, so the cut is made in SQL.
+/// How many characters of `last_error`, of each payload field and of each report text field
+/// (`image_tag`, `image_digest`, `commit_sha`) a read returns. The text is untrusted and may be
+/// long, so the cut is made in SQL.
 pub const MAX_TEXT_CHARS: i64 = 500;
 
 /// One job with its newest linked report, as the read routes need it. Times are Unix
@@ -236,6 +237,15 @@ pub struct JobFilter<'a> {
 /// One page of jobs with their newest linked report (the highest `rowid` for the job).
 /// `ORDER BY` uses CASE terms, so every sort key stays a compile-checked query.
 pub async fn list_jobs(pool: &SqlitePool, filter: &JobFilter<'_>) -> Result<Vec<JobRow>, AppError> {
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    list_jobs_in(&mut conn, filter).await
+}
+
+/// [`list_jobs`] on a connection the caller holds, so a read can run inside a transaction.
+pub async fn list_jobs_in(
+    conn: &mut SqliteConnection,
+    filter: &JobFilter<'_>,
+) -> Result<Vec<JobRow>, AppError> {
     let rows = sqlx::query!(
         r#"SELECT j.id AS "id!", j.mapping_id AS "mapping_id!", j.status AS "status!",
                   j.attempts AS "attempts!: i64", j.next_attempt_at AS "next_attempt_at?: i64",
@@ -249,8 +259,9 @@ pub async fn list_jobs(pool: &SqlitePool, filter: &JobFilter<'_>) -> Result<Vec<
                        THEN substr(CAST(json_extract(j.payload, '$.tag') AS TEXT), 1, ?) END AS "tag?: String",
                   CASE WHEN json_valid(j.payload)
                        THEN substr(CAST(json_extract(j.payload, '$.digest') AS TEXT), 1, ?) END AS "digest?: String",
-                  r.image_tag AS "report_image_tag?", r.image_digest AS "report_image_digest?",
-                  r.commit_sha AS "report_commit_sha?",
+                  substr(CAST(r.image_tag AS TEXT), 1, ?) AS "report_image_tag?: String",
+                  substr(CAST(r.image_digest AS TEXT), 1, ?) AS "report_image_digest?: String",
+                  substr(CAST(r.commit_sha AS TEXT), 1, ?) AS "report_commit_sha?: String",
                   r.vulnerability_summary AS "report_summary?",
                   r.sarif_status AS "report_sarif_status?",
                   r.synced_at AS "report_synced_at?: i64"
@@ -269,6 +280,9 @@ pub async fn list_jobs(pool: &SqlitePool, filter: &JobFilter<'_>) -> Result<Vec<
              CASE WHEN ? = 'updated_at' AND ? = -1 THEN j.updated_at END DESC,
              j.id ASC
            LIMIT ? OFFSET ?"#,
+        MAX_TEXT_CHARS,
+        MAX_TEXT_CHARS,
+        MAX_TEXT_CHARS,
         MAX_TEXT_CHARS,
         MAX_TEXT_CHARS,
         MAX_TEXT_CHARS,
@@ -293,7 +307,7 @@ pub async fn list_jobs(pool: &SqlitePool, filter: &JobFilter<'_>) -> Result<Vec<
         filter.limit,
         filter.offset
     )
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(|_| AppError::InternalError)?;
     Ok(rows
@@ -394,4 +408,20 @@ pub async fn find(pool: &SqlitePool, id: &str) -> Result<Option<JobRow>, AppErro
         offset: 0,
     };
     Ok(list_jobs(pool, &filter).await?.into_iter().next())
+}
+
+/// Like [`find`], on a connection the caller already holds, so the read runs inside its
+/// transaction.
+pub async fn find_in(conn: &mut SqliteConnection, id: &str) -> Result<Option<JobRow>, AppError> {
+    let filter = JobFilter {
+        user_id: None,
+        id: Some(id),
+        status: None,
+        mapping_id: None,
+        sort: "created_at",
+        sort_sign: -1,
+        limit: 1,
+        offset: 0,
+    };
+    Ok(list_jobs_in(conn, &filter).await?.into_iter().next())
 }

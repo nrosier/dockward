@@ -309,10 +309,6 @@ pub async fn retry(
         // Another tenant's job is not revealed: it looks the same as a missing one.
         return Err(AppError::NotFound);
     }
-    let mapping_id = db::find(pool, id)
-        .await?
-        .ok_or(AppError::NotFound)?
-        .mapping_id;
     let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
     let changed = db::reset_failed(&mut tx, id, now).await?;
     if changed == 0 {
@@ -321,6 +317,11 @@ pub async fn retry(
             "only a failed sync job can be retried.".to_owned(),
         ));
     }
+    // The response is read in the same transaction, before the commit, so a read that
+    // fails rolls the retry back instead of leaving a 500 after a retry that happened.
+    let row = db::find_in(&mut tx, id).await?.ok_or(AppError::NotFound)?;
+    let mapping_id = row.mapping_id.clone();
+    let job = to_sync_job(row)?;
     audit::record(
         &mut tx,
         actor,
@@ -330,13 +331,7 @@ pub async fn retry(
     )
     .await?;
     tx.commit().await.map_err(|_| AppError::InternalError)?;
-    get_unchecked(pool, id).await
-}
-
-/// Reads one job as the API object, without a tenancy check. The caller checked ownership.
-async fn get_unchecked(pool: &SqlitePool, id: &str) -> Result<SyncJob, AppError> {
-    let row = db::find(pool, id).await?.ok_or(AppError::NotFound)?;
-    to_sync_job(row)
+    Ok(job)
 }
 
 #[cfg(test)]

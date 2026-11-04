@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT j.id AS \"id!\", j.mapping_id AS \"mapping_id!\", j.status AS \"status!\",\n                  j.attempts AS \"attempts!: i64\", j.next_attempt_at AS \"next_attempt_at?: i64\",\n                  substr(CAST(j.last_error AS TEXT), 1, ?) AS \"last_error?: String\",\n                  j.created_at AS \"created_at?: i64\", j.updated_at AS \"updated_at?: i64\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.trigger') AS TEXT), 1, ?) END AS \"trigger?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.repo_full_name') AS TEXT), 1, ?) END AS \"repo_full_name?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.tag') AS TEXT), 1, ?) END AS \"tag?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.digest') AS TEXT), 1, ?) END AS \"digest?: String\",\n                  r.image_tag AS \"report_image_tag?\", r.image_digest AS \"report_image_digest?\",\n                  r.commit_sha AS \"report_commit_sha?\",\n                  r.vulnerability_summary AS \"report_summary?\",\n                  r.sarif_status AS \"report_sarif_status?\",\n                  r.synced_at AS \"report_synced_at?: i64\"\n           FROM sync_jobs j\n           JOIN repo_mappings m ON m.id = j.mapping_id\n           LEFT JOIN sync_reports r\n             ON r.rowid = (SELECT MAX(r2.rowid) FROM sync_reports r2 WHERE r2.sync_job_id = j.id)\n           WHERE (? IS NULL OR m.user_id = ?)\n             AND (? IS NULL OR j.id = ?)\n             AND (? IS NULL OR j.status = ?)\n             AND (? IS NULL OR j.mapping_id = ?)\n           ORDER BY\n             CASE WHEN ? = 'created_at' AND ? = 1 THEN j.created_at END ASC,\n             CASE WHEN ? = 'created_at' AND ? = -1 THEN j.created_at END DESC,\n             CASE WHEN ? = 'updated_at' AND ? = 1 THEN j.updated_at END ASC,\n             CASE WHEN ? = 'updated_at' AND ? = -1 THEN j.updated_at END DESC,\n             j.id ASC\n           LIMIT ? OFFSET ?",
+  "query": "SELECT j.id AS \"id!\", j.mapping_id AS \"mapping_id!\", j.status AS \"status!\",\n                  j.attempts AS \"attempts!: i64\", j.next_attempt_at AS \"next_attempt_at?: i64\",\n                  substr(CAST(j.last_error AS TEXT), 1, ?) AS \"last_error?: String\",\n                  j.created_at AS \"created_at?: i64\", j.updated_at AS \"updated_at?: i64\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.trigger') AS TEXT), 1, ?) END AS \"trigger?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.repo_full_name') AS TEXT), 1, ?) END AS \"repo_full_name?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.tag') AS TEXT), 1, ?) END AS \"tag?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.digest') AS TEXT), 1, ?) END AS \"digest?: String\",\n                  substr(CAST(r.image_tag AS TEXT), 1, ?) AS \"report_image_tag?: String\",\n                  substr(CAST(r.image_digest AS TEXT), 1, ?) AS \"report_image_digest?: String\",\n                  substr(CAST(r.commit_sha AS TEXT), 1, ?) AS \"report_commit_sha?: String\",\n                  r.vulnerability_summary AS \"report_summary?\",\n                  r.sarif_status AS \"report_sarif_status?\",\n                  r.synced_at AS \"report_synced_at?: i64\"\n           FROM sync_jobs j\n           JOIN repo_mappings m ON m.id = j.mapping_id\n           LEFT JOIN sync_reports r\n             ON r.rowid = (SELECT MAX(r2.rowid) FROM sync_reports r2 WHERE r2.sync_job_id = j.id)\n           WHERE (? IS NULL OR m.user_id = ?)\n             AND (? IS NULL OR j.id = ?)\n             AND (? IS NULL OR j.status = ?)\n             AND (? IS NULL OR j.mapping_id = ?)\n           ORDER BY\n             CASE WHEN ? = 'created_at' AND ? = 1 THEN j.created_at END ASC,\n             CASE WHEN ? = 'created_at' AND ? = -1 THEN j.created_at END DESC,\n             CASE WHEN ? = 'updated_at' AND ? = 1 THEN j.updated_at END ASC,\n             CASE WHEN ? = 'updated_at' AND ? = -1 THEN j.updated_at END DESC,\n             j.id ASC\n           LIMIT ? OFFSET ?",
   "describe": {
     "columns": [
       {
@@ -111,37 +111,22 @@
         "origin": "Expression"
       },
       {
-        "name": "report_image_tag?",
+        "name": "report_image_tag?: String",
         "ordinal": 12,
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "sync_reports",
-            "name": "image_tag"
-          }
-        }
+        "type_info": "Null",
+        "origin": "Expression"
       },
       {
-        "name": "report_image_digest?",
+        "name": "report_image_digest?: String",
         "ordinal": 13,
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "sync_reports",
-            "name": "image_digest"
-          }
-        }
+        "type_info": "Null",
+        "origin": "Expression"
       },
       {
-        "name": "report_commit_sha?",
+        "name": "report_commit_sha?: String",
         "ordinal": 14,
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "sync_reports",
-            "name": "commit_sha"
-          }
-        }
+        "type_info": "Null",
+        "origin": "Expression"
       },
       {
         "name": "report_summary?",
@@ -178,7 +163,7 @@
       }
     ],
     "parameters": {
-      "Right": 23
+      "Right": 26
     },
     "nullable": [
       true,
@@ -193,13 +178,13 @@
       true,
       true,
       true,
-      true,
-      true,
-      true,
+      null,
+      null,
+      null,
       true,
       true,
       true
     ]
   },
-  "hash": "4e4b53de8a0fb8f04c2ec6f81500729bd740f2635dd8ff94433734329f3d3d7b"
+  "hash": "2bd26b771f3dcf6420707ffc6cd79fc20a5f328eb93a79aea950b37c7c39144a"
 }

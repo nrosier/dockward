@@ -20,9 +20,6 @@ pub struct OpenCves {
     pub high: i64,
 }
 
-/// The `open_cves` of one mapping, as `GET /mappings` items carry it.
-pub type MappingOpenCves = OpenCves;
-
 /// The `GET /dashboard/summary` response (`specs/api.md`, Dashboard).
 #[derive(Debug, Serialize)]
 pub struct Summary {
@@ -48,12 +45,13 @@ fn sum_open(rows: &[db::OpenCount]) -> OpenCves {
     )
 }
 
-/// The open CVEs of one mapping, for the mapping list. `None` when the mapping has none.
+/// The open CVEs of one mapping, for the mapping list. A mapping with no open CVEs gives
+/// zero counts, not an absent value.
 pub async fn open_cves_for_mapping(
     pool: &SqlitePool,
     mapping_id: &str,
     now: i64,
-) -> Result<MappingOpenCves, AppError> {
+) -> Result<OpenCves, AppError> {
     let rows = db::open_by_mapping(pool, None, Some(mapping_id), now).await?;
     Ok(sum_open(&rows))
 }
@@ -324,6 +322,74 @@ mod tests {
                 .await
                 .unwrap(),
             2
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Decision 3: an open CVE's severity comes from its open rows only. CVE-A is CRITICAL on
+    /// v1 but fixed there and HIGH on v2 (open). Its CRITICAL row is fixed, so it counts as
+    /// HIGH. A CVE fixed on every tag does not appear in the open counts at all.
+    #[tokio::test]
+    async fn severity_is_taken_from_open_rows_only() {
+        let (pool, dir) = fresh_pool("open-rows").await;
+        seed(&pool, "u1", &[("m1", "app")]).await;
+        finding(&pool, "m1", "v1", "CVE-2026-0001", "CRITICAL", "fixed").await;
+        finding(&pool, "m1", "v2", "CVE-2026-0001", "HIGH", "open").await;
+        finding(&pool, "m1", "v1", "CVE-2026-0002", "CRITICAL", "fixed").await;
+        finding(&pool, "m1", "v2", "CVE-2026-0002", "CRITICAL", "fixed").await;
+        assert_eq!(
+            open_totals(&pool, Some("u1")).await,
+            OpenCves {
+                critical: 0,
+                high: 1
+            },
+            "open_cves must use the open rows only and skip fully fixed CVEs"
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Decision 2: an acceptance hides an open CVE only while it is active. An accepted, fully
+    /// fixed CVE still counts in `fixed_cves`, because the acceptance rule covers open CVEs only.
+    /// When an acceptance expires, the open CVE is counted again.
+    #[tokio::test]
+    async fn accepted_exclusion_applies_only_while_open() {
+        let (pool, dir) = fresh_pool("accepted-open-fixed").await;
+        seed(&pool, "u1", &[("m1", "app")]).await;
+        // CVE-A is open and accepted. CVE-B is fixed on every tag and accepted.
+        finding(&pool, "m1", "v1", "CVE-2026-0001", "CRITICAL", "open").await;
+        finding(&pool, "m1", "v1", "CVE-2026-0002", "CRITICAL", "fixed").await;
+        accept(&pool, "m1", "CVE-2026-0001", None).await;
+        accept(&pool, "m1", "CVE-2026-0002", None).await;
+
+        assert_eq!(
+            open_totals(&pool, Some("u1")).await,
+            OpenCves {
+                critical: 0,
+                high: 0
+            },
+            "an active acceptance must hide an open CVE"
+        );
+        assert_eq!(
+            db::fixed_cves(&pool, Some("u1")).await.unwrap(),
+            1,
+            "an accepted fixed CVE must still count as fixed"
+        );
+
+        // The acceptance of CVE-A expires. It is open again and counted.
+        sqlx::query("UPDATE cve_acceptances SET expires_at = ? WHERE cve_id = 'CVE-2026-0001'")
+            .bind(NOW - 1)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            open_totals(&pool, Some("u1")).await,
+            OpenCves {
+                critical: 1,
+                high: 0
+            },
+            "an expired acceptance must not hide an open CVE"
         );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);

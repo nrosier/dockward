@@ -219,6 +219,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn report_text_fields_are_capped_at_500_characters() {
+        let (pool, dir) = fresh_pool("report-cap").await;
+        seed_job(&pool, "{}").await;
+        let long = "y".repeat(5_000);
+        sqlx::query(
+            "INSERT INTO sync_reports (id, mapping_id, sync_job_id, harbor_repository, image_tag, image_digest, commit_sha, vulnerability_summary, sarif_status)
+             VALUES ('rep-cap', 'm1', 'job-1', 'r', ?, ?, ?, '{}', 'success')",
+        )
+        .bind(&long)
+        .bind(&long)
+        .bind(&long)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let job = sync_jobs::get(&pool, "owner", false, "job-1")
+            .await
+            .unwrap();
+        let report = job.report.expect("the linked report is included");
+        assert_eq!(report.image_tag.chars().count(), 500);
+        assert_eq!(report.image_digest.chars().count(), 500);
+        assert_eq!(
+            report.commit_sha.map(|text| text.chars().count()),
+            Some(500)
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn list_rejects_an_unknown_status_before_sql() {
         let (pool, dir) = fresh_pool("status").await;
         seed_job(&pool, "{}").await;
