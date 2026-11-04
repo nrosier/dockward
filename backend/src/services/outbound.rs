@@ -155,7 +155,7 @@ impl Resolve for GuardedResolver {
 }
 
 /// The only outbound client. The inner reqwest client is private, and requests are built
-/// only through [`OutboundClient::get`] and [`OutboundClient::post`]. Both run
+/// only through [`OutboundClient::get`], [`OutboundClient::post`] and [`OutboundClient::patch`]. Each runs
 /// [`check_target`] before a request builder is returned, so a caller cannot send a
 /// request that skipped the check, including one to an IP literal.
 pub struct OutboundClient {
@@ -175,6 +175,12 @@ impl OutboundClient {
     pub fn post(&self, url: &reqwest::Url) -> Result<reqwest::RequestBuilder, OutboundError> {
         check_target(url, self.class, self.allow_private)?;
         Ok(self.inner.post(url.as_str()))
+    }
+
+    /// A PATCH request builder for `url`, after the target check.
+    pub fn patch(&self, url: &reqwest::Url) -> Result<reqwest::RequestBuilder, OutboundError> {
+        check_target(url, self.class, self.allow_private)?;
+        Ok(self.inner.patch(url.as_str()))
     }
 }
 
@@ -646,6 +652,27 @@ pub(crate) mod socket_tests {
         let client = client_trusting(TargetClass::Oidc, false, root).unwrap();
         assert_eq!(client.get(&url).err(), Some(OutboundError::BlockedAddress));
         assert_eq!(client.post(&url).err(), Some(OutboundError::BlockedAddress));
+        assert_eq!(
+            client.patch(&url).err(),
+            Some(OutboundError::BlockedAddress)
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_refuses_plain_http_and_reaches_an_opted_out_server() {
+        let http = reqwest::Url::parse("http://example.com/").unwrap();
+        let guarded = client(TargetClass::Oidc, false).unwrap();
+        assert_eq!(guarded.patch(&http).err(), Some(OutboundError::NotHttps));
+
+        // The control: with the opt-out, the same guarded PATCH reaches the server.
+        let (port, root) = loopback_tls_server(OK).await;
+        let url = reqwest::Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
+        let allowed = client_trusting(TargetClass::Oidc, true, root).unwrap();
+        let response = match allowed.patch(&url) {
+            Ok(builder) => builder.send().await.unwrap(),
+            Err(err) => panic!("opted-out request refused: {err}"),
+        };
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
     }
 
     #[tokio::test]
