@@ -26,6 +26,7 @@ pub mod pagination;
 pub mod sarif;
 #[allow(dead_code)] // Used by the session extractor and logout routes.
 pub mod sessions;
+pub mod sync;
 #[allow(dead_code)] // Used by the job worker and the retry route.
 pub mod sync_jobs;
 #[allow(dead_code)] // Used by the login service.

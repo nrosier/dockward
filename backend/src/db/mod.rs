@@ -13,6 +13,7 @@ pub mod mappings;
 pub mod setup;
 #[allow(dead_code)] // Used by the job worker and the retry route.
 pub mod sync_jobs;
+pub mod sync_reports;
 #[allow(dead_code)] // Used by the session service and the account and admin routes.
 pub mod users;
 

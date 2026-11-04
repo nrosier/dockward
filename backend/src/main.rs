@@ -466,8 +466,14 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     // The worker stops taking jobs on the same signal. A job it already took finishes.
     let worker_pool = state.pool.clone();
     let worker_stop = stop_rx.clone();
+    let sync_handler = services::sync::SyncHandler::new(
+        state.pool.clone(),
+        state.credentials_key.clone(),
+        state.allow_private_harbor,
+    )
+    .map_err(|_| "could not build the sync job handler")?;
     let worker_task = tokio::spawn(async move {
-        worker::run(worker_pool, Arc::new(worker::NoopHandler), worker_stop).await;
+        worker::run(worker_pool, Arc::new(sync_handler), worker_stop).await;
     });
 
     let mut graceful = stop_rx.clone();
