@@ -975,7 +975,10 @@ mod tests {
             .await
             .unwrap();
         let text = String::from_utf8_lossy(&bytes).into_owned();
-        assert!(!text.contains("FAKE_ROUTE_TOKEN"), "{text}");
+        assert!(
+            !text.contains("FAKE_ROUTE_TOKEN"),
+            "the route token leaked into the create response"
+        );
         let id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"]
             .as_str()
             .unwrap()

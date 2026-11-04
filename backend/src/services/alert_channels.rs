@@ -180,13 +180,12 @@ fn validate_smtp(config: &SmtpConfig) -> Result<(), AppError> {
 
 /// A deliberately light check: something on both sides of one `@`, no whitespace.
 fn is_address(value: &str) -> bool {
-    let trimmed = value.trim();
-    match trimmed.split_once('@') {
+    match value.split_once('@') {
         Some((local, domain)) => {
             !local.is_empty()
                 && !domain.is_empty()
                 && !domain.contains('@')
-                && !trimmed.chars().any(char::is_whitespace)
+                && !value.chars().any(char::is_whitespace)
         }
         None => false,
     }
@@ -464,7 +463,10 @@ mod tests {
                 "config_encrypted",
                 "v1:",
             ] {
-                assert!(!text.contains(secret), "{secret} leaked in {text}");
+                assert!(
+                    !text.contains(secret),
+                    "a secret leaked into a response body"
+                );
             }
         }
         let keys: Vec<&str> = bodies[0]
@@ -578,14 +580,26 @@ mod tests {
         let smtp: SmtpConfig = serde_json::from_value(smtp_config()).unwrap();
         let hook: WebhookConfig = serde_json::from_value(webhook_config()).unwrap();
         let out = format!("{smtp:?} {hook:?}");
-        assert!(!out.contains(FAKE_PASSWORD), "password leaked: {out}");
-        assert!(!out.contains("FAKE_URL_TOKEN_1"), "url token leaked: {out}");
+        assert!(
+            !out.contains(FAKE_PASSWORD),
+            "the password leaked into Debug output"
+        );
+        assert!(
+            !out.contains("FAKE_URL_TOKEN_1"),
+            "the url token leaked into Debug output"
+        );
         assert!(
             !out.contains("FAKE_HEADER_SECRET_1"),
-            "header value leaked: {out}"
+            "a header value leaked into Debug output"
         );
-        assert!(out.contains("smtp.example.test"), "host missing: {out}");
-        assert!(out.contains("<redacted>"), "no redaction marker: {out}");
+        assert!(
+            out.contains("smtp.example.test"),
+            "the host is missing from Debug output"
+        );
+        assert!(
+            out.contains("<redacted>"),
+            "no redaction marker in Debug output"
+        );
         let row = ChannelRow {
             id: "c1".to_owned(),
             kind: "webhook".to_owned(),
@@ -635,7 +649,7 @@ mod tests {
         .fetch_all(&pool)
         .await
         .unwrap();
-        assert_eq!(audit_rows.len(), 3, "{audit_rows:?}");
+        assert_eq!(audit_rows.len(), 3, "unexpected number of audit rows");
         let expected_fields = [
             vec!["kind", "enabled", "config"],
             vec!["enabled"],
@@ -646,7 +660,10 @@ mod tests {
             assert_eq!(target, &format!("alert_channel:{}", hook.id));
             let details = details.as_deref().unwrap();
             for secret in ["FAKE_URL_TOKEN_1", "FAKE_HEADER_SECRET_1", "hooks.example"] {
-                assert!(!details.contains(secret), "{secret} in audit: {details}");
+                assert!(
+                    !details.contains(secret),
+                    "a secret leaked into the audit details"
+                );
             }
             let value: serde_json::Value = serde_json::from_str(details).unwrap();
             assert_eq!(value["channel_id"], hook.id.as_str());
