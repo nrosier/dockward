@@ -9,6 +9,8 @@ pub mod backup;
 #[allow(dead_code)] // Used by the credential routes.
 pub mod credential_probe;
 pub mod credentials;
+#[allow(dead_code)] // Used by the SARIF upload worker (#53).
+pub mod github_scanning;
 #[allow(dead_code)] // Used by the sync pipeline.
 pub mod harbor_client;
 #[allow(dead_code)] // Used by the webhook route.
