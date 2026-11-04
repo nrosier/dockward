@@ -12,8 +12,8 @@ use std::io::Write;
 use std::path::Path;
 
 use aes_gcm::{
-    Aes256Gcm, Key,
-    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
+    Aes256Gcm,
+    aead::{Aead, Generate, KeyInit, Nonce, Payload},
 };
 use sqlx::SqlitePool;
 use zeroize::Zeroizing;
@@ -41,8 +41,9 @@ fn not_verified() -> AppError {
 /// Encrypts `plain` and returns `MAGIC || nonce || ciphertext || tag`. The nonce is
 /// fresh and random for every call.
 pub fn seal(key: &DerivedKey, plain: &[u8]) -> Result<Vec<u8>, AppError> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|_| AppError::InternalError)?;
+    // A fresh 12-byte nonce from the OS CSPRNG for every call.
+    let nonce = Nonce::<Aes256Gcm>::try_generate().map_err(|_| AppError::InternalError)?;
     let ciphertext = cipher
         .encrypt(
             &nonce,
@@ -68,12 +69,13 @@ pub fn open(key: &DerivedKey, file: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppErro
         return Err(not_verified());
     }
     let (magic, rest) = file.split_at(MAGIC_LEN);
-    let (nonce, ciphertext) = rest.split_at(NONCE_LEN);
+    let (nonce_bytes, ciphertext) = rest.split_at(NONCE_LEN);
+    let nonce: &Nonce<Aes256Gcm> = nonce_bytes.try_into().map_err(|_| not_verified())?;
 
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
+    let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|_| AppError::InternalError)?;
     let plain = cipher
         .decrypt(
-            nonce.into(),
+            nonce,
             Payload {
                 msg: ciphertext,
                 aad: magic,
@@ -238,6 +240,24 @@ mod tests {
         db::users::insert_local(&mut conn, id, username, None, "test-hash", "user")
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn each_seal_draws_a_fresh_nonce() {
+        let key = key();
+        let first = seal(&key, b"same").unwrap_or_default();
+        let second = seal(&key, b"same").unwrap_or_default();
+        // The nonce follows the 5-byte magic and is 12 bytes long.
+        let nonce_range = MAGIC_LEN..MAGIC_LEN + NONCE_LEN;
+        assert_eq!(
+            first.get(nonce_range.clone()).map(<[u8]>::len),
+            Some(NONCE_LEN)
+        );
+        assert_ne!(
+            first.get(nonce_range.clone()),
+            second.get(nonce_range),
+            "two seals reused a nonce"
+        );
     }
 
     #[test]

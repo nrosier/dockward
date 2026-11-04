@@ -5,8 +5,8 @@
 //! See `specs/security.md` (Encryption and keys, Derived keys).
 
 use aes_gcm::{
-    AeadCore, Aes256Gcm, Key,
-    aead::{Aead, KeyInit, OsRng, Payload},
+    Aes256Gcm,
+    aead::{Aead, Generate, KeyInit, Nonce, Payload},
 };
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -72,8 +72,9 @@ pub fn aad(table: &str, column: &str, row_id: &str) -> String {
 
 /// Encrypts `plaintext` with `key` and binds it to `aad`. Returns the `v1:` string.
 pub fn encrypt(key: &DerivedKey, aad: &str, plaintext: &[u8]) -> Result<String, AppError> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|_| AppError::InternalError)?;
+    // A fresh 12-byte nonce from the OS CSPRNG for every call.
+    let nonce = Nonce::<Aes256Gcm>::try_generate().map_err(|_| AppError::InternalError)?;
     let ciphertext = cipher
         .encrypt(
             &nonce,
@@ -101,12 +102,15 @@ pub fn decrypt(key: &DerivedKey, aad: &str, stored: &str) -> Result<Zeroizing<Ve
     if blob.len() < NONCE_LEN + TAG_LEN {
         return Err(AppError::InternalError);
     }
-    let (nonce, ciphertext) = blob.split_at(NONCE_LEN);
+    let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
+    let nonce: &Nonce<Aes256Gcm> = nonce_bytes
+        .try_into()
+        .map_err(|_| AppError::InternalError)?;
 
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_bytes()));
+    let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|_| AppError::InternalError)?;
     let plaintext = cipher
         .decrypt(
-            nonce.into(),
+            nonce,
             Payload {
                 msg: ciphertext,
                 aad: aad.as_bytes(),
@@ -221,6 +225,27 @@ mod tests {
         let first = encrypt(&key, &a, b"same").unwrap_or_default();
         let second = encrypt(&key, &a, b"same").unwrap_or_default();
         assert_ne!(first, second);
+    }
+
+    /// The first 12 bytes of each `v1:` value are the nonce. Two encryptions of the same
+    /// plaintext under the same key and AAD must draw different nonces. A fixed nonce
+    /// would make this fail.
+    #[test]
+    fn each_encryption_draws_a_fresh_nonce() {
+        let key = cred();
+        let a = aad("t", "c", "1");
+        let nonce_of = |stored: &str| -> Vec<u8> {
+            let encoded = stored.strip_prefix(V1_PREFIX).unwrap_or_default();
+            base64_decode(encoded).unwrap_or_default()[..NONCE_LEN].to_vec()
+        };
+        let first = encrypt(&key, &a, b"same").unwrap_or_default();
+        let second = encrypt(&key, &a, b"same").unwrap_or_default();
+        assert_eq!(nonce_of(&first).len(), NONCE_LEN, "nonce is not 12 bytes");
+        assert_ne!(
+            nonce_of(&first),
+            nonce_of(&second),
+            "two encryptions reused a nonce"
+        );
     }
 
     #[test]
