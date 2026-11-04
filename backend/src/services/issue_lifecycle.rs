@@ -24,8 +24,24 @@ use crate::services::github_issues::{self, GithubIssues, IssueRef};
 use crate::services::github_scanning::ScanError;
 use crate::services::ids;
 
-/// The longest issue title GitHub takes, in characters.
+/// The longest issue title GitHub takes, in characters. GitHub's own validation answer is
+/// `title is too long (maximum is 256 characters)`; the REST page for creating an issue
+/// (https://docs.github.com/rest/issues/issues#create-an-issue) does not state the limit.
 const MAX_TITLE_CHARS: usize = 256;
+
+/// The package text when a row has none, in the title and in the table.
+const UNKNOWN_PACKAGE: &str = "unknown package";
+
+/// The comment when the manual route reopens a closed issue.
+const MANUAL_REOPEN_COMMENT: &str = "CVE reopened manually from HarborGate.";
+
+/// The longest CVE id or mapping id the manual route and the lifecycle accept, in bytes.
+const MAX_ID_BYTES: usize = 128;
+
+/// Serialises "look for a row, look for a marked issue, create an issue, store the row".
+/// HarborGate runs as one instance (`specs/architecture.md`), so one process-wide lock is
+/// enough to stop a sync and a manual click from both creating the issue for one CVE.
+static CREATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The GitHub Issues calls the lifecycle needs. The production impl is [`GithubIssues`];
 /// tests answer from a model of GitHub.
@@ -127,6 +143,9 @@ pub enum Outcome {
         /// Unix seconds when GitHub allows calls again.
         until: i64,
     },
+    /// GitHub refused the token (`401` or `403`). The run stopped at the first refusal,
+    /// because every later call would fail the same way.
+    Refused,
 }
 
 /// The issue created or reopened by the manual route.
@@ -233,7 +252,7 @@ fn issue_title(view: &CveView, mapping: &MappingRow) -> String {
         .as_deref()
         .map(plain)
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "unknown package".to_owned());
+        .unwrap_or_else(|| UNKNOWN_PACKAGE.to_owned());
     let title = format!(
         "{}: {} ({}) in {}/{}",
         plain(&view.cve_id),
@@ -251,7 +270,7 @@ fn issue_text(view: &CveView, mapping: &MappingRow) -> String {
     let mut body = github_issues::issue_body(
         &view.cve_id,
         view.severity,
-        view.package.as_deref().unwrap_or("unknown"),
+        &code_span(view.package.as_deref().unwrap_or(UNKNOWN_PACKAGE)),
         view.fixed_in.as_deref(),
         &harbor,
     );
@@ -264,8 +283,42 @@ fn issue_text(view: &CveView, mapping: &MappingRow) -> String {
     body
 }
 
+/// True for an id that is safe in the marker line and the route: 1 to 128 bytes of ASCII
+/// letters, digits, `.`, `_`, `-` and `:` (a CVE id may be `RHSA-2023:1234`). A Harbor-supplied
+/// id with a line break or `-->` fails, so it cannot break the first-line marker. Findings
+/// with such an id never get an issue.
+fn valid_cve_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ID_BYTES
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':'))
+}
+
+fn valid_mapping_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ID_BYTES
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// A package name as one inline code span, so `@scope/pkg` cannot @-mention a GitHub user or
+/// organisation. Backticks and line breaks in the name are replaced first.
+fn code_span(text: &str) -> String {
+    format!("`{}`", plain(text))
+}
+
 fn to_number(number: i64) -> Result<u64, AppError> {
     u64::try_from(number).map_err(|_| AppError::InternalError)
+}
+
+/// What [`Ctx::create_or_adopt`] did.
+enum Made {
+    /// A new row was stored, for a new or an adopted issue.
+    Created(IssueRow),
+    /// The CVE already had a row, so nothing was created.
+    Existing(IssueRow),
 }
 
 /// What every GitHub step needs: the database, the client, the token, the mapping and the
@@ -287,15 +340,20 @@ impl<G: IssueApi> Ctx<'_, G> {
         &self.mapping.github_repo
     }
 
-    /// Finds or makes the issue for a CVE that has no `github_issues` row, stores the row
-    /// and links the CVE's findings to it. An open labelled issue with the marker is
-    /// adopted; otherwise a new issue is created. `listed` keeps the open issues after the
-    /// first lookup, so one run lists them once.
+    /// Finds or makes the issue for a CVE and stores the row. Under [`CREATE_LOCK`] it first
+    /// looks for the row again, so a concurrent caller that finished first wins and this one
+    /// gets [`Made::Existing`]. Otherwise an open labelled issue with the marker is adopted,
+    /// or a new issue is created, and the CVE's findings are linked to the row. `listed`
+    /// keeps the open issues after the first lookup, so one run lists them once.
     async fn create_or_adopt(
         &self,
         view: &CveView,
         listed: &mut Option<Vec<IssueRef>>,
-    ) -> Result<IssueRow, Failure> {
+    ) -> Result<Made, Failure> {
+        let _guard = CREATE_LOCK.lock().await;
+        if let Some(row) = self.find_row(&view.cve_id).await? {
+            return Ok(Made::Existing(row));
+        }
         if listed.is_none() {
             *listed = Some(
                 self.gh
@@ -329,7 +387,7 @@ impl<G: IssueApi> Ctx<'_, G> {
             .acquire()
             .await
             .map_err(|_| AppError::InternalError)?;
-        issue_db::insert(
+        let stored = issue_db::insert(
             &mut conn,
             &NewIssue {
                 id: &id,
@@ -341,8 +399,16 @@ impl<G: IssueApi> Ctx<'_, G> {
             },
         )
         .await?;
+        if !stored {
+            // Another writer stored a row after the check above (a second process, for
+            // example). Its row wins; this one is not an error.
+            let row = issue_db::find(&mut conn, self.owner(), self.repo(), &view.cve_id)
+                .await?
+                .ok_or(AppError::InternalError)?;
+            return Ok(Made::Existing(row));
+        }
         issue_db::link_findings(&mut conn, &self.mapping.id, &view.cve_id, &id).await?;
-        Ok(IssueRow {
+        Ok(Made::Created(IssueRow {
             id,
             github_owner: self.owner().to_owned(),
             github_repo: self.repo().to_owned(),
@@ -350,7 +416,16 @@ impl<G: IssueApi> Ctx<'_, G> {
             github_issue_number: number,
             github_issue_url: issue.html_url,
             status: "open".to_owned(),
-        })
+        }))
+    }
+
+    async fn find_row(&self, cve_id: &str) -> Result<Option<IssueRow>, AppError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        issue_db::find(&mut conn, self.owner(), self.repo(), cve_id).await
     }
 
     /// Reopens the issue of a closed row, marks the row `open`, then comments.
@@ -517,10 +592,27 @@ pub async fn reconcile<G: IssueApi>(
     };
     let mut listed: Option<Vec<IssueRef>> = None;
     for (cve_id, rows) in &by_cve {
+        if !valid_cve_id(cve_id) {
+            continue;
+        }
         match ctx.step(cve_id, rows, &rules, &mut listed).await {
             Ok(()) => {}
             Err(Failure::Scan(ScanError::RateLimited { until })) => {
                 return Ok(Outcome::RateLimited { until });
+            }
+            Err(Failure::Scan(ScanError::Unauthorized)) => {
+                tracing::warn!(
+                    reason = "Unauthorized",
+                    "GitHub refused the issue updates; stopping"
+                );
+                return Ok(Outcome::Refused);
+            }
+            Err(Failure::Scan(ScanError::Forbidden(_))) => {
+                tracing::warn!(
+                    reason = "Forbidden",
+                    "GitHub refused the issue updates; stopping"
+                );
+                return Ok(Outcome::Refused);
             }
             Err(Failure::Scan(_)) => {
                 tracing::warn!("a GitHub issue update failed; continuing with the next CVE");
@@ -604,16 +696,33 @@ pub async fn create_manual<G: IssueApi>(
     };
     let row = match existing {
         Some(row) => {
-            ctx.reopen(&row, "CVE reopened manually from HarborGate.")
+            ctx.reopen(&row, MANUAL_REOPEN_COMMENT)
                 .await
                 .map_err(manual_error)?;
             row
         }
         None => {
             let mut listed = None;
-            ctx.create_or_adopt(&view, &mut listed)
+            match ctx
+                .create_or_adopt(&view, &mut listed)
                 .await
                 .map_err(manual_error)?
+            {
+                Made::Created(row) => row,
+                // A concurrent caller stored the row first and it is still open.
+                Made::Existing(row) if row.status == "open" => {
+                    return Err(AppError::Conflict(format!(
+                        "An open GitHub issue already exists: {}",
+                        row.github_issue_url
+                    )));
+                }
+                Made::Existing(row) => {
+                    ctx.reopen(&row, MANUAL_REOPEN_COMMENT)
+                        .await
+                        .map_err(manual_error)?;
+                    row
+                }
+            }
         }
     };
     Ok(ManualIssue {
@@ -622,10 +731,12 @@ pub async fn create_manual<G: IssueApi>(
     })
 }
 
-/// Splits the route id `<mapping_id>:<cve_id>`. An id in any other shape is `404`.
+/// Splits the route id `<mapping_id>:<cve_id>`. An id in any other shape, an empty part, a
+/// part over 128 bytes, or a character outside the allowed set is `404`, before any database
+/// call.
 fn split_id(id: &str) -> Result<(&str, &str), AppError> {
     match id.split_once(':') {
-        Some((mapping_id, cve_id)) if !mapping_id.is_empty() && !cve_id.is_empty() => {
+        Some((mapping_id, cve_id)) if valid_mapping_id(mapping_id) && valid_cve_id(cve_id) => {
             Ok((mapping_id, cve_id))
         }
         _ => Err(AppError::NotFound),
@@ -682,6 +793,13 @@ pub(crate) mod test_support {
         /// `(method, path, body)` of every request, in order.
         pub log: Vec<(&'static str, String, Value)>,
         pub rate_limited: bool,
+        /// Answer every call as a refused token (`401`).
+        pub unauthorized: bool,
+        /// Make a list call wait (at most 100 ms) until a second caller also lists, so two
+        /// concurrent callers really overlap. A lock that serialises them makes the first
+        /// caller time out and go on alone.
+        pub rendezvous: bool,
+        pub listing: usize,
     }
 
     /// The fake GitHub for `octo/app`.
@@ -739,6 +857,9 @@ pub(crate) mod test_support {
                 state.log.push((method, path.to_owned(), body.clone()));
                 if state.rate_limited {
                     return Err(ScanError::RateLimited { until: 5_000 });
+                }
+                if state.unauthorized {
+                    return Err(ScanError::Unauthorized);
                 }
                 let reply = |status: u16, body: Value| ScanResponse {
                     status,
@@ -806,6 +927,8 @@ pub(crate) mod test_support {
             _token: &[u8],
             body: &Value,
         ) -> Result<ScanResponse, ScanError> {
+            // Let a concurrent caller run, so a missing lock shows up as a second create.
+            tokio::task::yield_now().await;
             self.respond("POST", path, body)
         }
 
@@ -819,7 +942,22 @@ pub(crate) mod test_support {
         }
 
         async fn get(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
-            self.respond("GET", path, &Value::Null)
+            // The answer is read now and delivered later, like a slow network: a caller
+            // that lists while another is creating gets a list without the new issue.
+            let answer = self.respond("GET", path, &Value::Null);
+            if self.with(|state| {
+                state.listing += 1;
+                state.rendezvous
+            }) {
+                for _ in 0..50 {
+                    if self.with(|state| state.listing >= 2) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+            }
+            tokio::task::yield_now().await;
+            answer
         }
     }
 
@@ -962,6 +1100,19 @@ mod tests {
 
         /// Stores a finding for `tag` as an `open` row seen at `at`.
         async fn finding(&self, mapping_id: &str, tag: &str, cve: &str, severity: &str, at: i64) {
+            self.finding_pkg(mapping_id, tag, cve, severity, "openssl", at)
+                .await;
+        }
+
+        async fn finding_pkg(
+            &self,
+            mapping_id: &str,
+            tag: &str,
+            cve: &str,
+            severity: &str,
+            package: &str,
+            at: i64,
+        ) {
             let mut conn = self.pool.acquire().await.unwrap();
             db::findings::upsert(
                 &mut conn,
@@ -971,7 +1122,7 @@ mod tests {
                     harbor_repository: "app",
                     image_tag: tag,
                     cve_id: cve,
-                    package: Some("openssl"),
+                    package: Some(package),
                     severity,
                     fixed_in_version: None,
                     description: None,
@@ -1264,5 +1415,262 @@ mod tests {
         // The run stopped at the first call.
         assert_eq!(fx.github.requests(), 1);
         assert!(fx.issues().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_reconciles_create_one_issue_and_no_error() {
+        let fx = Fixture::new("race-sync", "CRITICAL", true).await;
+        fx.github.with(|state| state.rendezvous = true);
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        let mapping = fx.mapping("m1").await;
+
+        let (a, b) = tokio::join!(
+            reconcile(&fx.pool, &fx.gh, TOKEN, &mapping, "proj/app:v1", 1_000),
+            reconcile(&fx.pool, &fx.gh, TOKEN, &mapping, "proj/app:v1", 1_000),
+        );
+
+        assert_eq!(a.unwrap(), Outcome::Complete);
+        assert_eq!(b.unwrap(), Outcome::Complete);
+        assert_eq!(fx.github.creates().len(), 1, "exactly one GitHub issue");
+        assert_eq!(fx.issues().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_manual_creates_make_one_issue_and_never_a_500() {
+        let fx = Fixture::new("race-manual", "CRITICAL", true).await;
+        fx.github.with(|state| state.rendezvous = true);
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        let mapping = fx.mapping("m1").await;
+
+        let (a, b) = tokio::join!(
+            create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0001", 1_000),
+            create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0001", 1_000),
+        );
+
+        // One call creates the issue; the other sees it and gets the `409`.
+        let results = [a, b];
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        let statuses: Vec<_> = results
+            .iter()
+            .filter_map(|r| r.as_ref().err())
+            .map(AppError::status)
+            .collect();
+        assert_eq!(statuses, vec![axum::http::StatusCode::CONFLICT]);
+        assert_eq!(fx.github.creates().len(), 1, "exactly one GitHub issue");
+    }
+
+    #[tokio::test]
+    async fn manual_and_sync_racing_make_one_issue() {
+        let fx = Fixture::new("race-mixed", "CRITICAL", true).await;
+        fx.github.with(|state| state.rendezvous = true);
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        let mapping = fx.mapping("m1").await;
+
+        let (synced, manual) = tokio::join!(
+            reconcile(&fx.pool, &fx.gh, TOKEN, &mapping, "proj/app:v1", 1_000),
+            create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0001", 1_000),
+        );
+
+        assert_eq!(synced.unwrap(), Outcome::Complete);
+        if let Err(error) = manual {
+            assert_eq!(error.status(), axum::http::StatusCode::CONFLICT);
+        }
+        assert_eq!(fx.github.creates().len(), 1, "exactly one GitHub issue");
+        assert_eq!(fx.issues().await.len(), 1);
+    }
+
+    /// An `IssueApi` that stores a row for the CVE just before it creates the issue, as a
+    /// second process would. The insert after the create then hits the UNIQUE constraint.
+    struct Racing {
+        inner: FakeIssues,
+        pool: SqlitePool,
+    }
+
+    impl IssueApi for Racing {
+        async fn list_open_labelled(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            now: i64,
+        ) -> Result<Vec<IssueRef>, ScanError> {
+            self.inner.list_open_labelled(token, owner, repo, now).await
+        }
+
+        async fn create(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            title: &str,
+            body: &str,
+            now: i64,
+        ) -> Result<IssueRef, ScanError> {
+            sqlx::query(
+                "INSERT INTO github_issues (id, github_owner, github_repo, cve_id, github_issue_number, github_issue_url, status)
+                 VALUES ('other', 'octo', 'app', 'CVE-2026-0001', 99, 'https://github.com/octo/app/issues/99', 'open')",
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(|_| ScanError::Upstream("test setup failed".to_owned()))?;
+            self.inner
+                .create(token, owner, repo, title, body, now)
+                .await
+        }
+
+        async fn comment(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            body: &str,
+            now: i64,
+        ) -> Result<(), ScanError> {
+            self.inner
+                .comment(token, owner, repo, number, body, now)
+                .await
+        }
+
+        async fn set_state(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            open: bool,
+            now: i64,
+        ) -> Result<(), ScanError> {
+            self.inner
+                .set_state(token, owner, repo, number, open, now)
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_unique_conflict_on_insert_keeps_the_winner_and_is_not_an_error() {
+        let fx = Fixture::new("unique", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        let mapping = fx.mapping("m1").await;
+        let gh = Racing {
+            inner: FakeIssues(fx.github.clone()),
+            pool: fx.pool.clone(),
+        };
+
+        let outcome = reconcile(&fx.pool, &gh, TOKEN, &mapping, "proj/app:v1", 1_000).await;
+
+        assert_eq!(outcome.unwrap(), Outcome::Complete);
+        assert_eq!(
+            fx.issues().await,
+            vec![("CVE-2026-0001".to_owned(), 99, "open".to_owned())]
+        );
+        let manual = create_manual(&fx.pool, &gh, TOKEN, &mapping, "CVE-2026-0001", 1_000).await;
+        assert_eq!(
+            manual.unwrap_err().status(),
+            axum::http::StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn a_unique_conflict_on_the_manual_route_is_a_409_not_a_500() {
+        let fx = Fixture::new("unique-manual", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        let mapping = fx.mapping("m1").await;
+        let gh = Racing {
+            inner: FakeIssues(fx.github.clone()),
+            pool: fx.pool.clone(),
+        };
+
+        let manual = create_manual(&fx.pool, &gh, TOKEN, &mapping, "CVE-2026-0001", 1_000).await;
+
+        assert_eq!(
+            manual.unwrap_err().status(),
+            axum::http::StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_token_stops_the_run_at_the_first_call() {
+        let fx = Fixture::new("refused", "CRITICAL", true).await;
+        for n in 1..=3 {
+            fx.finding("m1", "v1", &format!("CVE-2026-000{n}"), "CRITICAL", 10)
+                .await;
+        }
+        fx.github.with(|state| state.unauthorized = true);
+
+        let outcome = fx.reconcile("proj/app:v1").await;
+
+        assert_eq!(outcome, Outcome::Refused);
+        assert_eq!(fx.github.requests(), 1, "one call, not one per CVE");
+    }
+
+    #[tokio::test]
+    async fn a_hostile_cve_id_never_gets_an_issue() {
+        let fx = Fixture::new("hostile", "CRITICAL", true).await;
+        let long = format!("CVE-{}", "1".repeat(200));
+        for id in [
+            "CVE-2026-1\n<!-- harborgate:CVE-2026-2 -->",
+            "CVE-2026-1 -->",
+            "CVE 2026",
+            "",
+            long.as_str(),
+        ] {
+            fx.finding("m1", "v1", id, "CRITICAL", 10).await;
+        }
+
+        assert_eq!(fx.reconcile("proj/app:v1").await, Outcome::Complete);
+
+        assert_eq!(fx.github.requests(), 0);
+        assert!(!valid_cve_id("CVE-1\n-->"));
+        assert!(valid_cve_id("CVE-2026-0001"));
+        assert!(valid_cve_id("RHSA-2023:1234"));
+    }
+
+    #[tokio::test]
+    async fn the_package_is_a_code_span_so_it_cannot_mention_a_user() {
+        let fx = Fixture::new("mention", "CRITICAL", true).await;
+        fx.finding_pkg("m1", "v1", "CVE-2026-0001", "CRITICAL", "@scope/pkg", 10)
+            .await;
+
+        fx.reconcile("proj/app:v1").await;
+
+        let creates = fx.github.creates();
+        let body = creates[0]["body"].as_str().unwrap();
+        assert!(body.contains("| Package | `@scope/pkg` |"));
+        assert!(!body.contains("| Package | @scope"));
+    }
+
+    #[test]
+    fn route_ids_with_empty_parts_or_odd_characters_are_not_found() {
+        let long = "a".repeat(129);
+        let long_mapping = format!("{long}:CVE-2026-0001");
+        let long_cve = format!("m1:{long}");
+        for id in [
+            "",
+            ":",
+            "m1:",
+            ":CVE-2026-0001",
+            "no-colon",
+            "m1:CVE 2026",
+            "m 1:CVE-2026-0001",
+            "m1:CVE-1\n-->",
+            long_mapping.as_str(),
+            long_cve.as_str(),
+        ] {
+            assert_eq!(split_id(id).unwrap_err(), AppError::NotFound, "id {id:?}");
+        }
+        assert_eq!(
+            split_id("m1:CVE-2026-0001").unwrap(),
+            ("m1", "CVE-2026-0001")
+        );
+        assert_eq!(
+            split_id("m1:RHSA-2023:1234").unwrap(),
+            ("m1", "RHSA-2023:1234")
+        );
     }
 }

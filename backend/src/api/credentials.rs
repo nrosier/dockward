@@ -520,6 +520,9 @@ mod tests {
             backup_key: std::sync::Arc::new(crate::auth::crypto::backup_key(&root).unwrap()),
             data_dir: dir.clone(),
             backup_dir: dir.join("backups"),
+            issues_client: std::sync::Arc::new(
+                crate::services::github_issues::GithubIssues::new().unwrap(),
+            ),
         }
     }
 }

@@ -10,7 +10,6 @@ use serde::Serialize;
 
 use crate::api::state::AppState;
 use crate::error::AppError;
-use crate::services::github_issues::GithubIssues;
 use crate::services::issue_lifecycle::{self, IssueApi};
 use crate::services::sessions::AuthUser;
 use crate::worker::now_secs;
@@ -31,8 +30,7 @@ pub async fn issue(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<IssueCreated>), AppError> {
-    let gh = GithubIssues::new()?;
-    issue_with(&state, &user, &id, &gh).await
+    issue_with(&state, &user, &id, state.issues_client.as_ref()).await
 }
 
 /// The route's work with the GitHub client passed in, so tests use a fake.

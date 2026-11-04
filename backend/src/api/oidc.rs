@@ -307,6 +307,9 @@ mod tests {
             backup_key: Arc::new(crypto::backup_key(&root).unwrap()),
             data_dir: dir.clone(),
             backup_dir: dir.join("backups"),
+            issues_client: std::sync::Arc::new(
+                crate::services::github_issues::GithubIssues::new().unwrap(),
+            ),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }

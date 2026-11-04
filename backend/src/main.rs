@@ -527,6 +527,10 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         backup_key,
         data_dir: settings.data_dir.clone(),
         backup_dir: settings.backup_dir.clone(),
+        issues_client: Arc::new(
+            services::github_issues::GithubIssues::new()
+                .map_err(|_| "could not build the GitHub issues client")?,
+        ),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -750,6 +754,9 @@ mod tests {
             backup_key: Arc::new(auth::crypto::backup_key(&root).unwrap()),
             data_dir: dir.clone(),
             backup_dir: dir.join("backups"),
+            issues_client: std::sync::Arc::new(
+                crate::services::github_issues::GithubIssues::new().unwrap(),
+            ),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -822,6 +829,9 @@ mod tests {
             backup_key: Arc::new(auth::crypto::backup_key(&root).unwrap()),
             data_dir: dir.clone(),
             backup_dir: dir.join("backups"),
+            issues_client: std::sync::Arc::new(
+                crate::services::github_issues::GithubIssues::new().unwrap(),
+            ),
         };
         (app(Vec::new(), state), pool, dir, handle)
     }
@@ -1869,5 +1879,102 @@ mod tests {
 
         assert_eq!(result, Err(RotateFailure::SameKey));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `POST /api/v1/cves/{id}/issue` through the router: no CSRF token is `403`, a CSRF
+    /// token with no session is `401`, and another user's mapping in the percent-encoded
+    /// `<mapping_id>%3A<cve_id>` form is `404`. No GitHub call is made in any case.
+    #[tokio::test]
+    async fn cve_issue_route_checks_csrf_session_and_tenancy() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, pool, dir) = test_router("cve-issue-route").await;
+        let mut conn = pool.acquire().await.unwrap();
+        for id in ["owner-1", "other-2"] {
+            db::users::insert_local(&mut conn, id, id, None, "h", "user")
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        sqlx::query(
+            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
+             VALUES ('rc1', 'owner-1', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
+                    ('rc2', 'owner-1', 'github', 'g', NULL, NULL, 'v1:fake')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+             VALUES ('rm1', 'owner-1', 'rc1', 'rc2', 'https://harbor.example.com', 'proj', 'app', 'octo', 'app', 'h1', 'h2')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, severity, status)
+             VALUES ('rf1', 'rm1', 'app', 'v1', 'CVE-2026-0001', 'CRITICAL', 'open')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let key = auth::crypto::csrf_key(
+            &config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap(),
+        )
+        .unwrap();
+        let csrf = auth::csrf::issue(&key).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let other_session = session_cookie("other-2", "user", 0);
+        let uri = "/api/v1/cves/rm1%3ACVE-2026-0001/issue";
+        let post = |cookie: String, token: Option<&str>| {
+            let mut builder = with_peer(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("cookie", cookie),
+            );
+            if let Some(token) = token {
+                builder = builder.header("x-csrf-token", token);
+            }
+            builder.body(Body::empty()).unwrap()
+        };
+
+        let no_csrf = router
+            .clone()
+            .oneshot(post(format!("{other_session}; {csrf_cookie}"), None))
+            .await
+            .unwrap();
+        let no_session = router
+            .clone()
+            .oneshot(post(csrf_cookie.clone(), Some(&csrf)))
+            .await
+            .unwrap();
+        let foreign = router
+            .clone()
+            .oneshot(post(format!("{other_session}; {csrf_cookie}"), Some(&csrf)))
+            .await
+            .unwrap();
+        // The owner's call reaches the route with the decoded id. Its stored token is not
+        // real, so decryption fails before any GitHub call; what matters is that it is not 404.
+        let owner_session = session_cookie("owner-1", "user", 0);
+        let owner = router
+            .oneshot(post(format!("{owner_session}; {csrf_cookie}"), Some(&csrf)))
+            .await
+            .unwrap();
+        let issues: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM github_issues")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(no_csrf.status(), StatusCode::FORBIDDEN);
+        assert_eq!(no_session.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        assert_ne!(owner.status(), StatusCode::NOT_FOUND);
+        assert_eq!(issues, 0);
     }
 }

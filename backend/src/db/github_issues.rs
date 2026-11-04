@@ -54,12 +54,15 @@ pub async fn find(
     .map_err(|_| AppError::InternalError)
 }
 
-/// Stores a new `open` row.
-pub async fn insert(conn: &mut SqliteConnection, row: &NewIssue<'_>) -> Result<(), AppError> {
+/// Stores a new `open` row. Returns `false` and changes nothing when the repository already
+/// has a row for the CVE (`UNIQUE (github_owner, github_repo, cve_id)`): two writers racing
+/// for the same CVE are not an error, and the caller re-reads the winner's row.
+pub async fn insert(conn: &mut SqliteConnection, row: &NewIssue<'_>) -> Result<bool, AppError> {
     sqlx::query!(
         "INSERT INTO github_issues
             (id, github_owner, github_repo, cve_id, github_issue_number, github_issue_url, status)
-         VALUES (?, ?, ?, ?, ?, ?, 'open')",
+         VALUES (?, ?, ?, ?, ?, ?, 'open')
+         ON CONFLICT (github_owner, github_repo, cve_id) DO NOTHING",
         row.id,
         row.github_owner,
         row.github_repo,
@@ -69,7 +72,7 @@ pub async fn insert(conn: &mut SqliteConnection, row: &NewIssue<'_>) -> Result<(
     )
     .execute(conn)
     .await
-    .map(|_| ())
+    .map(|done| done.rows_affected() == 1)
     .map_err(|_| AppError::InternalError)
 }
 
@@ -181,4 +184,54 @@ pub async fn accepted_cves(
     .fetch_all(conn)
     .await
     .map_err(|_| AppError::InternalError)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    #[tokio::test]
+    async fn second_insert_for_the_same_cve_is_not_an_error() {
+        let dir = std::env::temp_dir().join(format!("harborgate-gi-dup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = db::open(&dir).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let first = NewIssue {
+            id: "gi1",
+            github_owner: "octo",
+            github_repo: "app",
+            cve_id: "CVE-2026-0001",
+            github_issue_number: 1,
+            github_issue_url: "https://github.com/octo/app/issues/1",
+        };
+        let second = NewIssue {
+            id: "gi2",
+            github_issue_number: 2,
+            github_issue_url: "https://github.com/octo/app/issues/2",
+            ..first_copy(&first)
+        };
+        assert!(insert(&mut conn, &first).await.unwrap());
+        assert!(!insert(&mut conn, &second).await.unwrap());
+        let kept = find(&mut conn, "octo", "app", "CVE-2026-0001")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.id, "gi1", "the first writer's row is kept");
+        drop(conn);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn first_copy<'a>(row: &NewIssue<'a>) -> NewIssue<'a> {
+        NewIssue {
+            id: row.id,
+            github_owner: row.github_owner,
+            github_repo: row.github_repo,
+            cve_id: row.cve_id,
+            github_issue_number: row.github_issue_number,
+            github_issue_url: row.github_issue_url,
+        }
+    }
 }

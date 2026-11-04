@@ -509,17 +509,18 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
         }
     }
 
-    /// Makes the GitHub issues follow the findings that were just applied. A rate limit is
-    /// logged as fixed text and the job still finishes: the report is already `success`, so
-    /// a retry would upload the SARIF again. The next scan reconciles the issues. Another
-    /// GitHub error is logged inside the reconcile. Only a database error fails the job.
-    async fn reconcile_issues(&self, context: &Context) -> Flow<()> {
+    /// Makes the GitHub issues follow the findings that were just applied. Nothing here can
+    /// fail the job: the report is already `success`, so a retry would upload the SARIF again
+    /// and add a second report row. A rate limit, a refused token or a database error is
+    /// logged as fixed text, and the next scan reconciles the issues. Another GitHub error is
+    /// logged inside the reconcile.
+    async fn reconcile_issues(&self, context: &Context) {
         let mapping = &context.mapping;
         let scan_label = format!(
             "{}/{}:{}",
             mapping.harbor_project, mapping.harbor_repository, context.payload.tag
         );
-        let outcome = issue_lifecycle::reconcile(
+        let result = issue_lifecycle::reconcile(
             &self.pool,
             &self.issues,
             &context.github_token,
@@ -527,14 +528,23 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
             &scan_label,
             self.clock.now(),
         )
-        .await
-        .map_err(database)?;
-        if matches!(outcome, issue_lifecycle::Outcome::RateLimited { .. }) {
-            tracing::warn!(
-                "GitHub rate limit reached while updating issues; the next scan retries"
-            );
+        .await;
+        match result {
+            Ok(issue_lifecycle::Outcome::Complete) => {}
+            Ok(issue_lifecycle::Outcome::RateLimited { .. }) => {
+                tracing::warn!(
+                    "GitHub rate limit reached while updating issues; the next scan retries"
+                );
+            }
+            Ok(issue_lifecycle::Outcome::Refused) => {
+                tracing::warn!(
+                    "GitHub refused the issue updates; check the token's Issues permission"
+                );
+            }
+            Err(_) => {
+                tracing::warn!("the database failed while updating issues; the next scan retries");
+            }
         }
-        Ok(())
     }
 
     /// Polls GitHub after 5 s, 10 s, then every 15 s, for at most 300 s in total. On
@@ -593,7 +603,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
                     )
                     .await
                     .map_err(database)?;
-                    self.reconcile_issues(context).await?;
+                    self.reconcile_issues(context).await;
                     return Ok(());
                 }
                 Processing::Failed(errors) => {
@@ -1268,5 +1278,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(findings, 4);
+    }
+
+    #[tokio::test]
+    async fn database_error_during_issue_updates_finishes_the_job_done() {
+        let fx = Fixture::new("issues-db-error").await;
+        sqlx::query("UPDATE repo_mappings SET auto_create_issues = 1 WHERE id = 'm1'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        // Only the issue step reads the acceptances. With the table gone, the findings are
+        // applied and the report is `success`, and then the issue step fails on the database.
+        sqlx::query("DROP TABLE cve_acceptances")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        let harbor = ok_harbor();
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+        let github = Arc::new(FakeGithub::default());
+
+        let outcome = fx
+            .handler_with(&harbor, &scanner, github.clone())
+            .run(fx.job())
+            .await;
+
+        assert_eq!(outcome, JobOutcome::Done);
+        assert_eq!(scanner.uploads(), 1);
+        let (status, ..) = fx.report().await.unwrap();
+        assert_eq!(status, "success");
+        // The findings were applied before the issue step failed.
+        let findings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cve_findings")
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+        assert_eq!(findings, 4);
+        assert_eq!(github.requests(), 0);
     }
 }
