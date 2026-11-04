@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE alert_channels\n         SET enabled = ?, config_encrypted = COALESCE(?, config_encrypted),\n             updated_at = unixepoch()\n         WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "370b781afbca8011cb6220befce2a010d51686765060033b1e6d593350d77f80"
+}

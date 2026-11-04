@@ -31,6 +31,8 @@ pub struct AppState {
     pub jwks: Arc<JwksCache>,
     /// `HARBORGATE_ALLOW_PRIVATE_HARBOR`. The private-range opt-out for Harbor targets.
     pub allow_private_harbor: bool,
+    /// `HARBORGATE_ALLOW_PRIVATE_ALERTS`. The private-range opt-out for alert webhook targets.
+    pub allow_private_alerts: bool,
     /// Webhook requests per mapping: 60 per minute (`specs/security.md`, Hardening).
     /// Keyed by mapping id.
     pub webhook_token_limiter: RateLimiter,

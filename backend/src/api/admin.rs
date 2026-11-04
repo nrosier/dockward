@@ -23,6 +23,7 @@ use crate::db::mappings as mapping_rows;
 use crate::error::AppError;
 use crate::models::role::Role;
 use crate::models::user::User;
+use crate::services::alert_channels::{self, Channel, ListQuery};
 use crate::services::audit::{self, AuditEntry, AuditQuery};
 use crate::services::backup as backup_service;
 use crate::services::credential_probe::{
@@ -133,6 +134,116 @@ pub async fn create_user(
         .await?
         .ok_or(AppError::InternalError)?;
     Ok((StatusCode::CREATED, Json(User::try_from(row)?)).into_response())
+}
+
+/// Body for `POST /api/v1/admin/alert-channels`. `config` holds secrets, so `Debug`
+/// does not print it.
+#[derive(Deserialize)]
+pub struct CreateChannelBody {
+    pub kind: String,
+    #[serde(default)]
+    pub enabled: bool,
+    pub config: serde_json::Value,
+}
+
+impl fmt::Debug for CreateChannelBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CreateChannelBody")
+            .field("kind", &self.kind)
+            .field("enabled", &self.enabled)
+            .field("config", &REDACTED)
+            .finish()
+    }
+}
+
+/// Body for `PUT /api/v1/admin/alert-channels/:id`. Without `config` only `enabled`
+/// changes. `config` is write-only.
+#[derive(Deserialize)]
+pub struct UpdateChannelBody {
+    pub enabled: Option<bool>,
+    pub config: Option<serde_json::Value>,
+}
+
+impl fmt::Debug for UpdateChannelBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpdateChannelBody")
+            .field("enabled", &self.enabled)
+            .field("config", &self.config.as_ref().map(|_| REDACTED))
+            .finish()
+    }
+}
+
+/// Raw query values for `GET /api/v1/admin/alert-channels`.
+#[derive(Debug, Deserialize)]
+pub struct ChannelListParams {
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+}
+
+/// `GET /api/v1/admin/alert-channels`. Paginated. The config is never returned.
+pub async fn list_alert_channels(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Query(params): Query<ChannelListParams>,
+) -> Result<Json<Page<Channel>>, AppError> {
+    let query = ListQuery {
+        page: params.page,
+        page_size: params.page_size,
+        sort: params.sort,
+        order: params.order,
+    };
+    Ok(Json(alert_channels::list(&state.pool, &query).await?))
+}
+
+/// `POST /api/v1/admin/alert-channels`. Returns `201`, or `422` for an invalid config.
+pub async fn create_alert_channel(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    body: axum::body::Bytes,
+) -> Result<Response, AppError> {
+    let body: CreateChannelBody = parse_body(&body)?;
+    let actor = audit::Actor {
+        user_id: Some(admin.id),
+        username: admin.username,
+    };
+    let channel = alert_channels::create(
+        &state.pool,
+        &state.credentials_key,
+        &actor,
+        state.allow_private_alerts,
+        &body.kind,
+        body.enabled,
+        body.config,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(channel)).into_response())
+}
+
+/// `PUT /api/v1/admin/alert-channels/:id`. Returns `200`, `404`, or `422`.
+pub async fn update_alert_channel(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Json<Channel>, AppError> {
+    let body: UpdateChannelBody = parse_body(&body)?;
+    let actor = audit::Actor {
+        user_id: Some(admin.id),
+        username: admin.username,
+    };
+    let channel = alert_channels::update(
+        &state.pool,
+        &state.credentials_key,
+        &actor,
+        state.allow_private_alerts,
+        &id,
+        body.enabled,
+        body.config,
+    )
+    .await?;
+    Ok(Json(channel))
 }
 
 /// `POST /api/v1/admin/backup`. Writes an encrypted backup to `HARBORGATE_BACKUP_DIR`
@@ -440,6 +551,7 @@ pub(crate) mod test_support {
             credentials_key: Arc::new(crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
             allow_private_harbor: false,
+            allow_private_alerts: false,
             jwks: Arc::new(crate::services::oidc_jwt::JwksCache::new()),
             webhook_token_limiter: crate::api::webhooks::new_token_limiter(),
             webhook_failure_limiter: crate::api::webhooks::new_failure_limiter(),
@@ -690,6 +802,7 @@ mod tests {
             credentials_key: Arc::new(crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
             allow_private_harbor: false,
+            allow_private_alerts: false,
             jwks: Arc::new(JwksCache::new()),
             webhook_token_limiter: crate::api::webhooks::new_token_limiter(),
             webhook_failure_limiter: crate::api::webhooks::new_failure_limiter(),
@@ -771,6 +884,149 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(runs, 1, "the admin backup did not write one backup.run row");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn channel_request(
+        method: &str,
+        uri: &str,
+        cookie: Option<&str>,
+        csrf: &str,
+        body: &str,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("x-csrf-token", csrf);
+        if let Some(cookie) = cookie {
+            builder = builder.header("cookie", cookie);
+        }
+        let mut request = builder.body(Body::from(body.to_owned())).unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            ))));
+        request
+    }
+
+    #[tokio::test]
+    async fn alert_channels_are_admin_only() {
+        let (router, pool, dir) = router("alert-channels").await;
+        let (admin_cookie, user_cookie) = cookies_for(&pool, TEST_KEY_B64).await;
+        let csrf = admin_cookie
+            .split("__Host-harborgate_csrf=")
+            .nth(1)
+            .unwrap()
+            .to_owned();
+        let base = "/api/v1/admin/alert-channels";
+        let body = r#"{"kind":"webhook","enabled":true,"config":{"url":"https://hooks.example.test/FAKE_ROUTE_TOKEN"}}"#;
+
+        // No session is 401 and a regular user is 403, on every method.
+        for (method, uri) in [
+            ("GET", base.to_owned()),
+            ("POST", base.to_owned()),
+            ("PUT", format!("{base}/some-id")),
+        ] {
+            // No session cookie, but a valid CSRF pair, so the session check is what answers.
+            let csrf_only = format!("__Host-harborgate_csrf={csrf}");
+            let anonymous = router
+                .clone()
+                .oneshot(channel_request(method, &uri, Some(&csrf_only), &csrf, body))
+                .await
+                .unwrap();
+            assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED, "{method}");
+            let regular = router
+                .clone()
+                .oneshot(channel_request(
+                    method,
+                    &uri,
+                    Some(&user_cookie),
+                    &csrf,
+                    body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(regular.status(), StatusCode::FORBIDDEN, "{method}");
+        }
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM alert_channels")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "a refused request created a channel");
+
+        // An admin creates (201), lists (200), updates (200), and gets 404 and 422.
+        let created = router
+            .clone()
+            .oneshot(channel_request(
+                "POST",
+                base,
+                Some(&admin_cookie),
+                &csrf,
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(created.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(!text.contains("FAKE_ROUTE_TOKEN"), "{text}");
+        let id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let listed = router
+            .clone()
+            .oneshot(channel_request("GET", base, Some(&admin_cookie), &csrf, ""))
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(listed.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("FAKE_ROUTE_TOKEN"));
+
+        let updated = router
+            .clone()
+            .oneshot(channel_request(
+                "PUT",
+                &format!("{base}/{id}"),
+                Some(&admin_cookie),
+                &csrf,
+                r#"{"enabled":false}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(updated.status(), StatusCode::OK);
+        let missing = router
+            .clone()
+            .oneshot(channel_request(
+                "PUT",
+                &format!("{base}/no-such-id"),
+                Some(&admin_cookie),
+                &csrf,
+                r#"{"enabled":false}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let invalid = router
+            .oneshot(channel_request(
+                "POST",
+                base,
+                Some(&admin_cookie),
+                &csrf,
+                r#"{"kind":"webhook","enabled":true,"config":{"url":"http://hooks.example.test/x"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
