@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE cve_findings SET status = 'fixed'\n         WHERE mapping_id = ? AND harbor_repository = ? AND image_tag = ?\n           AND status = 'open'\n           AND cve_id NOT IN (SELECT value FROM json_each(?))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "6fd7cff5cfcf788fa6aee9ab19a05bf69165225497bbee6c20d066d6925e33b4"
+}
