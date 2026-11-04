@@ -489,13 +489,19 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         stop_rx.clone(),
     ));
 
+    // Retention deletes rows past their age limit, 5 minutes after start and then daily.
+    let retention_task = tokio::spawn(services::retention::run(
+        state.pool.clone(),
+        stop_rx.clone(),
+    ));
+
     let mut graceful = stop_rx.clone();
     let router = app(settings.trusted_proxies.clone(), state)
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
     let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
         let _ = graceful.wait_for(|stopped| *stopped).await;
     });
-    let tasks = vec![worker_task, poller_task];
+    let tasks = vec![worker_task, poller_task, retention_task];
 
     let mut serve = Box::pin(std::future::IntoFuture::into_future(serve));
     let first = tokio::select! {

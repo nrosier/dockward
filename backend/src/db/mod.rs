@@ -10,6 +10,7 @@ pub mod config;
 pub mod credentials;
 pub mod job_runs;
 pub mod mappings;
+pub mod retention;
 #[allow(dead_code)] // Used by the setup and login services.
 pub mod setup;
 #[allow(dead_code)] // Used by the job worker and the retry route.

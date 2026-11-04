@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM alert_deliveries WHERE sent_at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "281eca12976524b39ed72aaa181b530fd47e1e66120815ad670bc16b286393ba"
+}

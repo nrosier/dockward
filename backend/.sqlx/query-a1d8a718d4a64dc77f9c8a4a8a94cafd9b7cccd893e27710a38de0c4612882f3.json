@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM sync_jobs WHERE status IN ('done', 'failed') AND updated_at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "a1d8a718d4a64dc77f9c8a4a8a94cafd9b7cccd893e27710a38de0c4612882f3"
+}
