@@ -7,6 +7,7 @@ use axum::{
 
 use crate::api::state::AppState;
 use crate::error::AppError;
+use crate::services::audit::Actor;
 use crate::services::sessions::AuthUser;
 use crate::services::sync_jobs;
 use crate::worker::now_secs;
@@ -19,6 +20,10 @@ pub async fn retry(
     Path(id): Path<String>,
 ) -> Result<Json<crate::db::sync_jobs::SyncJobView>, AppError> {
     let is_admin = user.role == crate::models::role::Role::Admin;
-    let job = sync_jobs::retry(&state.pool, &user.id, is_admin, &id, now_secs()).await?;
+    let actor = Actor {
+        user_id: Some(user.id.clone()),
+        username: user.username.clone(),
+    };
+    let job = sync_jobs::retry(&state.pool, &actor, is_admin, &id, now_secs()).await?;
     Ok(Json(job))
 }

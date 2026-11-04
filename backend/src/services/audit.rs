@@ -30,6 +30,7 @@ pub const ACTIONS: &[&str] = &[
     "restore.run",
     "key.rotate",
     "retention.run",
+    "sync_job.retry",
 ];
 
 /// Key names (lowercased) that mark a value as a secret. Any key that contains
