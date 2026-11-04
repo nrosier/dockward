@@ -51,6 +51,8 @@ export interface Credential {
   username: string | null;
   expires_at: string | null;
   created_at: string | null;
+  // Only the list route returns it (specs/api.md, Credentials).
+  mapping_count?: number;
 }
 
 export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN";
@@ -135,4 +137,79 @@ export interface MappingCreated {
   mapping: Mapping;
   webhook_url: string;
   auth_secret: string;
+}
+
+export interface CheckResult {
+  name: string;
+  ok: boolean;
+  detail: string;
+  warning?: string;
+}
+
+export interface TestResult {
+  ok: boolean;
+  checks: CheckResult[];
+}
+
+export interface HousekeepingRun {
+  id: string;
+  job_kind: "poll" | "cleanup" | "retention";
+  started_at: string;
+  finished_at: string | null;
+  status: "done" | "failed";
+  processed_count: number;
+  error_summary: string | null;
+}
+
+export interface AuditEntry {
+  id: string;
+  actor_user_id: string | null;
+  actor_username: string;
+  action: string;
+  target: string;
+  created_at: number | string | null;
+  details: unknown;
+}
+
+export interface HealthCheck {
+  credential_id: string;
+  label: string;
+  ok: boolean;
+  reachable: boolean;
+  missing_permissions: string[];
+  code_scanning: "ok" | "no_analysis_yet" | "unavailable" | null;
+  target: string | null;
+  detail: string;
+}
+
+export interface HealthRobot {
+  credential_id: string;
+  label: string;
+  expires_at: string | null;
+  days_left: number | null;
+}
+
+export interface HealthReport {
+  harbor: HealthCheck[];
+  github: HealthCheck[];
+  robot_accounts: HealthRobot[];
+  request: { client_ip: string; source: "peer" | "x-forwarded-for" };
+}
+
+export interface OidcSettings {
+  issuer_url: string | null;
+  client_id: string | null;
+  role_claim: string | null;
+  admin_group: string | null;
+  user_group: string | null;
+  client_secret_set: boolean;
+  oidc_only_users: boolean;
+}
+
+export interface AlertChannel {
+  id: string;
+  kind: "smtp" | "webhook";
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
 }
