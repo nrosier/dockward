@@ -178,7 +178,7 @@
   "mappings.shownOnce.step1a": "In Harbor, open the project",
   "mappings.shownOnce.step1b": ", then Webhooks, then New webhook.",
   "mappings.shownOnce.step2": "Paste the webhook URL as the endpoint and the auth header value as the auth header.",
-  "mappings.shownOnce.step3": "Select the event type “Artifact scan completed” and save.",
+  "mappings.shownOnce.step3": "Select the event “Scanning finished” (SCANNING_COMPLETED) and save.",
   "mappings.shownOnce.polling": "Polling every 15 minutes picks up scans if a webhook is missed.",
   "mappings.shownOnce.done": "Done",
   "mappings.webhook.title": "Webhook",
