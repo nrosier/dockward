@@ -139,6 +139,10 @@ pub fn filter_addresses(
 /// connects by itself instead of through [`OutboundClient`] (SMTP) must call this before
 /// every connection and connect only to an address it returns, so a DNS answer that changes
 /// between calls is checked again.
+///
+/// Blocked addresses are dropped from the answer, not reported. Only an answer in which
+/// every address is blocked is an error ([`OutboundError::BlockedAddress`]). So a host with
+/// one public and one private address resolves, and the result holds the public one only.
 pub async fn resolve_checked(
     host: &str,
     port: u16,

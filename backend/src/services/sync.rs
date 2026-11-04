@@ -25,6 +25,7 @@ use crate::db::mappings::{self as mapping_db, MappingRow};
 use crate::db::sync_jobs::ClaimedJob;
 use crate::db::sync_reports::{self as report_db, NewReport};
 use crate::error::AppError;
+use crate::services::alerts::Notifier;
 use crate::services::credentials::{base_for_join, decrypt_token};
 use crate::services::github_issues::GithubIssues;
 use crate::services::github_scanning::{
@@ -153,6 +154,7 @@ pub struct SyncHandler<H = HarborGet, G = GithubScanning, C = SystemClock, I = G
     github: G,
     clock: C,
     issues: I,
+    alerts: Notifier,
 }
 
 impl SyncHandler {
@@ -162,7 +164,9 @@ impl SyncHandler {
         pool: SqlitePool,
         credentials_key: Arc<DerivedKey>,
         allow_private_harbor: bool,
+        allow_private_alerts: bool,
     ) -> Result<Self, AppError> {
+        let alerts = Notifier::new(pool.clone(), credentials_key.clone(), allow_private_alerts);
         Ok(Self {
             pool,
             credentials_key,
@@ -170,6 +174,7 @@ impl SyncHandler {
             github: GithubScanning::new()?,
             clock: SystemClock,
             issues: GithubIssues::new()?,
+            alerts,
         })
     }
 }
@@ -184,6 +189,8 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
         clock: C,
         issues: I,
     ) -> Self {
+        // No alert channel exists in these tests, so this notifier sends nothing.
+        let alerts = Notifier::new(pool.clone(), credentials_key.clone(), false);
         Self {
             pool,
             credentials_key,
@@ -191,6 +198,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
             github,
             clock,
             issues,
+            alerts,
         }
     }
 }
@@ -591,9 +599,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
                     report_db::finish(&self.pool, report_id, "success", None, self.clock.now())
                         .await
                         .map_err(database)?;
-                    // The result of the scan is not used yet: #33 adds the alert for
-                    // `new_critical`.
-                    let _applied = findings::apply_scan(
+                    let applied = findings::apply_scan(
                         &self.pool,
                         &mapping.id,
                         &mapping.harbor_repository,
@@ -603,6 +609,11 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
                     )
                     .await
                     .map_err(database)?;
+                    self.alerts.spawn_new_critical(
+                        mapping,
+                        &context.payload.tag,
+                        &applied.new_critical,
+                    );
                     self.reconcile_issues(context).await;
                     return Ok(());
                 }
@@ -635,6 +646,10 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> JobHandler
             Ok(()) => JobOutcome::Done,
             Err(outcome) => outcome,
         }
+    }
+
+    fn on_give_up(&self, job: &ClaimedJob, now: i64) {
+        self.alerts.spawn_sync_failed(&job.id, &job.mapping_id, now);
     }
 }
 

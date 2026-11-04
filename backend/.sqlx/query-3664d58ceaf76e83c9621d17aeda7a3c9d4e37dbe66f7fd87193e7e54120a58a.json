@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM alert_deliveries\n         WHERE channel_id = ? AND dedupe_key = ? AND sent_at = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "3664d58ceaf76e83c9621d17aeda7a3c9d4e37dbe66f7fd87193e7e54120a58a"
+}

@@ -30,6 +30,11 @@ const WRITE_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// `Deferred` carry text that is stored or logged, so it must not contain secrets.
 pub trait JobHandler: Send + Sync + 'static {
     fn run(&self, job: ClaimedJob) -> impl Future<Output = JobOutcome> + Send;
+
+    /// Called once after a job was recorded as `failed` for good (the last attempt failed).
+    /// It must return at once: a handler that does slow work spawns it, so the queue is
+    /// never delayed. `now` is Unix seconds. The default does nothing.
+    fn on_give_up(&self, _job: &ClaimedJob, _now: i64) {}
 }
 
 /// What a handler reports for one job.
@@ -141,6 +146,7 @@ pub async fn step<H: JobHandler>(
                         record_failure_tx(pool, id, attempts, None, message, true, now)
                     })
                     .await?;
+                    handler.on_give_up(&job, now);
                     Ok(Step::GaveUp)
                 }
             }
@@ -343,6 +349,104 @@ mod tests {
         assert_eq!(step(&pool, &handler, now).await.unwrap(), Step::GaveUp);
         let (status, attempts, next) = job_row(&pool, "j1").await;
         assert_eq!((status.as_str(), attempts, next), ("failed", 8, None));
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A handler that always fails and records the jobs it was told were given up.
+    struct RecordGiveUp(std::sync::Mutex<Vec<(String, i64)>>);
+
+    impl JobHandler for RecordGiveUp {
+        async fn run(&self, _job: ClaimedJob) -> JobOutcome {
+            JobOutcome::Failed("upstream said no".to_owned())
+        }
+
+        fn on_give_up(&self, job: &ClaimedJob, now: i64) {
+            if let Ok(mut seen) = self.0.lock() {
+                seen.push((job.id.clone(), now));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn giving_up_a_job_triggers_a_sync_failed_alert() {
+        use crate::services::alerts::{ChannelConfig, Notifier};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (pool, dir) = fresh_pool("give-up-alert").await;
+        queued_job(&pool, "j-alert").await;
+
+        // The hook: only the last failure reports a give-up, and the retries report nothing.
+        let handler = Arc::new(RecordGiveUp(std::sync::Mutex::default()));
+        let mut now = 1_000;
+        for _ in 0..7 {
+            match step(&pool, &handler, now).await.unwrap() {
+                Step::Retry { next_attempt_at } => now = next_attempt_at,
+                other => panic!("expected a retry, got {other:?}"),
+            }
+        }
+        assert!(handler.0.lock().unwrap().is_empty(), "a retry gave up");
+        assert_eq!(step(&pool, &handler, now).await.unwrap(), Step::GaveUp);
+        assert_eq!(
+            handler.0.lock().unwrap().clone(),
+            vec![("j-alert".to_owned(), now)]
+        );
+
+        // The alert: one enabled channel, a recording sender. The notifier sends one
+        // `sync_failed` alert keyed `sync_failed:<job id>`, with mapping names and fixed text.
+        let key = Arc::new(
+            crate::auth::crypto::credentials_key(
+                &crate::config::parse_encryption_key(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let actor = crate::services::audit::Actor {
+            user_id: None,
+            username: "test-admin".to_owned(),
+        };
+        crate::services::alert_channels::create(
+            &pool,
+            &key,
+            &actor,
+            false,
+            "webhook",
+            true,
+            serde_json::json!({"url": "https://hooks.example.test/services/FAKE_URL_TOKEN_1"}),
+        )
+        .await
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (counter, log) = (calls.clone(), seen.clone());
+        let notifier = Notifier::with_sender(pool.clone(), key, move |config, alert| {
+            assert!(matches!(config, ChannelConfig::Webhook(_)));
+            counter.fetch_add(1, Ordering::SeqCst);
+            log.lock().unwrap().push(alert);
+            Box::pin(async { Ok(()) })
+        });
+        notifier.spawn_sync_failed("j-alert", "m1", now);
+        for _ in 0..200 {
+            if calls.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let alert = seen.lock().unwrap()[0].clone();
+        assert_eq!(
+            alert.event,
+            crate::services::alert_send::AlertEvent::SyncFailed
+        );
+        assert_eq!(alert.harbor, "p/r");
+        assert_eq!(alert.github, "o/g");
+        let key_used: String = sqlx::query_scalar("SELECT dedupe_key FROM alert_deliveries")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(key_used, "sync_failed:j-alert");
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
