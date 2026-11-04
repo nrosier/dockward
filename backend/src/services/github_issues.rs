@@ -7,11 +7,12 @@
 //! so the address check applies and errors are the shared [`ScanError`]. The token is sent
 //! only as a bearer header and never appears in an error message or an issue body.
 
+use reqwest::Url;
 use serde_json::{Value, json};
 
 use crate::error::AppError;
 use crate::services::github_scanning::{
-    GITHUB_API, LiveHttp, ScanError, ScanHttp, ScanResponse, check_names, classify,
+    API_HOST, LiveHttp, ScanError, ScanHttp, ScanResponse, check_names, classify,
 };
 use crate::services::outbound::{self, OutboundClient, TargetClass};
 
@@ -100,13 +101,36 @@ fn parse_issue(item: &Value) -> Result<IssueRef, ScanError> {
     })
 }
 
-/// The path (with query) of a `next` link, or an error when it points anywhere but the
-/// GitHub API. Checked before any request is made.
+/// The path (with query) of a `next` link, relative to the API root. The link must be an
+/// `https://api.github.com/` URL with no user info and no port other than the default, and
+/// its path must have no empty segment. Anything else is an error and is never fetched.
+///
+/// The empty-segment rule matters because the result is joined to the API root: a path
+/// such as `//evil.example/x` would otherwise replace the host, and the bearer token would
+/// be sent there.
 fn next_path(link: &str) -> Result<String, ScanError> {
-    link.strip_prefix(GITHUB_API)
-        .filter(|rest| !rest.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| ScanError::Upstream("GitHub sent a next link to another host".to_owned()))
+    let refused = || ScanError::Upstream("GitHub sent a next link to another host".to_owned());
+    let url = Url::parse(link).map_err(|_| refused())?;
+    let on_api_host = url.scheme() == "https"
+        && url.host_str() == Some(API_HOST)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none();
+    if !on_api_host {
+        return Err(refused());
+    }
+    let full = url.path();
+    if full.contains("//") || full.contains("://") {
+        return Err(refused());
+    }
+    let path = full.strip_prefix('/').unwrap_or(full);
+    if path.is_empty() {
+        return Err(refused());
+    }
+    Ok(match url.query() {
+        Some(query) => format!("{path}?{query}"),
+        None => path.to_owned(),
+    })
 }
 
 /// Lists every open issue with the `harborgate` label, following `link: rel="next"`.
@@ -429,6 +453,52 @@ mod tests {
         let outcome = list_open_labelled_with(&fake, b"token", "octo", "app", 1000).await;
         assert!(matches!(outcome, Err(ScanError::Upstream(_))));
         assert_eq!(fake.sent().len(), 1, "the foreign link must not be fetched");
+    }
+
+    #[tokio::test]
+    async fn list_never_requests_a_foreign_url_from_a_crafted_next_link() {
+        for link in [
+            // Empty segments that `Url::join` would read as a new host.
+            "https://api.github.com///evil.example/x",
+            "https://api.github.com//evil.example/x",
+            // An embedded absolute URL in the path.
+            "https://api.github.com/https://evil.example/",
+            // User info and a non-default port.
+            "https://api.github.com@evil.example/issues?page=2",
+            "https://user:pw@api.github.com/issues?page=2",
+            "https://api.github.com:8443/issues?page=2",
+            // Wrong scheme, wrong host, a lookalike host, and rubbish.
+            "http://api.github.com/issues?page=2",
+            "https://api.github.com.evil.example/issues?page=2",
+            "https://evil.example/issues?page=2",
+            "//evil.example/x",
+            "not a url",
+        ] {
+            let page = ScanResponse {
+                link_next: Some(link.to_owned()),
+                ..reply(200, json!([]))
+            };
+            let fake = Scripted::new(vec![page, reply(200, json!([]))]);
+            let outcome = list_open_labelled_with(&fake, b"token", "octo", "app", 1000).await;
+            assert!(
+                matches!(outcome, Err(ScanError::Upstream(_))),
+                "{link} should be refused"
+            );
+            assert_eq!(fake.sent().len(), 1, "{link} must not be requested");
+        }
+    }
+
+    #[test]
+    fn next_path_keeps_only_path_and_query() {
+        assert_eq!(
+            next_path("https://api.github.com/repositories/42/issues?page=2&per_page=100"),
+            Ok("repositories/42/issues?page=2&per_page=100".to_owned())
+        );
+        // The default port written out is the same host and port.
+        assert_eq!(
+            next_path("https://api.github.com:443/repositories/42/issues"),
+            Ok("repositories/42/issues".to_owned())
+        );
     }
 
     #[test]

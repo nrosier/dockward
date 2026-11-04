@@ -25,12 +25,17 @@ pub const MAX_COMPRESSED_BYTES: usize = 10 * 1024 * 1024;
 /// Seconds to wait when a rate-limited answer gives no retry time.
 const DEFAULT_WAIT_SECS: i64 = 60;
 
-/// Largest response body that is parsed. A page of 100 issues is far larger than the
-/// small bodies of the upload calls, so the cap is 8 MiB.
+/// Largest response body that is parsed. The upload calls return small bodies, but a page of
+/// 100 issues can carry 100 bodies of up to 65,536 characters each (GitHub's limit), about
+/// 6.5 MB. A 64 KiB cap turned such a page into `null`, so the cap is 8 MiB. Only one
+/// response is held at a time.
 const MAX_BODY: usize = 8 * 1024 * 1024;
 
 /// GitHub's REST API root. The host is fixed (`specs/security.md`, "GitHub token scope").
 pub(crate) const GITHUB_API: &str = "https://api.github.com/";
+
+/// The one host a request may reach.
+pub(crate) const API_HOST: &str = "api.github.com";
 
 /// The `tool_name` sent with each upload.
 const TOOL_NAME: &str = "HarborGate";
@@ -190,7 +195,19 @@ impl ScanHttp for LiveHttp<'_> {
 
 fn api_url(path: &str) -> Result<Url, ScanError> {
     let base = Url::parse(GITHUB_API).map_err(|_| transport())?;
-    base.join(path).map_err(|_| transport())
+    let url = base.join(path).map_err(|_| transport())?;
+    // `join` lets a path such as `//host/x` or `https://host/` replace the host. The token
+    // is sent with every request, so the result must still be the API host.
+    let on_api_host = url.scheme() == "https"
+        && url.host_str() == Some(API_HOST)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none();
+    if on_api_host {
+        Ok(url)
+    } else {
+        Err(transport())
+    }
 }
 
 /// Adds the bearer token and the headers the credential probes use.
@@ -541,6 +558,24 @@ mod tests {
     async fn upload_reply(response: ScanResponse, now: i64) -> Result<String, ScanError> {
         let fake = Recorded::new(response);
         upload_with(&fake, b"token", &sample_upload(), now).await
+    }
+
+    #[test]
+    fn api_url_never_leaves_the_api_host() {
+        assert_eq!(
+            api_url("repos/octo/app/issues?page=2").map(String::from),
+            Ok("https://api.github.com/repos/octo/app/issues?page=2".to_owned())
+        );
+        for path in [
+            "//evil.example/x",
+            "///evil.example/x",
+            "https://evil.example/x",
+            "http://api.github.com/x",
+            "https://api.github.com@evil.example/x",
+            "https://api.github.com:8443/x",
+        ] {
+            assert!(api_url(path).is_err(), "{path} should be refused");
+        }
     }
 
     #[test]
