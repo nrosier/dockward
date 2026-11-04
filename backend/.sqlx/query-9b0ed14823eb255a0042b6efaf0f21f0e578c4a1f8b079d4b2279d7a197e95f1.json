@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cve_id AS \"cve_id!\", image_tag AS \"image_tag!\", package,\n                  severity AS \"severity!\", fixed_in_version, status AS \"status!\", last_seen_at\n           FROM cve_findings WHERE mapping_id = ?\n           ORDER BY cve_id, image_tag",
+  "describe": {
+    "columns": [
+      {
+        "name": "cve_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "cve_id"
+          }
+        }
+      },
+      {
+        "name": "image_tag!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "image_tag"
+          }
+        }
+      },
+      {
+        "name": "package",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "package"
+          }
+        }
+      },
+      {
+        "name": "severity!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "severity"
+          }
+        }
+      },
+      {
+        "name": "fixed_in_version",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "fixed_in_version"
+          }
+        }
+      },
+      {
+        "name": "status!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "last_seen_at",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "last_seen_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "9b0ed14823eb255a0042b6efaf0f21f0e578c4a1f8b079d4b2279d7a197e95f1"
+}

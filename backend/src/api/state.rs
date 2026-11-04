@@ -44,4 +44,6 @@ pub struct AppState {
     pub data_dir: PathBuf,
     /// `HARBORGATE_BACKUP_DIR`. Encrypted backups are written here.
     pub backup_dir: PathBuf,
+    /// The GitHub Issues client, built once. The manual issue route uses it.
+    pub issues_client: Arc<crate::services::github_issues::GithubIssues>,
 }

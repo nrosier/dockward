@@ -10,6 +10,7 @@ pub mod backup;
 pub mod config;
 pub mod credentials;
 pub mod findings;
+pub mod github_issues;
 pub mod job_runs;
 pub mod key_rotation;
 pub mod mappings;
