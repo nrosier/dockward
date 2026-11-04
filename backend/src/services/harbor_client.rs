@@ -144,6 +144,58 @@ pub fn vulnerabilities_url(
     base.join(&path).map_err(|_| invalid_name())
 }
 
+/// Builds the artifact list URL for one repository page. The repository is encoded as in
+/// [`artifact_url`]. `page` starts at 1.
+pub fn artifacts_list_url(
+    base: &Url,
+    project: &str,
+    repository: &str,
+    page: u32,
+    page_size: u32,
+) -> Result<Url, AppError> {
+    let path = format!(
+        "api/v2.0/projects/{}/repositories/{}/artifacts",
+        encode_segment(project),
+        encode_repository_path(repository)
+    );
+    let mut url = base.join(&path).map_err(|_| invalid_name())?;
+    url.query_pairs_mut()
+        .append_pair("page", &page.to_string())
+        .append_pair("page_size", &page_size.to_string());
+    Ok(url)
+}
+
+#[derive(Debug, Deserialize)]
+struct ListedArtifact {
+    digest: String,
+    #[serde(default)]
+    tags: Option<Vec<ListedTag>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListedTag {
+    name: String,
+}
+
+/// Reads an artifact list page: each artifact's `digest` and its `tags[].name`. An
+/// artifact with no tags (`null` or missing) has an empty tag list.
+pub fn parse_artifact_list(body: &[u8]) -> Result<Vec<(String, Vec<String>)>, AppError> {
+    let listed: Vec<ListedArtifact> =
+        serde_json::from_slice(body).map_err(|_| AppError::UpstreamUnreachable)?;
+    Ok(listed
+        .into_iter()
+        .map(|artifact| {
+            let tags = artifact
+                .tags
+                .unwrap_or_default()
+                .into_iter()
+                .map(|tag| tag.name)
+                .collect();
+            (artifact.digest, tags)
+        })
+        .collect())
+}
+
 fn invalid_name() -> AppError {
     AppError::ValidationFailed("the Harbor project or repository name is not valid.".to_owned())
 }

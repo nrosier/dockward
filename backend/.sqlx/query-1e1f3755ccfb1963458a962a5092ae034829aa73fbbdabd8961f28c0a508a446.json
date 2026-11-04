@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT (\n               EXISTS (\n                   SELECT 1 FROM sync_reports r\n                   JOIN sync_jobs j ON j.id = r.sync_job_id\n                   WHERE r.mapping_id = ? AND r.harbor_repository = ?\n                     AND r.image_tag = ? AND r.image_digest = ?\n                     AND r.sarif_status = 'success' AND j.status = 'done'\n               )\n               OR EXISTS (\n                   SELECT 1 FROM sync_jobs q\n                   WHERE q.mapping_id = ? AND q.status IN ('queued', 'running')\n                     AND json_extract(q.payload, '$.digest') = ?\n                     AND json_extract(q.payload, '$.tag') = ?\n               )\n           ) AS \"found!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "found!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1e1f3755ccfb1963458a962a5092ae034829aa73fbbdabd8961f28c0a508a446"
+}
