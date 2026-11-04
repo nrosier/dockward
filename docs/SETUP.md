@@ -259,6 +259,25 @@ Check each item before you rely on the setup:
 - To stop HarborGate from writing to GitHub, revoke the token in GitHub (**Settings > Developer settings > Personal access tokens**).
 - After revocation, new syncs fail. Each failure appears in the admin **Failed syncs** view with the error message. Fix the credential and use the retry action, or remove the mapping.
 
+## Restore from a backup
+
+Restore is a command-line command that runs with HarborGate stopped. It is not an HTTP route and not in the admin UI. A backup is made in the admin UI under Settings > Backup and restore, and is written to `HARBORGATE_BACKUP_DIR` (default `/data/backups`) as `harborgate-<yyyymmddThhmmssZ>.hgbk`.
+
+1. **Find the key.** You need the same `HARBORGATE_ENCRYPTION_KEY` that created the backup. After a key rotation, older backups need the old key. A backup made under a different key is rejected.
+2. **Stop HarborGate.** Stop the app yourself first. The command also checks that port 8080 is free in its own container and prints `stop HarborGate before restoring` if it is not. That check cannot see an app running in another container, so do not rely on it.
+3. **Run the command** in a one-off container that uses the same data volume and the same environment as the app. For the compose setup:
+
+   ```bash
+   docker compose stop harborgate
+   docker compose run --rm harborgate restore /data/backups/harborgate-20260101T030000Z.hgbk
+   ```
+
+   The image's entrypoint is the `harborgate` binary, so the words after the service name are the subcommand. The command takes the settings from the environment (`HARBORGATE_ENCRYPTION_KEY`, `HARBORGATE_PUBLIC_URL`, `HARBORGATE_DATA_DIR`). It does not bind the port.
+4. **What it checks.** It verifies the file's authentication tag first. Then it writes a temporary copy in `HARBORGATE_DATA_DIR`, runs SQLite's `PRAGMA integrity_check` on it, and applies the schema migrations. Only after all of that passes does it replace the live database. If any step fails, the command exits with code 1, prints the reason, and the live database is unchanged.
+5. **Check the result.** The command appends one `restore.run` entry to the audit log with actor `cli`, the backup file name, and the backup's creation time. The creation time comes from the file name; if the file was renamed, it comes from the file's modification time. Start HarborGate again and look for the entry in the Admin audit log.
+
+Restored sessions and sync jobs are those in the backup. Credentials in the backup open only with the key that created it.
+
 ## 9. Troubleshooting
 
 | Symptom | Likely cause | Fix |

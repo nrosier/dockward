@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
@@ -14,6 +15,7 @@ use tokio::sync::watch;
 mod api;
 #[allow(dead_code)] // Crypto helpers are used by the credential and backup paths in later issues.
 mod auth;
+mod cli;
 mod config;
 #[allow(dead_code)] // Pool is consumed by handlers and workers added in later issues.
 mod db;
@@ -136,6 +138,273 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    let args: Vec<String> = std::env::args().collect();
+    let command = match cli::parse(args.get(1..).unwrap_or_default()) {
+        Ok(command) => command,
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    };
+    match command {
+        cli::Command::Serve => serve().await,
+        cli::Command::Restore(file) => {
+            if let Err(message) = run_restore(&file).await {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        cli::Command::RotateKey => {
+            // Implemented in #41.
+            eprintln!("rotate-key is not implemented");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The offline restore command. It never binds the HTTP port, and it refuses to run
+/// while the app holds the port.
+async fn run_restore(file: &Path) -> Result<(), String> {
+    ensure_app_stopped()?;
+    let encryption_key = config::load_encryption_key().map_err(|err| err.to_string())?;
+    let settings = config::load_settings().map_err(|err| err.to_string())?;
+    restore_database(&encryption_key, &settings.data_dir, file).await?;
+    println!("Restored the database from {}.", file.display());
+    Ok(())
+}
+
+/// Fails when something already listens on the app port. The listener is dropped at
+/// once, so the port is free again for the app.
+fn ensure_app_stopped() -> Result<(), String> {
+    match std::net::TcpListener::bind(BIND_ADDR) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(_) => Err("stop HarborGate before restoring".to_owned()),
+    }
+}
+
+/// The backup `created_at` for the `restore.run` audit row (decided on issue #58).
+/// It is the UTC timestamp in the file name `harborgate-<yyyymmddThhmmssZ>.hgbk`.
+/// A file that does not match that pattern falls back to its modification time.
+/// Returns `None` when neither is available.
+fn backup_created_at(file: &Path) -> Option<String> {
+    let from_name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(timestamp_from_file_name);
+    from_name.or_else(|| {
+        let modified = std::fs::metadata(file)
+            .and_then(|meta| meta.modified())
+            .ok()?;
+        let secs = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        services::time::rfc3339(i64::try_from(secs).ok()?).ok()
+    })
+}
+
+/// Parses `harborgate-<yyyymmddThhmmssZ>.hgbk` into an RFC 3339 string. A stamp that
+/// is not a real calendar instant returns `None`.
+fn timestamp_from_file_name(name: &str) -> Option<String> {
+    let stamp = name.strip_prefix("harborgate-")?.strip_suffix(".hgbk")?;
+    let bytes = stamp.as_bytes();
+    if bytes.len() != 16 || bytes[8] != b'T' || bytes[15] != b'Z' {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| -> Option<i64> {
+        let part = stamp.get(range)?;
+        if !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        part.parse().ok()
+    };
+    let (year, month, day) = (number(0..4)?, number(4..6)?, number(6..8)?);
+    let (hour, minute, second) = (number(9..11)?, number(11..13)?, number(13..15)?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    // Days since 1970-01-01 (Howard Hinnant's `days_from_civil`).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let unix = days * 86_400 + hour * 3600 + minute * 60 + second;
+    let text = services::time::rfc3339(unix).ok()?;
+    // A day that does not exist (such as 30 February) rolls over to another date, so
+    // the round trip no longer matches the stamp.
+    let expected = format!(
+        "{}-{}-{}T{}:{}:{}Z",
+        stamp.get(0..4)?,
+        stamp.get(4..6)?,
+        stamp.get(6..8)?,
+        stamp.get(9..11)?,
+        stamp.get(11..13)?,
+        stamp.get(13..15)?
+    );
+    (text == expected).then_some(text)
+}
+
+/// Removes the plaintext temporary database and any SQLite side files it left. A
+/// missing file is not an error.
+fn remove_temp_files(temp_path: &Path) {
+    let _ = std::fs::remove_file(temp_path);
+    for suffix in ["-wal", "-shm"] {
+        let mut side = temp_path.as_os_str().to_owned();
+        side.push(suffix);
+        let _ = std::fs::remove_file(side);
+    }
+}
+
+/// Replaces `<data_dir>/harborgate.db` with the database in the backup `file`.
+///
+/// The live database is untouched unless the backup passes every check: the GCM tag
+/// (`backup::open`), then `PRAGMA integrity_check` and the migrations on a temporary
+/// copy in `data_dir`. Only then are the live `-wal` and `-shm` files removed and the
+/// copy renamed over the live file (same directory, so the rename is atomic). The
+/// `restore.run` audit row is appended to the restored database last. The temporary
+/// copy holds the whole database in plain text and is removed on every path.
+///
+/// Errors are messages for the operator and name no key or file content.
+async fn restore_database(
+    encryption_key: &config::EncryptionKey,
+    data_dir: &Path,
+    file: &Path,
+) -> Result<(), String> {
+    let file_name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "the backup path has no usable file name".to_owned())?
+        .to_owned();
+    let created_at = backup_created_at(file);
+    let sealed = std::fs::read(file).map_err(|err| {
+        format!(
+            "could not read the backup file ({:?}); nothing was changed",
+            err.kind()
+        )
+    })?;
+    let backup_key = auth::crypto::backup_key(encryption_key)
+        .map_err(|_| "could not derive the backup key".to_owned())?;
+    let plain = services::backup::open(&backup_key, &sealed).map_err(|_| {
+        "the backup file failed verification; check the file and that HARBORGATE_ENCRYPTION_KEY \
+         is the key that created it. The live database was not changed."
+            .to_owned()
+    })?;
+    drop(sealed);
+
+    let temp_path = data_dir.join(format!("restore-{}.tmp", services::ids::new_id()));
+    let staged = stage_and_swap(data_dir, &temp_path, &plain).await;
+    remove_temp_files(&temp_path);
+    drop(plain);
+    staged?;
+
+    // The database is replaced. Append the audit row to the restored database.
+    let pool = db::open(data_dir).await.map_err(|_| {
+        "the database was restored, but it could not be reopened to record the audit row".to_owned()
+    })?;
+    let details = serde_json::json!({ "file": file_name, "created_at": created_at });
+    let recorded = record_restore(&pool, &file_name, &details).await;
+    pool.close().await;
+    recorded.map_err(|_| {
+        "the database was restored, but the restore.run audit row could not be written".to_owned()
+    })
+}
+
+/// Writes the plaintext to `temp_path`, checks it, and swaps it in for the live file.
+async fn stage_and_swap(data_dir: &Path, temp_path: &Path, plain: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Owner-only: the file holds the whole database in plain text.
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(temp_path)
+        .map_err(|_| "could not create the temporary file in HARBORGATE_DATA_DIR".to_owned())?;
+    out.write_all(plain)
+        .and_then(|()| out.sync_all())
+        .map_err(|_| "could not write the temporary file in HARBORGATE_DATA_DIR".to_owned())?;
+    drop(out);
+
+    let checked = check_candidate(temp_path).await;
+    checked?;
+
+    let live = db::database_path(data_dir);
+    let live_text = live.to_string_lossy().into_owned();
+    for suffix in ["-wal", "-shm"] {
+        let side = std::path::PathBuf::from(format!("{live_text}{suffix}"));
+        match std::fs::remove_file(&side) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(
+                    "could not remove the old write-ahead log; the live database was not replaced"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    std::fs::rename(temp_path, &live).map_err(|_| "could not replace the live database".to_owned())
+}
+
+/// Opens the candidate database, runs `PRAGMA integrity_check` (expects `ok`) and the
+/// migrations, then closes it so SQLite checkpoints and removes its own log files.
+async fn check_candidate(temp_path: &Path) -> Result<(), String> {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(db::connect_options(temp_path))
+        .await
+        .map_err(|_| "the backup does not contain a usable database".to_owned())?;
+    // A PRAGMA result has no column type the `query!` macro can check, so this read
+    // is a plain query.
+    let verdict = sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+        .fetch_one(&pool)
+        .await;
+    let result = match verdict {
+        Ok(text) if text == "ok" => db::migrate(&pool).await.map_err(|_| {
+            "the backup database could not be migrated; it may come from a newer HarborGate"
+                .to_owned()
+        }),
+        _ => Err("the backup database failed the integrity check".to_owned()),
+    };
+    pool.close().await;
+    result
+}
+
+/// Appends the `restore.run` audit row (actor `cli`) in one transaction.
+async fn record_restore(
+    pool: &sqlx::SqlitePool,
+    file_name: &str,
+    details: &serde_json::Value,
+) -> Result<(), error::AppError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| error::AppError::InternalError)?;
+    services::audit::record(
+        &mut tx,
+        &services::audit::Actor::cli(),
+        "restore.run",
+        &format!("backup:{file_name}"),
+        Some(details),
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|_| error::AppError::InternalError)
+}
+
+async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     // Refuse to start without a valid key or settings. This runs before the port is bound.
     let encryption_key = config::load_encryption_key()?;
     let settings = config::load_settings()?;
@@ -1125,5 +1394,167 @@ mod tests {
                 let (key, val) = pair.split_once('=')?;
                 (key == name).then(|| val.to_owned())
             })
+    }
+
+    // Base64 of 32 zero bytes, and of 32 bytes of 0x01. Test values only.
+    const RESTORE_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    const OTHER_KEY_B64: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+    /// 2001-09-09T01:46:40Z, the instant in the backup file name below.
+    const BACKUP_AT: i64 = 1_000_000_000;
+
+    fn restore_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("harborgate-restore-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    async fn add_user(pool: &sqlx::SqlitePool, username: &str) {
+        let mut conn = pool.acquire().await.unwrap();
+        db::users::insert_local(&mut conn, username, username, None, "test-hash", "user")
+            .await
+            .unwrap();
+    }
+
+    async fn usernames(data_dir: &Path) -> Vec<String> {
+        let pool = db::open(data_dir).await.unwrap();
+        let names: Vec<String> = sqlx::query_scalar("SELECT username FROM users ORDER BY username")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        names
+    }
+
+    async fn restore_audit_count(data_dir: &Path) -> i64 {
+        let pool = db::open(data_dir).await.unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'restore.run'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        pool.close().await;
+        count
+    }
+
+    /// A live data directory holding user `live`, and a backup directory holding a
+    /// backup of a database with user `backed-up`, sealed under `RESTORE_KEY_B64`.
+    /// Returns (live data dir, backup file path).
+    async fn live_and_backup(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let live = restore_dir(&format!("{name}-live"));
+        let source = restore_dir(&format!("{name}-source"));
+        let backups = restore_dir(&format!("{name}-backups"));
+
+        let live_pool = db::open(&live).await.unwrap();
+        add_user(&live_pool, "live").await;
+        live_pool.close().await;
+
+        let source_pool = db::open(&source).await.unwrap();
+        add_user(&source_pool, "backed-up").await;
+        let root = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+        let key = auth::crypto::backup_key(&root).unwrap();
+        let file_name = services::backup::create(&source_pool, &key, &source, &backups, BACKUP_AT)
+            .await
+            .unwrap();
+        source_pool.close().await;
+        (live, backups.join(file_name))
+    }
+
+    fn stray_temp_files(data_dir: &Path) -> Vec<String> {
+        std::fs::read_dir(data_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("restore-"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn restore_replaces_the_database_and_appends_restore_run() {
+        let (live, backup) = live_and_backup("replace").await;
+        assert_eq!(usernames(&live).await, vec!["live"]);
+        let root = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+
+        restore_database(&root, &live, &backup).await.unwrap();
+
+        assert_eq!(usernames(&live).await, vec!["backed-up"]);
+        assert!(stray_temp_files(&live).is_empty(), "temporary copy left");
+
+        let pool = db::open(&live).await.unwrap();
+        let row: (String, String, Option<String>, String) = sqlx::query_as(
+            "SELECT actor_username, action, actor_user_id, details FROM audit_log
+             WHERE action = 'restore.run'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        assert_eq!(row.0, "cli");
+        assert_eq!(row.1, "restore.run");
+        assert_eq!(row.2, None);
+        let details: serde_json::Value = serde_json::from_str(&row.3).unwrap();
+        assert_eq!(
+            details,
+            serde_json::json!({
+                "file": "harborgate-20010909T014640Z.hgbk",
+                "created_at": "2001-09-09T01:46:40Z",
+            })
+        );
+    }
+
+    /// The decided source of `created_at`: the file name first, then the file's
+    /// modification time.
+    #[test]
+    fn backup_created_at_prefers_the_name_then_the_modification_time() {
+        assert_eq!(
+            timestamp_from_file_name("harborgate-20010909T014640Z.hgbk").as_deref(),
+            Some("2001-09-09T01:46:40Z")
+        );
+        assert_eq!(
+            timestamp_from_file_name("harborgate-20010230T014640Z.hgbk"),
+            None
+        );
+        assert_eq!(timestamp_from_file_name("renamed.hgbk"), None);
+
+        let dir = restore_dir("created-at");
+        let renamed = dir.join("renamed.hgbk");
+        std::fs::write(&renamed, b"x").unwrap();
+        let fallback = backup_created_at(&renamed).unwrap();
+        assert!(
+            fallback.ends_with('Z') && fallback.len() == 20,
+            "{fallback}"
+        );
+        assert_eq!(backup_created_at(&dir.join("missing.hgbk")), None);
+    }
+
+    #[tokio::test]
+    async fn bad_tag_leaves_the_live_database_untouched() {
+        let (live, backup) = live_and_backup("bad-tag").await;
+        let mut bytes = std::fs::read(&backup).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        std::fs::write(&backup, bytes).unwrap();
+        let root = config::parse_encryption_key(RESTORE_KEY_B64).unwrap();
+
+        let result = restore_database(&root, &live, &backup).await;
+
+        assert!(result.is_err(), "a tampered backup was restored");
+        assert_eq!(usernames(&live).await, vec!["live"]);
+        assert_eq!(restore_audit_count(&live).await, 0);
+        assert!(stray_temp_files(&live).is_empty(), "temporary copy left");
+    }
+
+    #[tokio::test]
+    async fn wrong_key_leaves_the_live_database_untouched() {
+        let (live, backup) = live_and_backup("wrong-key").await;
+        let other = config::parse_encryption_key(OTHER_KEY_B64).unwrap();
+
+        let result = restore_database(&other, &live, &backup).await;
+
+        assert!(result.is_err(), "a backup restored under the wrong key");
+        assert_eq!(usernames(&live).await, vec!["live"]);
+        assert_eq!(restore_audit_count(&live).await, 0);
+        assert!(stray_temp_files(&live).is_empty(), "temporary copy left");
     }
 }
