@@ -110,6 +110,44 @@ where
     parse_encryption_key(raw.as_str())
 }
 
+/// Name of the environment variable that holds the key that wrote the current values.
+/// Read only by the offline `rotate-key` command.
+pub const OLD_ENCRYPTION_KEY_VAR: &str = "HARBORGATE_OLD_ENCRYPTION_KEY";
+
+/// Reads `HARBORGATE_OLD_ENCRYPTION_KEY` the same way as the new key. Errors name this
+/// variable and never include the value.
+pub fn load_old_encryption_key() -> Result<EncryptionKey, ConfigError> {
+    load_old_encryption_key_with(|name| env::var(name))
+}
+
+/// Same as [`load_old_encryption_key`], with the variable lookup injected for testing.
+pub fn load_old_encryption_key_with<F>(lookup: F) -> Result<EncryptionKey, ConfigError>
+where
+    F: FnOnce(&str) -> Result<String, VarError>,
+{
+    let raw = match lookup(OLD_ENCRYPTION_KEY_VAR) {
+        Ok(value) => Zeroizing::new(value),
+        Err(VarError::NotPresent) => {
+            return Err(ConfigError::Required {
+                var: OLD_ENCRYPTION_KEY_VAR,
+            });
+        }
+        Err(VarError::NotUnicode(_)) => {
+            return Err(ConfigError::Invalid {
+                var: OLD_ENCRYPTION_KEY_VAR,
+                reason: "is not valid UTF-8".to_owned(),
+            });
+        }
+    };
+    parse_encryption_key(raw.as_str()).map_err(|err| ConfigError::Invalid {
+        var: OLD_ENCRYPTION_KEY_VAR,
+        reason: match err {
+            ConfigError::InvalidBase64 => "is not valid base64 (standard alphabet)".to_owned(),
+            _ => format!("must be {ENCRYPTION_KEY_LEN} random bytes encoded in base64"),
+        },
+    })
+}
+
 /// Decodes a base64 (standard alphabet) string into an [`EncryptionKey`].
 pub fn parse_encryption_key(encoded: &str) -> Result<EncryptionKey, ConfigError> {
     // The decode buffer holds key material, so it is zeroed on drop.
@@ -739,6 +777,38 @@ mod tests {
                 Err(err) => panic!("expected Ok in test, got {err:?}"),
             }
         }
+    }
+
+    #[test]
+    fn old_key_is_read_from_its_own_variable() {
+        let lookup = |name: &str| {
+            if name == OLD_ENCRYPTION_KEY_VAR {
+                Ok(TEST_KEY_B64.to_owned())
+            } else {
+                Err(VarError::NotPresent)
+            }
+        };
+        let key = load_old_encryption_key_with(lookup);
+        assert!(matches!(&key, Ok(k) if k.as_bytes() == &[0u8; 32]));
+    }
+
+    #[test]
+    fn old_key_errors_name_the_old_variable_and_hide_the_value() {
+        let missing = load_old_encryption_key_with(|_| Err(VarError::NotPresent)).err();
+        let bad_base64 = load_old_encryption_key_with(|_| Ok("AAAA!!".to_owned())).err();
+        let short = load_old_encryption_key_with(|_| Ok("AAAA".to_owned())).err();
+        for err in [missing, bad_base64, short] {
+            let text = err.map(|e| e.to_string()).unwrap_or_default();
+            assert!(
+                text.contains(OLD_ENCRYPTION_KEY_VAR),
+                "the error does not name the old variable"
+            );
+        }
+        let rendered = load_old_encryption_key_with(|_| Ok("AAAA!!".to_owned()))
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(!rendered.contains("AAAA!!"), "the error echoes the value");
     }
 
     #[test]

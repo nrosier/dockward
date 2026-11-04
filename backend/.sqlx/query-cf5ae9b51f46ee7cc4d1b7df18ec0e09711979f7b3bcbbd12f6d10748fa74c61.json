@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE alert_channels SET config_encrypted = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "cf5ae9b51f46ee7cc4d1b7df18ec0e09711979f7b3bcbbd12f6d10748fa74c61"
+}
