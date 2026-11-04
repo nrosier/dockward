@@ -170,6 +170,37 @@ mod tests {
         ));
     }
 
+    /// Lowercase hex of `bytes`.
+    fn to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A CSRF nonce and its tag, recorded with the hmac 0.12 build under the CSRF key
+    /// derived from the all-zero test root. The tag is HMAC-SHA256 of the nonce, as hex
+    /// and as the base64url value the cookie carries.
+    const KAT_CSRF_NONCE: &str = "kat-csrf-nonce";
+    const KAT_CSRF_TAG_HEX: &str =
+        "e493641318234cd473668382b031307186a45f4bd3bdef25052ab68a62cb66d7";
+    const KAT_CSRF_TOKEN: &str = "kat-csrf-nonce.5JNkExgjTNRzZoOCsDEwcYakX0vTve8lBSq2imLLZtc";
+
+    #[test]
+    fn csrf_tag_known_answer() {
+        let k = key();
+        let computed = tag(&k, KAT_CSRF_NONCE).unwrap_or_default();
+        assert!(
+            to_hex(&computed) == KAT_CSRF_TAG_HEX,
+            "the CSRF tag changed"
+        );
+    }
+
+    #[test]
+    fn csrf_token_from_the_old_build_still_verifies() {
+        assert!(
+            verify(&key(), KAT_CSRF_TOKEN),
+            "a CSRF token from the old build no longer verifies"
+        );
+    }
+
     #[test]
     fn csrf_cookie_attributes_match_the_spec() {
         let cookie = set_cookie("v.w");

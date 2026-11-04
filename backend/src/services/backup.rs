@@ -362,6 +362,30 @@ mod tests {
         assert_eq!(std::fs::read(&taken).unwrap(), b"existing");
     }
 
+    /// An `HGBK1` file recorded with the aes-gcm 0.10 build, as lowercase hex. The backup
+    /// key is derived from the all-zero test root. The nonce is 0x2b repeated 12 times,
+    /// and the plaintext is `database bytes`. Test values only.
+    const KAT_HGBK1_HEX: &str = "4847424b312b2b2b2b2b2b2b2b2b2b2b2bb94ab0bc2c33bec3bcaf58cf15178f96bbc433e09b036161efdff639e857";
+
+    fn hex_decode(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .filter_map(|i| text.get(i..i + 2))
+            .filter_map(|pair| u8::from_str_radix(pair, 16).ok())
+            .collect()
+    }
+
+    #[test]
+    fn hgbk1_file_from_the_old_build_still_restores() {
+        let file = hex_decode(KAT_HGBK1_HEX);
+        assert!(file.starts_with(MAGIC), "the recorded file lost its header");
+        let plain = open(&key(), &file);
+        assert!(
+            matches!(plain, Ok(ref p) if p.as_slice() == b"database bytes"),
+            "an HGBK1 file recorded with the old build no longer opens"
+        );
+    }
+
     #[test]
     fn file_name_matches_the_safe_pattern() {
         let name = file_name_for(NOW).unwrap();
