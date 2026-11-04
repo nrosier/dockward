@@ -1,5 +1,6 @@
 // Module placeholder. Filled in by later issues.
 
+pub mod acceptance;
 #[allow(dead_code)] // Used by the account routes.
 pub mod account;
 pub mod alert_channels;
