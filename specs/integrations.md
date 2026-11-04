@@ -150,6 +150,12 @@ Read these from the Harbor artifact (`GET .../artifacts/{reference}` or the arti
 - Every issue carries the HarborGate label and body marker used to re-adopt issues. The rule is in [cve-lifecycle.md](cve-lifecycle.md).
 - Issue lifecycle (one open issue per CVE per repo, close, reopen) is defined in [cve-lifecycle.md](cve-lifecycle.md).
 - GitHub issues API permission: `Issues: read and write` (see [security.md](security.md)).
+- Decided (2026-11-04, user, #30): issue title, `<CVE-ID>: <package> (<SEVERITY>) in <harbor_project>/<harbor_repository>`. The package and severity come from the CVE's rows: the package from the most recently scanned open tag row, the severity the highest across open rows. A row with no package shows `unknown package`.
+- Decided (2026-11-04, user, #30): the issue body is the marker line, the table (CVE, severity, package, fixed in, Harbor repository) from the most recently scanned open tag row, and a line `Affected tags:` that lists every tag where the CVE is open.
+- Decided (2026-11-04, user, #30): the scan named in the close and reopen comments is `<harbor_project>/<harbor_repository>:<tag>` (no digest). The close comment is `No tracked tag reports this CVE since scan <scan>.` and the reopen comment is `CVE is back in scan <scan>`.
+- Decided (2026-11-04, user, #30): the manual route follows [api.md](api.md): `:id` is `<mapping_id>:<cve_id>`. It is allowed when the highest open severity across the mapping's tags is CRITICAL or HIGH, ignoring `min_issue_severity` and `auto_create_issues` because the manual action overrides the automatic threshold. It returns `409` while an active acceptance exists or an open issue exists, and it reopens a closed issue instead of creating a second one.
+- Brief #30, step 3: `auto_create_issues = false` skips only the creation of new issues. Existing issue rows still close and reopen by the lifecycle rules.
+- Decided (2026-11-04, user, #30): a GitHub rate limit while the issues are updated after a scan is logged as fixed text (no secrets) and the sync job still finishes `Done`. The job is not deferred, because the report is already `success` and a retry would upload the SARIF again. The next sync or poll reconciles the issues. Another GitHub error on one CVE is logged the same way and the next CVE continues.
 
 ## GitHub target
 

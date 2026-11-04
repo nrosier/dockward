@@ -12,7 +12,6 @@ pub mod backup;
 pub mod credential_probe;
 pub mod credentials;
 pub mod findings;
-#[allow(dead_code)] // Used by the issue lifecycle (#30).
 pub mod github_issues;
 #[allow(dead_code)] // Used by the SARIF upload worker (#53).
 pub mod github_scanning;
@@ -23,6 +22,7 @@ pub mod harbor_webhook;
 pub mod health;
 #[allow(dead_code)] // Used by the admin routes and the auth paths added in later issues.
 pub mod ids;
+pub mod issue_lifecycle;
 pub mod key_rotation;
 #[allow(dead_code)] // Used by the mapping routes.
 pub mod mappings;

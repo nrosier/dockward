@@ -26,6 +26,7 @@ use crate::db::sync_jobs::ClaimedJob;
 use crate::db::sync_reports::{self as report_db, NewReport};
 use crate::error::AppError;
 use crate::services::credentials::{base_for_join, decrypt_token};
+use crate::services::github_issues::GithubIssues;
 use crate::services::github_scanning::{
     GithubScanning, Processing, ScanError, Upload, encode_sarif,
 };
@@ -33,6 +34,7 @@ use crate::services::harbor_client::{
     HarborGet, ReportState, TRIVY_REPORT_MIME, artifact_url, branch_for, check_source,
     parse_labels, parse_report, require_revision, vulnerabilities_url,
 };
+use crate::services::issue_lifecycle::{self, IssueApi};
 use crate::services::{findings, ids, sarif};
 use crate::worker::{JobHandler, JobOutcome, now_secs};
 
@@ -144,12 +146,13 @@ impl Clock for SystemClock {
 }
 
 /// Runs sync jobs. The type parameters default to the production clients.
-pub struct SyncHandler<H = HarborGet, G = GithubScanning, C = SystemClock> {
+pub struct SyncHandler<H = HarborGet, G = GithubScanning, C = SystemClock, I = GithubIssues> {
     pool: SqlitePool,
     credentials_key: Arc<DerivedKey>,
     harbor: H,
     github: G,
     clock: C,
+    issues: I,
 }
 
 impl SyncHandler {
@@ -166,11 +169,12 @@ impl SyncHandler {
             harbor: HarborGet::new(allow_private_harbor)?,
             github: GithubScanning::new()?,
             clock: SystemClock,
+            issues: GithubIssues::new()?,
         })
     }
 }
 
-impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
+impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C, I> {
     #[cfg(test)]
     fn with_parts(
         pool: SqlitePool,
@@ -178,6 +182,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
         harbor: H,
         github: G,
         clock: C,
+        issues: I,
     ) -> Self {
         Self {
             pool,
@@ -185,6 +190,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
             harbor,
             github,
             clock,
+            issues,
         }
     }
 }
@@ -283,7 +289,7 @@ struct Context {
     payload: Payload,
 }
 
-impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
+impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C, I> {
     async fn execute(&self, job: &ClaimedJob) -> Flow<()> {
         let context = self.load(job).await?;
 
@@ -503,6 +509,34 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
         }
     }
 
+    /// Makes the GitHub issues follow the findings that were just applied. A rate limit is
+    /// logged as fixed text and the job still finishes: the report is already `success`, so
+    /// a retry would upload the SARIF again. The next scan reconciles the issues. Another
+    /// GitHub error is logged inside the reconcile. Only a database error fails the job.
+    async fn reconcile_issues(&self, context: &Context) -> Flow<()> {
+        let mapping = &context.mapping;
+        let scan_label = format!(
+            "{}/{}:{}",
+            mapping.harbor_project, mapping.harbor_repository, context.payload.tag
+        );
+        let outcome = issue_lifecycle::reconcile(
+            &self.pool,
+            &self.issues,
+            &context.github_token,
+            mapping,
+            &scan_label,
+            self.clock.now(),
+        )
+        .await
+        .map_err(database)?;
+        if matches!(outcome, issue_lifecycle::Outcome::RateLimited { .. }) {
+            tracing::warn!(
+                "GitHub rate limit reached while updating issues; the next scan retries"
+            );
+        }
+        Ok(())
+    }
+
     /// Polls GitHub after 5 s, 10 s, then every 15 s, for at most 300 s in total. On
     /// `Complete` the report is marked `success` and the findings of the tag are updated
     /// from `vuln_report`. A retry has no report in hand (`None`), so it is fetched from
@@ -559,6 +593,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
                     )
                     .await
                     .map_err(database)?;
+                    self.reconcile_issues(context).await?;
                     return Ok(());
                 }
                 Processing::Failed(errors) => {
@@ -582,7 +617,9 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock> SyncHandler<H, G, C> {
     }
 }
 
-impl<H: HarborFetch, G: CodeScanning, C: Clock> JobHandler for SyncHandler<H, G, C> {
+impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> JobHandler
+    for SyncHandler<H, G, C, I>
+{
     async fn run(&self, job: ClaimedJob) -> JobOutcome {
         match self.execute(&job).await {
             Ok(()) => JobOutcome::Done,
@@ -601,6 +638,7 @@ mod tests {
     use crate::auth::crypto::{self, credentials_key};
     use crate::config;
     use crate::db;
+    use crate::services::issue_lifecycle::test_support::{FakeGithub, FakeIssues};
 
     // Test values only. The root key and the tokens are obviously fake.
     const ROOT: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -845,7 +883,16 @@ mod tests {
             &self,
             harbor: &Arc<FakeHarbor>,
             scanner: &Arc<FakeScanner>,
-        ) -> SyncHandler<Arc<FakeHarbor>, Arc<FakeScanner>, FakeClock> {
+        ) -> SyncHandler<Arc<FakeHarbor>, Arc<FakeScanner>, FakeClock, FakeIssues> {
+            self.handler_with(harbor, scanner, Arc::new(FakeGithub::default()))
+        }
+
+        fn handler_with(
+            &self,
+            harbor: &Arc<FakeHarbor>,
+            scanner: &Arc<FakeScanner>,
+            github: Arc<FakeGithub>,
+        ) -> SyncHandler<Arc<FakeHarbor>, Arc<FakeScanner>, FakeClock, FakeIssues> {
             SyncHandler::with_parts(
                 self.pool.clone(),
                 Arc::new(key()),
@@ -854,6 +901,7 @@ mod tests {
                 FakeClock {
                     sleeps: self.sleeps.clone(),
                 },
+                FakeIssues(github),
             )
         }
 
@@ -1160,5 +1208,65 @@ mod tests {
         assert_eq!(outcome, JobOutcome::Failed(MSG_GONE.to_owned()));
         assert_eq!(harbor.calls(), 0);
         assert_eq!(scanner.uploads(), 0);
+    }
+
+    #[tokio::test]
+    async fn complete_scan_creates_the_issue_with_the_scan_label() {
+        let fx = Fixture::new("issues").await;
+        sqlx::query("UPDATE repo_mappings SET auto_create_issues = 1 WHERE id = 'm1'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        let harbor = ok_harbor();
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+        let github = Arc::new(FakeGithub::default());
+        let outcome = fx
+            .handler_with(&harbor, &scanner, github.clone())
+            .run(fx.job())
+            .await;
+        assert_eq!(outcome, JobOutcome::Done);
+        // CVE-2026-0001 is the only CRITICAL finding in the report.
+        let creates = github.creates();
+        assert_eq!(creates.len(), 1);
+        assert_eq!(
+            creates[0]["title"],
+            "CVE-2026-0001: openssl (CRITICAL) in proj/app"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_during_issue_updates_finishes_the_job_done() {
+        let fx = Fixture::new("issues-limited").await;
+        sqlx::query("UPDATE repo_mappings SET auto_create_issues = 1 WHERE id = 'm1'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        let harbor = ok_harbor();
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+        let github = Arc::new(FakeGithub::default());
+        github.with(|state| state.rate_limited = true);
+
+        let outcome = fx
+            .handler_with(&harbor, &scanner, github.clone())
+            .run(fx.job())
+            .await;
+
+        // The job is Done, not Deferred, so it is not run again and the SARIF is not
+        // uploaded a second time.
+        assert_eq!(outcome, JobOutcome::Done);
+        assert_eq!(scanner.uploads(), 1);
+        assert_eq!(github.requests(), 1);
+        let (status, ..) = fx.report().await.unwrap();
+        assert_eq!(status, "success");
+        let reports: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_reports")
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+        assert_eq!(reports, 1);
+        let findings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cve_findings")
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+        assert_eq!(findings, 4);
     }
 }

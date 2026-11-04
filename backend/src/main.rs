@@ -86,6 +86,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             post(api::mappings::rotate_auth_secret),
         )
         .route("/api/v1/sync-jobs/{id}/retry", post(api::sync_jobs::retry))
+        .route("/api/v1/cves/{id}/issue", post(api::cves::issue))
         .route(
             "/api/v1/webhooks/harbor/{mapping_token}",
             post(api::webhooks::receive),

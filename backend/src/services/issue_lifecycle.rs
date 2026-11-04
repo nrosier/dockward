@@ -1,0 +1,1268 @@
+//! The GitHub issue lifecycle (`specs/cve-lifecycle.md`, "GitHub issue rules"; defaults in
+//! `specs/integrations.md`, "GitHub issues").
+//!
+//! After each applied scan, [`reconcile`] makes the GitHub issues of one mapping follow its
+//! `cve_findings`: create or adopt an issue for an eligible CVE, reuse it while it is open,
+//! close it with a comment when no tracked tag reports the CVE, and reopen it when the CVE
+//! returns. [`create_manual`] is the same create-or-adopt step for the manual route.
+//!
+//! The token is only passed on to the GitHub client. Nothing here logs it, an error value,
+//! or a response body: every log line and error message is fixed text.
+
+use std::collections::BTreeMap;
+use std::future::Future;
+
+use sqlx::SqlitePool;
+
+use crate::auth::crypto::DerivedKey;
+use crate::db::credentials as credential_db;
+use crate::db::github_issues::{self as issue_db, FindingRow, IssueRow, NewIssue};
+use crate::db::mappings::{self as mapping_db, MappingRow};
+use crate::error::AppError;
+use crate::services::credentials::decrypt_token;
+use crate::services::github_issues::{self, GithubIssues, IssueRef};
+use crate::services::github_scanning::ScanError;
+use crate::services::ids;
+
+/// The longest issue title GitHub takes, in characters.
+const MAX_TITLE_CHARS: usize = 256;
+
+/// The GitHub Issues calls the lifecycle needs. The production impl is [`GithubIssues`];
+/// tests answer from a model of GitHub.
+pub trait IssueApi: Send + Sync + 'static {
+    fn list_open_labelled(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        now: i64,
+    ) -> impl Future<Output = Result<Vec<IssueRef>, ScanError>> + Send;
+
+    fn create(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        now: i64,
+    ) -> impl Future<Output = Result<IssueRef, ScanError>> + Send;
+
+    fn comment(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        body: &str,
+        now: i64,
+    ) -> impl Future<Output = Result<(), ScanError>> + Send;
+
+    fn set_state(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        open: bool,
+        now: i64,
+    ) -> impl Future<Output = Result<(), ScanError>> + Send;
+}
+
+impl IssueApi for GithubIssues {
+    async fn list_open_labelled(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        now: i64,
+    ) -> Result<Vec<IssueRef>, ScanError> {
+        GithubIssues::list_open_labelled(self, token, owner, repo, now).await
+    }
+
+    async fn create(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        now: i64,
+    ) -> Result<IssueRef, ScanError> {
+        GithubIssues::create(self, token, owner, repo, title, body, now).await
+    }
+
+    async fn comment(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        body: &str,
+        now: i64,
+    ) -> Result<(), ScanError> {
+        GithubIssues::comment(self, token, owner, repo, number, body, now).await
+    }
+
+    async fn set_state(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        open: bool,
+        now: i64,
+    ) -> Result<(), ScanError> {
+        GithubIssues::set_state(self, token, owner, repo, number, open, now).await
+    }
+}
+
+/// How a [`reconcile`] run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Every CVE was looked at. Some GitHub calls may have failed and were skipped.
+    Complete,
+    /// GitHub rate limited a call. The run stopped; the next scan reconciles again.
+    RateLimited {
+        /// Unix seconds when GitHub allows calls again.
+        until: i64,
+    },
+}
+
+/// The issue created or reopened by the manual route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualIssue {
+    pub url: String,
+    pub number: i64,
+}
+
+/// Why one CVE step stopped.
+enum Failure {
+    Scan(ScanError),
+    Db(AppError),
+}
+
+impl From<ScanError> for Failure {
+    fn from(error: ScanError) -> Self {
+        Failure::Scan(error)
+    }
+}
+
+impl From<AppError> for Failure {
+    fn from(error: AppError) -> Self {
+        Failure::Db(error)
+    }
+}
+
+/// Severity order for the issue rule. Only `CRITICAL` (2) and `HIGH` (1) can create issues.
+fn rank(severity: &str) -> u8 {
+    match severity {
+        "CRITICAL" => 2,
+        "HIGH" => 1,
+        _ => 0,
+    }
+}
+
+/// True when `severity` reaches the mapping's `min_issue_severity`.
+fn meets_minimum(severity: &str, min_issue_severity: Option<&str>) -> bool {
+    let needed = if min_issue_severity == Some("HIGH") {
+        1
+    } else {
+        2
+    };
+    rank(severity) >= needed
+}
+
+/// What the open rows of one CVE say, for the issue text and the rules.
+struct CveView {
+    cve_id: String,
+    /// The highest severity among the open rows.
+    severity: &'static str,
+    /// Package of the most recently scanned open row.
+    package: Option<String>,
+    /// Fixed-in version of the most recently scanned open row.
+    fixed_in: Option<String>,
+    /// Every tag where the CVE is open.
+    tags: Vec<String>,
+}
+
+/// The view of a CVE from its rows, or `None` when no tracked tag reports it (no `open` row).
+fn summarize(cve_id: &str, rows: &[FindingRow]) -> Option<CveView> {
+    let open: Vec<&FindingRow> = rows.iter().filter(|row| row.status == "open").collect();
+    let latest = open
+        .iter()
+        .max_by(|a, b| {
+            a.last_seen_at
+                .cmp(&b.last_seen_at)
+                .then_with(|| b.image_tag.cmp(&a.image_tag))
+        })
+        .copied()?;
+    let severity = match open.iter().map(|row| rank(&row.severity)).max() {
+        Some(2) => "CRITICAL",
+        Some(1) => "HIGH",
+        _ => {
+            // No CRITICAL or HIGH row: keep the latest row's own severity for the text.
+            match latest.severity.as_str() {
+                "MEDIUM" => "MEDIUM",
+                "LOW" => "LOW",
+                _ => "UNKNOWN",
+            }
+        }
+    };
+    let mut tags: Vec<String> = open.iter().map(|row| row.image_tag.clone()).collect();
+    tags.sort();
+    tags.dedup();
+    Some(CveView {
+        cve_id: cve_id.to_owned(),
+        severity,
+        package: latest.package.clone(),
+        fixed_in: latest.fixed_in_version.clone(),
+        tags,
+    })
+}
+
+/// Text kept on one line: no line break, no backtick.
+fn plain(text: &str) -> String {
+    text.replace(['\r', '\n', '`'], " ").trim().to_owned()
+}
+
+/// `<CVE-ID>: <package> (<SEVERITY>) in <harbor_project>/<harbor_repository>`.
+fn issue_title(view: &CveView, mapping: &MappingRow) -> String {
+    let package = view
+        .package
+        .as_deref()
+        .map(plain)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown package".to_owned());
+    let title = format!(
+        "{}: {} ({}) in {}/{}",
+        plain(&view.cve_id),
+        package,
+        view.severity,
+        mapping.harbor_project,
+        mapping.harbor_repository
+    );
+    title.chars().take(MAX_TITLE_CHARS).collect()
+}
+
+/// The marker line, the table from [`github_issues::issue_body`], and the affected tags.
+fn issue_text(view: &CveView, mapping: &MappingRow) -> String {
+    let harbor = format!("{}/{}", mapping.harbor_project, mapping.harbor_repository);
+    let mut body = github_issues::issue_body(
+        &view.cve_id,
+        view.severity,
+        view.package.as_deref().unwrap_or("unknown"),
+        view.fixed_in.as_deref(),
+        &harbor,
+    );
+    let tags: Vec<String> = view
+        .tags
+        .iter()
+        .map(|tag| format!("`{}`", plain(tag)))
+        .collect();
+    body.push_str(&format!("\nAffected tags: {}\n", tags.join(", ")));
+    body
+}
+
+fn to_number(number: i64) -> Result<u64, AppError> {
+    u64::try_from(number).map_err(|_| AppError::InternalError)
+}
+
+/// What every GitHub step needs: the database, the client, the token, the mapping and the
+/// time. The token is only passed on to the client.
+struct Ctx<'a, G> {
+    pool: &'a SqlitePool,
+    gh: &'a G,
+    token: &'a [u8],
+    mapping: &'a MappingRow,
+    now: i64,
+}
+
+impl<G: IssueApi> Ctx<'_, G> {
+    fn owner(&self) -> &str {
+        &self.mapping.github_owner
+    }
+
+    fn repo(&self) -> &str {
+        &self.mapping.github_repo
+    }
+
+    /// Finds or makes the issue for a CVE that has no `github_issues` row, stores the row
+    /// and links the CVE's findings to it. An open labelled issue with the marker is
+    /// adopted; otherwise a new issue is created. `listed` keeps the open issues after the
+    /// first lookup, so one run lists them once.
+    async fn create_or_adopt(
+        &self,
+        view: &CveView,
+        listed: &mut Option<Vec<IssueRef>>,
+    ) -> Result<IssueRow, Failure> {
+        if listed.is_none() {
+            *listed = Some(
+                self.gh
+                    .list_open_labelled(self.token, self.owner(), self.repo(), self.now)
+                    .await?,
+            );
+        }
+        let adopted = listed
+            .as_deref()
+            .and_then(|issues| github_issues::find_marked(issues, &view.cve_id))
+            .cloned();
+        let issue = match adopted {
+            Some(issue) => issue,
+            None => {
+                self.gh
+                    .create(
+                        self.token,
+                        self.owner(),
+                        self.repo(),
+                        &issue_title(view, self.mapping),
+                        &issue_text(view, self.mapping),
+                        self.now,
+                    )
+                    .await?
+            }
+        };
+        let number = i64::try_from(issue.number).map_err(|_| AppError::InternalError)?;
+        let id = ids::new_id();
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        issue_db::insert(
+            &mut conn,
+            &NewIssue {
+                id: &id,
+                github_owner: self.owner(),
+                github_repo: self.repo(),
+                cve_id: &view.cve_id,
+                github_issue_number: number,
+                github_issue_url: &issue.html_url,
+            },
+        )
+        .await?;
+        issue_db::link_findings(&mut conn, &self.mapping.id, &view.cve_id, &id).await?;
+        Ok(IssueRow {
+            id,
+            github_owner: self.owner().to_owned(),
+            github_repo: self.repo().to_owned(),
+            cve_id: view.cve_id.clone(),
+            github_issue_number: number,
+            github_issue_url: issue.html_url,
+            status: "open".to_owned(),
+        })
+    }
+
+    /// Reopens the issue of a closed row, marks the row `open`, then comments.
+    async fn reopen(&self, row: &IssueRow, comment: &str) -> Result<(), Failure> {
+        let number = to_number(row.github_issue_number)?;
+        self.gh
+            .set_state(
+                self.token,
+                self.owner(),
+                self.repo(),
+                number,
+                true,
+                self.now,
+            )
+            .await?;
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        issue_db::set_status(&mut conn, &row.id, "open").await?;
+        drop(conn);
+        self.gh
+            .comment(
+                self.token,
+                self.owner(),
+                self.repo(),
+                number,
+                comment,
+                self.now,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Comments on the issue of an open row, closes it, and marks the row `closed`.
+    async fn close(&self, row: &IssueRow, comment: &str) -> Result<(), Failure> {
+        let number = to_number(row.github_issue_number)?;
+        self.gh
+            .comment(
+                self.token,
+                self.owner(),
+                self.repo(),
+                number,
+                comment,
+                self.now,
+            )
+            .await?;
+        self.gh
+            .set_state(
+                self.token,
+                self.owner(),
+                self.repo(),
+                number,
+                false,
+                self.now,
+            )
+            .await?;
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        issue_db::set_status(&mut conn, &row.id, "closed").await?;
+        Ok(())
+    }
+
+    /// Applies the issue rules to one CVE of the mapping, given its rows.
+    async fn step(
+        &self,
+        cve_id: &str,
+        rows: &[FindingRow],
+        rules: &Rules<'_>,
+        listed: &mut Option<Vec<IssueRef>>,
+    ) -> Result<(), Failure> {
+        let view = summarize(cve_id, rows);
+        let existing = {
+            let mut conn = self
+                .pool
+                .acquire()
+                .await
+                .map_err(|_| AppError::InternalError)?;
+            let row = issue_db::find(&mut conn, self.owner(), self.repo(), cve_id).await?;
+            if let Some(row) = &row {
+                issue_db::link_findings(&mut conn, &self.mapping.id, cve_id, &row.id).await?;
+            }
+            row
+        };
+        match (existing, view) {
+            // (a) Reported, eligible, and no issue yet: adopt or create. Skipped when
+            // `auto_create_issues` is off.
+            (None, Some(view)) => {
+                let accepted = rules.accepted.iter().any(|id| id == cve_id);
+                if rules.auto_create
+                    && !accepted
+                    && meets_minimum(view.severity, rules.min_issue_severity)
+                {
+                    self.create_or_adopt(&view, listed).await?;
+                }
+            }
+            // (b) The CVE is back: reopen the same issue.
+            (Some(row), Some(_)) if row.status == "closed" => {
+                let comment = format!("CVE is back in scan {}", rules.scan_label);
+                self.reopen(&row, &comment).await?;
+            }
+            // (c) No tracked tag reports it any more: comment, then close.
+            (Some(row), None) if row.status == "open" => {
+                let comment = format!(
+                    "No tracked tag reports this CVE since scan {}.",
+                    rules.scan_label
+                );
+                self.close(&row, &comment).await?;
+            }
+            // (d) Nothing to do.
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// The mapping's rule inputs for one reconcile run.
+struct Rules<'a> {
+    auto_create: bool,
+    min_issue_severity: Option<&'a str>,
+    scan_label: &'a str,
+    /// CVE ids with an active acceptance.
+    accepted: Vec<String>,
+}
+
+/// Makes the GitHub issues of `mapping` follow its findings. `scan_label` names the scan in
+/// the comments. A rate limit stops the run and is returned in [`Outcome`]. Any other GitHub
+/// error is logged as fixed text and the next CVE continues. A database error is returned.
+pub async fn reconcile<G: IssueApi>(
+    pool: &SqlitePool,
+    gh: &G,
+    token: &[u8],
+    mapping: &MappingRow,
+    scan_label: &str,
+    now: i64,
+) -> Result<Outcome, AppError> {
+    let (rows, accepted) = {
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        (
+            issue_db::findings_for_mapping(&mut conn, &mapping.id).await?,
+            issue_db::accepted_cves(&mut conn, &mapping.id, now).await?,
+        )
+    };
+    let mut by_cve: BTreeMap<String, Vec<FindingRow>> = BTreeMap::new();
+    for row in rows {
+        by_cve.entry(row.cve_id.clone()).or_default().push(row);
+    }
+    let rules = Rules {
+        auto_create: mapping.auto_create_issues.unwrap_or(false),
+        min_issue_severity: mapping.min_issue_severity.as_deref(),
+        scan_label,
+        accepted,
+    };
+    let ctx = Ctx {
+        pool,
+        gh,
+        token,
+        mapping,
+        now,
+    };
+    let mut listed: Option<Vec<IssueRef>> = None;
+    for (cve_id, rows) in &by_cve {
+        match ctx.step(cve_id, rows, &rules, &mut listed).await {
+            Ok(()) => {}
+            Err(Failure::Scan(ScanError::RateLimited { until })) => {
+                return Ok(Outcome::RateLimited { until });
+            }
+            Err(Failure::Scan(_)) => {
+                tracing::warn!("a GitHub issue update failed; continuing with the next CVE");
+            }
+            Err(Failure::Db(error)) => return Err(error),
+        }
+    }
+    Ok(Outcome::Complete)
+}
+
+/// A GitHub failure in the manual route is `502`; a database error stays as it is.
+fn manual_error(failure: Failure) -> AppError {
+    match failure {
+        Failure::Db(error) => error,
+        Failure::Scan(_) => AppError::UpstreamUnreachable,
+    }
+}
+
+/// The manual issue route's work (`specs/api.md`, `POST /api/v1/cves/:id/issue`) for a
+/// mapping the caller owns.
+///
+/// - `404` when the mapping has no finding for the CVE.
+/// - `409` (with the URL) when its issue is open, and `409` while an active acceptance exists.
+/// - `422` unless the highest open severity is `CRITICAL` or `HIGH`. The mapping's
+///   `min_issue_severity` and `auto_create_issues` do not apply: the manual action overrides
+///   them.
+/// - A closed issue is reopened, never duplicated. Otherwise an open labelled issue with the
+///   marker is adopted, or a new one is created.
+/// - A GitHub failure is `502`.
+pub async fn create_manual<G: IssueApi>(
+    pool: &SqlitePool,
+    gh: &G,
+    token: &[u8],
+    mapping: &MappingRow,
+    cve_id: &str,
+    now: i64,
+) -> Result<ManualIssue, AppError> {
+    let (rows, existing, accepted) = {
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        (
+            issue_db::findings_for_cve(&mut conn, &mapping.id, cve_id).await?,
+            issue_db::find(
+                &mut conn,
+                &mapping.github_owner,
+                &mapping.github_repo,
+                cve_id,
+            )
+            .await?,
+            issue_db::accepted_cves(&mut conn, &mapping.id, now).await?,
+        )
+    };
+    if rows.is_empty() {
+        return Err(AppError::NotFound);
+    }
+    if let Some(row) = &existing
+        && row.status == "open"
+    {
+        return Err(AppError::Conflict(format!(
+            "An open GitHub issue already exists: {}",
+            row.github_issue_url
+        )));
+    }
+    if accepted.iter().any(|id| id == cve_id) {
+        return Err(AppError::Conflict(
+            "This CVE has an active risk acceptance.".to_owned(),
+        ));
+    }
+    let view = summarize(cve_id, &rows)
+        .filter(|view| rank(view.severity) > 0)
+        .ok_or_else(|| {
+            AppError::ValidationFailed(
+                "Only a CVE that is open as CRITICAL or HIGH can get an issue.".to_owned(),
+            )
+        })?;
+    let ctx = Ctx {
+        pool,
+        gh,
+        token,
+        mapping,
+        now,
+    };
+    let row = match existing {
+        Some(row) => {
+            ctx.reopen(&row, "CVE reopened manually from HarborGate.")
+                .await
+                .map_err(manual_error)?;
+            row
+        }
+        None => {
+            let mut listed = None;
+            ctx.create_or_adopt(&view, &mut listed)
+                .await
+                .map_err(manual_error)?
+        }
+    };
+    Ok(ManualIssue {
+        url: row.github_issue_url,
+        number: row.github_issue_number,
+    })
+}
+
+/// Splits the route id `<mapping_id>:<cve_id>`. An id in any other shape is `404`.
+fn split_id(id: &str) -> Result<(&str, &str), AppError> {
+    match id.split_once(':') {
+        Some((mapping_id, cve_id)) if !mapping_id.is_empty() && !cve_id.is_empty() => {
+            Ok((mapping_id, cve_id))
+        }
+        _ => Err(AppError::NotFound),
+    }
+}
+
+/// `POST /api/v1/cves/:id/issue` for `user_id`: finds the mapping the caller owns (another
+/// tenant's mapping is `404`), decrypts the GitHub token of its credential, and calls
+/// [`create_manual`].
+pub async fn create_manual_for_user<G: IssueApi>(
+    pool: &SqlitePool,
+    credentials_key: &DerivedKey,
+    gh: &G,
+    user_id: &str,
+    id: &str,
+    now: i64,
+) -> Result<ManualIssue, AppError> {
+    let (mapping_id, cve_id) = split_id(id)?;
+    let (mapping, credential) = {
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        let mapping = mapping_db::find_owned(&mut conn, user_id, mapping_id)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        let credential = credential_db::find_owned(&mut conn, user_id, &mapping.github_cred_id)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        (mapping, credential)
+    };
+    let token = decrypt_token(credentials_key, &credential)?;
+    create_manual(pool, gh, &token, &mapping, cve_id, now).await
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    //! A model of GitHub for the tests: it answers the `ScanHttp` calls of the issues client
+    //! from an in-memory list of issues and records every request.
+
+    use std::sync::Mutex;
+
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::services::github_scanning::{ScanHttp, ScanResponse};
+
+    pub struct Issue {
+        pub number: u64,
+        pub body: String,
+        pub open: bool,
+    }
+
+    #[derive(Default)]
+    pub struct State {
+        pub issues: Vec<Issue>,
+        /// `(method, path, body)` of every request, in order.
+        pub log: Vec<(&'static str, String, Value)>,
+        pub rate_limited: bool,
+    }
+
+    /// The fake GitHub for `octo/app`.
+    #[derive(Default)]
+    pub struct FakeGithub {
+        pub state: Mutex<State>,
+    }
+
+    impl FakeGithub {
+        pub fn with<T>(&self, f: impl FnOnce(&mut State) -> T) -> T {
+            let mut guard = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            f(&mut guard)
+        }
+
+        /// Bodies of the requests that created issues.
+        pub fn creates(&self) -> Vec<Value> {
+            self.with(|state| {
+                state
+                    .log
+                    .iter()
+                    .filter(|(method, path, _)| {
+                        *method == "POST" && path == "repos/octo/app/issues"
+                    })
+                    .map(|(_, _, body)| body.clone())
+                    .collect()
+            })
+        }
+
+        /// `(method, path, body)` of every request that is not a list.
+        pub fn writes(&self) -> Vec<(&'static str, String, Value)> {
+            self.with(|state| {
+                state
+                    .log
+                    .iter()
+                    .filter(|(method, _, _)| *method != "GET")
+                    .cloned()
+                    .collect()
+            })
+        }
+
+        pub fn requests(&self) -> usize {
+            self.with(|state| state.log.len())
+        }
+
+        fn respond(
+            &self,
+            method: &'static str,
+            path: &str,
+            body: &Value,
+        ) -> Result<ScanResponse, ScanError> {
+            self.with(|state| {
+                state.log.push((method, path.to_owned(), body.clone()));
+                if state.rate_limited {
+                    return Err(ScanError::RateLimited { until: 5_000 });
+                }
+                let reply = |status: u16, body: Value| ScanResponse {
+                    status,
+                    retry_after: None,
+                    ratelimit_remaining: None,
+                    ratelimit_reset: None,
+                    link_next: None,
+                    body,
+                };
+                let issue_json = |issue: &Issue| {
+                    json!({
+                        "number": issue.number,
+                        "html_url": format!("https://github.com/octo/app/issues/{}", issue.number),
+                        "body": issue.body,
+                    })
+                };
+                match (method, path) {
+                    ("GET", _) => {
+                        let items: Vec<Value> = state
+                            .issues
+                            .iter()
+                            .filter(|issue| issue.open)
+                            .map(issue_json)
+                            .collect();
+                        Ok(reply(200, Value::Array(items)))
+                    }
+                    ("POST", "repos/octo/app/issues") => {
+                        let number = state.issues.len() as u64 + 1;
+                        let text = body
+                            .get("body")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        state.issues.push(Issue {
+                            number,
+                            body: text,
+                            open: true,
+                        });
+                        let created = state.issues.last().map(issue_json).unwrap_or(Value::Null);
+                        Ok(reply(201, created))
+                    }
+                    ("POST", _) => Ok(reply(201, json!({}))),
+                    (_, _) => {
+                        let number: Option<u64> =
+                            path.rsplit('/').next().and_then(|last| last.parse().ok());
+                        let open = body.get("state").and_then(Value::as_str) == Some("open");
+                        if let Some(issue) = state
+                            .issues
+                            .iter_mut()
+                            .find(|issue| Some(issue.number) == number)
+                        {
+                            issue.open = open;
+                        }
+                        Ok(reply(200, json!({})))
+                    }
+                }
+            })
+        }
+    }
+
+    impl ScanHttp for FakeGithub {
+        async fn post(
+            &self,
+            path: &str,
+            _token: &[u8],
+            body: &Value,
+        ) -> Result<ScanResponse, ScanError> {
+            self.respond("POST", path, body)
+        }
+
+        async fn patch(
+            &self,
+            path: &str,
+            _token: &[u8],
+            body: &Value,
+        ) -> Result<ScanResponse, ScanError> {
+            self.respond("PATCH", path, body)
+        }
+
+        async fn get(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
+            self.respond("GET", path, &Value::Null)
+        }
+    }
+
+    /// The lifecycle's `IssueApi` over the fake GitHub, through the real issues client
+    /// functions, so the label, the marker and the paths are the production ones.
+    pub struct FakeIssues(pub std::sync::Arc<FakeGithub>);
+
+    impl IssueApi for FakeIssues {
+        async fn list_open_labelled(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            now: i64,
+        ) -> Result<Vec<IssueRef>, ScanError> {
+            github_issues::list_open_labelled_with(&*self.0, token, owner, repo, now).await
+        }
+
+        async fn create(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            title: &str,
+            body: &str,
+            now: i64,
+        ) -> Result<IssueRef, ScanError> {
+            github_issues::create_with(&*self.0, token, owner, repo, title, body, now).await
+        }
+
+        async fn comment(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            body: &str,
+            now: i64,
+        ) -> Result<(), ScanError> {
+            github_issues::comment_with(&*self.0, token, owner, repo, number, body, now).await
+        }
+
+        async fn set_state(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            open: bool,
+            now: i64,
+        ) -> Result<(), ScanError> {
+            github_issues::set_state_with(&*self.0, token, owner, repo, number, open, now).await
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::test_support::{FakeGithub, FakeIssues};
+    use super::*;
+    use crate::db;
+    use crate::db::mappings as mapping_db;
+
+    const TOKEN: &[u8] = b"fake-token-value";
+
+    struct Fixture {
+        pool: SqlitePool,
+        dir: std::path::PathBuf,
+        github: Arc<FakeGithub>,
+        gh: FakeIssues,
+    }
+
+    impl Fixture {
+        async fn new(name: &str, min: &str, auto: bool) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "harborgate-lifecycle-{name}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let pool = db::open(&dir).await.unwrap();
+            sqlx::query(
+                "INSERT INTO users (id, username, password_hash, role, token_version)
+                 VALUES ('u1', 'u1', NULL, 'user', 0)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            for (id, service, base_url) in [
+                ("c1", "harbor", Some("https://harbor.example.com")),
+                ("c2", "github", None),
+            ] {
+                sqlx::query(
+                    "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
+                     VALUES (?, 'u1', ?, ?, ?, NULL, 'v1:test')",
+                )
+                .bind(id)
+                .bind(service)
+                .bind(id)
+                .bind(base_url)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            let github = Arc::new(FakeGithub::default());
+            let fixture = Self {
+                pool,
+                dir,
+                github: github.clone(),
+                gh: FakeIssues(github),
+            };
+            fixture.mapping_row("m1", min, auto).await;
+            fixture
+        }
+
+        async fn mapping_row(&self, id: &str, min: &str, auto: bool) {
+            sqlx::query(
+                "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash, auto_create_issues, min_issue_severity)
+                 VALUES (?, 'u1', 'c1', 'c2', 'https://harbor.example.com', 'proj', 'app', 'octo', 'app', ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(format!("hash-token-{id}"))
+            .bind(format!("hash-secret-{id}"))
+            .bind(auto)
+            .bind(min)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        }
+
+        async fn mapping(&self, id: &str) -> MappingRow {
+            let mut conn = self.pool.acquire().await.unwrap();
+            mapping_db::find_by_id(&mut conn, id)
+                .await
+                .unwrap()
+                .unwrap()
+        }
+
+        /// Stores a finding for `tag` as an `open` row seen at `at`.
+        async fn finding(&self, mapping_id: &str, tag: &str, cve: &str, severity: &str, at: i64) {
+            let mut conn = self.pool.acquire().await.unwrap();
+            db::findings::upsert(
+                &mut conn,
+                &db::findings::Finding {
+                    id: &ids::new_id(),
+                    mapping_id,
+                    harbor_repository: "app",
+                    image_tag: tag,
+                    cve_id: cve,
+                    package: Some("openssl"),
+                    severity,
+                    fixed_in_version: None,
+                    description: None,
+                    now: at,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        async fn fix(&self, tag: &str, cve: &str) {
+            sqlx::query(
+                "UPDATE cve_findings SET status = 'fixed' WHERE image_tag = ? AND cve_id = ?",
+            )
+            .bind(tag)
+            .bind(cve)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        }
+
+        async fn reconcile(&self, label: &str) -> Outcome {
+            let mapping = self.mapping("m1").await;
+            reconcile(&self.pool, &self.gh, TOKEN, &mapping, label, 1_000)
+                .await
+                .unwrap()
+        }
+
+        /// `(cve_id, issue number, status)` of every tracked issue.
+        async fn issues(&self) -> Vec<(String, i64, String)> {
+            sqlx::query_as(
+                "SELECT cve_id, github_issue_number, status FROM github_issues ORDER BY cve_id",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .unwrap()
+        }
+
+        async fn count(&self, sql: &'static str) -> i64 {
+            sqlx::query_scalar(sql).fetch_one(&self.pool).await.unwrap()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn critical_creates_one_issue_with_label_and_marker() {
+        let fx = Fixture::new("critical", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.finding("m1", "v1", "CVE-2026-0002", "MEDIUM", 10).await;
+
+        assert_eq!(fx.reconcile("proj/app:v1").await, Outcome::Complete);
+
+        let creates = fx.github.creates();
+        assert_eq!(creates.len(), 1);
+        assert_eq!(creates[0]["labels"], serde_json::json!(["harborgate"]));
+        let body = creates[0]["body"].as_str().unwrap();
+        assert_eq!(
+            body.lines().next(),
+            Some("<!-- harborgate:CVE-2026-0001 -->")
+        );
+        assert_eq!(
+            creates[0]["title"],
+            "CVE-2026-0001: openssl (CRITICAL) in proj/app"
+        );
+        assert!(body.contains("`v1`"));
+        assert_eq!(
+            fx.issues().await,
+            vec![("CVE-2026-0001".to_owned(), 1, "open".to_owned())]
+        );
+        assert_eq!(
+            fx.count("SELECT COUNT(*) FROM cve_findings WHERE github_issue_id IS NOT NULL")
+                .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn high_creates_only_when_min_severity_is_high() {
+        let fx = Fixture::new("high", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0003", "HIGH", 10).await;
+        fx.reconcile("proj/app:v1").await;
+        assert!(fx.github.creates().is_empty());
+
+        sqlx::query("UPDATE repo_mappings SET min_issue_severity = 'HIGH' WHERE id = 'm1'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        fx.reconcile("proj/app:v1").await;
+        assert_eq!(fx.github.creates().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn open_issue_is_reused_on_next_scan() {
+        let fx = Fixture::new("reuse", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.reconcile("proj/app:v1").await;
+        let listed_after_first = fx.github.requests();
+
+        // A later scan of another tag reports the same CVE.
+        fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 20)
+            .await;
+        fx.reconcile("proj/app:v2").await;
+
+        assert_eq!(fx.github.creates().len(), 1);
+        assert_eq!(fx.issues().await.len(), 1);
+        // The second run needs no GitHub call at all: the row exists and nothing changed.
+        assert_eq!(fx.github.requests(), listed_after_first);
+        assert_eq!(
+            fx.count("SELECT COUNT(*) FROM cve_findings WHERE github_issue_id IS NOT NULL")
+                .await,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn readopts_after_mapping_delete_and_recreate() {
+        let fx = Fixture::new("readopt", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.reconcile("proj/app:v1").await;
+        assert_eq!(fx.github.creates().len(), 1);
+
+        // The mapping is deleted: its issue rows go with it, and GitHub is not changed.
+        let mut conn = fx.pool.acquire().await.unwrap();
+        mapping_db::delete_github_issues(&mut conn, "octo", "app")
+            .await
+            .unwrap();
+        drop(conn);
+        sqlx::query("DELETE FROM repo_mappings WHERE id = 'm1'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        assert!(fx.issues().await.is_empty());
+
+        // A new mapping for the same repository, and the CVE is reported again.
+        fx.mapping_row("m2", "CRITICAL", true).await;
+        fx.finding("m2", "v1", "CVE-2026-0001", "CRITICAL", 30)
+            .await;
+        let mapping = fx.mapping("m2").await;
+        reconcile(&fx.pool, &fx.gh, TOKEN, &mapping, "proj/app:v1", 2_000)
+            .await
+            .unwrap();
+
+        assert_eq!(fx.github.creates().len(), 1, "no second issue is created");
+        assert_eq!(
+            fx.issues().await,
+            vec![("CVE-2026-0001".to_owned(), 1, "open".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn stays_open_while_another_tag_reports() {
+        let fx = Fixture::new("stays", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.reconcile("proj/app:v2").await;
+
+        // v1 is scanned clean, v2 still reports the CVE.
+        fx.fix("v1", "CVE-2026-0001").await;
+        fx.reconcile("proj/app:v1").await;
+
+        assert_eq!(fx.issues().await[0].2, "open");
+        // The only write is the create: no comment and no close.
+        assert_eq!(fx.github.writes().len(), 1);
+        assert_eq!(fx.github.creates().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn closes_when_no_tag_reports() {
+        let fx = Fixture::new("closes", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.reconcile("proj/app:v1").await;
+
+        fx.fix("v1", "CVE-2026-0001").await;
+        fx.reconcile("proj/app:v2").await;
+
+        let writes = fx.github.writes();
+        // create, comment, close.
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[1].0, "POST");
+        assert_eq!(writes[1].1, "repos/octo/app/issues/1/comments");
+        assert_eq!(
+            writes[1].2["body"],
+            "No tracked tag reports this CVE since scan proj/app:v2."
+        );
+        assert_eq!(writes[2].0, "PATCH");
+        assert_eq!(writes[2].2["state"], "closed");
+        assert_eq!(fx.issues().await[0].2, "closed");
+        // Running again does nothing more.
+        fx.reconcile("proj/app:v2").await;
+        assert_eq!(fx.github.writes().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn reopens_when_cve_returns() {
+        let fx = Fixture::new("reopens", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.reconcile("proj/app:v1").await;
+        fx.fix("v1", "CVE-2026-0001").await;
+        fx.reconcile("proj/app:v2").await;
+        assert_eq!(fx.issues().await[0].2, "closed");
+
+        // The CVE returns on a later scan of v3.
+        fx.finding("m1", "v3", "CVE-2026-0001", "CRITICAL", 40)
+            .await;
+        fx.reconcile("proj/app:v3").await;
+
+        assert_eq!(fx.github.creates().len(), 1, "the same issue is reused");
+        let writes = fx.github.writes();
+        // create, comment, close, reopen, comment.
+        assert_eq!(writes.len(), 5);
+        assert_eq!(writes[3].0, "PATCH");
+        assert_eq!(writes[3].2["state"], "open");
+        assert_eq!(writes[4].2["body"], "CVE is back in scan proj/app:v3");
+        assert_eq!(
+            fx.issues().await,
+            vec![("CVE-2026-0001".to_owned(), 1, "open".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_cve_creates_no_issue() {
+        let fx = Fixture::new("accepted", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        sqlx::query(
+            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username, expires_at)
+             VALUES ('a1', 'm1', 'CVE-2026-0001', 'accepted for the test', 'u1', 'u1', NULL)",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        fx.reconcile("proj/app:v1").await;
+        assert!(fx.github.creates().is_empty());
+        assert!(fx.issues().await.is_empty());
+
+        // An acceptance that has expired counts for nothing: the issue is created.
+        sqlx::query("UPDATE cve_acceptances SET expires_at = 500 WHERE id = 'a1'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        fx.reconcile("proj/app:v1").await;
+        assert_eq!(fx.github.creates().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_create_off_skips_creation_but_still_closes() {
+        let fx = Fixture::new("autooff", "CRITICAL", false).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.reconcile("proj/app:v1").await;
+        assert!(fx.github.creates().is_empty());
+
+        // An issue made by hand exists; it still follows the close rule.
+        sqlx::query(
+            "INSERT INTO github_issues (id, github_owner, github_repo, cve_id, github_issue_number, github_issue_url, status)
+             VALUES ('gi1', 'octo', 'app', 'CVE-2026-0001', 7, 'https://github.com/octo/app/issues/7', 'open')",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        fx.fix("v1", "CVE-2026-0001").await;
+        fx.reconcile("proj/app:v1").await;
+        assert_eq!(fx.issues().await[0].2, "closed");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_stops_the_run_and_is_returned() {
+        let fx = Fixture::new("limited", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.finding("m1", "v1", "CVE-2026-0002", "CRITICAL", 10)
+            .await;
+        fx.github.with(|state| state.rate_limited = true);
+
+        let outcome = fx.reconcile("proj/app:v1").await;
+
+        assert_eq!(outcome, Outcome::RateLimited { until: 5_000 });
+        // The run stopped at the first call.
+        assert_eq!(fx.github.requests(), 1);
+        assert!(fx.issues().await.is_empty());
+    }
+}

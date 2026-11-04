@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", github_owner AS \"github_owner!\", github_repo AS \"github_repo!\",\n                  cve_id AS \"cve_id!\", github_issue_number AS \"github_issue_number!: i64\",\n                  github_issue_url AS \"github_issue_url!\", status AS \"status!\"\n           FROM github_issues\n           WHERE github_owner = ? AND github_repo = ? AND cve_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "github_issues",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "github_owner!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "github_issues",
+            "name": "github_owner"
+          }
+        }
+      },
+      {
+        "name": "github_repo!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "github_issues",
+            "name": "github_repo"
+          }
+        }
+      },
+      {
+        "name": "cve_id!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "github_issues",
+            "name": "cve_id"
+          }
+        }
+      },
+      {
+        "name": "github_issue_number!: i64",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "github_issues",
+            "name": "github_issue_number"
+          }
+        }
+      },
+      {
+        "name": "github_issue_url!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "github_issues",
+            "name": "github_issue_url"
+          }
+        }
+      },
+      {
+        "name": "status!",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "github_issues",
+            "name": "status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "908ab3d735af795a80810339128c06c14f05ca8c2bb0c665fc375ff7f2f282ab"
+}

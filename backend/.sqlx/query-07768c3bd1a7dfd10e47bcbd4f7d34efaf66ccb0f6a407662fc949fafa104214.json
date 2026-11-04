@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO github_issues\n            (id, github_owner, github_repo, cve_id, github_issue_number, github_issue_url, status)\n         VALUES (?, ?, ?, ?, ?, ?, 'open')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "07768c3bd1a7dfd10e47bcbd4f7d34efaf66ccb0f6a407662fc949fafa104214"
+}
