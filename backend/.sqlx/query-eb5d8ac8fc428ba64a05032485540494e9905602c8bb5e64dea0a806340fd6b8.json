@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE sync_reports SET sarif_status = ?, error_message = ?, synced_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "eb5d8ac8fc428ba64a05032485540494e9905602c8bb5e64dea0a806340fd6b8"
+}

@@ -6,8 +6,8 @@
 //! an attempt. A panic in a handler fails that job only. The worker stops taking new jobs
 //! after the stop signal.
 //!
-//! The handler that runs real syncs is added with the Harbor and GitHub pipeline. Until
-//! then the worker uses [`NoopHandler`], which completes every job.
+//! The handler that runs real syncs is [`crate::services::sync::SyncHandler`]. Tests that
+//! only exercise the queue use [`NoopHandler`], which completes every job.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -42,14 +42,14 @@ pub enum JobOutcome {
     /// The job cannot run yet, for example after an upstream rate limit. It goes back to
     /// `queued` at `until` (Unix seconds), capped at one hour, and no attempt is used.
     /// `reason` is logged, not stored.
-    // Constructed by the real handlers in #53; remove this allow then.
-    #[allow(dead_code)]
     Deferred { until: i64, reason: String },
 }
 
-/// The default handler until the sync pipeline exists. It completes every job.
+/// A test handler that completes every job.
+#[cfg(test)]
 pub struct NoopHandler;
 
+#[cfg(test)]
 impl JobHandler for NoopHandler {
     async fn run(&self, _job: ClaimedJob) -> JobOutcome {
         JobOutcome::Done
