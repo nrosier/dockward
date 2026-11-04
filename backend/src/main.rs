@@ -166,17 +166,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         cli::Command::RotateKey => {
-            // Implemented in #41.
-            eprintln!("rotate-key is not implemented");
-            std::process::exit(1);
+            if let Err(message) = run_rotate_key().await {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+            Ok(())
         }
+    }
+}
+
+/// The offline key rotation command. It never binds the HTTP port, refuses to run
+/// while the app holds the port, and prints only the number of rows it rewrote.
+async fn run_rotate_key() -> Result<(), String> {
+    ensure_app_stopped("rotating the key")?;
+    let old_key = config::load_old_encryption_key().map_err(|err| err.to_string())?;
+    let new_key = config::load_encryption_key().map_err(|err| err.to_string())?;
+    let settings = config::load_settings().map_err(|err| err.to_string())?;
+    let old = auth::crypto::credentials_key(&old_key)
+        .map_err(|_| "could not derive the old credential key".to_owned())?;
+    let new = auth::crypto::credentials_key(&new_key)
+        .map_err(|_| "could not derive the new credential key".to_owned())?;
+    if !db::database_path(&settings.data_dir).is_file() {
+        return Err("no database was found in HARBORGATE_DATA_DIR; nothing was changed".to_owned());
+    }
+    // No migrations here: a failed rotation must leave the database exactly as it was.
+    // Every table rotation touches exists since the first migration.
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(db::connect_options(&db::database_path(&settings.data_dir)))
+        .await
+        .map_err(|_| "could not open the database; nothing was changed".to_owned())?;
+    let rotated = services::key_rotation::rotate(&pool, &old, &new).await;
+    pool.close().await;
+    match rotated {
+        Ok(rows) => {
+            println!("Re-encrypted {rows} stored values under the new key.");
+            Ok(())
+        }
+        Err(error::AppError::InvalidRequest(_)) => Err(
+            "HARBORGATE_OLD_ENCRYPTION_KEY and HARBORGATE_ENCRYPTION_KEY are the same key; \
+             nothing was changed"
+                .to_owned(),
+        ),
+        Err(_) => Err(
+            "a stored value could not be re-encrypted. Check that HARBORGATE_OLD_ENCRYPTION_KEY \
+             is the key that wrote the data. The database was not changed."
+                .to_owned(),
+        ),
     }
 }
 
 /// The offline restore command. It never binds the HTTP port, and it refuses to run
 /// while the app holds the port.
 async fn run_restore(file: &Path) -> Result<(), String> {
-    ensure_app_stopped()?;
+    ensure_app_stopped("restoring")?;
     let encryption_key = config::load_encryption_key().map_err(|err| err.to_string())?;
     let settings = config::load_settings().map_err(|err| err.to_string())?;
     restore_database(&encryption_key, &settings.data_dir, file).await?;
@@ -186,13 +228,13 @@ async fn run_restore(file: &Path) -> Result<(), String> {
 
 /// Fails when something already listens on the app port. The listener is dropped at
 /// once, so the port is free again for the app.
-fn ensure_app_stopped() -> Result<(), String> {
+fn ensure_app_stopped(activity: &str) -> Result<(), String> {
     match std::net::TcpListener::bind(BIND_ADDR) {
         Ok(listener) => {
             drop(listener);
             Ok(())
         }
-        Err(_) => Err("stop HarborGate before restoring".to_owned()),
+        Err(_) => Err(format!("stop HarborGate before {activity}")),
     }
 }
 

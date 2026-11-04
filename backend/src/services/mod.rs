@@ -22,6 +22,7 @@ pub mod harbor_webhook;
 pub mod health;
 #[allow(dead_code)] // Used by the admin routes and the auth paths added in later issues.
 pub mod ids;
+pub mod key_rotation;
 #[allow(dead_code)] // Used by the mapping routes.
 pub mod mappings;
 #[allow(dead_code)] // The list routes that use this are added with the admin routes.

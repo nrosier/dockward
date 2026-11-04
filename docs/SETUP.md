@@ -278,6 +278,27 @@ Restore is a command-line command that runs with HarborGate stopped. It is not a
 
 Restored sessions and sync jobs are those in the backup. Credentials in the backup open only with the key that created it.
 
+## Key rotation
+
+Rotation replaces `HARBORGATE_ENCRYPTION_KEY` with a new key and re-encrypts every stored secret under it: Harbor and GitHub credentials, the OIDC client secret, and the alert channel settings. It is a command-line command that runs with HarborGate stopped. It is not an HTTP route and not in the admin UI.
+
+1. **Make a backup first.** Create one in the admin UI (Settings > Backup and restore). A backup is encrypted with the key that was current when it was made, so keep the old key as long as you keep that backup.
+2. **Generate the new key** with `openssl rand -base64 32` and store it in your secrets store.
+3. **Stop HarborGate.** Stop the app yourself first. The command also checks that port 8080 is free in its own container and prints `stop HarborGate before rotating the key` if it is not. That check cannot see an app running in another container, so do not rely on it.
+4. **Run the command** in a one-off container with the same data volume. Pass the old key as `HARBORGATE_OLD_ENCRYPTION_KEY` and the new key as `HARBORGATE_ENCRYPTION_KEY`. For the compose setup, with the new key already in `.env` and the old key in your shell:
+
+   ```bash
+   docker compose stop harborgate
+   docker compose run --rm -e HARBORGATE_OLD_ENCRYPTION_KEY="$OLD_KEY" harborgate rotate-key
+   ```
+
+   The command takes the other settings from the environment (`HARBORGATE_PUBLIC_URL`, `HARBORGATE_DATA_DIR`). It does not bind the port.
+5. **What it does.** In one database transaction it decrypts each stored value with the old key and encrypts it with the new key. If any value does not open with the old key, or the two keys are the same, the command exits with code 1, prints the reason, and the database is unchanged. On success it prints only the number of values it re-encrypted, and it appends one `key.rotate` entry to the audit log with actor `cli` and that count. The command never prints a key.
+6. **Start HarborGate** with `HARBORGATE_ENCRYPTION_KEY` set to the new key, and remove `HARBORGATE_OLD_ENCRYPTION_KEY` from the environment. Sessions are signed with a key derived from the encryption key, so users sign in again.
+7. **Check the result.** Open the audit log and look for the `key.rotate` entry, then use the test button on one credential.
+
+Backups made before the rotation open only with the old key.
+
 ## 9. Troubleshooting
 
 | Symptom | Likely cause | Fix |

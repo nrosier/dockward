@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE system_config SET value = ? WHERE key = ? AND is_encrypted = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f5c3f1dd2fb1d66d21961130b1a6507e3afdb17d825270b198ca3f8afd0382c7"
+}
