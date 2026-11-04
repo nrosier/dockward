@@ -1,0 +1,205 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT j.id AS \"id!\", j.mapping_id AS \"mapping_id!\", j.status AS \"status!\",\n                  j.attempts AS \"attempts!: i64\", j.next_attempt_at AS \"next_attempt_at?: i64\",\n                  substr(CAST(j.last_error AS TEXT), 1, ?) AS \"last_error?: String\",\n                  j.created_at AS \"created_at?: i64\", j.updated_at AS \"updated_at?: i64\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.trigger') AS TEXT), 1, ?) END AS \"trigger?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.repo_full_name') AS TEXT), 1, ?) END AS \"repo_full_name?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.tag') AS TEXT), 1, ?) END AS \"tag?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.digest') AS TEXT), 1, ?) END AS \"digest?: String\",\n                  r.image_tag AS \"report_image_tag?\", r.image_digest AS \"report_image_digest?\",\n                  r.commit_sha AS \"report_commit_sha?\",\n                  r.vulnerability_summary AS \"report_summary?\",\n                  r.sarif_status AS \"report_sarif_status?\",\n                  r.synced_at AS \"report_synced_at?: i64\"\n           FROM sync_jobs j\n           JOIN repo_mappings m ON m.id = j.mapping_id\n           LEFT JOIN sync_reports r\n             ON r.rowid = (SELECT MAX(r2.rowid) FROM sync_reports r2 WHERE r2.sync_job_id = j.id)\n           WHERE (? IS NULL OR m.user_id = ?)\n             AND (? IS NULL OR j.id = ?)\n             AND (? IS NULL OR j.status = ?)\n             AND (? IS NULL OR j.mapping_id = ?)\n           ORDER BY\n             CASE WHEN ? = 'created_at' AND ? = 1 THEN j.created_at END ASC,\n             CASE WHEN ? = 'created_at' AND ? = -1 THEN j.created_at END DESC,\n             CASE WHEN ? = 'updated_at' AND ? = 1 THEN j.updated_at END ASC,\n             CASE WHEN ? = 'updated_at' AND ? = -1 THEN j.updated_at END DESC,\n             j.id ASC\n           LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_jobs",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "mapping_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_jobs",
+            "name": "mapping_id"
+          }
+        }
+      },
+      {
+        "name": "status!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_jobs",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "attempts!: i64",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sync_jobs",
+            "name": "attempts"
+          }
+        }
+      },
+      {
+        "name": "next_attempt_at?: i64",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sync_jobs",
+            "name": "next_attempt_at"
+          }
+        }
+      },
+      {
+        "name": "last_error?: String",
+        "ordinal": 5,
+        "type_info": "Null",
+        "origin": "Expression"
+      },
+      {
+        "name": "created_at?: i64",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sync_jobs",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "updated_at?: i64",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sync_jobs",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "name": "trigger?: String",
+        "ordinal": 8,
+        "type_info": "Null",
+        "origin": "Expression"
+      },
+      {
+        "name": "repo_full_name?: String",
+        "ordinal": 9,
+        "type_info": "Null",
+        "origin": "Expression"
+      },
+      {
+        "name": "tag?: String",
+        "ordinal": 10,
+        "type_info": "Null",
+        "origin": "Expression"
+      },
+      {
+        "name": "digest?: String",
+        "ordinal": 11,
+        "type_info": "Null",
+        "origin": "Expression"
+      },
+      {
+        "name": "report_image_tag?",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "image_tag"
+          }
+        }
+      },
+      {
+        "name": "report_image_digest?",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "image_digest"
+          }
+        }
+      },
+      {
+        "name": "report_commit_sha?",
+        "ordinal": 14,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "commit_sha"
+          }
+        }
+      },
+      {
+        "name": "report_summary?",
+        "ordinal": 15,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "vulnerability_summary"
+          }
+        }
+      },
+      {
+        "name": "report_sarif_status?",
+        "ordinal": 16,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "sarif_status"
+          }
+        }
+      },
+      {
+        "name": "report_synced_at?: i64",
+        "ordinal": 17,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "synced_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 23
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      null,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "4e4b53de8a0fb8f04c2ec6f81500729bd740f2635dd8ff94433734329f3d3d7b"
+}

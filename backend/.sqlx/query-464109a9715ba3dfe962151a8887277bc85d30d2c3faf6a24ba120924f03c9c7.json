@@ -1,0 +1,93 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", job_kind AS \"job_kind!\", started_at AS \"started_at!: i64\",\n                  finished_at AS \"finished_at?: i64\", status AS \"status!\",\n                  processed_count AS \"processed_count!: i64\",\n                  substr(CAST(error_summary AS TEXT), 1, ?) AS \"error_summary?: String\"\n           FROM job_runs\n           WHERE (? IS NULL OR job_kind = ?)\n           ORDER BY\n             CASE WHEN ? = 1 THEN started_at END ASC,\n             CASE WHEN ? = -1 THEN started_at END DESC,\n             id ASC\n           LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_runs",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "job_kind!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_runs",
+            "name": "job_kind"
+          }
+        }
+      },
+      {
+        "name": "started_at!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "job_runs",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "name": "finished_at?: i64",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "job_runs",
+            "name": "finished_at"
+          }
+        }
+      },
+      {
+        "name": "status!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_runs",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "processed_count!: i64",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "job_runs",
+            "name": "processed_count"
+          }
+        }
+      },
+      {
+        "name": "error_summary?: String",
+        "ordinal": 6,
+        "type_info": "Null",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "464109a9715ba3dfe962151a8887277bc85d30d2c3faf6a24ba120924f03c9c7"
+}

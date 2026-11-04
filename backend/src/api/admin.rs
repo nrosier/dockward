@@ -31,6 +31,7 @@ use crate::services::credential_probe::{
 };
 use crate::services::credentials;
 use crate::services::health::{self, GithubAnswers, HealthReport};
+use crate::services::job_runs::{self as job_runs, JobRunItem, ListQuery as JobRunsListQuery};
 use crate::services::pagination::Page;
 use crate::services::users as user_service;
 
@@ -60,6 +61,33 @@ pub async fn audit_log(
         actor_user_id: params.actor_user_id,
     };
     Ok(Json(audit::list(&state.pool, &query).await?))
+}
+
+/// Raw query values for `GET /api/v1/admin/jobs`.
+#[derive(Debug, Deserialize)]
+pub struct AdminJobsParams {
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+    pub kind: Option<String>,
+}
+
+/// `GET /api/v1/admin/jobs`. Housekeeping runs (cleanup, retention, polling), newest first,
+/// paginated, with an optional `kind` filter.
+pub async fn admin_jobs(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Query(params): Query<AdminJobsParams>,
+) -> Result<Json<Page<JobRunItem>>, AppError> {
+    let query = JobRunsListQuery {
+        page: params.page,
+        page_size: params.page_size,
+        sort: params.sort,
+        order: params.order,
+        kind: params.kind,
+    };
+    Ok(Json(job_runs::list(&state.pool, &query).await?))
 }
 
 /// Body for `POST /api/v1/admin/users`. Local accounts only.
@@ -1038,5 +1066,84 @@ mod tests {
         assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `GET /api/v1/admin/jobs` through the full router. No session is `401`, a regular user
+    /// is `403`, and an admin is `200` with the paged shape. `kind` outside the allow-list
+    /// is `400`, checked before any SQL.
+    #[tokio::test]
+    async fn admin_jobs_is_admin_only() {
+        use crate::api::admin::test_support as fake;
+
+        let (state, dir) = fake::test_state("admin-jobs").await;
+        fake::seed_user(&state.pool, "u-admin", "admin").await;
+        fake::seed_user(&state.pool, "u-user", "user").await;
+        crate::db::job_runs::insert(
+            &state.pool,
+            &crate::db::job_runs::JobRun {
+                id: "run-1".to_owned(),
+                job_kind: "retention".to_owned(),
+                started_at: 1_000,
+                finished_at: Some(1_010),
+                status: "done".to_owned(),
+                processed_count: 3,
+                error_summary: None,
+            },
+        )
+        .await
+        .unwrap();
+        let admin_token = session_for(&state, "u-admin", "admin");
+        let user_token = session_for(&state, "u-user", "user");
+
+        let (anonymous, _) = get_path(state.clone(), "/api/v1/admin/jobs", None).await;
+        let (regular, _) = get_path(state.clone(), "/api/v1/admin/jobs", Some(&user_token)).await;
+        let (admin, body) = get_path(state.clone(), "/api/v1/admin/jobs", Some(&admin_token)).await;
+        let (bad_kind, _) = get_path(
+            state.clone(),
+            "/api/v1/admin/jobs?kind=unknown",
+            Some(&admin_token),
+        )
+        .await;
+        state.pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(anonymous, 401);
+        assert_eq!(regular, 403);
+        assert_eq!(admin, 200, "{body}");
+        assert!(body.contains("\"job_kind\":\"retention\""), "{body}");
+        assert_eq!(bad_kind, 400);
+    }
+
+    /// A GET through the full router with an optional session cookie. Returns the status
+    /// and the body text.
+    async fn get_path(
+        state: crate::api::state::AppState,
+        uri: &str,
+        cookie: Option<&str>,
+    ) -> (u16, String) {
+        use axum::extract::ConnectInfo;
+        let mut builder = Request::builder().uri(uri);
+        if let Some(token) = cookie {
+            builder = builder.header(
+                "cookie",
+                format!("{}={token}", crate::auth::session::SESSION_COOKIE),
+            );
+        }
+        let mut request = builder.body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            ))));
+        let response = crate::app(Vec::new(), state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 }

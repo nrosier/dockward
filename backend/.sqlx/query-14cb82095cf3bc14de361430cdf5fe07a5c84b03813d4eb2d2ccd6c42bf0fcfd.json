@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM sync_jobs j\n           JOIN repo_mappings m ON m.id = j.mapping_id\n           WHERE (? IS NULL OR m.user_id = ?)\n             AND (? IS NULL OR j.status = ?)\n             AND (? IS NULL OR j.mapping_id = ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "14cb82095cf3bc14de361430cdf5fe07a5c84b03813d4eb2d2ccd6c42bf0fcfd"
+}

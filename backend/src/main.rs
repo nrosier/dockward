@@ -90,7 +90,10 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/mappings/{id}/cves",
             get(api::cves::list_for_mapping),
         )
+        .route("/api/v1/sync-jobs", get(api::sync_jobs::list))
+        .route("/api/v1/sync-jobs/{id}", get(api::sync_jobs::get))
         .route("/api/v1/sync-jobs/{id}/retry", post(api::sync_jobs::retry))
+        .route("/api/v1/dashboard/summary", get(api::dashboard::summary))
         .route("/api/v1/cves", get(api::cves::list))
         .route("/api/v1/cves/{id}", get(api::cves::get))
         .route("/api/v1/cves/{id}/issue", post(api::cves::issue))
@@ -101,6 +104,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             post(api::webhooks::receive),
         )
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
+        .route("/api/v1/admin/jobs", get(api::admin::admin_jobs))
         .route("/api/v1/admin/health", get(api::admin::health))
         .route("/api/v1/admin/backup", post(api::admin::backup))
         .route(
@@ -2228,5 +2232,219 @@ mod tests {
             (admin_all, admin_page["total"].clone()),
             (StatusCode::OK, 1.into())
         );
+    }
+
+    /// The read routes of this issue through the full router. A `GET` with no session is
+    /// `401`. A `GET` is not CSRF-guarded, so a missing token does not turn it into `403`.
+    /// A regular user gets `403` for `scope=all` and `404` for another tenant's job, and the
+    /// owner's own job is `200`. The admin jobs route is `401`, then `403`, then `200`.
+    #[tokio::test]
+    async fn read_routes_check_session_tenancy_and_scope() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, pool, dir) = test_router("read-routes").await;
+        let mut conn = pool.acquire().await.unwrap();
+        for id in ["owner-1", "other-2", "admin-3"] {
+            let role = if id == "admin-3" { "admin" } else { "user" };
+            db::users::insert_local(&mut conn, id, id, None, "h", role)
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        sqlx::query(
+            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
+             VALUES ('rc1', 'owner-1', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
+                    ('rc2', 'owner-1', 'github', 'g', NULL, NULL, 'v1:fake')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+             VALUES ('rm1', 'owner-1', 'rc1', 'rc2', 'https://harbor.example.com', 'proj', 'app', 'octo', 'app', 'h1', 'h2')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sync_jobs (id, mapping_id, status, attempts, payload, created_at, updated_at)
+             VALUES ('job-owner', 'rm1', 'failed', 8, '{}', 1000, 2000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        db::job_runs::insert(
+            &pool,
+            &db::job_runs::JobRun {
+                id: "run-1".to_owned(),
+                job_kind: "poll".to_owned(),
+                started_at: 1_000,
+                finished_at: None,
+                status: "failed".to_owned(),
+                processed_count: 0,
+                error_summary: Some("x".repeat(2_000)),
+            },
+        )
+        .await
+        .unwrap();
+
+        let owner = session_cookie("owner-1", "user", 0);
+        let other = session_cookie("other-2", "user", 0);
+        let admin = session_cookie("admin-3", "admin", 0);
+        let get = |uri: &str, cookie: Option<&str>| {
+            let mut builder = with_peer(Request::builder().method("GET").uri(uri));
+            if let Some(cookie) = cookie {
+                builder = builder.header("cookie", cookie);
+            }
+            builder.body(Body::empty()).unwrap()
+        };
+
+        // Anonymous requests are 401 on every new route.
+        for uri in [
+            "/api/v1/sync-jobs",
+            "/api/v1/sync-jobs/job-owner",
+            "/api/v1/dashboard/summary",
+            "/api/v1/admin/jobs",
+        ] {
+            let response = router.clone().oneshot(get(uri, None)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+
+        // Tenancy: the owner reads the job, another user gets 404 with no oracle.
+        let (owner_status, _) = get_json(&router, "/api/v1/sync-jobs/job-owner", &owner).await;
+        let (other_status, other_body) =
+            get_json(&router, "/api/v1/sync-jobs/job-owner", &other).await;
+        let (missing_status, missing_body) =
+            get_json(&router, "/api/v1/sync-jobs/no-such-job", &other).await;
+        assert_eq!(owner_status, StatusCode::OK);
+        assert_eq!(other_status, StatusCode::NOT_FOUND);
+        assert_eq!(missing_status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            other_body, missing_body,
+            "a foreign job must look like a missing one"
+        );
+
+        // A foreign mapping_id filter is an empty page, not 404.
+        let (foreign_status, foreign_page) =
+            get_json(&router, "/api/v1/sync-jobs?mapping_id=rm1", &other).await;
+        assert_eq!(foreign_status, StatusCode::OK);
+        assert_eq!(foreign_page["total"], 0);
+
+        // scope=all is admin only.
+        let (user_all, _) = get_json(&router, "/api/v1/sync-jobs?scope=all", &other).await;
+        let (admin_all, admin_page) =
+            get_json(&router, "/api/v1/sync-jobs?scope=all", &admin).await;
+        assert_eq!(user_all, StatusCode::FORBIDDEN);
+        assert_eq!(admin_all, StatusCode::OK);
+        assert_eq!(admin_page["total"], 1);
+        let (user_summary_all, _) =
+            get_json(&router, "/api/v1/dashboard/summary?scope=all", &other).await;
+        assert_eq!(user_summary_all, StatusCode::FORBIDDEN);
+
+        // The admin jobs route: a regular user is 403, an admin is 200 and the error text is capped.
+        let (user_jobs, _) = get_json(&router, "/api/v1/admin/jobs", &owner).await;
+        let (admin_jobs, admin_jobs_body) = get_json(&router, "/api/v1/admin/jobs", &admin).await;
+        assert_eq!(user_jobs, StatusCode::FORBIDDEN);
+        assert_eq!(admin_jobs, StatusCode::OK);
+        let capped = admin_jobs_body["items"][0]["error_summary"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count();
+        assert_eq!(capped, 500);
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The CSRF guard applies to every state-changing route. The retry route is `POST`, so
+    /// a missing `X-CSRF-Token` is `403 csrf_invalid` before the handler runs, and the
+    /// failed job stays failed. With a matching token and the owner's session it is `200`.
+    #[tokio::test]
+    async fn sync_job_retry_checks_csrf_session_and_tenancy() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, pool, dir) = test_router("retry-route").await;
+        let mut conn = pool.acquire().await.unwrap();
+        for id in ["owner-1", "other-2"] {
+            db::users::insert_local(&mut conn, id, id, None, "h", "user")
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        sqlx::query(
+            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
+             VALUES ('rc1', 'owner-1', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
+                    ('rc2', 'owner-1', 'github', 'g', NULL, NULL, 'v1:fake')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+             VALUES ('rm1', 'owner-1', 'rc1', 'rc2', 'https://harbor.example.com', 'proj', 'app', 'octo', 'app', 'h1', 'h2')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sync_jobs (id, mapping_id, status, attempts, payload, created_at, updated_at)
+             VALUES ('job-1', 'rm1', 'failed', 8, '{}', 1000, 2000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let key = auth::crypto::csrf_key(
+            &config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap(),
+        )
+        .unwrap();
+        let csrf = auth::csrf::issue(&key).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let owner = format!("{}; {csrf_cookie}", session_cookie("owner-1", "user", 0));
+        let other = format!("{}; {csrf_cookie}", session_cookie("other-2", "user", 0));
+        let post = |cookie: &str, token: Option<&str>| {
+            let mut builder = with_peer(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/sync-jobs/job-1/retry")
+                    .header("cookie", cookie),
+            );
+            if let Some(token) = token {
+                builder = builder.header("x-csrf-token", token);
+            }
+            builder.body(Body::empty()).unwrap()
+        };
+
+        let no_csrf = router.clone().oneshot(post(&owner, None)).await.unwrap();
+        let foreign = router
+            .clone()
+            .oneshot(post(&other, Some(&csrf)))
+            .await
+            .unwrap();
+        let still_failed: String =
+            sqlx::query_scalar("SELECT status FROM sync_jobs WHERE id = 'job-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let owner_retry = router.oneshot(post(&owner, Some(&csrf))).await.unwrap();
+        let owner_status = owner_retry.status();
+        let retry_body = axum::body::to_bytes(owner_retry.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let retried: serde_json::Value = serde_json::from_slice(&retry_body).unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(no_csrf.status(), StatusCode::FORBIDDEN);
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        assert_eq!(still_failed, "failed");
+        assert_eq!(owner_status, StatusCode::OK);
+        assert_eq!(retried["status"], "queued");
+        assert!(retried["created_at"].as_str().unwrap().ends_with('Z'));
     }
 }
