@@ -10,7 +10,7 @@ Decisions are marked `Decided (<date>)`. On 2026-11-03 the user delegated every 
 - The mapping token is only in the URL path. It is never placed in a header or body.
 - The URL token is redacted or omitted from access logs and traces.
 - Trigger: Harbor event `SCANNING_COMPLETED` only.
-  - Source: Harbor webhook documentation (https://goharbor.io/docs/latest/working-with-projects/project-configuration/configure-webhooks/), which lists "Artifact scan completed" with event type `SCANNING_COMPLETED`. Harbor source `src/controller/event/topic.go` defines the same string.
+  - Source: Harbor webhook documentation (https://goharbor.io/docs/latest/working-with-projects/project-configuration/configure-webhooks/), which lists "Artifact scan completed" with event type `SCANNING_COMPLETED`. Harbor's web UI labels the same type "Scanning finished" (`src/portal/src/app/base/project/webhook/webhook.service.ts`, checked 2026-11-05). The type string is unchanged. Harbor source `src/controller/event/topic.go` defines the same string.
 - Payloads: accepts both Harbor's default JSON payload and the CloudEvents payload. Both produce the same internal event.
   - Harbor offers a payload format choice of `Default` and `CloudEvents` (Harbor API swagger, `PayloadFormatType`; [docs/SETUP.md](../docs/SETUP.md) step 3c).
   - Each format has its own test fixture.

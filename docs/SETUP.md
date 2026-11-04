@@ -88,7 +88,7 @@ Harbor webhooks are configured per project, so one webhook sends HarborGate the 
 1. In Harbor, open the project `<project>`, go to **Webhooks**, and create a new endpoint (requires project administrator rights).
 2. Set the notify type to **HTTP**.
 3. Select a payload format. Harbor offers `Default` and `CloudEvents` (verified). HarborGate accepts both formats (see [specs/integrations.md](../specs/integrations.md)).
-4. Select only the event **Scan completed** (`SCANNING_COMPLETED`). Do not select push, pull, delete, or other events. HarborGate triggers on `SCANNING_COMPLETED` only.
+4. Select only the event **Scanning finished** (`SCANNING_COMPLETED`). Harbor older releases label it "Artifact scan completed". Do not select push, pull, delete, or other events. HarborGate triggers on `SCANNING_COMPLETED` only.
 5. Set the endpoint URL to HarborGate's webhook URL:
 
 ```text
@@ -310,6 +310,6 @@ Backups made before the rotation open only with the old key.
 | 403 from GitHub on SARIF upload | Token is missing the Code scanning alerts permission, or the repository is not selected for the token | Edit the token in GitHub to grant Code scanning alerts (read and write) and select the repository. |
 | 404 from GitHub | GitHub repository name or owner is wrong, or the token is not scoped to the repository | Check the mapping's owner and repo name. Confirm the token's repository access includes the repo. |
 | Sync failed: missing SHA label | The image has no `org.opencontainers.image.revision` label | Add the label at build time (section 6) and push the image again. |
-| No webhook triggers | Webhook event is not "Scan completed", the webhook token does not match the mapping, or the pushed image has no tag (HarborGate ignores untagged pushes) | Edit the Harbor webhook so it subscribes only to Scan completed, confirm the URL contains the mapping's token, and push the image with a tag. |
+| No webhook triggers | Webhook event is not "Scanning finished" (`SCANNING_COMPLETED`), the webhook token does not match the mapping, or the pushed image has no tag (HarborGate ignores untagged pushes) | Edit the Harbor webhook so it subscribes only to Scan completed, confirm the URL contains the mapping's token, and push the image with a tag. |
 | Issue not created | Severity is below the threshold, the CVE is accepted on the mapping, auto-issues is off, or the GitHub token lacks the Issues permission | Check the mapping's minimum severity and auto-issues setting. Check the CVE's acceptance status. Check that the token has Issues (read and write). |
 | Webhook returns 401 | Authorization header missing or wrong | Compare the Auth Header value in Harbor (`Bearer <webhook-secret>`) with the HarborGate mapping screen; rotate the value if it was exposed. |
