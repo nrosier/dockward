@@ -48,7 +48,8 @@ pub struct Mapping {
     pub created_at: Option<String>,
 }
 
-/// The create response: the mapping plus the two values shown once.
+/// The create response: the mapping plus the two values shown once. `auth_secret` is the
+/// full `Authorization` header value (`Bearer <secret>`), which Harbor sends as is.
 #[derive(Serialize)]
 pub struct Created {
     pub mapping: Mapping,
@@ -416,7 +417,8 @@ pub async fn create<P: HarborProbe, G: GithubProbe>(
     Ok(Created {
         mapping: stored,
         webhook_url: webhook_url(public_url, &token),
-        auth_secret: secret,
+        // The value Harbor sends as the Authorization header, ready to paste.
+        auth_secret: format!("Bearer {secret}"),
     })
 }
 
@@ -527,7 +529,8 @@ pub async fn rotate_auth_secret(
     )
     .await?;
     tx.commit().await.map_err(|_| AppError::InternalError)?;
-    Ok(secret)
+    // The value Harbor sends as the Authorization header, ready to paste.
+    Ok(format!("Bearer {secret}"))
 }
 
 /// Deletes one owned mapping. Writes `mapping.delete`.
@@ -865,7 +868,12 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(row.webhook_auth_secret_hash, digest(&new_secret));
+        // The shown value is the Authorization header. Verification strips `Bearer `
+        // and hashes the rest, so the stored digest must match the bare secret.
+        let bare = new_secret
+            .strip_prefix("Bearer ")
+            .expect("rotation returns the Authorization header value");
+        assert_eq!(row.webhook_auth_secret_hash, digest(bare));
         assert_ne!(new_secret, created.auth_secret);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
