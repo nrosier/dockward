@@ -214,9 +214,11 @@ Decided (2026-11-05, delegated, #129): `CveSummary` also has `"open_severity"`, 
 
 ## Sync jobs
 
-`SyncJob` is `{"id","mapping_id","status","attempts","next_attempt_at","last_error","created_at","updated_at","report": {...} or null}`. `report` is the linked `sync_reports` row (`image_tag`, `image_digest`, `commit_sha`, `vulnerability_summary`, `sarif_status`, `synced_at`).
+`SyncJob` is `{"id","mapping_id","kind","status","attempts","next_attempt_at","last_error","created_at","updated_at","report": {...} or null}`. `report` is the linked `sync_reports` row (`image_tag`, `image_digest`, `commit_sha`, `vulnerability_summary`, `sarif_status`, `synced_at`).
 
 Decided (2026-11-03, user, #35): `SyncJob` also has `"trigger"` (`webhook` or `poll`, read from `payload.trigger`; a payload without the field is `webhook`) and `"image": {"repo_full_name","tag","digest"}` from the job payload, so queued and running jobs show their image before a report exists.
+
+Decided (2026-11-05, user, #132): `SyncJob` also has `"kind"` (`sync` or `resolve`, read from `payload.kind`; a payload without the field is `sync`). For a resolve job, `image.tag` is `null` and `report` is `null`, and `image.digest` is set. A failed resolve job has one of the fixed `last_error` strings in [integrations.md](integrations.md). Decided (2026-11-05, delegated, #132): the retry route works on a failed resolve job as on any job, because it only re-queues work.
 
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |
@@ -296,7 +298,7 @@ All routes below are `admin`.
 - Format detection by `specversion`, the `Authorization` header contract, and the response code rules are in [integrations.md](integrations.md). The header is decided (2026-11-03): `Authorization: Bearer <secret>`.
 - A wrong URL token and a wrong or missing `Authorization` value return the same `401` and the same body (Decided 2026-11-03, delegated).
 - The route never echoes the token and never logs it. The access log records the route template.
-- Handling: validate, store a `sync_jobs` row, return `202`. See [backend.md](backend.md).
+- Handling: validate, store a `sync_jobs` row, return `202`. See [backend.md](backend.md). Decided (2026-11-05, user, #132): an untagged event with a valid digest stores one resolve job and returns `202` with no Harbor call. An untagged event with a missing or invalid digest returns `400`.
 
 ## Verification
 
@@ -307,7 +309,7 @@ Required test scenarios for the planner (high level):
 - A state-changing request without `X-CSRF-Token` returns `403 csrf_invalid`. The webhook and login are exempt.
 - The error envelope shape is the same on every error response, and no response body contains a token, key, `password_hash`, or webhook URL, except the documented shown-once fields.
 - Pagination: `page_size` above 200 returns `400`, the default is 50, and `total` is the unfiltered match count.
-- Webhook: both payload fixtures return `202` and store one job. A missing header and a wrong token return the identical `401`. An oversize body returns `413`. The 61st request in a minute returns `429`.
+- Webhook: both payload fixtures return `202` and store one job. Decided (2026-11-05, user, #132): an untagged event fixture (digest, no tag, in each format) returns `202` and stores exactly one resolve job (`kind` `resolve`, no tag), with no outbound request recorded; the same event with an invalid digest returns `400` and stores nothing. A missing header and a wrong token return the identical `401`. An oversize body returns `413`. The 61st request in a minute returns `429`.
 - Login: after 5 consecutive failures for one account from one client IP, the next attempt inside the delay returns `401 invalid_credentials` without a password check. The same account from another client IP is not delayed. The account is never locked ([security.md](security.md)).
 - Login and setup with a cross-site `Origin`, or with neither `Origin` nor `Sec-Fetch-Site`, return `403 csrf_invalid`.
 - A session issued before `logout-all` or a password change returns `401`.
