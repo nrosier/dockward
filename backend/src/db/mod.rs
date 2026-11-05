@@ -182,4 +182,111 @@ mod tests {
         assert_eq!(mode, "wal");
         Ok(())
     }
+
+    /// Migration 0005 rebuilds `project_webhooks` without the `rotated_at` default. Rows and
+    /// their unmatched counts written under 0004 survive, and a new row has `rotated_at` NULL.
+    #[tokio::test]
+    async fn migration_0005_keeps_rows_and_drops_the_rotated_at_default() -> Result<(), AppError> {
+        let options = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let migrator = sqlx::migrate!("./migrations");
+        migrator
+            .run_to(4, &pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        sqlx::query(
+            "INSERT INTO users (id, username, role, auth_provider)
+             VALUES ('u1', 'u1', 'user', 'local')",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        // Written under 0004, so rotated_at took the old default.
+        sqlx::query(
+            "INSERT INTO project_webhooks (id, user_id, harbor_base_url, harbor_project, token_hash, secret_hash)
+             VALUES ('pw1', 'u1', 'https://harbor.example.com', 'proj', 'th', 'sh')",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        sqlx::query(
+            "INSERT INTO project_webhook_unmatched (project_webhook_id, repository, count, last_seen_at)
+             VALUES ('pw1', 'proj/x', 3, 100)",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        let (before,): (Option<i64>,) =
+            sqlx::query_as("SELECT rotated_at FROM project_webhooks WHERE id = 'pw1'")
+                .fetch_one(&pool)
+                .await
+                .map_err(|_| AppError::InternalError)?;
+
+        migrator
+            .run(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+
+        let (id, token_hash, rotated): (String, String, Option<i64>) = sqlx::query_as(
+            "SELECT id, token_hash, rotated_at FROM project_webhooks WHERE id = 'pw1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        assert_eq!((id.as_str(), token_hash.as_str()), ("pw1", "th"));
+        assert_eq!(rotated, before, "the existing value is copied unchanged");
+        let (kept,): (i64,) = sqlx::query_as(
+            "SELECT count FROM project_webhook_unmatched WHERE project_webhook_id = 'pw1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        assert_eq!(kept, 3);
+        sqlx::query(
+            "INSERT INTO project_webhooks (id, user_id, harbor_base_url, harbor_project, token_hash, secret_hash)
+             VALUES ('pw2', 'u1', 'https://harbor.example.com', 'proj2', 'th2', 'sh2')",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        let (fresh,): (Option<i64>,) =
+            sqlx::query_as("SELECT rotated_at FROM project_webhooks WHERE id = 'pw2'")
+                .fetch_one(&pool)
+                .await
+                .map_err(|_| AppError::InternalError)?;
+        assert_eq!(fresh, None);
+        // The constraints survive: duplicate token and duplicate project are refused, and
+        // deleting the user still cascades to the webhook and its counts.
+        let dup_token = sqlx::query(
+            "INSERT INTO project_webhooks (id, user_id, harbor_base_url, harbor_project, token_hash, secret_hash)
+             VALUES ('pw3', 'u1', 'https://harbor.example.com', 'proj3', 'th', 'sh')",
+        )
+        .execute(&pool)
+        .await;
+        let dup_project = sqlx::query(
+            "INSERT INTO project_webhooks (id, user_id, harbor_base_url, harbor_project, token_hash, secret_hash)
+             VALUES ('pw4', 'u1', 'https://harbor.example.com', 'proj', 'th4', 'sh')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(dup_token.is_err() && dup_project.is_err());
+        sqlx::query("DELETE FROM users WHERE id = 'u1'")
+            .execute(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let (left,): (i64,) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM project_webhooks) + (SELECT COUNT(*) FROM project_webhook_unmatched)",
+        )
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        assert_eq!(left, 0);
+        Ok(())
+    }
 }

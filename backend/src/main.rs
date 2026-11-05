@@ -3836,10 +3836,10 @@ mod tests {
             .unwrap();
         let before = schema_state(&pool).await;
         pool.close().await;
-        // Migration 2 is removed; migrations 3 (project webhooks, #132) and 4 (picker hidden
-        // items, #126) are still applied.
+        // Migration 2 is removed; migrations 3 (project webhooks, #132), 4 (picker hidden
+        // items, #126) and 5 (project webhook rotated_at, #145) are still applied.
         assert!(
-            before == (vec![1, 3, 4], 0),
+            before == (vec![1, 3, 4, 5], 0),
             "the setup did not remove migration 2"
         );
 
