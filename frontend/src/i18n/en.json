@@ -512,5 +512,17 @@
   "admin.restore.run": "Run the restore command with the same HARBORGATE_ENCRYPTION_KEY that made the backup:",
   "admin.restore.placeholder": "<path>/<file>",
   "admin.restore.start": "Start HarborGate again. The audit log records the restore.",
-  "admin.restore.docs": "Full steps are in docs/SETUP.md."
+  "admin.restore.docs": "Full steps are in docs/SETUP.md.",
+  "mapping.pull.button": "Pull scans",
+  "mapping.pull.heading": "Pull scans",
+  "mapping.pull.readyHint": "Fetch the latest scans from Harbor for this mapping now, instead of waiting for the next poll.",
+  "mapping.pull.pulling": "Pulling…",
+  "mapping.pull.result": "Queued {n} sync jobs.",
+  "mapping.pull.resultOne": "Queued 1 sync job.",
+  "mapping.pull.zero": "Nothing to queue. Every scan from Harbor is already synced.",
+  "mapping.pull.viewSyncJobs": "View sync jobs",
+  "mapping.pull.cooldownHint": "A pull ran recently. You can pull again when the timer ends.",
+  "mapping.pull.cooldownNote": "Each mapping can be pulled once every 5 minutes.",
+  "mapping.pull.cooldownTimer": "Time left: {time}",
+  "mapping.pull.failed": "Harbor could not be reached. The pull did not run."
 }

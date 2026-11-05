@@ -160,4 +160,10 @@ describe("MappingFormPage", () => {
     expect(rotated()).toBe(true);
     expect(screen.getByText(t("mappings.shownOnce.warningOne"))).toBeInTheDocument();
   });
+
+  it("shows the Pull scans panel to the owner", async () => {
+    stub();
+    renderWithRoutes(routes, "/mappings/m1");
+    expect(await screen.findByRole("button", { name: t("mapping.pull.button") })).toBeEnabled();
+  });
 });
