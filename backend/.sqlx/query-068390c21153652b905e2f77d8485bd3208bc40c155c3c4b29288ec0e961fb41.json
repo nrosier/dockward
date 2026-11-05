@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT (\n               EXISTS (\n                   SELECT 1 FROM sync_reports r\n                   JOIN sync_jobs j ON j.id = r.sync_job_id\n                   WHERE r.mapping_id = ? AND r.harbor_repository = ?\n                     AND r.image_tag = ? AND r.image_digest = ?\n                     AND r.sarif_status = 'success' AND j.status = 'done'\n               )\n               OR EXISTS (\n                   SELECT 1 FROM sync_jobs q\n                   WHERE q.mapping_id = ? AND q.status IN ('queued', 'running')\n                     AND json_extract(q.payload, '$.digest') = ?\n                     AND json_extract(q.payload, '$.tag') = ?\n               )\n               -- A permanent failure (for example a missing revision label) is one attempt\n               -- with status failed. It is not re-queued until the image digest changes or an\n               -- operator retries it (issue #141).\n               OR EXISTS (\n                   SELECT 1 FROM sync_jobs p\n                   WHERE p.mapping_id = ? AND p.status = 'failed' AND p.attempts = 1\n                     AND json_extract(p.payload, '$.digest') = ?\n                     AND json_extract(p.payload, '$.tag') = ?\n               )\n           ) AS \"found!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "found!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "068390c21153652b905e2f77d8485bd3208bc40c155c3c4b29288ec0e961fb41"
+}

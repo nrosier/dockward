@@ -260,6 +260,15 @@ fn validation_message(error: AppError, fallback: &str) -> JobOutcome {
     }
 }
 
+/// Like `validation_message`, but for a failure that retrying cannot fix: a missing revision
+/// label or a source mismatch is a property of the image (`specs/integrations.md`).
+fn permanent_validation(error: AppError, fallback: &str) -> JobOutcome {
+    match error {
+        AppError::ValidationFailed(message) => JobOutcome::Permanent(message),
+        _ => JobOutcome::Permanent(fallback.to_owned()),
+    }
+}
+
 /// Counts the report's vulnerabilities by severity.
 fn summarize(report: &Value) -> String {
     let mut counts = [0u64; 5];
@@ -457,10 +466,10 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
         let labels = parse_labels(&body)
             .map_err(|_| failed("Harbor returned an artifact that could not be read"))?;
         let revision = require_revision(&labels)
-            .map_err(|e| validation_message(e, "the image has no revision label"))?
+            .map_err(|e| permanent_validation(e, "the image has no revision label"))?
             .to_owned();
         check_source(&labels, &mapping.github_owner, &mapping.github_repo)
-            .map_err(|e| validation_message(e, "the image source label does not match"))?;
+            .map_err(|e| permanent_validation(e, "the image source label does not match"))?;
         let branch = branch_for(&labels, &mapping.default_branch);
 
         let report = self.fetch_report(context).await?;
@@ -1031,7 +1040,7 @@ mod tests {
         let harbor = Arc::new(FakeHarbor::new(&artifact("{}"), (200, &report_body())));
         let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![]);
         let outcome = fx.handler(&harbor, &scanner).run(fx.job()).await;
-        assert!(matches!(outcome, JobOutcome::Failed(ref m) if m.contains("revision")));
+        assert!(matches!(outcome, JobOutcome::Permanent(ref m) if m.contains("revision")));
         assert_eq!(scanner.uploads(), 0);
         assert!(fx.report().await.is_none());
     }
@@ -1045,7 +1054,7 @@ mod tests {
         let harbor = Arc::new(FakeHarbor::new(&artifact(&labels), (200, &report_body())));
         let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![]);
         let outcome = fx.handler(&harbor, &scanner).run(fx.job()).await;
-        assert!(matches!(outcome, JobOutcome::Failed(ref m) if m.contains("source")));
+        assert!(matches!(outcome, JobOutcome::Permanent(ref m) if m.contains("source")));
         assert_eq!(scanner.uploads(), 0);
         assert!(fx.report().await.is_none());
     }

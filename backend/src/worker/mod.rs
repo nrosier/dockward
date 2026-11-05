@@ -42,8 +42,12 @@ pub trait JobHandler: Send + Sync + 'static {
 pub enum JobOutcome {
     /// The job is complete. It becomes `done`.
     Done,
-    /// The attempt failed. Its text is stored in `last_error`.
+    /// The attempt failed and may succeed later. Its text is stored in `last_error`, and the
+    /// job retries with backoff.
     Failed(String),
+    /// The failure cannot heal by retrying, for example an image with no revision label. The
+    /// job is marked `failed` after this one attempt, with no retries (`specs/integrations.md`).
+    Permanent(String),
     /// The job cannot run yet, for example after an upstream rate limit. It goes back to
     /// `queued` at `until` (Unix seconds), capped at one hour, and no attempt is used.
     /// `reason` is logged, not stored.
@@ -151,6 +155,14 @@ pub async fn step<H: JobHandler>(
                 }
             }
         }
+        JobOutcome::Permanent(message) => {
+            // One attempt, no retry: the failure is a property of the input, not of timing.
+            let attempts = job.attempts + 1;
+            with_write_retries(|| record_failure_tx(pool, id, attempts, None, &message, true, now))
+                .await?;
+            handler.on_give_up(&job, now);
+            Ok(Step::GaveUp)
+        }
         JobOutcome::Deferred { until, reason } => {
             tracing::info!(reason = %reason, "sync job deferred");
             let next_attempt_at =
@@ -248,6 +260,17 @@ mod tests {
         }
     }
 
+    /// A handler that always reports a permanent failure, as a missing revision label does.
+    struct AlwaysPermanent;
+
+    impl JobHandler for AlwaysPermanent {
+        async fn run(&self, _job: ClaimedJob) -> JobOutcome {
+            JobOutcome::Permanent(
+                "the image has no org.opencontainers.image.revision label.".to_owned(),
+            )
+        }
+    }
+
     /// A handler that panics for the job `j-panic` and completes every other job.
     struct PanicOnOne;
 
@@ -326,6 +349,19 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_permanent_failure_gives_up_after_one_attempt() {
+        let (pool, dir) = fresh_pool("permanent").await;
+        queued_job(&pool, "j1").await;
+        let handler = Arc::new(AlwaysPermanent);
+        // One step: the job is recorded as failed with one attempt, and nothing is scheduled.
+        assert_eq!(step(&pool, &handler, 1_000).await.unwrap(), Step::GaveUp);
+        let (status, attempts, next) = job_row(&pool, "j1").await;
+        assert_eq!((status.as_str(), attempts, next), ("failed", 1, None));
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

@@ -110,11 +110,23 @@ pub async fn has_success(
                      AND json_extract(q.payload, '$.digest') = ?
                      AND json_extract(q.payload, '$.tag') = ?
                )
+               -- A permanent failure (for example a missing revision label) is one attempt
+               -- with status failed. It is not re-queued until the image digest changes or an
+               -- operator retries it (issue #141).
+               OR EXISTS (
+                   SELECT 1 FROM sync_jobs p
+                   WHERE p.mapping_id = ? AND p.status = 'failed' AND p.attempts = 1
+                     AND json_extract(p.payload, '$.digest') = ?
+                     AND json_extract(p.payload, '$.tag') = ?
+               )
            ) AS "found!: i64""#,
         mapping_id,
         harbor_repository,
         tag,
         digest,
+        mapping_id,
+        digest,
+        tag,
         mapping_id,
         digest,
         tag
