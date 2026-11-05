@@ -16,3 +16,4 @@ master.key
 frontend/tsconfig.tsbuildinfo
 *.tsbuildinfo
 .playwright-mcp/
+.lavish/
