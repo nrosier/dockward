@@ -14,6 +14,7 @@ const TABS: Tab[] = [
   { to: "/admin/audit", label: "admin.tabs.audit" },
   { to: "/admin/health", label: "admin.tabs.health" },
   { to: "/admin/settings/oidc", label: "admin.tabs.settings" },
+  { to: "/admin/log", label: "admin.tabs.log" },
 ];
 
 const SETTINGS: Tab[] = [
