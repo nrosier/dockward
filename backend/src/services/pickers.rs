@@ -294,14 +294,17 @@ impl PickerCache {
 
     /// Drops every entry of one credential.
     fn drop_credential(&self, credential: &str) {
+        // Both steps run under the map lock, slots first, then the generation. `slot()`
+        // takes the same lock, so a reader that sees the new generation also finds the
+        // slots already gone and cannot pick up a slot filled before the drop.
+        let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
+        map.slots.retain(|key, _| key.credential != credential);
         *self
             .generations
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .entry(credential.to_owned())
             .or_insert(0) += 1;
-        let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
-        map.slots.retain(|key, _| key.credential != credential);
     }
 
     #[cfg(test)]
