@@ -115,6 +115,24 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 - Decided (2026-11-03): `DELETE` removes only HarborGate's own rows: `repo_mappings`, its `cve_findings`, `cve_acceptances`, `sync_jobs`, `sync_reports`, and its webhook token and auth secret. The `github_issues` rows for the mapping's GitHub target are deleted in the same transaction, matched by `github_owner` and `github_repo`. Open GitHub issues are NOT closed and are NOT changed on GitHub. The user must close each issue on GitHub manually. Only one mapping can exist per GitHub repository ([database.md](database.md)), so these rows belong to this mapping alone.
 - Audit: the delete writes `mapping.delete`. Its `details` list the GitHub issue numbers left open. It never contains tokens or secrets.
 
+## Project webhooks
+
+One project webhook per Harbor base URL and project. Its rules (owner, routing, rotation, transfer) are in [integrations.md](integrations.md), "Project webhook (one per Harbor project)". The receiver `POST /api/v1/webhooks/harbor/project/:project_token` is public and is not listed here. Decided (2026-11-05, user, #132).
+
+- `ProjectWebhook` is `{"id","harbor_base_url","harbor_project","owner","created_at","rotated_at"}`, where `owner` is the owner's username for the owner and admins, and `rotated_at` is `null` until the first rotation. It never contains the URL, token, or secret.
+- The `GET` response adds `"mappings"`: a list of Harbor repository names (`harbor_repository`) only. It never contains other users' usernames, targets, or mapping ids.
+- Rotation and create responses carry the value once. A later `GET` never returns it.
+
+| Method | Path | Auth | Request | Response | Codes |
+| --- | --- | --- | --- | --- | --- |
+| POST | `/api/v1/project-webhooks` | session | `{"mapping_id"}`; the caller must own that mapping | `{"id","webhook_url": "<shown once>","auth_secret": "<shown once>"}` | 201, 404 (mapping not the caller's, or not found), 409 `conflict` (a project webhook already exists for that Harbor base URL and project) |
+| GET | `/api/v1/project-webhooks/:id` | session (owner or admin, read) | none | `ProjectWebhook` with `mappings` | 200, 401, 403 (not owner or admin), 404 |
+| POST | `/api/v1/project-webhooks/:id/rotate-token` | session (owner only) | none | `{"webhook_url": "<new, shown once>","mappings": [harbor_repository, ...]}` | 200, 401, 403 (any non-owner, including admins), 404 |
+| POST | `/api/v1/project-webhooks/:id/rotate-secret` | session (owner only) | none | `{"auth_secret": "<new, shown once>","mappings": [harbor_repository, ...]}` | 200, 401, 403 (any non-owner, including admins), 404 |
+| GET | `/api/v1/project-webhooks/:id/unmatched` | session (owner or admin, read) | paging params | paged list of `{"repository","count","last_seen_at"}`; rows for repositories that now have a mapping are hidden | 200, 401, 403, 404 |
+
+- Audit: create writes `project_webhook.create`, token rotation writes `project_webhook.token_rotate`, secret rotation writes `project_webhook.secret_rotate`, and an owner change writes `project_webhook.owner_transfer`. Details hold ids only, never values ([database.md](database.md)).
+
 ## CVEs
 
 `{id}` identifies one CVE within one mapping, because acceptance and issues are per mapping and `cve_findings` has one row per tag. Decided (2026-11-03, delegated): `{id}` is `<mapping_id>:<cve_id>`, URL-encoded (`:` is `%3A`). Neither a UUID nor a CVE id contains a colon. No external source. Alternative: nest the routes under `/mappings/:mapping_id/cves/:cve_id`. The paths below follow the form the user gave for `POST /api/v1/cves/{id}/issue`.

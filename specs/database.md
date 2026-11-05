@@ -241,6 +241,10 @@ Decided (2026-11-03) for `restore.run`: the offline restore command appends one 
 - `mapping.delete`
 - `mapping.webhook_token_rotate`
 - `mapping.auth_secret_rotate`
+- `project_webhook.create`
+- `project_webhook.token_rotate`
+- `project_webhook.secret_rotate`
+- `project_webhook.owner_transfer`
 - `alert.config_change`
 - `backup.run`
 - `restore.run`
