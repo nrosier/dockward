@@ -15,6 +15,21 @@ Decisions are marked `Decided (<date>)`. On 2026-11-03 the user delegated every 
   - Harbor offers a payload format choice of `Default` and `CloudEvents` (Harbor API swagger, `PayloadFormatType`; [docs/SETUP.md](../docs/SETUP.md) step 3c).
   - Each format has its own test fixture.
 
+### Project webhook (one per Harbor project)
+
+Decided (2026-11-05, user, #132): Harbor webhooks are set per project, so one project webhook serves every mapping in that project. The per-mapping URL stays valid, and the project webhook is the recommended setup for a project with more than one mapping.
+
+- **Owner.** The project webhook belongs to the user who created the first mapping on that Harbor base URL and project (`harbor_base_url`, `harbor_project`). Other users' mappings on the same project are routed through it. They cannot change its URL or auth secret.
+- **Endpoint.** `POST /api/v1/webhooks/harbor/project/:project_token`. Public, CSRF-exempt, like the mapping endpoint. The project token is a random value of at least 256 bits from a CSPRNG, base64url without padding, and only its SHA-256 digest is stored. It is shown once, when the project webhook is created.
+- **Auth.** The same `Authorization: Bearer <secret>` rule as the mapping endpoint, with one project secret. Only the digest is stored, shown once.
+- **Routing.** The event's `repository.repo_full_name` selects the mapping: the one mapping on that project whose `harbor_project`/`harbor_repository` equals the event's repository and whose `harbor_base_url` equals the project's. No mapping matches: the request returns `202` and stores nothing, and the event is recorded as unmatched (see below). More than one match cannot occur, because a mapping's Harbor repository is unique per Harbor instance.
+- **Unmatched events.** An event for a repository with no mapping returns `202` and is counted, with its repository name, so the owner can see that Harbor sends events HarborGate does not map. Not silently dropped.
+- **Rotation.** Only the project owner can rotate the project token or the project secret. Rotation shows the new URL and secret once and lists every mapping on the project that will use them. The old value stops working immediately.
+- **Migration.** Existing per-mapping URLs keep working unchanged. A mapping whose Harbor project already has a project webhook shows the project URL as the recommended setup, and keeps its own URL until the owner switches Harbor to the project URL.
+- **Scope of the trigger.** The same rules apply as for the mapping endpoint: `SCANNING_COMPLETED` only, `scan_type` `vulnerability`, a tag present, and a `repo_full_name` that matches a mapping. Only the routing step differs.
+
+Status: decided here, not yet built. Building it needs the new route, the project table and its migration, the unmatched-event count, and the owner-only rotation.
+
 ### Payload format detection
 
 - Decided (2026-11-03, delegated): the format is detected from the parsed JSON body. If the top-level object has a `specversion` member, the body is CloudEvents. Otherwise it is Harbor's default JSON.
