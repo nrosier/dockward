@@ -12,6 +12,7 @@ import AdminAuditPage from "./pages/AdminAuditPage";
 import AdminBackupPage from "./pages/AdminBackupPage";
 import AdminFailedPage from "./pages/AdminFailedPage";
 import AdminHealthPage from "./pages/AdminHealthPage";
+import AdminLogPage from "./pages/AdminLogPage";
 import AdminJobsPage from "./pages/AdminJobsPage";
 import AdminOidcPage from "./pages/AdminOidcPage";
 import AdminUsersPage from "./pages/AdminUsersPage";
@@ -67,6 +68,7 @@ export const routes: RouteObject[] = [
                   { path: "failed", element: <AdminFailedPage /> },
                   { path: "audit", element: <AdminAuditPage /> },
                   { path: "health", element: <AdminHealthPage /> },
+                  { path: "log", element: <AdminLogPage /> },
                   { path: "settings", element: <Navigate to="/admin/settings/oidc" replace /> },
                   { path: "settings/oidc", element: <AdminOidcPage /> },
                   { path: "settings/users", element: <AdminUsersPage /> },

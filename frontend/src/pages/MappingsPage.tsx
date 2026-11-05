@@ -46,17 +46,24 @@ function IssuesCell({ mapping }: { mapping: MappingListItem }) {
   );
 }
 
+const OPEN_COUNTS = [
+  { key: "critical", dot: "bg-crit", label: "pill.critical", text: "mappings.count.critical" },
+  { key: "high", dot: "bg-high", label: "pill.high", text: "mappings.count.high" },
+  { key: "medium", dot: "bg-med", label: "pill.medium", text: "mappings.count.medium" },
+  { key: "low", dot: "bg-low", label: "pill.low", text: "mappings.count.low" },
+  { key: "unknown", dot: "bg-muted", label: "pill.unknown", text: "mappings.count.unknown" },
+] as const;
+
 function OpenCounts({ counts }: { counts: OpenCves }) {
   return (
-    <div className="flex gap-2.5">
-      <span className="inline-flex items-center gap-1.5" title={t("pill.critical")}>
-        <span aria-hidden="true" className="size-2 rounded-full bg-crit" />
-        {t("mappings.count.critical", { n: counts.critical })}
-      </span>
-      <span className="inline-flex items-center gap-1.5" title={t("pill.high")}>
-        <span aria-hidden="true" className="size-2 rounded-full bg-high" />
-        {t("mappings.count.high", { n: counts.high })}
-      </span>
+    <div className="flex flex-wrap gap-x-2.5 gap-y-1">
+      {OPEN_COUNTS.map((item) => (
+        <span key={item.key} className="inline-flex items-center gap-1.5" title={t(item.label)}>
+          <span aria-hidden="true" className={`size-2 rounded-full ${item.dot}`} />
+          {t(item.text, { n: counts[item.key] })}
+        </span>
+      ))}
+      <span className="font-semibold">{t("mappings.count.total", { n: counts.total })}</span>
     </div>
   );
 }

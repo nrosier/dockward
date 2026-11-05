@@ -20,7 +20,7 @@ function mapping(over: Partial<MappingListItem>): MappingListItem {
     auto_create_issues: true,
     min_issue_severity: "HIGH",
     created_at: null,
-    open_cves: { critical: 1, high: 4 },
+    open_cves: { critical: 1, high: 4, medium: 2, low: 3, unknown: 1, total: 11 },
     last_sync: { status: "done", updated_at: new Date().toISOString() },
     ...over,
   };
@@ -43,7 +43,7 @@ describe("MappingsPage", () => {
               user_id: "other",
               harbor_repository: "web",
               auto_create_issues: false,
-              open_cves: { critical: 0, high: 2 },
+              open_cves: { critical: 0, high: 2, medium: 0, low: 0, unknown: 0, total: 2 },
               last_sync: null,
             }),
           ],
@@ -58,6 +58,10 @@ describe("MappingsPage", () => {
     const first = (await screen.findByText("platform/api-gateway")).closest("tr") as HTMLElement;
     expect(within(first).getByText(t("mappings.count.critical", { n: 1 }))).toBeInTheDocument();
     expect(within(first).getByText(t("mappings.count.high", { n: 4 }))).toBeInTheDocument();
+    expect(within(first).getByText(t("mappings.count.medium", { n: 2 }))).toBeInTheDocument();
+    expect(within(first).getByText(t("mappings.count.low", { n: 3 }))).toBeInTheDocument();
+    expect(within(first).getByText(t("mappings.count.unknown", { n: 1 }))).toBeInTheDocument();
+    expect(within(first).getByText(t("mappings.count.total", { n: 11 }))).toBeInTheDocument();
     expect(within(first).getByText(t("pill.done"))).toBeInTheDocument();
     expect(within(first).getByRole("link", { name: t("mappings.editNamed", { name: "platform/api-gateway" }) })).toBeInTheDocument();
 
