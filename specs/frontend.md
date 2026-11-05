@@ -42,11 +42,12 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 - Decisions approved with the designs (2026-11-03, user):
   - Cards and forms span the full content width (64rem). No card has its own narrower limit.
   - Mapping form: the GitHub target section also holds a GitHub credential select, because `POST /mappings` needs `github_cred_id`. The Harbor source section holds the Harbor credential select.
-  - Mappings has a list page with the columns Harbor source, GitHub target, Issues, Open CVEs (CRITICAL and HIGH), Last sync, and Actions.
+  - Mappings has a list page with the columns Harbor source, GitHub target, Issues, Open CVEs, Last sync, and Actions. Changed (2026-11-05, user, #129): Open CVEs shows every severity with a breakdown (CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN), not only CRITICAL and HIGH. The changed column needs design approval before it is built.
   - Admins see a "My mappings / All mappings" toggle on Dashboard, Mappings, CVEs, and Sync jobs. "All mappings" sends `scope=all`. Regular users do not see it.
   - Admin Settings shows its four sections as a row of pill links under the tabs. Each section has its own URL.
   - Alert channels: saved config is never returned, so editing a channel means entering its whole config again. The edit form says so.
-  - Per-CVE view: "Create issue" shows only for CRITICAL and HIGH, and is disabled while an open issue exists. CVE status uses an OPEN pill (neutral) and an ACCEPTED pill (accent).
+  - Per-CVE view: "Create issue" shows for a CVE of any severity that is open on at least one tag (Changed 2026-11-05, user, #129; until then CRITICAL and HIGH only), and is disabled while an open issue exists or an active acceptance exists. When `open_severity` is LOW or UNKNOWN, the button first asks for confirmation in a dialog; CRITICAL and HIGH stay one click (MEDIUM too, see [integrations.md](integrations.md)). A GitHub rate limit shows one clear message and is not retried in a loop. The changed button needs design approval before it is built.
+  - CVE list (Decided 2026-11-05, user, #129): the default view shows every severity. Filters: severity (multi-select), status (open, fixed, accepted), package, tag, Harbor project and Harbor repository. They map to the query parameters in [api.md](api.md), CVEs. The filter bar needs design approval before it is built. CVE status uses an OPEN pill (neutral) and an ACCEPTED pill (accent).
   - Accept risk is a modal dialog (Radix Dialog).
   - Add credential: the primary button is "Save and test". It saves the credential, then calls `POST /credentials/:id/test` and shows the check results on the same page, with "Test again" and "Done". The API has no route that tests an unsaved credential.
   - Sync job Trigger shows `webhook` or `poll` ([api.md](api.md), Sync jobs). A retry keeps the job's trigger.
@@ -91,7 +92,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 
 ## Dashboard (decided)
 
-- Summary counts: open CVEs by severity (CRITICAL, HIGH), fixed CVEs, open GitHub issues, failed syncs.
+- Summary counts: open CVEs by severity (CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN; every severity since 2026-11-05, user, #129), fixed CVEs, open GitHub issues, failed syncs.
 - Below the counts: recent syncs with status and time. Failed rows have a retry action.
 
 ## Mapping form (decided)

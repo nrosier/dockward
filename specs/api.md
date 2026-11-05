@@ -107,10 +107,10 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 | POST | `/api/v1/mappings/:id/rotate-webhook-token` | session (owner only) | none | `{"webhook_url": "<new, shown once>"}` | 200, 404 |
 | POST | `/api/v1/mappings/:id/rotate-auth-secret` | session (owner only) | none | `{"auth_secret": "<shown once>"}` | 200, 404 |
 
-- Decided (2026-11-03, user, #35): items of `GET /mappings` add `"open_cves": {"critical","high"}` and `"last_sync": {"status","updated_at"} or null`. `open_cves` follows the dashboard counting rules in [cve-lifecycle.md](cve-lifecycle.md) for that one mapping. `last_sync` is the mapping's most recently updated `sync_jobs` row. `GET /mappings/:id` does not carry these fields.
+- Decided (2026-11-03, user, #35): items of `GET /mappings` add `"open_cves": {"critical","high"}` and `"last_sync": {"status","updated_at"} or null`. `open_cves` follows the dashboard counting rules in [cve-lifecycle.md](cve-lifecycle.md) for that one mapping. Changed (2026-11-05, user, #129): `open_cves` is `{"critical","high","medium","low","unknown","total"}`, every severity with a breakdown. `total` is the sum of the five. The `critical` and `high` fields keep their meaning, so a client that reads only them still works. `last_sync` is the mapping's most recently updated `sync_jobs` row. `GET /mappings/:id` does not carry these fields.
 - The duplicate error for the GitHub target is shown inline in the form ([frontend.md](frontend.md)). The `409` body names the conflicting mapping's label. Decided (2026-11-03, delegated): only if that mapping is owned by the caller; otherwise the message is generic, so another tenant's mapping is not revealed.
 - Both credentials must be owned by the caller. A credential of another user returns `404`.
-- `min_issue_severity` accepts `CRITICAL` or `HIGH`.
+- `min_issue_severity` accepts `CRITICAL` or `HIGH`. It governs automatic issues only; `MEDIUM` and lower are refused with `422` (unchanged by #129, Decided 2026-11-05, user).
 - Rotation audits `mapping.webhook_token_rotate` and `mapping.auth_secret_rotate`. The old value stops working immediately.
 - Decided (2026-11-03): `DELETE` removes only HarborGate's own rows: `repo_mappings`, its `cve_findings`, `cve_acceptances`, `sync_jobs`, `sync_reports`, and its webhook token and auth secret. The `github_issues` rows for the mapping's GitHub target are deleted in the same transaction, matched by `github_owner` and `github_repo`. Open GitHub issues are NOT closed and are NOT changed on GitHub. The user must close each issue on GitHub manually. Only one mapping can exist per GitHub repository ([database.md](database.md)), so these rows belong to this mapping alone.
 - Audit: the delete writes `mapping.delete`. Its `details` list the GitHub issue numbers left open. It never contains tokens or secrets.
@@ -123,18 +123,30 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 
 Decided (2026-11-03, user, #35): `CveSummary` also has `"fixed_in_version"` (from the most recently scanned tag that reports the CVE; `null` when unknown), `"open_tags"` (tracked tags where the CVE is open), `"tracked_tags"` (tracked tags of the mapping, at most 10), `"github_issue_number"`, and `"github_issue_status"` (`open`, `closed`, or `null` when there is no issue). `CveDetail` also has `"description"` (the Harbor vulnerability description, or `null`; see [database.md](database.md), `cve_findings.description`).
 
+Decided (2026-11-05, delegated, #129): `CveSummary` also has `"open_severity"`, the highest severity across the CVE's `open` tag rows, or `null` when the CVE is fixed on every tag. It is the severity a manual issue is logged with ([integrations.md](integrations.md), "GitHub issues"), so the UI uses it to decide whether the manual-issue button needs a confirmation (LOW or UNKNOWN). `severity` stays the highest across all of the CVE's rows, open or fixed.
+
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |
-| GET | `/api/v1/mappings/:id/cves` | session | list params; `sort` (`severity`, `cve_id`, `first_seen_at`, `last_seen_at`), `severity`, `status`, `accepted`, `q` | list of `CveSummary` | 200, 404 |
-| GET | `/api/v1/cves` | session | same as above plus `mapping_id`; admin may add `scope=all` | list of `CveSummary` | 200, 401 |
+| GET | `/api/v1/mappings/:id/cves` | session | list params; `sort` (`severity`, `cve_id`, `first_seen_at`, `last_seen_at`), `severity`, `status`, `accepted`, `q`, `package`, `tag`, `harbor_project`, `harbor_repository` | list of `CveSummary` | 200, 400, 404 |
+| GET | `/api/v1/cves` | session | same as above plus `mapping_id`; admin may add `scope=all` | list of `CveSummary` | 200, 400, 401, 403, 404 |
 | GET | `/api/v1/cves/:id` | session | none | `CveDetail` | 200, 404 |
 | POST | `/api/v1/cves/:id/accept` | session (mapping owner) | `{"reason","expires_at"}` | `{"acceptance": {...}}` | 201, 404, 409 (already accepted), 422 (empty reason, past expiry) |
 | POST | `/api/v1/cves/:id/unaccept` | session (mapping owner) | none | empty | 204, 404 (no active acceptance) |
-| POST | `/api/v1/cves/:id/issue` | session (mapping owner) | none | `{"github_issue_url","github_issue_number"}` | 201, 404, 409 (open issue exists, body has its URL), 422 (severity not eligible), 502 |
+| POST | `/api/v1/cves/:id/issue` | session (mapping owner) | none | `{"github_issue_url","github_issue_number"}` | 201, 403 `csrf_invalid`, 404, 409 (open issue exists, body has its URL; or an active acceptance), 422 (the CVE is not open on any tracked tag), 502 |
 
 - Accept applies to the whole mapping. It does not close an open issue. It adds a comment (Decided 2026-11-03, delegated; [cve-lifecycle.md](cve-lifecycle.md)). Un-accept is a soft revoke.
 - Both accept and un-accept are audited (`cve.accept`, `cve.unaccept`).
-- `POST .../issue` creates an issue only for `CRITICAL` or `HIGH`. It reuses the closed issue for the same CVE and repo by reopening it, never creates a second one (lifecycle rules in [cve-lifecycle.md](cve-lifecycle.md)).
+- CVE list filters. Decided (2026-11-05, user, #129): the default list shows every severity (no severity filter is applied), and accepted and fixed CVEs are reached through `status`. Decided (2026-11-05, delegated, #129) for the exact semantics:
+  - `severity`: one or more of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `UNKNOWN`, comma-separated (`severity=LOW,UNKNOWN`). Values are case-sensitive. A CVE matches when its `severity` (the highest across its tags) is any of them. A single value works as before.
+  - `status`: one or more of `open`, `fixed`, `accepted`, comma-separated. `open` and `fixed` match the CVE's `status` field; `accepted` matches a CVE with an active acceptance (`accepted: true`), whatever its `status`. A CVE matches when any listed value matches (`status=fixed,accepted`).
+  - `accepted` (`true` or `false`) is kept and is combined with `status` by AND, so `status=open&accepted=false` is the open CVEs that are not accepted.
+  - `package`: the CVE's `package` field equals the value exactly (case-sensitive).
+  - `tag`: the CVE has a row for that image tag, open or fixed. The summary is still aggregated over every tag.
+  - `harbor_project` and `harbor_repository`: the mapping's Harbor project or repository equals the value exactly.
+  - Different parameters combine by AND. Within one comma-separated parameter, values combine by OR. Repeated values are ignored. `package`, `tag`, `harbor_project` and `harbor_repository` take one value each and are not split on commas. An empty `package`, `tag`, `harbor_project`, `harbor_repository` or `q` means no filter.
+  - A bad value returns `400 invalid_request` with a fixed message: an unknown or empty `severity` or `status` item, a `package`, `tag`, `harbor_project` or `harbor_repository` value over 256 characters, a `q` over 100 characters (unchanged), or a text value with a control character. Every filter value is a bound SQL parameter (multi-value lists are bound as one JSON array), never part of the SQL text.
+  - `total` is computed with exactly the same predicates as `items`. `page_size` stays capped at 200. Tenancy is unchanged: the filters narrow the caller's own CVEs (or every tenant's with admin `scope=all`) and never widen them.
+- `POST .../issue` creates an issue for a CVE of any severity that is open on at least one tracked tag (Changed 2026-11-05, user, #129; until then only `CRITICAL` or `HIGH`). A CVE fixed on every tag is `422`. The issue uses the highest open severity (`open_severity`). Automatic creation still uses only `CRITICAL` and `HIGH` ([integrations.md](integrations.md)). The LOW and UNKNOWN confirmation is a frontend step; the route takes no confirm flag. It reuses the closed issue for the same CVE and repo by reopening it, never creates a second one (lifecycle rules in [cve-lifecycle.md](cve-lifecycle.md)).
 - Decided (2026-11-03, G28): the manual-issue button lives in the per-CVE page header, next to the GitHub issue link. See [frontend.md](frontend.md).
 - A tag with zero findings has no `cve_findings` row, so it does not appear in `tags`. Decided (2026-11-03, delegated): the tag list shows only tags that report this CVE.
 
@@ -159,7 +171,7 @@ Decided (2026-11-03, user, #35): `SyncJob` also has `"trigger"` (`webhook` or `p
 
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |
-| GET | `/api/v1/dashboard/summary` | session | admin may add `scope=all` | `{"open_cves": {"critical","high"}, "fixed_cves", "open_issues", "failed_syncs", "recent_syncs": [SyncJob]}` | 200, 401 |
+| GET | `/api/v1/dashboard/summary` | session | admin may add `scope=all` | `{"open_cves": {"critical","high","medium","low","unknown","total"}, "fixed_cves", "open_issues", "failed_syncs", "recent_syncs": [SyncJob]}` | 200, 401 |
 
 - Counting rules (distinct CVEs, current snapshot) are in [cve-lifecycle.md](cve-lifecycle.md), Dashboard counts. `recent_syncs` holds the latest 10. The 10 matches the tag limit and is Decided (2026-11-03, delegated), with no external source. Failed rows can be retried with the route above.
 
@@ -238,3 +250,5 @@ Required test scenarios for the planner (high level):
 - Accept then un-accept then accept again succeeds. Accepting twice returns `409`.
 - Retry of a `failed` job resets `attempts` to 0 and sets `status` to `queued`. Retry of a non-failed job returns `409`.
 - Dashboard: one CVE on three tags of one mapping counts as 1 ([cve-lifecycle.md](cve-lifecycle.md)).
+- CVE list (#129): with no filter every severity is listed. Each filter (`severity` with one and several values, `status` with `open`, `fixed`, `accepted` and a combination, `package`, `tag`, `harbor_project`, `harbor_repository`) returns the expected CVEs, and `total` equals the number of items over all pages. A bad value is `400 invalid_request`.
+- Manual issue (#129): a LOW or UNKNOWN open CVE gets an issue; an automatic run never creates one below the mapping's minimum; an active acceptance is `409`; an open issue is `409` with its URL; a closed issue is reopened; a CVE fixed on every tag is `422`.
