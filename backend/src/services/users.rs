@@ -61,7 +61,14 @@ pub async fn create_local(
 /// rules are checked first:
 /// - an admin cannot delete themselves (`409`);
 /// - the last local admin cannot be deleted (`409`).
-pub async fn delete_user(pool: &SqlitePool, actor: &Actor, user_id: &str) -> Result<(), AppError> {
+///
+/// Returns the ids of the credentials that were deleted, so the caller can drop the
+/// in-memory picker cache and rate-limit block of each (`PickerState::drop_credential`).
+pub async fn delete_user(
+    pool: &SqlitePool,
+    actor: &Actor,
+    user_id: &str,
+) -> Result<Vec<String>, AppError> {
     if actor.user_id.as_deref() == Some(user_id) {
         return Err(AppError::Conflict(
             "You cannot delete your own account.".to_owned(),
@@ -80,6 +87,7 @@ pub async fn delete_user(pool: &SqlitePool, actor: &Actor, user_id: &str) -> Res
     // Any without a candidate stay, and the user row's cascade deletes them (#132).
     project_webhooks::transfer_on_user_delete(&mut tx, actor, user_id).await?;
     users::delete_mappings(&mut tx, user_id).await?;
+    let credential_ids = users::credential_ids(&mut tx, user_id).await?;
     users::delete_credentials(&mut tx, user_id).await?;
     if users::delete_user_row(&mut tx, user_id).await? == 0 {
         return Err(AppError::NotFound);
@@ -93,7 +101,7 @@ pub async fn delete_user(pool: &SqlitePool, actor: &Actor, user_id: &str) -> Res
     )
     .await?;
     tx.commit().await.map_err(|_| AppError::InternalError)?;
-    Ok(())
+    Ok(credential_ids)
 }
 
 /// Changes a local user's role. OIDC users' roles come only from the group claim, so
@@ -392,6 +400,10 @@ mod tests {
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
         assert!(result.is_ok(), "delete failed: {result:?}");
+        // The ids come back so the handler can drop each credential's picker cache.
+        let mut deleted = result.unwrap_or_default();
+        deleted.sort();
+        assert_eq!(deleted, ["test-cred-g", "test-cred-h"]);
         assert_eq!(mappings, 0);
         assert_eq!(creds, 0);
         assert_eq!(acceptances, 0);

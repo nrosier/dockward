@@ -354,6 +354,13 @@ impl PickerState {
             .remove(credential);
     }
 
+    /// How many cache entries and rate-limit blocks are held. Tests use it to see a drop.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> (usize, usize) {
+        let blocks = self.blocks.lock().map_or(0, |blocks| blocks.len());
+        (self.cache.len(), blocks)
+    }
+
     fn check_user_limit(&self, user_id: &str) -> Result<(), PickerFail> {
         self.limiter
             .check(&format!("picker:{user_id}"), Instant::now())
