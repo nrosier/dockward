@@ -4,6 +4,27 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.10.0
+
+### Added
+- Project webhook owner page and management API, with one Harbor webhook per project, rotation and unmatched repository counts (#132, #145).
+- Manual scan pull for a mapping, a Pull scans button on the mapping page, and a 5-minute cooldown (#131).
+- Admin application log page and an admin log level control that reverts after 30 minutes. Secrets are never logged (#136).
+- All-severity CVE list with filters for severity, status, package, tag, project and repository, and manual GitHub issues for any severity, with a confirmation for LOW and UNKNOWN (#129).
+- `PUT /api/v1/mappings/:id` for partial mapping edits (#130).
+- Retry state and error shown for failing sync jobs (#135).
+- A startup note that the image revision label is set explicitly (commit cd00199, no issue).
+
+### Changed
+- A missing image revision label is a permanent failure and is not retried (#141).
+- The webhook auth value is shown as the full Authorization header, ready to paste into Harbor.
+- The Account page is split into Profile, Appearance and Credentials tabs.
+- The admin setup button explains why it is disabled when the passwords differ.
+
+### Fixed
+- A sync job no longer retries forever on a missing revision label (#141).
+- A mapping update rebuilds from the locked row (#130).
+
 ## 0.9.1
 
 ### Fixed
