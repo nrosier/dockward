@@ -25,8 +25,8 @@ const PAGE_SIZE = 50;
 const MAX_ATTEMPTS = 8;
 const STATUSES = ["queued", "running", "done", "failed"] as const;
 const COLUMNS = 7;
-// The worker already caps last_error at 500 characters. The page shows less, so a long message
-// does not push the table wide.
+// The API read cuts last_error to MAX_TEXT_CHARS (500 characters, backend/src/db/sync_jobs.rs).
+// The page shows at most 300 of them, so a long message does not push the table wide.
 const ERROR_DISPLAY_MAX = 300;
 
 // A job that has run and is queued again is retrying. A job that has never run is plain Queued.

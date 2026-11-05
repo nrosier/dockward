@@ -86,6 +86,20 @@ describe("SyncJobsPage", () => {
     expect(within(table).getByText(t("syncJobs.nextAttempt", { time: formatDateTime(retrying.next_attempt_at) }))).toBeInTheDocument();
   });
 
+  it("a long retry error is capped at 300 characters", async () => {
+    // 400 code points. The emoji sits at code point 300, so the cut falls right after it.
+    const kept = `${"a".repeat(299)}😀`;
+    const full = `${kept}${"b".repeat(100)}`;
+    expect(Array.from(kept)).toHaveLength(300);
+    expect(Array.from(full)).toHaveLength(400);
+    stub([{ ...retrying, next_attempt_at: null, last_error: full }]);
+    renderAt(<SyncJobsPage />);
+    expect(await screen.findByText(t("syncJobs.trigger.webhook"))).toBeInTheDocument();
+    const table = screen.getByRole("table");
+    expect(within(table).getByText(`${kept}…`)).toBeInTheDocument();
+    expect(within(table).queryByText(full)).not.toBeInTheDocument();
+  });
+
   it("a queued job with attempts 0 shows Queued and no error", async () => {
     stub([neverRun]);
     renderAt(<SyncJobsPage />);
