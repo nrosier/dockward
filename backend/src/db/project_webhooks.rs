@@ -6,13 +6,22 @@ use sqlx::SqlitePool;
 use crate::error::AppError;
 
 /// A project webhook, found by its token digest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProjectWebhook {
     pub id: String,
     pub user_id: String,
     pub harbor_base_url: String,
     pub harbor_project: String,
     pub secret_hash: String,
+}
+
+/// Prints the id only: the secret digest, the owner and the Harbor address stay out of logs.
+impl std::fmt::Debug for ProjectWebhook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectWebhook")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Looks up a project webhook by the digest of its project token.
@@ -392,4 +401,23 @@ pub async fn set_owner(
     .await
     .map(|done| done.rows_affected())
     .map_err(|_| AppError::InternalError)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_webhook_debug_prints_the_id_and_not_the_hash() {
+        let row = ProjectWebhook {
+            id: "pw1".to_owned(),
+            user_id: "u1".to_owned(),
+            harbor_base_url: "https://harbor.example.com".to_owned(),
+            harbor_project: "proj".to_owned(),
+            secret_hash: "digest-value-fake".to_owned(),
+        };
+        let text = format!("{row:?}");
+        assert!(text.contains("pw1"));
+        assert!(!text.contains("digest-value-fake"));
+    }
 }
