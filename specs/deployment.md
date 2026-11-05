@@ -80,6 +80,10 @@ Use the narrowest ranges that work. Trusting the whole `proxy` subnet lets any c
 - Create a semver tag `vMAJOR.MINOR.PATCH`.
 - Pushing the tag triggers the Docker publish job.
 - Update `CHANGELOG.md` before tagging.
+- Bump the version in every version file before tagging: `backend/Cargo.toml` (`[package]` version), `backend/Cargo.lock` (the `harborgate` package entry only), `frontend/package.json` (`version`), and `frontend/package-lock.json` (root package entries only). The tag must equal the version in these files.
+- Build and verify the binary reports the new version before tagging. The backend reads `CARGO_PKG_VERSION` (`backend/src/main.rs`, the startup log and the API). Verify with `cargo check --locked` plus a test or a documented run that prints the version. Do not tag until this check passes.
+- Never move, delete or re-create a published tag. A bad release gets the next patch version. Published tags are immutable.
+- Update `CHANGELOG.md` with a version heading that matches the tag.
 - Image publish is to `ghcr.io/<owner>/harborgate`. The `:latest` tag is applied only from `main`.
 - Tags: Decided (2026-11-03): `sha-<7 hex>` on every published build; `<major>.<minor>.<patch>` and `<major>.<minor>` on `v*` tags; `latest` only from `main`. A `v*` tag never moves `latest`. The publish flow is in [testing-and-ci.md](testing-and-ci.md).
 

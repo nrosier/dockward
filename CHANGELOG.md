@@ -4,6 +4,11 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.10.1
+
+### Fixed
+- The app reports its real version. 0.10.0 shipped with the version still set to 0.9.1 in the code; this release sets it to 0.10.1 (the 0.10.0 image reports 0.9.1).
+
 ## 0.10.0
 
 ### Added

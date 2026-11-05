@@ -52,7 +52,7 @@ Purpose: test strategy, CI workflows, dependency updates, and repo hygiene check
 - `SECURITY.md`: security reporting policy.
 - `.github/CODEOWNERS`: code ownership.
 - `.github/ISSUE_TEMPLATE/`: bug report, feature request, and template config.
-- `CHANGELOG.md`: release notes, updated before each tag.
+- `CHANGELOG.md`: release notes, updated before each tag. Each release also bumps the version in every version file and verifies the built binary before tagging, and published tags are never moved (see [deployment.md](deployment.md) Releases).
 - `.gitignore`: see [deployment.md](deployment.md).
 
 ## Schema and SARIF checks
