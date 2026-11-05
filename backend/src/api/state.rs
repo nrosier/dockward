@@ -205,6 +205,9 @@ pub struct AppState {
     /// The Harbor probe for mapping create and update. Production uses the outbound probe;
     /// router tests inject a fake, so no live Harbor is needed.
     pub harbor_probe: HarborProbeHandle,
+    /// The application log buffer and the global level controller
+    /// (`specs/security.md`, Application log).
+    pub app_log: Arc<crate::services::app_log::AppLog>,
     /// The Harbor reader for the manual scan pull (`POST /api/v1/mappings/:id/pull`).
     pub harbor_fetch: HarborFetchHandle,
     /// Manual scan pulls per mapping: 1 per 5 minutes, in memory (`specs/security.md`,

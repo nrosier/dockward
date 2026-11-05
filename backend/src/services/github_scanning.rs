@@ -158,12 +158,8 @@ impl ScanHttp for LiveHttp<'_> {
     ) -> Result<ScanResponse, ScanError> {
         let url = api_url(path)?;
         let builder = self.client.post(&url).map_err(|_| transport())?;
-        let response = authorized(builder, token)?
-            .json(body)
-            .send()
-            .await
-            .map_err(|_| transport())?;
-        read_response(response).await
+        let sent = authorized(builder, token)?.json(body).send().await;
+        logged_response("POST", &url, sent).await
     }
 
     async fn patch(
@@ -174,23 +170,31 @@ impl ScanHttp for LiveHttp<'_> {
     ) -> Result<ScanResponse, ScanError> {
         let url = api_url(path)?;
         let builder = self.client.patch(&url).map_err(|_| transport())?;
-        let response = authorized(builder, token)?
-            .json(body)
-            .send()
-            .await
-            .map_err(|_| transport())?;
-        read_response(response).await
+        let sent = authorized(builder, token)?.json(body).send().await;
+        logged_response("PATCH", &url, sent).await
     }
 
     async fn get(&self, path: &str, token: &[u8]) -> Result<ScanResponse, ScanError> {
         let url = api_url(path)?;
         let builder = self.client.get(&url).map_err(|_| transport())?;
-        let response = authorized(builder, token)?
-            .send()
-            .await
-            .map_err(|_| transport())?;
-        read_response(response).await
+        let sent = authorized(builder, token)?.send().await;
+        logged_response("GET", &url, sent).await
     }
+}
+
+/// Logs the request at `debug` (method, URL path, status; `app_log::log_outbound`) and
+/// reads the response.
+async fn logged_response(
+    method: &str,
+    url: &Url,
+    sent: Result<reqwest::Response, reqwest::Error>,
+) -> Result<ScanResponse, ScanError> {
+    crate::services::app_log::log_outbound(
+        method,
+        url,
+        sent.as_ref().ok().map(|r| r.status().as_u16()),
+    );
+    read_response(sent.map_err(|_| transport())?).await
 }
 
 fn api_url(path: &str) -> Result<Url, ScanError> {

@@ -311,6 +311,9 @@ mod tests {
                 crate::services::github_issues::GithubIssues::new().unwrap(),
             ),
             harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
+            app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
+                crate::services::app_log::REVERT_AFTER,
+            )),
             harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
             pull_limiter: crate::api::mappings::new_pull_limiter(),
         };

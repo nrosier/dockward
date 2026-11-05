@@ -44,6 +44,15 @@ The current `backend/src/main.rs` is the only implemented file. Treat the layout
 - Decided (2026-11-03): the binary handles SIGTERM and Ctrl+C itself, through Axum's `with_graceful_shutdown` and the Tokio `signal` feature. It does not rely on an init process to deliver or act on signals. `--init` or `init: true` stays recommended for reaping child processes.
 - On a signal it stops accepting connections, finishes in-flight requests, and stops the worker from taking new jobs. Decided (2026-11-03, delegated): drain for at most 8 seconds, inside Docker's default 10-second stop timeout, then exit. A job still `running` at exit is re-queued at the next startup (see "Durable job queue").
 
+## Application log
+
+Decided (2026-11-05, user, #136). Rules are in [security.md](security.md), "Application log"; routes are in [api.md](api.md), Admin.
+
+- `services/app_log.rs` owns the application log: the `tracing` layer that copies each event into a bounded in-memory ring buffer (500 lines, 1000 characters per line, secret-named fields dropped), and the level controller.
+- `main.rs` installs one subscriber: a reloadable `Targets` filter in front of the stdout formatter and the buffer layer. The filter starts at `info` for every target and ignores `RUST_LOG`. A level change sets `harborgate` to the chosen level and keeps the default (every other crate) at `info`.
+- The level controller holds the reload handle, the current level, and the revert deadline. Raising the level above `info` spawns a Tokio timer; a later change replaces it. The timer duration is a constructor argument (30 minutes in production), so tests inject a short one. The revert writes `log.level_change` with the actor `system`.
+- The outbound Harbor and GitHub send sites call one helper that logs, at `debug`, the method, the URL path, and the status code. The helper takes a `Url` and logs only `url.path()`, so the query string and userinfo never reach the log.
+
 ## Error handling
 
 - Use `Result<T, AppError>` and implement `IntoResponse` for `AppError`.

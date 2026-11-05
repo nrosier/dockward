@@ -49,10 +49,13 @@ impl HarborGet {
         for (name, value) in extra_headers {
             request = request.header(*name, *value);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|_| AppError::UpstreamUnreachable)?;
+        let sent = request.send().await;
+        crate::services::app_log::log_outbound(
+            "GET",
+            url,
+            sent.as_ref().ok().map(|r| r.status().as_u16()),
+        );
+        let response = sent.map_err(|_| AppError::UpstreamUnreachable)?;
         let status = response.status().as_u16();
         let body = response
             .bytes()
