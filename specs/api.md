@@ -132,7 +132,7 @@ One project webhook per Harbor base URL and project. Its rules (owner, routing, 
 
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |
-| POST | `/api/v1/project-webhooks` | session | `{"mapping_id"}`; the caller must own that mapping | `{"id","webhook_url": "<shown once>","auth_secret": "<shown once>"}` | 201, 404 (mapping not the caller's, or not found), 409 `conflict` (a project webhook already exists for that Harbor base URL and project) |
+| POST | `/api/v1/project-webhooks` | session | `{"mapping_id"}`; the caller must own that mapping | `{"id","webhook_url": "<shown once>","auth_secret": "<shown once>"}` | 201, 400 (body not valid), 401, 404 (mapping not the caller's, or not found), 409 `conflict` (a project webhook already exists for that Harbor base URL and project) |
 | GET | `/api/v1/project-webhooks/:id` | session (owner or admin, read) | none | `ProjectWebhook` with `mappings` | 200, 401, 403 (not owner or admin), 404 |
 | POST | `/api/v1/project-webhooks/:id/rotate-token` | session (owner only) | none | `{"webhook_url": "<new, shown once>","mappings": [harbor_repository, ...]}` | 200, 401, 403 (any non-owner, including admins), 404 |
 | POST | `/api/v1/project-webhooks/:id/rotate-secret` | session (owner only) | none | `{"auth_secret": "<new, shown once>","mappings": [harbor_repository, ...]}` | 200, 401, 403 (any non-owner, including admins), 404 |
