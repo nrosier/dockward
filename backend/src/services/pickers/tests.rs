@@ -304,7 +304,7 @@ async fn short_harbor_list_is_not_truncated_and_search_goes_to_harbor() {
 }
 
 #[tokio::test]
-async fn identity_412_passes_and_anything_else_is_refused() {
+async fn identity_412_passes_4xx_and_200_are_refused_and_5xx_is_502() {
     for (code, ok_expected) in [(412u16, true), (401, false), (200, false), (500, false)] {
         let fx = Fixture::new(&format!("identity-{code}")).await;
         let fake = Arc::new(Recorded::default());
@@ -319,6 +319,12 @@ async fn identity_412_passes_and_anything_else_is_refused() {
             .await;
         if ok_expected {
             assert_eq!(result.unwrap().items.len(), 1);
+        } else if code >= 500 {
+            assert!(
+                matches!(result, Err(PickerFail::App(AppError::UpstreamUnreachable))),
+                "status {code}: expected 502, got {result:?}"
+            );
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
         } else {
             let (message, detail) = expect_invalid(result);
             assert_eq!(message, MSG_HARBOR_IDENTITY, "status {code}");

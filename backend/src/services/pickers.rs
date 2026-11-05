@@ -568,21 +568,25 @@ impl PickerState {
         Ok(response)
     }
 
-    /// The robot identity check: `GET users/current` must answer `412`. Anything else is
-    /// refused with the fixed message (a wrong robot secret otherwise runs as anonymous).
+    /// The robot identity check: `GET users/current` must answer `412`. A `4xx` refusal or a
+    /// `200` is refused with the fixed message (a wrong robot secret otherwise runs as
+    /// anonymous); a `5xx` is `502 upstream_unreachable`.
     async fn harbor_identity(&self, ctx: &HarborCtx) -> Result<(), PickerFail> {
         let url = ctx
             .base
             .join("api/v2.0/users/current")
             .map_err(|_| AppError::InternalError)?;
         let response = self.harbor_get(ctx, &url).await?;
-        if response.status == 412 {
-            Ok(())
-        } else {
-            Err(invalid_with(
+        match response.status {
+            412 => Ok(()),
+            // A `4xx` refusal, or a `200` that is not a robot identity: the credential does
+            // not work (`specs/integrations.md`, "Errors and rate limits").
+            200 | 400..=499 => Err(invalid_with(
                 MSG_HARBOR_IDENTITY,
                 ErrorDetail::HarborIdentity,
-            ))
+            )),
+            // A `5xx` or any other status says nothing about the credential.
+            _ => Err(upstream()),
         }
     }
 
