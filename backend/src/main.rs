@@ -1593,7 +1593,7 @@ mod tests {
             _username: &'a str,
             _secret: &'a [u8],
             _extra_headers: &'a [(&'a str, &'a str)],
-        ) -> api::state::ProbeFuture<'a, (u16, Vec<u8>)> {
+        ) -> api::state::ProbeFuture<'a, services::harbor_client::HarborReply> {
             let repository = url
                 .path()
                 .split('/')
@@ -1608,12 +1608,23 @@ mod tests {
                     "two" => {
                         r#"[{"digest": "sha256:bbbb", "tags": [{"name": "v1"}, {"name": "v2"}]}]"#
                     }
-                    _ => return Ok((500, b"harbor exploded".to_vec())),
+                    _ => {
+                        return Ok(services::harbor_client::HarborReply::new(
+                            500,
+                            b"harbor exploded".to_vec(),
+                        ));
+                    }
                 };
                 if first_page {
-                    Ok((200, body.as_bytes().to_vec()))
+                    Ok(services::harbor_client::HarborReply::new(
+                        200,
+                        body.as_bytes().to_vec(),
+                    ))
                 } else {
-                    Ok((200, b"[]".to_vec()))
+                    Ok(services::harbor_client::HarborReply::new(
+                        200,
+                        b"[]".to_vec(),
+                    ))
                 }
             })
         }
@@ -2293,12 +2304,13 @@ mod tests {
     /// The event for repository `repo` on project `proj`.
     fn repo_event(repo: &str) -> String {
         format!(
-            r#"{{"type":"SCANNING_COMPLETED","event_data":{{"repository":{{"repo_full_name":"proj/{repo}"}},"resources":[{{"digest":"sha256:aaaa","tag":"v1"}}],"scan":{{"scan_type":"vulnerability"}}}}}}"#
+            r#"{{"type":"SCANNING_COMPLETED","event_data":{{"repository":{{"repo_full_name":"proj/{repo}"}},"resources":[{{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tag":"v1"}}],"scan":{{"scan_type":"vulnerability"}}}}}}"#
         )
     }
 
     /// A default-format vulnerability event for `proj/app`.
-    const WEBHOOK_BODY: &str = r#"{"type":"SCANNING_COMPLETED","event_data":{"repository":{"repo_full_name":"proj/app"},"resources":[{"digest":"sha256:aaaa"}],"scan":{"scan_type":"vulnerability"}}}"#;
+    /// It is untagged, so it stores one resolve job (#132).
+    const WEBHOOK_BODY: &str = r#"{"type":"SCANNING_COMPLETED","event_data":{"repository":{"repo_full_name":"proj/app"},"resources":[{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"scan":{"scan_type":"vulnerability"}}}"#;
 
     fn webhook_request(
         token: &str,
@@ -2667,6 +2679,261 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Harbor reader and probe that count every call. The webhook routes must never call
+    /// Harbor (#132), so these must stay at zero.
+    #[derive(Default)]
+    struct CountingHarbor(std::sync::atomic::AtomicUsize);
+
+    impl api::state::DynHarborFetch for CountingHarbor {
+        fn fetch<'a>(
+            &'a self,
+            _url: &'a reqwest::Url,
+            _username: &'a str,
+            _secret: &'a [u8],
+            _extra_headers: &'a [(&'a str, &'a str)],
+        ) -> api::state::ProbeFuture<'a, services::harbor_client::HarborReply> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(services::harbor_client::HarborReply::new(500, Vec::new())) })
+        }
+    }
+
+    impl api::state::DynHarborProbe for CountingHarbor {
+        fn users_current<'a>(
+            &'a self,
+            _base: &'a reqwest::Url,
+            _username: &'a str,
+            _secret: &'a [u8],
+        ) -> api::state::ProbeFuture<'a, u16> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(500) })
+        }
+
+        fn artifacts_status<'a>(
+            &'a self,
+            _base: &'a reqwest::Url,
+            _username: &'a str,
+            _secret: &'a [u8],
+            _project: &'a str,
+            _repository: &'a str,
+        ) -> api::state::ProbeFuture<'a, u16> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(500) })
+        }
+    }
+
+    /// A test router whose Harbor reader and probe count calls. Returns the counter too.
+    async fn counting_router(
+        name: &str,
+    ) -> (
+        Router,
+        sqlx::SqlitePool,
+        std::path::PathBuf,
+        Arc<CountingHarbor>,
+    ) {
+        let harbor = Arc::new(CountingHarbor::default());
+        let (router, pool, dir, _) = test_router_with_fetch(
+            name,
+            services::throttle::LoginThrottle::new(),
+            api::webhooks::new_token_limiter(),
+            api::state::HarborProbeHandle::new(harbor.clone()),
+            api::state::HarborFetchHandle::new(harbor.clone()),
+        )
+        .await;
+        (router, pool, dir, harbor)
+    }
+
+    /// Every stored job: (mapping id, payload as JSON).
+    async fn stored_jobs(pool: &sqlx::SqlitePool) -> Vec<(String, serde_json::Value)> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT mapping_id, payload FROM sync_jobs ORDER BY rowid")
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        rows.into_iter()
+            .map(|(mapping, payload)| (mapping, serde_json::from_str(&payload).unwrap()))
+            .collect()
+    }
+
+    const VALID_DIGEST: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// A vulnerability event for `proj/{repo}` in either format, with an optional tag.
+    fn scan_event(cloud: bool, repo: &str, digest: &str, tag: Option<&str>) -> String {
+        let mut resource = serde_json::json!({ "digest": digest });
+        if let Some(tag) = tag {
+            resource["tag"] = serde_json::json!(tag);
+        }
+        let data = serde_json::json!({
+            "repository": {"repo_full_name": format!("proj/{repo}")},
+            "resources": [resource],
+            "scan": {"scan_type": "vulnerability"},
+        });
+        if cloud {
+            serde_json::json!({"specversion":"1.0","type":"harbor.scan.completed","source":"harbor","data":data})
+        } else {
+            serde_json::json!({"type":"SCANNING_COMPLETED","event_data":data})
+        }
+        .to_string()
+    }
+
+    /// Sends `body` to the mapping route (`project` false) or the project route (`true`), with
+    /// the fixtures' fake token and secret. Returns the status.
+    async fn send_event(router: &Router, project: bool, body: &str) -> axum::http::StatusCode {
+        use tower::ServiceExt;
+        let request = if project {
+            project_request("proj-tok-fake", Some("Bearer proj-sec-fake"), body)
+        } else {
+            webhook_request("map-tok-fake", Some("Bearer map-sec-fake"), body)
+        };
+        router.clone().oneshot(request).await.unwrap().status()
+    }
+
+    /// An untagged event with a valid digest stores ONE resolve job and returns 202 on both
+    /// routes and in both formats, and Harbor is never called (#132).
+    #[tokio::test]
+    async fn untagged_valid_digest_queues_one_resolve_job_with_no_harbor_call_on_both_routes() {
+        use axum::http::StatusCode;
+        for project in [false, true] {
+            for cloud in [false, true] {
+                let name = format!("resolve-202-{project}-{cloud}");
+                let (router, pool, dir, harbor) = counting_router(&name).await;
+                if project {
+                    project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+                } else {
+                    webhook_fixture(&pool, "map-tok-fake", "map-sec-fake").await;
+                }
+                let body = scan_event(cloud, "app", VALID_DIGEST, None);
+                assert_eq!(
+                    send_event(&router, project, &body).await,
+                    StatusCode::ACCEPTED
+                );
+                let jobs = stored_jobs(&pool).await;
+                assert_eq!(jobs.len(), 1, "{name}");
+                assert_eq!(jobs[0].0, if project { "pm-app" } else { "wm1" });
+                assert_eq!(
+                    jobs[0].1,
+                    serde_json::json!({"kind":"resolve","repo_full_name":"proj/app","digest":VALID_DIGEST})
+                );
+                assert_eq!(
+                    harbor.0.load(std::sync::atomic::Ordering::SeqCst),
+                    0,
+                    "the webhook called Harbor ({name})"
+                );
+                pool.close().await;
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+
+    /// A tagged event stores one sync job as before, with no lookup and no `kind`.
+    #[tokio::test]
+    async fn tagged_event_queues_one_sync_job_with_no_lookup() {
+        use axum::http::StatusCode;
+        for project in [false, true] {
+            let (router, pool, dir, harbor) = counting_router(&format!("tagged-{project}")).await;
+            if project {
+                project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+            } else {
+                webhook_fixture(&pool, "map-tok-fake", "map-sec-fake").await;
+            }
+            let body = scan_event(false, "app", VALID_DIGEST, Some("v1"));
+            assert_eq!(
+                send_event(&router, project, &body).await,
+                StatusCode::ACCEPTED
+            );
+            let jobs = stored_jobs(&pool).await;
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(
+                jobs[0].1,
+                serde_json::json!({"repo_full_name":"proj/app","digest":VALID_DIGEST,"tag":"v1"})
+            );
+            assert_eq!(harbor.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+            pool.close().await;
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A missing or invalid digest on any vulnerability event returns 400 and stores nothing,
+    /// tagged or not, on both routes (#132).
+    #[tokio::test]
+    async fn invalid_digest_on_any_vulnerability_event_returns_400_and_stores_nothing() {
+        use axum::http::StatusCode;
+        let upper = format!("sha256:{}", "A".repeat(64));
+        let short = format!("sha256:{}", "a".repeat(63));
+        for project in [false, true] {
+            let (router, pool, dir, harbor) =
+                counting_router(&format!("bad-digest-{project}")).await;
+            if project {
+                project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+            } else {
+                webhook_fixture(&pool, "map-tok-fake", "map-sec-fake").await;
+            }
+            for digest in ["sha256:aaaa", upper.as_str(), short.as_str()] {
+                for tag in [None, Some("v1")] {
+                    for cloud in [false, true] {
+                        let body = scan_event(cloud, "app", digest, tag);
+                        assert_eq!(
+                            send_event(&router, project, &body).await,
+                            StatusCode::BAD_REQUEST,
+                            "{digest} {tag:?} cloud={cloud} project={project}"
+                        );
+                    }
+                }
+            }
+            // No digest at all.
+            let missing = scan_event(false, "app", "x", Some("v1")).replace(r#""digest":"x","#, "");
+            assert!(!missing.contains("digest"), "fixture");
+            assert_eq!(
+                send_event(&router, project, &missing).await,
+                StatusCode::BAD_REQUEST
+            );
+            assert!(stored_jobs(&pool).await.is_empty());
+            assert_eq!(harbor.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+            pool.close().await;
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A non-vulnerability event and an event for another repository stay `202` with nothing
+    /// stored, even with a digest that would be invalid.
+    #[tokio::test]
+    async fn non_vulnerability_and_other_repo_events_stay_202_ignored() {
+        use axum::http::StatusCode;
+        for project in [false, true] {
+            let (router, pool, dir, harbor) = counting_router(&format!("ignored-{project}")).await;
+            if project {
+                project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+            } else {
+                webhook_fixture(&pool, "map-tok-fake", "map-sec-fake").await;
+            }
+            for digest in [VALID_DIGEST, "sha256:aaaa"] {
+                let sbom = scan_event(false, "app", digest, None).replace("vulnerability", "sbom");
+                assert_eq!(
+                    send_event(&router, project, &sbom).await,
+                    StatusCode::ACCEPTED
+                );
+                let push = scan_event(false, "app", digest, None)
+                    .replace("SCANNING_COMPLETED", "PUSH_ARTIFACT");
+                assert_eq!(
+                    send_event(&router, project, &push).await,
+                    StatusCode::ACCEPTED
+                );
+            }
+            if !project {
+                // On the mapping route, another repository of the project is ignored.
+                let other = scan_event(false, "other", "sha256:aaaa", None);
+                assert_eq!(
+                    send_event(&router, project, &other).await,
+                    StatusCode::ACCEPTED
+                );
+            }
+            assert!(stored_jobs(&pool).await.is_empty());
+            assert_eq!(harbor.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+            pool.close().await;
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     /// The value the create and rotate responses return is the full `Authorization` header.

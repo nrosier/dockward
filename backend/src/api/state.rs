@@ -12,7 +12,7 @@ use crate::api::hardening::RateLimiter;
 use crate::auth::crypto::DerivedKey;
 use crate::error::AppError;
 use crate::services::credential_probe::{HarborProbe, OutboundHarborProbe};
-use crate::services::harbor_client::HarborGet;
+use crate::services::harbor_client::{HarborGet, HarborReply};
 use crate::services::oidc_jwt::JwksCache;
 use crate::services::sync::HarborFetch;
 use crate::services::throttle::LoginThrottle;
@@ -114,14 +114,14 @@ impl HarborProbe for HarborProbeHandle {
 /// Object-safe view of `HarborFetch`, for the same reason as `DynHarborProbe`: the
 /// `HarborFetch` future cannot be a trait object, so this trait returns a boxed future.
 pub trait DynHarborFetch: Send + Sync {
-    /// Sends `GET url` with the robot's basic auth. Returns the status and the body.
+    /// Sends `GET url` with the robot's basic auth. Returns the status, the body and `Retry-After`.
     fn fetch<'a>(
         &'a self,
         url: &'a Url,
         username: &'a str,
         secret: &'a [u8],
         extra_headers: &'a [(&'a str, &'a str)],
-    ) -> ProbeFuture<'a, (u16, Vec<u8>)>;
+    ) -> ProbeFuture<'a, HarborReply>;
 }
 
 impl DynHarborFetch for HarborGet {
@@ -131,7 +131,7 @@ impl DynHarborFetch for HarborGet {
         username: &'a str,
         secret: &'a [u8],
         extra_headers: &'a [(&'a str, &'a str)],
-    ) -> ProbeFuture<'a, (u16, Vec<u8>)> {
+    ) -> ProbeFuture<'a, HarborReply> {
         Box::pin(self.get(url, username, secret, extra_headers))
     }
 }
@@ -161,7 +161,7 @@ impl HarborFetch for HarborFetchHandle {
         username: &str,
         secret: &[u8],
         extra_headers: &[(&str, &str)],
-    ) -> Result<(u16, Vec<u8>), AppError> {
+    ) -> Result<HarborReply, AppError> {
         self.0.fetch(url, username, secret, extra_headers).await
     }
 }

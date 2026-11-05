@@ -16,8 +16,40 @@ use crate::services::credential_probe::{encode_repository_path, encode_segment};
 /// MIME type the vulnerability endpoint is asked for, and the key of the response object.
 pub const TRIVY_REPORT_MIME: &str = "application/vnd.security.vulnerability.report; version=1.1";
 
+/// What one Harbor GET answered: the status, the body, and the `Retry-After` header when
+/// Harbor sent one as a whole number of seconds (#132). A rate-limited resolve job reads it
+/// to decide how long to wait. The header is not read for any other purpose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarborReply {
+    pub status: u16,
+    pub body: Vec<u8>,
+    pub retry_after: Option<u64>,
+}
+
+impl HarborReply {
+    /// A reply with no `Retry-After` header.
+    pub fn new(status: u16, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            body,
+            retry_after: None,
+        }
+    }
+}
+
+/// Reads a `Retry-After` value as delta-seconds (RFC 9110 section 10.2.3). The HTTP-date form
+/// and anything that is not a plain non-negative integer is `None`, so it counts as absent.
+pub fn parse_retry_after(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    trimmed.parse().ok()
+}
+
 /// Fetches one GET from Harbor through the checked client, with the robot's basic
-/// auth. Returns the status and the body. The secret is held in a local buffer only.
+/// auth. Returns the status, the body and `Retry-After`. The secret is held in a local
+/// buffer only.
 pub struct HarborGet {
     client: crate::services::outbound::OutboundClient,
 }
@@ -39,7 +71,7 @@ impl HarborGet {
         username: &str,
         secret: &[u8],
         extra_headers: &[(&str, &str)],
-    ) -> Result<(u16, Vec<u8>), AppError> {
+    ) -> Result<HarborReply, AppError> {
         let secret = std::str::from_utf8(secret).map_err(|_| AppError::InternalError)?;
         let mut request = self
             .client
@@ -57,12 +89,21 @@ impl HarborGet {
         );
         let response = sent.map_err(|_| AppError::UpstreamUnreachable)?;
         let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_retry_after);
         let body = response
             .bytes()
             .await
             .map_err(|_| AppError::UpstreamUnreachable)?
             .to_vec();
-        Ok((status, body))
+        Ok(HarborReply {
+            status,
+            body,
+            retry_after,
+        })
     }
 }
 
@@ -197,6 +238,82 @@ pub fn parse_artifact_list(body: &[u8]) -> Result<Vec<(String, Vec<String>)>, Ap
             (artifact.digest, tags)
         })
         .collect())
+}
+
+/// One tag of an artifact: its name and Harbor's `push_time` (RFC 3339 text) when present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactTag {
+    pub name: String,
+    pub push_time: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaggedArtifact {
+    #[serde(default)]
+    tags: Option<Vec<DatedTag>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DatedTag {
+    name: String,
+    #[serde(default)]
+    push_time: Option<String>,
+}
+
+impl From<DatedTag> for ArtifactTag {
+    fn from(tag: DatedTag) -> Self {
+        Self {
+            name: tag.name,
+            push_time: tag.push_time,
+        }
+    }
+}
+
+/// Reads the tags of one artifact body (`GET .../artifacts/{digest}`): each tag's `name` and
+/// `push_time`. `tags` missing or `null` is an empty list. Names are not validated here.
+pub fn parse_artifact_tags(body: &[u8]) -> Result<Vec<ArtifactTag>, AppError> {
+    let artifact: TaggedArtifact =
+        serde_json::from_slice(body).map_err(|_| AppError::UpstreamUnreachable)?;
+    Ok(artifact
+        .tags
+        .unwrap_or_default()
+        .into_iter()
+        .map(ArtifactTag::from)
+        .collect())
+}
+
+#[derive(Debug, Deserialize)]
+struct DatedArtifact {
+    digest: String,
+    #[serde(default)]
+    tags: Option<Vec<DatedTag>>,
+}
+
+/// Like [`parse_artifact_list`], but each tag keeps its `push_time`, so the poller can cut a
+/// digest to its newest tags (#132).
+pub fn parse_artifact_list_dated(body: &[u8]) -> Result<Vec<(String, Vec<ArtifactTag>)>, AppError> {
+    let listed: Vec<DatedArtifact> =
+        serde_json::from_slice(body).map_err(|_| AppError::UpstreamUnreachable)?;
+    Ok(listed
+        .into_iter()
+        .map(|artifact| {
+            let tags = artifact
+                .tags
+                .unwrap_or_default()
+                .into_iter()
+                .map(ArtifactTag::from)
+                .collect();
+            (artifact.digest, tags)
+        })
+        .collect())
+}
+
+/// True for `sha256:` followed by exactly 64 lowercase hex digits: the form Harbor returns,
+/// and a strict check that keeps a digest safe as a URL path segment (#132).
+pub fn valid_digest(digest: &str) -> bool {
+    digest.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 fn invalid_name() -> AppError {
@@ -363,6 +480,52 @@ mod tests {
     fn another_mime_key_means_not_yet() {
         let body = r#"{"application/other": {}}"#;
         assert_eq!(parse_report(body.as_bytes()).unwrap(), ReportState::NotYet);
+    }
+
+    #[test]
+    fn retry_after_reads_whole_seconds_only() {
+        assert_eq!(parse_retry_after("252"), Some(252));
+        assert_eq!(parse_retry_after(" 30 "), Some(30));
+        assert_eq!(parse_retry_after("0"), Some(0));
+        assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        assert_eq!(parse_retry_after("-5"), None);
+        assert_eq!(parse_retry_after("1.5"), None);
+        assert_eq!(parse_retry_after(""), None);
+        assert_eq!(parse_retry_after("99999999999999999999999"), None);
+    }
+
+    #[test]
+    fn artifact_tags_keep_name_and_push_time() {
+        let body = r#"{"digest":"sha256:x","tags":[
+            {"name":"v1","push_time":"2026-11-05T10:00:00.000Z","id":1},
+            {"name":"v2"}]}"#;
+        let tags = parse_artifact_tags(body.as_bytes()).unwrap();
+        assert_eq!(
+            tags,
+            vec![
+                ArtifactTag {
+                    name: "v1".to_owned(),
+                    push_time: Some("2026-11-05T10:00:00.000Z".to_owned())
+                },
+                ArtifactTag {
+                    name: "v2".to_owned(),
+                    push_time: None
+                },
+            ]
+        );
+        assert!(parse_artifact_tags(br#"{"tags":null}"#).unwrap().is_empty());
+        assert!(parse_artifact_tags(b"{}").unwrap().is_empty());
+        assert!(parse_artifact_tags(b"not json").is_err());
+    }
+
+    #[test]
+    fn digest_must_be_sha256_and_64_lowercase_hex() {
+        assert!(valid_digest(&format!("sha256:{}", "a".repeat(64))));
+        assert!(!valid_digest("sha256:aaaa"));
+        assert!(!valid_digest(&format!("sha256:{}", "A".repeat(64))));
+        assert!(!valid_digest(&format!("sha256:{}", "a".repeat(65))));
+        assert!(!valid_digest(&format!("sha512:{}", "a".repeat(64))));
+        assert!(!valid_digest(&"a".repeat(64)));
     }
 
     #[test]

@@ -2,7 +2,8 @@
 //!
 //! Webhooks are the primary trigger. Every 15 minutes this poller lists the artifacts of
 //! each mapping's Harbor repository and queues one sync job for every `(digest, tag)` pair
-//! that has a tag and no successful or pending sync. Untagged artifacts are skipped. Each
+//! that has a tag and no successful or pending sync. Untagged artifacts are skipped. Each digest
+//! is cut to its newest 10 tags by tag `push_time`, the same cut as the resolve job (#132). Each
 //! run is recorded in `job_runs` with kind `poll`.
 //!
 //! The poller only reads from Harbor. It queues jobs; the worker does the syncs. Error
@@ -26,8 +27,11 @@ use crate::db::{credentials as credential_db, sync_jobs, sync_reports};
 use crate::error::AppError;
 use crate::services::audit::{self, Actor};
 use crate::services::credentials::{base_for_join, decrypt_token};
-use crate::services::harbor_client::{HarborGet, artifacts_list_url, parse_artifact_list};
+use crate::services::harbor_client::{
+    HarborGet, HarborReply, artifacts_list_url, parse_artifact_list_dated,
+};
 use crate::services::ids;
+use crate::services::resolve::{MAX_TAGS_PER_DIGEST, newest_tags};
 use crate::services::sync::HarborFetch;
 use crate::worker::now_secs;
 
@@ -165,16 +169,17 @@ async fn poll_mapping<H: HarborFetch>(
             page,
             PAGE_SIZE,
         )?;
-        let (status, body) = http.fetch(&url, &username, &secret, &[]).await?;
+        let HarborReply { status, body, .. } = http.fetch(&url, &username, &secret, &[]).await?;
         if status != 200 {
             return Err(AppError::UpstreamUnreachable);
         }
-        let artifacts = parse_artifact_list(&body)?;
+        let artifacts = parse_artifact_list_dated(&body)?;
         if artifacts.is_empty() {
             break;
         }
         for (digest, tags) in artifacts {
-            for tag in tags.iter().filter(|tag| !tag.is_empty()) {
+            // The same cut as the resolve job (#132): valid tag names, newest 10 by push time.
+            for tag in &newest_tags(tags, MAX_TAGS_PER_DIGEST) {
                 if sync_reports::has_success(
                     pool,
                     &mapping.id,
@@ -204,8 +209,10 @@ async fn poll_mapping<H: HarborFetch>(
     Ok(queued)
 }
 
-/// The robot username and the decrypted secret of the mapping's Harbor credential.
-async fn harbor_login(
+/// The robot username and the decrypted secret of the mapping's Harbor credential. The
+/// credential is read scoped by the mapping's user, so a credential of another user is
+/// `NotFound`. The resolve job uses it too (#132).
+pub(crate) async fn harbor_login(
     pool: &SqlitePool,
     key: &DerivedKey,
     mapping: &MappingRow,
@@ -301,7 +308,7 @@ mod tests {
             _username: &str,
             _secret: &[u8],
             _extra_headers: &[(&str, &str)],
-        ) -> Result<(u16, Vec<u8>), AppError> {
+        ) -> Result<HarborReply, AppError> {
             let query = url.query().unwrap_or_default().to_owned();
             lock(&self.pages).push(format!("{} {query}", url.path()));
             let repository = url
@@ -316,9 +323,9 @@ mod tests {
                 .cloned()
                 .unwrap_or((404, String::new()));
             if status == 200 && !query.starts_with("page=1&") {
-                return Ok((200, b"[]".to_vec()));
+                return Ok(HarborReply::new(200, b"[]".to_vec()));
             }
-            Ok((status, body.into_bytes()))
+            Ok(HarborReply::new(status, body.into_bytes()))
         }
     }
 
@@ -536,6 +543,38 @@ mod tests {
         let jobs = fx.jobs().await;
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].1["digest"], "sha256:dddd");
+    }
+
+    /// A digest with 12 tags is cut to its newest 10 by tag push time, the same cut as the
+    /// resolve job (#132). The two oldest are not queued.
+    #[tokio::test]
+    async fn poller_caps_a_digest_to_its_newest_ten_tags() {
+        let fx = Fixture::new("cap").await;
+        let tags: Vec<String> = (0..12)
+            .map(|n| {
+                format!(r#"{{"name": "t{n:02}", "push_time": "2026-11-05T10:00:{n:02}.000Z"}}"#)
+            })
+            .collect();
+        let body = format!(
+            r#"[{{"digest": "sha256:aaaa", "tags": [{}]}}]"#,
+            tags.join(",")
+        );
+        let harbor = FakeHarbor::with("app", 200, &body);
+        harbor.set("other", 200, "[]");
+
+        assert_eq!(
+            poll_once(&fx.pool, &key(), &harbor, 1_000).await.unwrap(),
+            10
+        );
+        let mut queued: Vec<String> = fx
+            .jobs()
+            .await
+            .iter()
+            .map(|(_, payload)| payload["tag"].as_str().unwrap().to_owned())
+            .collect();
+        queued.sort();
+        let expected: Vec<String> = (2..12).map(|n| format!("t{n:02}")).collect();
+        assert_eq!(queued, expected);
     }
 
     #[tokio::test]
@@ -812,14 +851,14 @@ mod tests {
             _username: &str,
             _secret: &[u8],
             _extra_headers: &[(&str, &str)],
-        ) -> Result<(u16, Vec<u8>), AppError> {
+        ) -> Result<HarborReply, AppError> {
             let mut calls = lock(&self.calls);
             *calls += 1;
             let body = format!(
                 r#"[{{"digest": "sha256:{:04}", "tags": [{{"name": "v{}"}}]}}]"#,
                 *calls, *calls
             );
-            Ok((200, body.into_bytes()))
+            Ok(HarborReply::new(200, body.into_bytes()))
         }
     }
 }
