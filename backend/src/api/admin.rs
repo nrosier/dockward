@@ -589,6 +589,7 @@ pub(crate) mod test_support {
             issues_client: std::sync::Arc::new(
                 crate::services::github_issues::GithubIssues::new().unwrap(),
             ),
+            harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
         };
         (state, dir)
     }
@@ -843,6 +844,7 @@ mod tests {
             issues_client: std::sync::Arc::new(
                 crate::services::github_issues::GithubIssues::new().unwrap(),
             ),
+            harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }

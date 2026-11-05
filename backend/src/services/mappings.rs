@@ -82,6 +82,29 @@ pub struct NewMapping {
     pub min_issue_severity: Option<String>,
 }
 
+/// A partial update (`PUT /mappings/:id`). Each field is optional, and `None` leaves it
+/// unchanged. The field names are the create field names. Unknown fields are ignored,
+/// as the create route ignores them.
+#[derive(Clone, Default, Deserialize)]
+pub struct MappingPatch {
+    pub harbor_cred_id: Option<String>,
+    pub github_cred_id: Option<String>,
+    pub harbor_project: Option<String>,
+    pub harbor_repository: Option<String>,
+    pub github_owner: Option<String>,
+    pub github_repo: Option<String>,
+    pub default_branch: Option<String>,
+    pub auto_create_issues: Option<bool>,
+    pub min_issue_severity: Option<String>,
+}
+
+/// The two outbound probes a mapping write uses. Grouped so the write functions keep
+/// a short argument list. Tests pass fakes.
+pub struct Probes<'a, P: HarborProbe, G: GithubProbe> {
+    pub harbor: &'a P,
+    pub github: &'a G,
+}
+
 /// Query parameters for the list route.
 #[derive(Debug, Default)]
 pub struct ListQuery {
@@ -420,6 +443,190 @@ pub async fn create<P: HarborProbe, G: GithubProbe>(
         // The value Harbor sends as the Authorization header, ready to paste.
         auth_secret: format!("Bearer {secret}"),
     })
+}
+
+/// Updates one owned mapping from a partial patch. Only changed fields are validated
+/// and probed. The webhook token and auth secret are not touched, and no shown-once
+/// value is returned. Writes `mapping.update` with the changed field names only, in the
+/// same transaction as the change.
+pub async fn update<P: HarborProbe, G: GithubProbe>(
+    pool: &SqlitePool,
+    credentials_key: &DerivedKey,
+    probes: Probes<'_, P, G>,
+    actor: &Actor,
+    user_id: &str,
+    id: &str,
+    patch: MappingPatch,
+) -> Result<Mapping, AppError> {
+    let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
+    let current = db::find_owned(&mut tx, user_id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let mut next = current.clone();
+    let mut changed: Vec<&str> = Vec::new();
+
+    if let Some(value) = patch.harbor_project.as_deref() {
+        validate_text("harbor_project", value)?;
+        next.harbor_project = value.to_owned();
+        changed.push("harbor_project");
+    }
+    if let Some(value) = patch.harbor_repository.as_deref() {
+        validate_text("harbor_repository", value)?;
+        next.harbor_repository = value.to_owned();
+        changed.push("harbor_repository");
+    }
+    if patch.harbor_project.is_some() || patch.harbor_repository.is_some() {
+        validate_harbor_names(&next.harbor_project, &next.harbor_repository)?;
+    }
+    if let Some(value) = patch.github_owner.as_deref() {
+        validate_text("github_owner", value)?;
+        next.github_owner = value.to_owned();
+        changed.push("github_owner");
+    }
+    if let Some(value) = patch.github_repo.as_deref() {
+        validate_text("github_repo", value)?;
+        next.github_repo = value.to_owned();
+        changed.push("github_repo");
+    }
+    if let Some(value) = patch.default_branch.as_deref() {
+        validate_text("default_branch", value)?;
+        next.default_branch = value.to_owned();
+        changed.push("default_branch");
+    }
+    if let Some(value) = patch.min_issue_severity.as_deref() {
+        validate_severity(value)?;
+        next.min_issue_severity = Some(value.to_owned());
+        changed.push("min_issue_severity");
+    }
+    if let Some(value) = patch.auto_create_issues {
+        next.auto_create_issues = Some(value);
+        changed.push("auto_create_issues");
+    }
+    if let Some(value) = patch.harbor_cred_id.as_deref() {
+        // The mapping copies the base URL of its Harbor credential, so a credential
+        // change refreshes the copy. The caller must own the credential.
+        next.harbor_base_url = harbor_base_of(&mut tx, user_id, value).await?;
+        next.harbor_cred_id = value.to_owned();
+        changed.push("harbor_cred_id");
+    }
+    if let Some(value) = patch.github_cred_id.as_deref() {
+        check_github(&mut tx, user_id, value).await?;
+        next.github_cred_id = value.to_owned();
+        changed.push("github_cred_id");
+    }
+
+    // Probe again only for the parts that changed. A Harbor repository change, or a Harbor
+    // credential change, re-checks the repository. A GitHub target change re-checks code
+    // scanning. Turning issues on, or changing the GitHub target while they are on, re-checks
+    // the Issues permission.
+    let harbor_changed = patch.harbor_cred_id.is_some()
+        || patch.harbor_project.is_some()
+        || patch.harbor_repository.is_some();
+    if harbor_changed {
+        check_harbor_repository(
+            &mut tx,
+            credentials_key,
+            probes.harbor,
+            user_id,
+            &next.harbor_cred_id,
+            &next.harbor_project,
+            &next.harbor_repository,
+        )
+        .await?;
+    }
+    let github_changed = patch.github_cred_id.is_some()
+        || patch.github_owner.is_some()
+        || patch.github_repo.is_some();
+    if github_changed {
+        check_code_scanning(
+            &mut tx,
+            credentials_key,
+            probes.github,
+            user_id,
+            &next.github_cred_id,
+            &next.github_owner,
+            &next.github_repo,
+        )
+        .await?;
+    }
+    let issues_on = next.auto_create_issues.unwrap_or(false);
+    let issues_turned_on = issues_on && current.auto_create_issues != Some(true);
+    if issues_on && (github_changed || issues_turned_on) {
+        check_issues(
+            &mut tx,
+            credentials_key,
+            probes.github,
+            user_id,
+            &next.github_cred_id,
+            &next.github_owner,
+            &next.github_repo,
+        )
+        .await?;
+    }
+
+    let target_changed =
+        harbor_changed || patch.github_owner.is_some() || patch.github_repo.is_some();
+    let collision = if target_changed {
+        db::find_conflict(
+            &mut tx,
+            &next.harbor_base_url,
+            &next.harbor_project,
+            &next.harbor_repository,
+            &next.github_owner,
+            &next.github_repo,
+            id,
+        )
+        .await?
+    } else {
+        None
+    };
+    if let Some((other_id, other_user)) = collision {
+        return Err(conflict_error(&other_id, &other_user, user_id));
+    }
+
+    if changed.is_empty() {
+        tx.commit().await.map_err(|_| AppError::InternalError)?;
+        return to_mapping(current);
+    }
+
+    let written = db::update_owned(&mut tx, user_id, &next)
+        .await
+        .map_err(|err| match err {
+            // A UNIQUE violation is a race with another write. The id of the other
+            // mapping is unknown here, so the message is the generic one.
+            sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
+                AppError::Conflict(
+                    "this Harbor repository or GitHub target is already mapped.".to_owned(),
+                )
+            }
+            _ => AppError::InternalError,
+        })?;
+    if written == 0 {
+        return Err(AppError::NotFound);
+    }
+    let details = serde_json::json!({ "changed_fields": changed });
+    audit::record(
+        &mut tx,
+        actor,
+        "mapping.update",
+        &format!("mapping:{id}"),
+        Some(&details),
+    )
+    .await?;
+    tx.commit().await.map_err(|_| AppError::InternalError)?;
+    to_mapping(load_row_owned(pool, user_id, id).await?)
+}
+
+/// Reads one owned row. Used after a write, so the response shows the stored values.
+async fn load_row_owned(
+    pool: &SqlitePool,
+    user_id: &str,
+    id: &str,
+) -> Result<MappingRow, AppError> {
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    db::find_owned(&mut conn, user_id, id)
+        .await?
+        .ok_or(AppError::NotFound)
 }
 
 /// Builds the `409` for a duplicate. The body names the other mapping only when the
@@ -1333,6 +1540,264 @@ mod tests {
                 .unwrap();
         let value: serde_json::Value = serde_json::from_str(&details).unwrap();
         assert_eq!(value["open_issue_numbers"], serde_json::json!([7, 9]));
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A mapping for `owner` with the given Harbor repository and GitHub repo. Returns its id.
+    async fn mapping_for(pool: &SqlitePool, owner: &str, repo: &str, gh_repo: &str) -> String {
+        let (h, g) = creds(pool, owner).await;
+        create(
+            pool,
+            &key(),
+            &READABLE,
+            &GH_READY,
+            &actor(owner),
+            owner,
+            PUBLIC,
+            input(&h, &g, repo, gh_repo),
+        )
+        .await
+        .unwrap()
+        .mapping
+        .id
+    }
+
+    /// A patch with every field unset.
+    fn no_change() -> MappingPatch {
+        MappingPatch::default()
+    }
+
+    /// Runs `update` with the given probes and patch.
+    async fn update_with<P: HarborProbe, G: GithubProbe>(
+        pool: &SqlitePool,
+        probes: Probes<'_, P, G>,
+        owner: &str,
+        id: &str,
+        patch: MappingPatch,
+    ) -> Result<Mapping, AppError> {
+        update(pool, &key(), probes, &actor(owner), owner, id, patch).await
+    }
+
+    #[tokio::test]
+    async fn update_collision_names_the_mapping_only_for_its_owner() {
+        let (pool, dir) = fresh_pool("update-collide").await;
+        let owner = user(&pool, "owner").await;
+        let other = user(&pool, "other").await;
+        let first = mapping_for(&pool, &owner, "repo-a", "gh-a").await;
+        let second = mapping_for(&pool, &owner, "repo-b", "gh-b").await;
+        let (oh, og) = creds(&pool, &other).await;
+        let other_id = create(
+            &pool,
+            &key(),
+            &READABLE,
+            &GH_READY,
+            &actor(&other),
+            &other,
+            PUBLIC,
+            input(&oh, &og, "repo-c", "gh-c"),
+        )
+        .await
+        .unwrap()
+        .mapping
+        .id;
+        let probes = || Probes {
+            harbor: &READABLE,
+            github: &GH_READY,
+        };
+
+        // The owner moves their second mapping onto a repository the first one uses. The
+        // 409 names the first mapping, because the owner owns it.
+        let own = update_with(
+            &pool,
+            probes(),
+            &owner,
+            &second,
+            MappingPatch {
+                harbor_repository: Some("repo-a".to_owned()),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap_err();
+        match own {
+            AppError::Conflict(message) => assert!(message.contains(&first)),
+            other => panic!("expected conflict, got {other:?}"),
+        }
+
+        // The owner moves a mapping onto the other tenant's repository. The 409 is generic,
+        // so the other tenant's mapping id is not revealed.
+        let foreign = update_with(
+            &pool,
+            probes(),
+            &owner,
+            &second,
+            MappingPatch {
+                harbor_repository: Some("repo-c".to_owned()),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap_err();
+        match foreign {
+            AppError::Conflict(message) => {
+                assert!(!message.contains(&other_id), "leaked another tenant's id");
+                assert_eq!(
+                    message,
+                    "this Harbor repository or GitHub target is already mapped."
+                );
+            }
+            other => panic!("expected conflict, got {other:?}"),
+        }
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_invalid_values_with_422() {
+        let (pool, dir) = fresh_pool("update-422").await;
+        let owner = user(&pool, "owner").await;
+        let id = mapping_for(&pool, &owner, "repo", "gh").await;
+        let probes = || Probes {
+            harbor: &READABLE,
+            github: &GH_READY,
+        };
+        let cases = [
+            MappingPatch {
+                harbor_repository: Some("repo?x".to_owned()),
+                ..no_change()
+            },
+            MappingPatch {
+                harbor_project: Some("proj/x".to_owned()),
+                ..no_change()
+            },
+            MappingPatch {
+                github_owner: Some("   ".to_owned()),
+                ..no_change()
+            },
+            MappingPatch {
+                min_issue_severity: Some("MEDIUM".to_owned()),
+                ..no_change()
+            },
+        ];
+        for patch in cases {
+            let err = update_with(&pool, probes(), &owner, &id, patch)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, AppError::ValidationFailed(_)), "{err:?}");
+            assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        // Nothing was stored by the refused writes.
+        let stored = load_owned(&pool, &owner, &id).await.unwrap();
+        assert_eq!(stored.harbor_repository, "repo");
+        assert_eq!(stored.min_issue_severity, "CRITICAL");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn update_keeps_webhook_token_and_secret_and_returns_no_secret() {
+        let (pool, dir) = fresh_pool("update-keep-secrets").await;
+        let owner = user(&pool, "owner").await;
+        let id = mapping_for(&pool, &owner, "repo", "gh").await;
+        let before = db::find_owned(&mut pool.acquire().await.unwrap(), &owner, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        let updated = update_with(
+            &pool,
+            Probes {
+                harbor: &READABLE,
+                github: &GH_READY,
+            },
+            &owner,
+            &id,
+            MappingPatch {
+                harbor_repository: Some("repo-two".to_owned()),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap();
+        let after = db::find_owned(&mut pool.acquire().await.unwrap(), &owner, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.harbor_repository, "repo-two");
+        assert_eq!(after.webhook_token_hash, before.webhook_token_hash);
+        assert_eq!(
+            after.webhook_auth_secret_hash,
+            before.webhook_auth_secret_hash
+        );
+        // The response is the Mapping object, which never carries a secret or the URL.
+        let json = serde_json::to_string(&updated).unwrap();
+        assert!(!json.contains("webhook"));
+        assert!(!json.contains("Bearer"));
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn update_writes_an_audit_row_with_field_names_only() {
+        let (pool, dir) = fresh_pool("update-audit").await;
+        let owner = user(&pool, "owner").await;
+        let id = mapping_for(&pool, &owner, "repo", "gh").await;
+        update_with(
+            &pool,
+            Probes {
+                harbor: &READABLE,
+                github: &GH_READY,
+            },
+            &owner,
+            &id,
+            MappingPatch {
+                harbor_repository: Some("repo-two".to_owned()),
+                default_branch: Some("trunk".to_owned()),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap();
+        let row: (String, String) =
+            sqlx::query_as("SELECT action, details FROM audit_log WHERE action = 'mapping.update'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "mapping.update");
+        let details: serde_json::Value = serde_json::from_str(&row.1).unwrap();
+        assert_eq!(
+            details["changed_fields"],
+            serde_json::json!(["harbor_repository", "default_branch"])
+        );
+        // The values are not recorded, only the names.
+        assert!(!row.1.contains("repo-two"));
+        assert!(!row.1.contains("trunk"));
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn update_of_another_users_mapping_is_not_found() {
+        let (pool, dir) = fresh_pool("update-tenancy").await;
+        let owner = user(&pool, "owner").await;
+        let other = user(&pool, "other").await;
+        let id = mapping_for(&pool, &owner, "repo", "gh").await;
+        let err = update_with(
+            &pool,
+            Probes {
+                harbor: &READABLE,
+                github: &GH_READY,
+            },
+            &other,
+            &id,
+            MappingPatch {
+                harbor_repository: Some("repo-two".to_owned()),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::NotFound), "{err:?}");
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

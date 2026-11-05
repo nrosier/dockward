@@ -80,12 +80,13 @@ pub async fn find_owned(
     .map_err(|_| AppError::InternalError)
 }
 
-/// Replaces the editable columns of one owned mapping.
+/// Replaces the editable columns of one owned mapping. Returns the rows changed. The
+/// raw `sqlx::Error` is returned so the caller can tell a UNIQUE violation (`409`).
 pub async fn update_owned(
     conn: &mut SqliteConnection,
     user_id: &str,
     row: &MappingRow,
-) -> Result<(), AppError> {
+) -> Result<u64, sqlx::Error> {
     sqlx::query!(
         "UPDATE repo_mappings
             SET harbor_cred_id = ?, github_cred_id = ?, harbor_base_url = ?,
@@ -107,8 +108,7 @@ pub async fn update_owned(
     )
     .execute(conn)
     .await
-    .map(|_| ())
-    .map_err(|_| AppError::InternalError)
+    .map(|done| done.rows_affected())
 }
 
 /// Replaces the webhook token digest of one owned mapping.
