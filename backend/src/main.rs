@@ -76,7 +76,9 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         )
         .route(
             "/api/v1/mappings/{id}",
-            get(api::mappings::get).delete(api::mappings::delete),
+            get(api::mappings::get)
+                .put(api::mappings::update)
+                .delete(api::mappings::delete),
         )
         .route(
             "/api/v1/mappings/{id}/rotate-webhook-token",
@@ -548,6 +550,8 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
             services::github_issues::GithubIssues::new()
                 .map_err(|_| "could not build the GitHub issues client")?,
         ),
+        harbor_probe: api::state::HarborProbeHandle::outbound(settings.allow_private_harbor)
+            .map_err(|_| "could not build the Harbor probe")?,
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -788,6 +792,7 @@ mod tests {
             issues_client: std::sync::Arc::new(
                 crate::services::github_issues::GithubIssues::new().unwrap(),
             ),
+            harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -805,6 +810,177 @@ mod tests {
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A Harbor probe that answers every artifacts request with `200`. No socket.
+    struct ReadableHarbor;
+
+    impl api::state::DynHarborProbe for ReadableHarbor {
+        fn users_current<'a>(
+            &'a self,
+            _base: &'a reqwest::Url,
+            _username: &'a str,
+            _secret: &'a [u8],
+        ) -> api::state::ProbeFuture<'a, u16> {
+            Box::pin(async { Ok(200) })
+        }
+
+        fn artifacts_status<'a>(
+            &'a self,
+            _base: &'a reqwest::Url,
+            _username: &'a str,
+            _secret: &'a [u8],
+            _project: &'a str,
+            _repository: &'a str,
+        ) -> api::state::ProbeFuture<'a, u16> {
+            Box::pin(async { Ok(200) })
+        }
+    }
+
+    /// `PUT /api/v1/mappings/:id` through the router. Checks session (`401`), CSRF
+    /// (`403`), tenancy (`404` for another user's mapping), and the owner's `200` for a
+    /// changed `harbor_repository`. The Harbor probe is a fake, so no live Harbor is used.
+    #[tokio::test]
+    async fn mapping_put_route_checks_session_csrf_tenancy_and_owner_update() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let probe = api::state::HarborProbeHandle::new(Arc::new(ReadableHarbor));
+        let (router, pool, dir, _) = test_router_with_probe(
+            "mapping-put-route",
+            services::throttle::LoginThrottle::new(),
+            api::webhooks::new_token_limiter(),
+            probe,
+        )
+        .await;
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        for id in ["owner-1", "other-2"] {
+            db::users::insert_local(&mut conn, id, id, None, "h", "user")
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        let owner_actor = services::audit::Actor {
+            user_id: Some("owner-1".to_owned()),
+            username: "owner-1".to_owned(),
+        };
+        let harbor_cred = services::credentials::create(
+            &pool,
+            &auth::crypto::credentials_key(&root).unwrap(),
+            &owner_actor,
+            "owner-1",
+            services::credentials::NewCredential {
+                service_type: services::credentials::SERVICE_HARBOR.to_owned(),
+                label: "h".to_owned(),
+                base_url: Some("https://harbor.example.com".to_owned()),
+                username: Some("robot$hg".to_owned()),
+                token: "test-harbor-secret".to_owned(),
+                expires_at: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let github_cred = services::credentials::create(
+            &pool,
+            &auth::crypto::credentials_key(&root).unwrap(),
+            &owner_actor,
+            "owner-1",
+            services::credentials::NewCredential {
+                service_type: services::credentials::SERVICE_GITHUB.to_owned(),
+                label: "g".to_owned(),
+                base_url: None,
+                username: None,
+                token: "test-github-secret".to_owned(),
+                expires_at: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+             VALUES ('rm1', 'owner-1', ?, ?, 'https://harbor.example.com', 'proj', 'app', 'octo', 'app', 'h1', 'h2')",
+        )
+        .bind(&harbor_cred.id)
+        .bind(&github_cred.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let key = auth::crypto::csrf_key(&root).unwrap();
+        let csrf = auth::csrf::issue(&key).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let owner = format!("{}; {csrf_cookie}", session_cookie("owner-1", "user", 0));
+        let other = format!("{}; {csrf_cookie}", session_cookie("other-2", "user", 0));
+        let body = r#"{"harbor_repository":"app-two"}"#;
+        let put = |cookie: Option<&str>, token: Option<&str>, uri: &str| {
+            let mut builder = with_peer(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header("content-type", "application/json"),
+            );
+            if let Some(cookie) = cookie {
+                builder = builder.header("cookie", cookie);
+            }
+            if let Some(token) = token {
+                builder = builder.header("x-csrf-token", token);
+            }
+            builder.body(Body::from(body)).unwrap()
+        };
+
+        // No session, with a matching CSRF cookie and token, so the CSRF guard passes and
+        // the session check decides: 401.
+        let anonymous = router
+            .clone()
+            .oneshot(put(Some(&csrf_cookie), Some(&csrf), "/api/v1/mappings/rm1"))
+            .await
+            .unwrap()
+            .status();
+        // A session but no CSRF token: 403.
+        let no_csrf = router
+            .clone()
+            .oneshot(put(Some(&owner), None, "/api/v1/mappings/rm1"))
+            .await
+            .unwrap()
+            .status();
+        // Another user's mapping: 404, with the CSRF token present.
+        let foreign = router
+            .clone()
+            .oneshot(put(Some(&other), Some(&csrf), "/api/v1/mappings/rm1"))
+            .await
+            .unwrap()
+            .status();
+        // The owner, with the token: 200 and the new repository.
+        let owned = router
+            .oneshot(put(Some(&owner), Some(&csrf), "/api/v1/mappings/rm1"))
+            .await
+            .unwrap();
+        let owned_status = owned.status();
+        let owned_body = axum::body::to_bytes(owned.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let stored: String =
+            sqlx::query_scalar("SELECT harbor_repository FROM repo_mappings WHERE id = 'rm1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(anonymous, StatusCode::UNAUTHORIZED);
+        assert_eq!(no_csrf, StatusCode::FORBIDDEN);
+        assert_eq!(foreign, StatusCode::NOT_FOUND);
+        assert_eq!(owned_status, StatusCode::OK, "owner update was refused");
+        assert_eq!(stored, "app-two");
+        let json: serde_json::Value = serde_json::from_slice(&owned_body).unwrap();
+        assert_eq!(json["harbor_repository"], "app-two");
+        assert!(json.get("webhook_url").is_none());
+        assert!(json.get("auth_secret").is_none());
     }
 
     /// A router over a fresh database, with the session and CSRF keys derived from
@@ -830,6 +1006,23 @@ mod tests {
         name: &str,
         login_throttle: services::throttle::LoginThrottle,
         webhook_token_limiter: api::hardening::RateLimiter,
+    ) -> (
+        Router,
+        sqlx::SqlitePool,
+        std::path::PathBuf,
+        api::hardening::RateLimiter,
+    ) {
+        let outbound = api::state::HarborProbeHandle::outbound(false).unwrap();
+        test_router_with_probe(name, login_throttle, webhook_token_limiter, outbound).await
+    }
+
+    /// The full test router with the given Harbor probe. A router test that changes a
+    /// Harbor repository passes a fake here, so no live Harbor is called.
+    async fn test_router_with_probe(
+        name: &str,
+        login_throttle: services::throttle::LoginThrottle,
+        webhook_token_limiter: api::hardening::RateLimiter,
+        harbor_probe: api::state::HarborProbeHandle,
     ) -> (
         Router,
         sqlx::SqlitePool,
@@ -863,6 +1056,7 @@ mod tests {
             issues_client: std::sync::Arc::new(
                 crate::services::github_issues::GithubIssues::new().unwrap(),
             ),
+            harbor_probe,
         };
         (app(Vec::new(), state), pool, dir, handle)
     }

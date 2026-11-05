@@ -1,14 +1,113 @@
 //! Shared application state for handlers and extractors.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use reqwest::Url;
 use sqlx::SqlitePool;
 
 use crate::api::hardening::RateLimiter;
 use crate::auth::crypto::DerivedKey;
+use crate::error::AppError;
+use crate::services::credential_probe::{HarborProbe, OutboundHarborProbe};
 use crate::services::oidc_jwt::JwksCache;
 use crate::services::throttle::LoginThrottle;
+
+/// The future a probe call returns. It is boxed so the probe can be a trait object.
+pub type ProbeFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, AppError>> + Send + 'a>>;
+
+/// Object-safe view of `HarborProbe`. `HarborProbe` uses `async fn`, which cannot be a
+/// trait object, so this trait returns boxed futures. The production probe and the test
+/// fakes implement it.
+pub trait DynHarborProbe: Send + Sync {
+    /// Sends the robot test and returns the HTTP status code.
+    fn users_current<'a>(
+        &'a self,
+        base: &'a Url,
+        username: &'a str,
+        secret: &'a [u8],
+    ) -> ProbeFuture<'a, u16>;
+
+    /// Sends the repository artifacts request and returns the HTTP status code.
+    fn artifacts_status<'a>(
+        &'a self,
+        base: &'a Url,
+        username: &'a str,
+        secret: &'a [u8],
+        project: &'a str,
+        repository: &'a str,
+    ) -> ProbeFuture<'a, u16>;
+}
+
+impl DynHarborProbe for OutboundHarborProbe {
+    fn users_current<'a>(
+        &'a self,
+        base: &'a Url,
+        username: &'a str,
+        secret: &'a [u8],
+    ) -> ProbeFuture<'a, u16> {
+        Box::pin(HarborProbe::users_current(self, base, username, secret))
+    }
+
+    fn artifacts_status<'a>(
+        &'a self,
+        base: &'a Url,
+        username: &'a str,
+        secret: &'a [u8],
+        project: &'a str,
+        repository: &'a str,
+    ) -> ProbeFuture<'a, u16> {
+        Box::pin(HarborProbe::artifacts_status(
+            self, base, username, secret, project, repository,
+        ))
+    }
+}
+
+/// The Harbor probe that `AppState` holds. It implements `HarborProbe`, so the generic
+/// service code takes it. Production uses the outbound probe; tests inject a fake.
+#[derive(Clone)]
+pub struct HarborProbeHandle(Arc<dyn DynHarborProbe>);
+
+impl HarborProbeHandle {
+    /// The production probe: the guarded outbound client. `allow_private` is
+    /// `HARBORGATE_ALLOW_PRIVATE_HARBOR`.
+    pub fn outbound(allow_private: bool) -> Result<Self, AppError> {
+        Ok(Self::new(Arc::new(OutboundHarborProbe::new(
+            allow_private,
+        )?)))
+    }
+
+    /// Wraps any probe, such as a test fake.
+    pub fn new(probe: Arc<dyn DynHarborProbe>) -> Self {
+        Self(probe)
+    }
+}
+
+impl HarborProbe for HarborProbeHandle {
+    async fn users_current(
+        &self,
+        base: &Url,
+        username: &str,
+        secret: &[u8],
+    ) -> Result<u16, AppError> {
+        self.0.users_current(base, username, secret).await
+    }
+
+    async fn artifacts_status(
+        &self,
+        base: &Url,
+        username: &str,
+        secret: &[u8],
+        project: &str,
+        repository: &str,
+    ) -> Result<u16, AppError> {
+        self.0
+            .artifacts_status(base, username, secret, project, repository)
+            .await
+    }
+}
 
 /// Pool and derived session key. The session key is kept behind an `Arc` because
 /// the derived key is not `Clone`.
@@ -46,4 +145,7 @@ pub struct AppState {
     pub backup_dir: PathBuf,
     /// The GitHub Issues client, built once. The manual issue route uses it.
     pub issues_client: Arc<crate::services::github_issues::GithubIssues>,
+    /// The Harbor probe for mapping create and update. Production uses the outbound probe;
+    /// router tests inject a fake, so no live Harbor is needed.
+    pub harbor_probe: HarborProbeHandle,
 }

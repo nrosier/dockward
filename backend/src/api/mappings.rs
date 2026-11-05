@@ -15,9 +15,9 @@ use crate::api::state::AppState;
 use crate::error::AppError;
 use crate::models::role::Role;
 use crate::services::audit::Actor;
-use crate::services::credential_probe::{OutboundGithubProbe, OutboundHarborProbe};
+use crate::services::credential_probe::OutboundGithubProbe;
 use crate::services::dashboard::{self, OpenCves};
-use crate::services::mappings::{self, Created, ListQuery, Mapping, NewMapping};
+use crate::services::mappings::{self, Created, ListQuery, Mapping, MappingPatch, NewMapping};
 use crate::services::pagination::Page;
 use crate::services::sessions::AuthUser;
 use crate::services::sync_jobs::{self, LastSync};
@@ -112,12 +112,11 @@ pub async fn create(
 ) -> Result<Response, AppError> {
     let input: NewMapping = parse_body(&body)?;
     let actor = actor_of(&user);
-    let probe = OutboundHarborProbe::new(state.allow_private_harbor)?;
     let github_probe = OutboundGithubProbe::new()?;
     let created: Created = mappings::create(
         &state.pool,
         &state.credentials_key,
-        &probe,
+        &state.harbor_probe,
         &github_probe,
         &actor,
         &user.id,
@@ -126,6 +125,34 @@ pub async fn create(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(created)).into_response())
+}
+
+/// `PUT /api/v1/mappings/:id`. Takes any subset of the create fields. Returns `200` with
+/// the updated mapping. Owner only. The webhook token and auth secret are not changed.
+pub async fn update(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Json<Mapping>, AppError> {
+    let patch: MappingPatch = parse_body(&body)?;
+    let actor = actor_of(&user);
+    let github_probe = OutboundGithubProbe::new()?;
+    let probes = mappings::Probes {
+        harbor: &state.harbor_probe,
+        github: &github_probe,
+    };
+    let updated = mappings::update(
+        &state.pool,
+        &state.credentials_key,
+        probes,
+        &actor,
+        &user.id,
+        &id,
+        patch,
+    )
+    .await?;
+    Ok(Json(updated))
 }
 
 /// `GET /api/v1/mappings/:id`.
