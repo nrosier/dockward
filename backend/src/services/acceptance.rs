@@ -124,7 +124,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 
 /// Parses an RFC 3339 `date-time` (`2026-11-02T09:30:00Z`, optional fraction, `Z` or a
 /// `+hh:mm` offset) into Unix seconds. Anything else is `None`.
-fn parse_rfc3339(text: &str) -> Option<i64> {
+pub(crate) fn parse_rfc3339(text: &str) -> Option<i64> {
     if !text.is_ascii() || text.len() < 20 || text.len() > 40 {
         return None;
     }

@@ -2,11 +2,14 @@
 //!
 //! The body is parsed once. A top-level `specversion` marks CloudEvents. Otherwise the
 //! default Harbor JSON shape is used. Both produce one [`ScanEvent`]. A job is created
-//! only for a vulnerability scan of the mapping's repository.
+//! only for a vulnerability scan of the mapping's repository. An event with a tag makes a sync
+//! job. An event with a valid digest and no tag makes a resolve job (#132), which the worker
+//! expands into sync jobs. The webhook itself never calls Harbor.
 
 use serde_json::Value;
 
 use crate::error::AppError;
+use crate::services::harbor_client::valid_digest;
 
 /// The validated event stored in `sync_jobs.payload`. It holds no secrets.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -15,8 +18,17 @@ pub struct ScanEvent {
     pub repo_full_name: String,
     /// The artifact digest, `sha256:<hex>`.
     pub digest: String,
-    /// The first tag. Always non-empty: an untagged event is ignored (`specs/integrations.md`).
+    /// The first tag. Always non-empty: an untagged event makes a [`ResolveEvent`] instead.
     pub tag: String,
+}
+
+/// The payload of a resolve job (#132): a digest with no tag. Stored as
+/// `{"kind":"resolve","repo_full_name","digest"}`. It holds no secrets.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ResolveEvent {
+    pub kind: &'static str,
+    pub repo_full_name: String,
+    pub digest: String,
 }
 
 /// What a valid body means for the mapping.
@@ -24,6 +36,8 @@ pub struct ScanEvent {
 pub enum Outcome {
     /// Store a `sync_jobs` row with this event.
     Queue(ScanEvent),
+    /// The event has a valid digest and no tag. Store one resolve job (#132).
+    Resolve(ResolveEvent),
     /// Valid, but not a vulnerability scan of this repository. Nothing is stored.
     Ignore,
 }
@@ -78,13 +92,22 @@ pub fn classify(body: &[u8], repo_full_name: &str) -> Result<Outcome, AppError> 
     if repo.as_deref() != Some(repo_full_name) {
         return Ok(Outcome::Ignore);
     }
-    let Some(digest) = string_at(&data, &["resources", "0", "digest"]) else {
-        return Err(bad_request());
-    };
-    // An untagged event is pushed by digest. CVEs are tracked per tag, so nothing is queued.
+    // A vulnerability event for this repository needs a valid digest, tagged or not (#132).
+    // A missing or malformed one is a 400, and nothing is stored.
+    let digest = string_at(&data, &["resources", "0", "digest"])
+        .filter(|digest| valid_digest(digest))
+        .ok_or_else(bad_request)?;
+    // An untagged event is pushed by digest. CVEs are tracked per tag, so a resolve job reads
+    // the tags from Harbor later, in the worker.
     let tag = match string_at(&data, &["resources", "0", "tag"]) {
         Some(tag) if !tag.is_empty() => tag,
-        _ => return Ok(Outcome::Ignore),
+        _ => {
+            return Ok(Outcome::Resolve(ResolveEvent {
+                kind: "resolve",
+                repo_full_name: repo_full_name.to_owned(),
+                digest,
+            }));
+        }
     };
     Ok(Outcome::Queue(ScanEvent {
         repo_full_name: repo_full_name.to_owned(),
@@ -127,33 +150,43 @@ mod tests {
     use super::*;
 
     const REPO: &str = "proj/app";
+    /// A valid digest: `sha256:` and 64 lowercase hex characters.
+    const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     /// A default-format scan event for a vulnerability scan of `REPO`.
-    fn default_vuln() -> &'static str {
+    fn default_vuln() -> String {
         r#"{
           "type": "SCANNING_COMPLETED",
           "occur_at": 1700000000,
           "operator": "admin",
           "event_data": {
             "repository": {"repo_full_name": "proj/app", "name": "app"},
-            "resources": [{"digest": "sha256:aaaa", "tag": "1.2.3"}],
+            "resources": [{"digest": "DIGEST", "tag": "1.2.3"}],
             "scan": {"scan_type": "vulnerability"}
           }
         }"#
+        .replace("DIGEST", DIGEST)
     }
 
     /// The same event in the CloudEvents format.
-    fn cloudevents_vuln() -> &'static str {
+    fn cloudevents_vuln() -> String {
         r#"{
           "specversion": "1.0",
           "type": "harbor.scan.completed",
           "source": "harbor",
           "data": {
             "repository": {"repo_full_name": "proj/app", "name": "app"},
-            "resources": [{"digest": "sha256:aaaa", "tag": "1.2.3"}],
+            "resources": [{"digest": "DIGEST", "tag": "1.2.3"}],
             "scan": {"scan_type": "vulnerability"}
           }
         }"#
+        .replace("DIGEST", DIGEST)
+    }
+
+    fn untagged(body: &str) -> String {
+        let out = body.replace(r#", "tag": "1.2.3""#, "");
+        assert_eq!(out.matches("\"tag\"").count(), 0, "fixture");
+        out
     }
 
     #[test]
@@ -163,25 +196,69 @@ mod tests {
             outcome,
             Outcome::Queue(ScanEvent {
                 repo_full_name: REPO.to_owned(),
-                digest: "sha256:aaaa".to_owned(),
+                digest: DIGEST.to_owned(),
                 tag: "1.2.3".to_owned(),
             })
         );
     }
 
     #[test]
-    fn untagged_event_is_ignored() {
-        // A missing tag and an empty tag both mean the image was pushed by digest.
-        let missing = default_vuln().replace(r#", "tag": "1.2.3""#, "");
-        assert_eq!(missing.matches("\"tag\"").count(), 0, "fixture");
-        assert_eq!(classify(missing.as_bytes(), REPO).unwrap(), Outcome::Ignore);
+    fn untagged_event_with_a_valid_digest_is_a_resolve_job_in_both_formats() {
+        let expected = Outcome::Resolve(ResolveEvent {
+            kind: "resolve",
+            repo_full_name: REPO.to_owned(),
+            digest: DIGEST.to_owned(),
+        });
+        for body in [untagged(&default_vuln()), untagged(&cloudevents_vuln())] {
+            assert_eq!(classify(body.as_bytes(), REPO).unwrap(), expected);
+        }
+        // An empty tag is the same as a missing one.
         let empty = default_vuln().replace("1.2.3", "");
-        assert_eq!(classify(empty.as_bytes(), REPO).unwrap(), Outcome::Ignore);
-        // A tagged event still queues, so the rule is not too broad.
-        assert!(matches!(
-            classify(default_vuln().as_bytes(), REPO).unwrap(),
-            Outcome::Queue(_)
-        ));
+        assert_eq!(classify(empty.as_bytes(), REPO).unwrap(), expected);
+        // The stored payload has the kind, the repository and the digest, and no tag.
+        let Outcome::Resolve(event) = expected else {
+            panic!("fixture");
+        };
+        let stored: Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            stored,
+            serde_json::json!({"kind":"resolve","repo_full_name":REPO,"digest":DIGEST})
+        );
+    }
+
+    #[test]
+    fn an_invalid_digest_on_a_vulnerability_event_is_a_bad_request_tagged_or_not() {
+        let upper = format!("sha256:{}", "A".repeat(64));
+        let long = format!("sha256:{}", "a".repeat(65));
+        for bad in ["sha256:aaaa", upper.as_str(), long.as_str(), "", "md5:abc"] {
+            let tagged = default_vuln().replace(DIGEST, bad);
+            assert!(classify(tagged.as_bytes(), REPO).is_err(), "tagged {bad}");
+            let none = untagged(&tagged);
+            assert!(classify(none.as_bytes(), REPO).is_err(), "untagged {bad}");
+            let cloud = cloudevents_vuln().replace(DIGEST, bad);
+            assert!(classify(cloud.as_bytes(), REPO).is_err(), "cloud {bad}");
+        }
+        // A missing digest is also a 400, tagged or not.
+        let missing = default_vuln().replace(&format!(r#""digest": "{DIGEST}", "#), "");
+        assert!(!missing.contains("digest\""), "fixture");
+        assert!(classify(missing.as_bytes(), REPO).is_err());
+    }
+
+    #[test]
+    fn a_bad_digest_on_an_ignored_event_is_still_ignored() {
+        // Only a SCANNING_COMPLETED vulnerability event for this repository is validated.
+        let sbom = default_vuln()
+            .replace("vulnerability", "sbom")
+            .replace(DIGEST, "sha256:aaaa");
+        assert_eq!(classify(sbom.as_bytes(), REPO).unwrap(), Outcome::Ignore);
+        let other = default_vuln()
+            .replace("proj/app", "proj/other")
+            .replace(DIGEST, "sha256:aaaa");
+        assert_eq!(classify(other.as_bytes(), REPO).unwrap(), Outcome::Ignore);
+        let push = default_vuln()
+            .replace("SCANNING_COMPLETED", "PUSH_ARTIFACT")
+            .replace(DIGEST, "sha256:aaaa");
+        assert_eq!(classify(push.as_bytes(), REPO).unwrap(), Outcome::Ignore);
     }
 
     #[test]
@@ -282,8 +359,9 @@ pub async fn receive_for(
     queue_event(pool, mapping_id, &repo_full_name, body, now, new_job_id).await
 }
 
-/// Classifies one event for a mapping's repository and queues it if it is a tagged vulnerability
-/// scan. The caller has already checked the `Authorization` secret: the mapping's own for a
+/// Classifies one event for a mapping's repository and queues it if it is a vulnerability scan:
+/// a sync job for a tagged event, or one resolve job for an untagged event with a valid digest
+/// (#132). It makes no Harbor call. The caller has already checked the `Authorization` secret: the mapping's own for a
 /// mapping webhook, or the project's for a project webhook (#132). Both routes share this, so
 /// the event rules are the same.
 pub async fn queue_event(
@@ -297,6 +375,11 @@ pub async fn queue_event(
     match classify(body, repo_full_name)? {
         Outcome::Ignore => Ok(Received::Ignored),
         Outcome::Queue(event) => {
+            let payload = serde_json::to_string(&event).map_err(|_| AppError::InternalError)?;
+            sync_jobs::enqueue(pool, new_job_id, mapping_id, &payload, now).await?;
+            Ok(Received::Queued)
+        }
+        Outcome::Resolve(event) => {
             let payload = serde_json::to_string(&event).map_err(|_| AppError::InternalError)?;
             sync_jobs::enqueue(pool, new_job_id, mapping_id, &payload, now).await?;
             Ok(Received::Queued)

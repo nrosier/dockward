@@ -22,6 +22,19 @@ pub async fn enqueue(
     payload: &str,
     now: i64,
 ) -> Result<(), AppError> {
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    enqueue_in(&mut conn, id, mapping_id, payload, now).await
+}
+
+/// [`enqueue`] on a connection the caller holds, so the insert can join a transaction (the
+/// resolve fan-out, #132).
+pub async fn enqueue_in(
+    conn: &mut SqliteConnection,
+    id: &str,
+    mapping_id: &str,
+    payload: &str,
+    now: i64,
+) -> Result<(), AppError> {
     sqlx::query!(
         "INSERT INTO sync_jobs (id, mapping_id, status, attempts, next_attempt_at, payload, created_at, updated_at)
          VALUES (?, ?, 'queued', 0, ?, ?, ?, ?)",
@@ -32,9 +45,57 @@ pub async fn enqueue(
         now,
         now
     )
-    .execute(pool)
+    .execute(conn)
     .await
     .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Whether a `queued` or `running` sync job exists for this mapping, digest and tag. Only
+/// those two statuses count: a `done` or `failed` job never blocks a new one, because a rescan
+/// of a synced tag must sync again (`specs/integrations.md`, resolve worker). A resolve job has
+/// no `tag` in its payload, so it can never match. Reads on the caller's connection, so the
+/// check sees the transaction's own inserts.
+pub async fn has_pending_pair(
+    conn: &mut SqliteConnection,
+    mapping_id: &str,
+    digest: &str,
+    tag: &str,
+) -> Result<bool, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM sync_jobs
+           WHERE mapping_id = ?
+             AND status IN ('queued', 'running')
+             AND json_valid(payload)
+             AND json_extract(payload, '$.digest') = ?
+             AND json_extract(payload, '$.tag') = ?"#,
+        mapping_id,
+        digest,
+        tag
+    )
+    .fetch_one(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.n > 0)
+}
+
+/// Marks a job `done` only while it is still `running`. Returns the rows changed: zero means
+/// the job is no longer running (it was re-queued, failed, or deleted), and the caller must
+/// not act on its result. Runs on the caller's connection, inside its transaction.
+pub async fn finish_running_in(
+    conn: &mut SqliteConnection,
+    id: &str,
+    now: i64,
+) -> Result<u64, AppError> {
+    sqlx::query!(
+        "UPDATE sync_jobs SET status = 'done', last_error = NULL, updated_at = ?
+         WHERE id = ? AND status = 'running'",
+        now,
+        id
+    )
+    .execute(conn)
+    .await
+    .map(|done| done.rows_affected())
     .map_err(|_| AppError::InternalError)
 }
 
@@ -202,6 +263,8 @@ pub struct JobRow {
     pub updated_at: Option<i64>,
     /// `payload.trigger`, or `None` when the payload has none.
     pub trigger: Option<String>,
+    /// `payload.kind`, or `None` when the payload has none (a sync job).
+    pub kind: Option<String>,
     pub repo_full_name: Option<String>,
     pub tag: Option<String>,
     pub digest: Option<String>,
@@ -254,6 +317,8 @@ pub async fn list_jobs_in(
                   CASE WHEN json_valid(j.payload)
                        THEN substr(CAST(json_extract(j.payload, '$.trigger') AS TEXT), 1, ?) END AS "trigger?: String",
                   CASE WHEN json_valid(j.payload)
+                       THEN substr(CAST(json_extract(j.payload, '$.kind') AS TEXT), 1, ?) END AS "kind?: String",
+                  CASE WHEN json_valid(j.payload)
                        THEN substr(CAST(json_extract(j.payload, '$.repo_full_name') AS TEXT), 1, ?) END AS "repo_full_name?: String",
                   CASE WHEN json_valid(j.payload)
                        THEN substr(CAST(json_extract(j.payload, '$.tag') AS TEXT), 1, ?) END AS "tag?: String",
@@ -280,6 +345,7 @@ pub async fn list_jobs_in(
              CASE WHEN ? = 'updated_at' AND ? = -1 THEN j.updated_at END DESC,
              j.id ASC
            LIMIT ? OFFSET ?"#,
+        MAX_TEXT_CHARS,
         MAX_TEXT_CHARS,
         MAX_TEXT_CHARS,
         MAX_TEXT_CHARS,
@@ -341,6 +407,7 @@ pub async fn list_jobs_in(
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 trigger: row.trigger,
+                kind: row.kind,
                 repo_full_name: row.repo_full_name,
                 tag: row.tag,
                 digest: row.digest,

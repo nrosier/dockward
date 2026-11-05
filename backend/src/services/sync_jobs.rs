@@ -122,6 +122,8 @@ pub struct SyncJob {
     pub updated_at: Option<String>,
     /// `webhook` or `poll`. A payload with no `trigger` is `webhook`.
     pub trigger: String,
+    /// `sync` or `resolve`. A payload with no `kind` is `sync` (#132).
+    pub kind: String,
     pub image: JobImage,
     pub report: Option<SyncReport>,
 }
@@ -151,6 +153,11 @@ fn to_sync_job(row: db::JobRow) -> Result<SyncJob, AppError> {
         created_at: row.created_at.map(time::rfc3339).transpose()?,
         updated_at: row.updated_at.map(time::rfc3339).transpose()?,
         trigger: row.trigger.unwrap_or_else(|| "webhook".to_owned()),
+        kind: match row.kind.as_deref() {
+            Some("resolve") => "resolve",
+            _ => "sync",
+        }
+        .to_owned(),
         image: JobImage {
             repo_full_name: row.repo_full_name,
             tag: row.tag,

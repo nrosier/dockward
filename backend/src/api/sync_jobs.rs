@@ -183,6 +183,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_resolve_job_has_kind_resolve_no_tag_and_no_report() {
+        let (pool, dir) = fresh_pool("resolve-kind").await;
+        seed_job(
+            &pool,
+            r#"{"kind":"resolve","repo_full_name":"p/r","digest":"sha256:aa"}"#,
+        )
+        .await;
+
+        let job = sync_jobs::get(&pool, "owner", false, "job-1")
+            .await
+            .unwrap();
+        assert_eq!(job.kind, "resolve");
+        assert_eq!(job.image.tag, None);
+        assert_eq!(job.image.digest.as_deref(), Some("sha256:aa"));
+        assert_eq!(job.image.repo_full_name.as_deref(), Some("p/r"));
+        assert!(job.report.is_none());
+        let json = serde_json::to_value(&job).unwrap();
+        assert_eq!(json["kind"], "resolve");
+        assert!(json["image"]["tag"].is_null());
+        assert!(json["report"].is_null());
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_legacy_payload_with_no_kind_is_a_sync_job() {
+        let (pool, dir) = fresh_pool("legacy-kind").await;
+        seed_job(
+            &pool,
+            r#"{"repo_full_name":"p/r","digest":"sha256:aa","tag":"v1"}"#,
+        )
+        .await;
+
+        let job = sync_jobs::get(&pool, "owner", false, "job-1")
+            .await
+            .unwrap();
+        assert_eq!(job.kind, "sync");
+        assert_eq!(job.image.tag.as_deref(), Some("v1"));
+        // A kind that is not known is shown as sync: the field has two values (`specs/api.md`).
+        sqlx::query(r#"UPDATE sync_jobs SET payload = '{"kind":"other","tag":"v1"}'"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let odd = sync_jobs::get(&pool, "owner", false, "job-1")
+            .await
+            .unwrap();
+        assert_eq!(odd.kind, "sync");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn payload_without_trigger_is_webhook() {
         let (pool, dir) = fresh_pool("trigger").await;
         seed_job(

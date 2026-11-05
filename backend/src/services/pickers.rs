@@ -25,7 +25,9 @@ use crate::error::{AppError, ErrorDetail};
 use crate::services::credential_probe::{encode_segment, valid_github_name, valid_harbor_name};
 use crate::services::credentials::{self, SERVICE_GITHUB, SERVICE_HARBOR};
 use crate::services::github_scanning::DEFAULT_WAIT_SECS;
-use crate::services::harbor_client::{artifact_url, artifacts_list_url, parse_artifact_list};
+use crate::services::harbor_client::{
+    artifact_url, artifacts_list_url, parse_artifact_list, valid_digest,
+};
 use crate::services::pagination::Pagination;
 use crate::services::picker_upstream::{
     OutboundPickerHttp, PickerHttp, UpstreamAuth, UpstreamResponse, is_github_api_url,
@@ -1103,13 +1105,6 @@ pub fn parse_source_label(label: &str) -> LabelParse {
     }
 }
 
-/// True for `sha256:` followed by exactly 64 lowercase hex digits.
-fn valid_digest(digest: &str) -> bool {
-    digest.strip_prefix("sha256:").is_some_and(|hex| {
-        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    })
-}
-
 #[derive(Deserialize)]
 struct ArtifactDetail {
     #[serde(default)]
@@ -1131,7 +1126,7 @@ struct ImageConfig {
 /// Whether `tag` is a valid OCI image tag. The OCI distribution spec grammar is
 /// `[A-Za-z0-9_][A-Za-z0-9._-]{0,127}`: 1 to 128 characters, the first a letter, digit or
 /// underscore, the rest also allowing `.` and `-`.
-fn valid_image_tag(tag: &str) -> bool {
+pub(crate) fn valid_image_tag(tag: &str) -> bool {
     let mut bytes = tag.bytes();
     let Some(first) = bytes.next() else {
         return false;

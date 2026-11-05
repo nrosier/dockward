@@ -32,10 +32,11 @@ use crate::services::github_scanning::{
     GithubScanning, Processing, ScanError, Upload, encode_sarif,
 };
 use crate::services::harbor_client::{
-    HarborGet, ReportState, TRIVY_REPORT_MIME, artifact_url, branch_for, check_source,
+    HarborGet, HarborReply, ReportState, TRIVY_REPORT_MIME, artifact_url, branch_for, check_source,
     parse_labels, parse_report, require_revision, vulnerabilities_url,
 };
 use crate::services::issue_lifecycle::{self, IssueApi};
+use crate::services::resolve::{self, JobKind};
 use crate::services::{findings, ids, sarif};
 use crate::worker::{JobHandler, JobOutcome, now_secs};
 
@@ -46,9 +47,9 @@ const LATER_WAIT: Duration = Duration::from_secs(15);
 /// Total time one attempt waits for GitHub to process an upload.
 const MAX_WAIT: Duration = Duration::from_secs(300);
 
-const MSG_GONE: &str = "mapping or credential no longer exists";
-const MSG_DATABASE: &str = "the database could not be read or written";
-const MSG_INTERNAL: &str = "an internal error stopped this job; it will be retried";
+pub(crate) const MSG_GONE: &str = "mapping or credential no longer exists";
+pub(crate) const MSG_DATABASE: &str = "the database could not be read or written";
+pub(crate) const MSG_INTERNAL: &str = "an internal error stopped this job; it will be retried";
 const MSG_DECRYPT: &str = "a stored credential could not be decrypted";
 const MSG_NOT_YET: &str = "Harbor report not available yet";
 const MSG_TOO_LARGE: &str = "SARIF over 10 MB compressed";
@@ -71,7 +72,7 @@ pub trait HarborFetch: Send + Sync + 'static {
         username: &str,
         secret: &[u8],
         extra_headers: &[(&str, &str)],
-    ) -> impl Future<Output = Result<(u16, Vec<u8>), AppError>> + Send;
+    ) -> impl Future<Output = Result<HarborReply, AppError>> + Send;
 }
 
 impl HarborFetch for HarborGet {
@@ -81,7 +82,7 @@ impl HarborFetch for HarborGet {
         username: &str,
         secret: &[u8],
         extra_headers: &[(&str, &str)],
-    ) -> Result<(u16, Vec<u8>), AppError> {
+    ) -> Result<HarborReply, AppError> {
         self.get(url, username, secret, extra_headers).await
     }
 }
@@ -182,7 +183,7 @@ impl SyncHandler {
 
 impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C, I> {
     #[cfg(test)]
-    fn with_parts(
+    pub(crate) fn with_parts(
         pool: SqlitePool,
         credentials_key: Arc<DerivedKey>,
         harbor: H,
@@ -205,7 +206,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
 
     /// Replaces the notifier, so a test can record alerts instead of sending them.
     #[cfg(test)]
-    fn with_alerts(mut self, alerts: Notifier) -> Self {
+    pub(crate) fn with_alerts(mut self, alerts: Notifier) -> Self {
         self.alerts = alerts;
         self
     }
@@ -521,7 +522,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
         headers: &[(&str, &str)],
         what: &str,
     ) -> Flow<Vec<u8>> {
-        let (status, body) = self
+        let HarborReply { status, body, .. } = self
             .harbor
             .fetch(
                 url,
@@ -664,10 +665,26 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
 impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> JobHandler
     for SyncHandler<H, G, C, I>
 {
+    /// Branches on the payload's `kind` before the payload is parsed (#132): a sync job runs the
+    /// Harbor-to-GitHub sync, a resolve job expands a digest into sync jobs, and an unknown kind
+    /// fails for good.
     async fn run(&self, job: ClaimedJob) -> JobOutcome {
-        match self.execute(&job).await {
-            Ok(()) => JobOutcome::Done,
-            Err(outcome) => outcome,
+        match resolve::job_kind(&job.payload) {
+            JobKind::Sync => match self.execute(&job).await {
+                Ok(()) => JobOutcome::Done,
+                Err(outcome) => outcome,
+            },
+            JobKind::Resolve => {
+                resolve::run(
+                    &self.pool,
+                    &self.credentials_key,
+                    &self.harbor,
+                    &self.clock,
+                    &job,
+                )
+                .await
+            }
+            JobKind::Unknown => JobOutcome::Permanent(resolve::MSG_UNKNOWN_KIND.to_owned()),
         }
     }
 
@@ -734,15 +751,15 @@ mod tests {
             _username: &str,
             _secret: &[u8],
             extra_headers: &[(&str, &str)],
-        ) -> Result<(u16, Vec<u8>), AppError> {
+        ) -> Result<HarborReply, AppError> {
             lock(&self.urls).push(url.path().to_owned());
             if url.path().ends_with("/additions/vulnerabilities") {
                 for (name, value) in extra_headers {
                     lock(&self.report_headers).push(((*name).to_owned(), (*value).to_owned()));
                 }
-                Ok(self.report.clone())
+                Ok(HarborReply::new(self.report.0, self.report.1.clone()))
             } else {
-                Ok(self.artifact.clone())
+                Ok(HarborReply::new(self.artifact.0, self.artifact.1.clone()))
             }
         }
     }
@@ -1032,6 +1049,86 @@ mod tests {
             applied[0],
             ("CVE-2026-0001".to_owned(), "CRITICAL".to_owned())
         );
+    }
+
+    /// A payload with no `kind` (every job stored before #132) still runs the sync.
+    #[tokio::test]
+    async fn a_legacy_sync_payload_with_no_kind_still_syncs() {
+        let fx = Fixture::new("legacy-kind").await;
+        let harbor = ok_harbor();
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+        let job = fx.job();
+        assert!(!job.payload.contains("kind"), "fixture");
+
+        let outcome = fx.handler(&harbor, &scanner).run(job).await;
+
+        assert_eq!(outcome, JobOutcome::Done);
+        assert_eq!(scanner.uploads(), 1);
+        // `"kind":"sync"` is the same job.
+        let mut explicit = fx.job();
+        explicit.payload = explicit.payload.replacen('{', r#"{"kind":"sync","#, 1);
+        let again = fx.handler(&harbor, &scanner).run(explicit).await;
+        assert_eq!(again, JobOutcome::Done);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_job_kind_is_permanent_with_no_harbor_call() {
+        let fx = Fixture::new("unknown-kind").await;
+        let harbor = ok_harbor();
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![]);
+        let mut job = fx.job();
+        job.payload = job.payload.replacen('{', r#"{"kind":"refresh","#, 1);
+
+        let outcome = fx.handler(&harbor, &scanner).run(job).await;
+
+        assert_eq!(
+            outcome,
+            JobOutcome::Permanent(resolve::MSG_UNKNOWN_KIND.to_owned())
+        );
+        assert_eq!(harbor.calls(), 0);
+        assert_eq!(scanner.uploads(), 0);
+    }
+
+    /// The sync handler sends a resolve job to the resolve module: the artifact is read once,
+    /// sync children are queued, and nothing is uploaded.
+    #[tokio::test]
+    async fn the_sync_handler_runs_a_resolve_job_as_a_fan_out() {
+        let fx = Fixture::new("dispatch-resolve").await;
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let artifact = format!(
+            r#"{{"digest": "{digest}", "tags": [{{"name": "v1", "push_time": "2026-11-05T10:00:00Z"}}, {{"name": "v2", "push_time": "2026-11-05T11:00:00Z"}}]}}"#
+        );
+        let harbor = Arc::new(FakeHarbor::new(&artifact, (200, "{}")));
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![]);
+        let payload =
+            format!(r#"{{"kind":"resolve","repo_full_name":"proj/app","digest":"{digest}"}}"#);
+        sqlx::query(
+            "INSERT INTO sync_jobs (id, mapping_id, status, attempts, payload) VALUES ('r1', 'm1', 'running', 0, ?)",
+        )
+        .bind(&payload)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        let job = ClaimedJob {
+            id: "r1".to_owned(),
+            mapping_id: "m1".to_owned(),
+            attempts: 0,
+            payload,
+        };
+
+        let outcome = fx.handler(&harbor, &scanner).run(job).await;
+
+        assert_eq!(outcome, JobOutcome::Done);
+        assert_eq!(harbor.calls(), 1);
+        assert_eq!(scanner.uploads(), 0);
+        let tags: Vec<String> = sqlx::query_scalar(
+            "SELECT json_extract(payload, '$.tag') FROM sync_jobs WHERE json_extract(payload, '$.digest') = ? AND id != 'r1' ORDER BY rowid",
+        )
+        .bind(&digest)
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!(tags, vec!["v2", "v1"]);
     }
 
     #[tokio::test]
