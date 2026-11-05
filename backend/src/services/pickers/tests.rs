@@ -1489,6 +1489,49 @@ async fn a_result_filled_under_an_old_generation_is_not_served_after_a_drop() {
     assert!(matches!(again, Cached::Projects(l) if l.items[0].name == "new"));
 }
 
+#[test]
+fn image_tag_grammar() {
+    assert!(valid_image_tag("v1.2.3-rc_1"));
+    assert!(valid_image_tag("_x"));
+    assert!(valid_image_tag(&"a".repeat(128)));
+    assert!(!valid_image_tag("team/app"));
+    assert!(!valid_image_tag("v 1"));
+    assert!(!valid_image_tag(".hidden"));
+    assert!(!valid_image_tag("-dash"));
+    assert!(!valid_image_tag(&"a".repeat(129)));
+    assert!(!valid_image_tag(""));
+}
+
+#[tokio::test]
+async fn a_read_after_drop_credential_never_returns_a_slot_filled_before() {
+    let cache = PickerCache::new(CACHE_TTL, 10);
+    let key = || CacheKey {
+        credential: "c".to_owned(),
+        list: "harbor_projects",
+        project: String::new(),
+        search: String::new(),
+    };
+    let view = |name: &'static str| {
+        Cached::Projects(Arc::new(Listing {
+            items: vec![HarborProject {
+                name: name.to_owned(),
+            }],
+            truncated: false,
+        }))
+    };
+    cache
+        .get_or_fill(key(), cache.generation("c"), async { Ok(view("before")) })
+        .await
+        .unwrap();
+    cache.drop_credential("c");
+    assert_eq!(cache.len(), 0, "the slot is gone once the generation moved");
+    let after = cache
+        .get_or_fill(key(), cache.generation("c"), async { Ok(view("after")) })
+        .await
+        .unwrap();
+    assert!(matches!(after, Cached::Projects(l) if l.items[0].name == "after"));
+}
+
 /// `n` Harbor project names, the first `start`.
 fn harbor_page_body(start: u32, n: u32) -> String {
     projects_body((start..start + n).map(|i| format!("p{i:04}")))

@@ -294,14 +294,17 @@ impl PickerCache {
 
     /// Drops every entry of one credential.
     fn drop_credential(&self, credential: &str) {
+        // Both steps run under the map lock, slots first, then the generation. `slot()`
+        // takes the same lock, so a reader that sees the new generation also finds the
+        // slots already gone and cannot pick up a slot filled before the drop.
+        let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
+        map.slots.retain(|key, _| key.credential != credential);
         *self
             .generations
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .entry(credential.to_owned())
             .or_insert(0) += 1;
-        let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
-        map.slots.retain(|key, _| key.credential != credential);
     }
 
     #[cfg(test)]
@@ -1125,6 +1128,19 @@ struct ImageConfig {
     labels: Option<HashMap<String, String>>,
 }
 
+/// Whether `tag` is a valid OCI image tag. The OCI distribution spec grammar is
+/// `[A-Za-z0-9_][A-Za-z0-9._-]{0,127}`: 1 to 128 characters, the first a letter, digit or
+/// underscore, the rest also allowing `.` and `-`.
+fn valid_image_tag(tag: &str) -> bool {
+    let mut bytes = tag.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    tag.len() <= 128
+        && (first.is_ascii_alphanumeric() || first == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
 /// The `suggestion` object of the response.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct Suggestion {
@@ -1263,6 +1279,10 @@ impl PickerState {
         let Some(image_tag) = tags.into_iter().next() else {
             return Ok(SuggestionOutcome::None("no_tagged_artifact"));
         };
+        // The tag goes back to the client and into the cache, so it must be a real OCI tag.
+        if !valid_image_tag(&image_tag) {
+            return Ok(SuggestionOutcome::None("invalid_label"));
+        }
         // Defence in depth: the digest goes into a URL path, so it must be `sha256:<64 hex>`.
         if !valid_digest(&digest) {
             return Err(upstream());
