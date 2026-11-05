@@ -205,7 +205,7 @@ async fn poll_mapping<H: HarborFetch>(
 }
 
 /// The robot username and the decrypted secret of the mapping's Harbor credential.
-async fn harbor_login(
+pub(crate) async fn harbor_login(
     pool: &SqlitePool,
     key: &DerivedKey,
     mapping: &MappingRow,

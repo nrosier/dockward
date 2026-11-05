@@ -1104,7 +1104,7 @@ pub fn parse_source_label(label: &str) -> LabelParse {
 }
 
 /// True for `sha256:` followed by exactly 64 lowercase hex digits.
-fn valid_digest(digest: &str) -> bool {
+pub(crate) fn valid_digest(digest: &str) -> bool {
     digest.strip_prefix("sha256:").is_some_and(|hex| {
         hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     })

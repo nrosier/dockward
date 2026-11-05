@@ -13,10 +13,10 @@ use axum::{
 use serde::Serialize;
 
 use crate::api::hardening::{ClientIp, RateLimiter, too_many_requests};
-use crate::api::state::AppState;
+use crate::api::state::{AppState, HarborFetchHandle};
 use crate::db;
 use crate::error::AppError;
-use crate::services::harbor_webhook::{self, Received};
+use crate::services::harbor_webhook::{self, HarborTagLookup, Received};
 use crate::worker::now_secs;
 
 /// Largest accepted webhook body (`specs/security.md`, Hardening).
@@ -122,7 +122,6 @@ pub async fn receive_project(
     if !harbor_webhook::secret_matches(&project.secret_hash, authorization) {
         return Err(refuse(&state, failure_key.as_deref(), now));
     }
-    let job_id = crate::services::ids::new_id()?;
     // The event's own repo_full_name is already `project/repository`, the form classify compares.
     let repo_full_name = repository.clone();
     match harbor_webhook::queue_event(
@@ -131,7 +130,8 @@ pub async fn receive_project(
         &repo_full_name,
         &body,
         now_secs(),
-        &job_id,
+        &tag_lookup(&state),
+        crate::services::ids::new_id,
     )
     .await
     {
@@ -139,6 +139,16 @@ pub async fn receive_project(
             Ok((StatusCode::ACCEPTED, Json(Accepted { status: "accepted" })).into_response())
         }
         Err(other) => Err(other),
+    }
+}
+
+/// The Harbor tag lookup for an untagged scan event, on the app's guarded Harbor reader. Both
+/// webhook routes use it, so a digest-only event is handled the same on either.
+fn tag_lookup(state: &AppState) -> HarborTagLookup<'_, HarborFetchHandle> {
+    HarborTagLookup {
+        pool: &state.pool,
+        key: &state.credentials_key,
+        http: &state.harbor_fetch,
     }
 }
 
@@ -189,14 +199,14 @@ pub async fn receive(
     let authorization = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
-    let job_id = crate::services::ids::new_id()?;
     match harbor_webhook::receive_for(
         &state.pool,
         &mapping_id,
         authorization,
         &body,
         now_secs(),
-        &job_id,
+        &tag_lookup(&state),
+        crate::services::ids::new_id,
     )
     .await
     {

@@ -199,6 +199,28 @@ pub fn parse_artifact_list(body: &[u8]) -> Result<Vec<(String, Vec<String>)>, Ap
         .collect())
 }
 
+#[derive(Debug, Deserialize)]
+struct TaggedArtifact {
+    #[serde(default)]
+    tags: Option<Vec<ListedTag>>,
+}
+
+/// Reads the tag names from one artifact body (`GET .../artifacts/{digest}`). A missing or
+/// `null` `tags` member is an artifact with no tags. Empty names are dropped and a name
+/// that repeats is kept once, in order. A body that is not an artifact object is the fixed
+/// `upstream_unreachable` error.
+pub fn parse_artifact_tags(body: &[u8]) -> Result<Vec<String>, AppError> {
+    let artifact: TaggedArtifact =
+        serde_json::from_slice(body).map_err(|_| AppError::UpstreamUnreachable)?;
+    let mut names: Vec<String> = Vec::new();
+    for tag in artifact.tags.unwrap_or_default() {
+        if !tag.name.is_empty() && !names.contains(&tag.name) {
+            names.push(tag.name);
+        }
+    }
+    Ok(names)
+}
+
 fn invalid_name() -> AppError {
     AppError::ValidationFailed("the Harbor project or repository name is not valid.".to_owned())
 }
@@ -273,6 +295,17 @@ pub fn branch_for(labels: &ArtifactLabels, default_branch: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_artifact_tags;
+
+    #[test]
+    fn artifact_tags_are_read_without_empty_or_repeated_names() {
+        let body = br#"{"digest":"x","tags":[{"name":"a"},{"name":""},{"name":"b"},{"name":"a"}]}"#;
+        assert_eq!(parse_artifact_tags(body).unwrap(), vec!["a", "b"]);
+        assert!(parse_artifact_tags(br#"{"tags":null}"#).unwrap().is_empty());
+        assert!(parse_artifact_tags(b"{}").unwrap().is_empty());
+        assert!(parse_artifact_tags(b"nope").is_err());
+    }
+
     use super::*;
 
     /// A spec-derived artifact body. Harbor's real response was not captured here; this

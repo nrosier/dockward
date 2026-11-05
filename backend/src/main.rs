@@ -2561,6 +2561,142 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A Harbor reader for the digest tag lookup. It answers the artifact read with two tags
+    /// and records each URL asked. No socket is opened.
+    struct TaggedArtifact {
+        urls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl api::state::DynHarborFetch for TaggedArtifact {
+        fn fetch<'a>(
+            &'a self,
+            url: &'a reqwest::Url,
+            _username: &'a str,
+            _secret: &'a [u8],
+            _extra_headers: &'a [(&'a str, &'a str)],
+        ) -> api::state::ProbeFuture<'a, (u16, Vec<u8>)> {
+            if let Ok(mut urls) = self.urls.lock() {
+                urls.push(url.path().to_owned());
+            }
+            Box::pin(async { Ok((200, br#"{"tags":[{"name":"v1"},{"name":"v2"}]}"#.to_vec())) })
+        }
+    }
+
+    const UNTAGGED_DIGEST: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// An untagged event for `proj/app`.
+    fn untagged_event() -> String {
+        format!(
+            r#"{{"type":"SCANNING_COMPLETED","event_data":{{"repository":{{"repo_full_name":"proj/app"}},"resources":[{{"digest":"{UNTAGGED_DIGEST}"}}],"scan":{{"scan_type":"vulnerability"}}}}}}"#
+        )
+    }
+
+    /// Replaces a fixture credential's placeholder ciphertext with a real one, so the lookup
+    /// can decrypt it.
+    async fn seal_harbor_credential(pool: &sqlx::SqlitePool, id: &str) {
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let key = auth::crypto::credentials_key(&root).unwrap();
+        let aad = auth::crypto::aad("user_credentials", "encrypted_token", id);
+        let sealed = auth::crypto::encrypt(&key, &aad, b"test-fake-robot-secret").unwrap();
+        sqlx::query("UPDATE user_credentials SET encrypted_token = ? WHERE id = ?")
+            .bind(sealed)
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// Sends one untagged event to the mapping route or the project route of a fresh router,
+    /// with a fake Harbor reader. Returns the status, the queued tags and how many artifact
+    /// reads were made. `sealed` gives the Harbor credential a real ciphertext; without it the
+    /// lookup cannot decrypt the credential and fails.
+    async fn untagged_via(project_route: bool, sealed: bool) -> (u16, Vec<String>, usize) {
+        use tower::ServiceExt;
+        let harbor = Arc::new(TaggedArtifact {
+            urls: std::sync::Mutex::new(Vec::new()),
+        });
+        let name = format!("untagged-lookup-{project_route}-{sealed}");
+        let (router, pool, dir, _) = test_router_with_fetch(
+            &name,
+            services::throttle::LoginThrottle::new(),
+            api::webhooks::new_token_limiter(),
+            api::state::HarborProbeHandle::outbound(false).unwrap(),
+            api::state::HarborFetchHandle::new(harbor.clone()),
+        )
+        .await;
+        let request = if project_route {
+            project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+            if sealed {
+                seal_harbor_credential(&pool, "pc1").await;
+            }
+            project_request(
+                "proj-tok-fake",
+                Some("Bearer proj-sec-fake"),
+                &untagged_event(),
+            )
+        } else {
+            webhook_fixture(&pool, "map-tok-fake", "map-sec-fake").await;
+            if sealed {
+                seal_harbor_credential(&pool, "wc1").await;
+            }
+            webhook_request(
+                "map-tok-fake",
+                Some("Bearer map-sec-fake"),
+                &untagged_event(),
+            )
+        };
+        let status = router.oneshot(request).await.unwrap().status().as_u16();
+        let payloads: Vec<(String,)> =
+            sqlx::query_as("SELECT payload FROM sync_jobs ORDER BY payload")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let tags = payloads
+            .into_iter()
+            .map(|(payload,)| {
+                let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+                json["tag"].as_str().unwrap_or_default().to_owned()
+            })
+            .collect();
+        let asked = harbor.urls.lock().unwrap().len();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        (status, tags, asked)
+    }
+
+    /// An untagged event on the mapping route looks up the digest's tags and queues one job
+    /// per tag; the answer is `202` (#132).
+    #[tokio::test]
+    async fn mapping_route_looks_up_tags_for_an_untagged_event() {
+        let (status, tags, asked) = untagged_via(false, true).await;
+        assert_eq!(status, 202);
+        assert_eq!(tags, vec!["v1", "v2"]);
+        assert_eq!(asked, 1);
+    }
+
+    /// The same on the project route.
+    #[tokio::test]
+    async fn project_route_looks_up_tags_for_an_untagged_event() {
+        let (status, tags, asked) = untagged_via(true, true).await;
+        assert_eq!(status, 202);
+        assert_eq!(tags, vec!["v1", "v2"]);
+        assert_eq!(asked, 1);
+    }
+
+    /// A lookup that cannot run (the fixture credential holds a placeholder ciphertext, so it
+    /// cannot be decrypted) still answers `202` and queues nothing, on both routes.
+    #[tokio::test]
+    async fn a_failed_lookup_still_answers_202_on_both_webhook_routes() {
+        for project_route in [false, true] {
+            let (status, tags, asked) = untagged_via(project_route, false).await;
+            assert_eq!(status, 202, "project route: {project_route}");
+            assert!(tags.is_empty());
+            assert_eq!(asked, 0, "no request was made");
+        }
+    }
+
     /// A project event for a mapped repository is routed to that mapping and queues a job.
     #[tokio::test]
     async fn project_event_routes_to_the_matching_mapping() {
