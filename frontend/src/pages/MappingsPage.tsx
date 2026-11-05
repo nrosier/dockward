@@ -145,7 +145,10 @@ export default function MappingsPage() {
                     </td>
                     <td className={TD}>
                       {mapping.last_sync === null ? (
-                        <span className="text-muted">{t("mappings.never")}</span>
+                        <>
+                          <span className="text-muted">{t("mappings.never")}</span>
+                          <div className="mt-1 text-[12.5px] text-muted">{t("mappings.neverReason")}</div>
+                        </>
                       ) : (
                         <>
                           <JobStatusPill status={mapping.last_sync.status} />
