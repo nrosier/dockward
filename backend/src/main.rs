@@ -88,6 +88,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/mappings/{id}/rotate-auth-secret",
             post(api::mappings::rotate_auth_secret),
         )
+        .route("/api/v1/mappings/{id}/pull", post(api::mappings::pull))
         .route(
             "/api/v1/mappings/{id}/cves",
             get(api::cves::list_for_mapping),
@@ -559,6 +560,9 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         harbor_probe: api::state::HarborProbeHandle::outbound(settings.allow_private_harbor)
             .map_err(|_| "could not build the Harbor probe")?,
         app_log,
+        harbor_fetch: api::state::HarborFetchHandle::outbound(settings.allow_private_harbor)
+            .map_err(|_| "could not build the Harbor client")?,
+        pull_limiter: api::mappings::new_pull_limiter(),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -805,6 +809,8 @@ mod tests {
             app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
                 crate::services::app_log::REVERT_AFTER,
             )),
+            harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
+            pull_limiter: crate::api::mappings::new_pull_limiter(),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -995,6 +1001,243 @@ mod tests {
         assert!(json.get("auth_secret").is_none());
     }
 
+    /// A Harbor reader that answers the artifact list from recorded bodies. Page 1 of a
+    /// repository has its body; later pages are empty. An unknown repository answers `500`.
+    /// No socket is opened.
+    struct RecordedHarbor;
+
+    impl api::state::DynHarborFetch for RecordedHarbor {
+        fn fetch<'a>(
+            &'a self,
+            url: &'a reqwest::Url,
+            _username: &'a str,
+            _secret: &'a [u8],
+            _extra_headers: &'a [(&'a str, &'a str)],
+        ) -> api::state::ProbeFuture<'a, (u16, Vec<u8>)> {
+            let repository = url
+                .path()
+                .split('/')
+                .rev()
+                .nth(1)
+                .unwrap_or_default()
+                .to_owned();
+            let first_page = url.query().unwrap_or_default().starts_with("page=1&");
+            Box::pin(async move {
+                let body = match repository.as_str() {
+                    "app" => r#"[{"digest": "sha256:aaaa", "tags": [{"name": "v1"}]}]"#,
+                    "two" => {
+                        r#"[{"digest": "sha256:bbbb", "tags": [{"name": "v1"}, {"name": "v2"}]}]"#
+                    }
+                    _ => return Ok((500, b"harbor exploded".to_vec())),
+                };
+                if first_page {
+                    Ok((200, body.as_bytes().to_vec()))
+                } else {
+                    Ok((200, b"[]".to_vec()))
+                }
+            })
+        }
+    }
+
+    /// `POST /api/v1/mappings/:id/pull` through the router (#131). Checks session (`401`),
+    /// CSRF (`403`), tenancy (another user `404`, the owner and an admin `200`), the
+    /// 5-minute cooldown (`429` with `Retry-After`), a Harbor error (`502` with fixed text,
+    /// which still uses the cooldown), and the `mapping.pull` audit row. Harbor is a fake.
+    #[tokio::test]
+    async fn mapping_pull_route_checks_session_csrf_tenancy_and_cooldown() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let fetch = api::state::HarborFetchHandle::new(Arc::new(RecordedHarbor));
+        let (router, pool, dir, _) = test_router_with_fetch(
+            "mapping-pull-route",
+            services::throttle::LoginThrottle::new(),
+            api::webhooks::new_token_limiter(),
+            api::state::HarborProbeHandle::new(Arc::new(ReadableHarbor)),
+            fetch,
+        )
+        .await;
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        for (id, role) in [
+            ("owner-1", "user"),
+            ("other-2", "user"),
+            ("admin-3", "admin"),
+        ] {
+            db::users::insert_local(&mut conn, id, id, None, "h", role)
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        let owner_actor = services::audit::Actor {
+            user_id: Some("owner-1".to_owned()),
+            username: "owner-1".to_owned(),
+        };
+        let mut cred_ids = Vec::new();
+        for (service, base_url, username) in [
+            (
+                services::credentials::SERVICE_HARBOR,
+                Some("https://harbor.example.com"),
+                Some("robot$hg"),
+            ),
+            (services::credentials::SERVICE_GITHUB, None, None),
+        ] {
+            let created = services::credentials::create(
+                &pool,
+                &auth::crypto::credentials_key(&root).unwrap(),
+                &owner_actor,
+                "owner-1",
+                services::credentials::NewCredential {
+                    service_type: service.to_owned(),
+                    label: service.to_owned(),
+                    base_url: base_url.map(str::to_owned),
+                    username: username.map(str::to_owned),
+                    token: "test-fake-secret".to_owned(),
+                    expires_at: None,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+            cred_ids.push(created.id);
+        }
+        // rm1 (repository app), rm2 (two) and rm3 (broken, Harbor answers 500).
+        for (id, repository) in [("rm1", "app"), ("rm2", "two"), ("rm3", "broken")] {
+            sqlx::query(
+                "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+                 VALUES (?, 'owner-1', ?, ?, 'https://harbor.example.com', 'proj', ?, 'octo', ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(&cred_ids[0])
+            .bind(&cred_ids[1])
+            .bind(repository)
+            .bind(repository)
+            .bind(format!("{id}-token"))
+            .bind(format!("{id}-secret"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let key = auth::crypto::csrf_key(&root).unwrap();
+        let csrf = auth::csrf::issue(&key).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let owner = format!("{}; {csrf_cookie}", session_cookie("owner-1", "user", 0));
+        let other = format!("{}; {csrf_cookie}", session_cookie("other-2", "user", 0));
+        let admin = format!("{}; {csrf_cookie}", session_cookie("admin-3", "admin", 0));
+        let pull = |cookie: &str, token: Option<&str>, id: &str| {
+            let mut builder = with_peer(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/mappings/{id}/pull"))
+                    .header("cookie", cookie),
+            );
+            if let Some(token) = token {
+                builder = builder.header("x-csrf-token", token);
+            }
+            builder.body(Body::empty()).unwrap()
+        };
+        let send = |request: Request<Body>| {
+            let router = router.clone();
+            async move {
+                let response = router.oneshot(request).await.unwrap();
+                let status = response.status();
+                let retry_after = response
+                    .headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .map(|value| value.to_str().unwrap().to_owned());
+                let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .unwrap();
+                let json: serde_json::Value =
+                    serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                (status, retry_after, json)
+            }
+        };
+
+        // No session, CSRF passes: 401.
+        let anonymous = send(pull(&csrf_cookie, Some(&csrf), "rm1")).await;
+        // A session but no CSRF token: 403.
+        let no_csrf = send(pull(&owner, None, "rm1")).await;
+        // Another user: 404, and the cooldown is not used.
+        let foreign = send(pull(&other, Some(&csrf), "rm1")).await;
+        let missing = send(pull(&owner, Some(&csrf), "nope")).await;
+        // The owner: 200, one job queued.
+        let owned = send(pull(&owner, Some(&csrf), "rm1")).await;
+        // The owner again within 5 minutes: 429 with Retry-After.
+        let again = send(pull(&owner, Some(&csrf), "rm1")).await;
+        // An admin on the owner's other mapping: 200, two jobs (one per tag).
+        let by_admin = send(pull(&admin, Some(&csrf), "rm2")).await;
+        // Harbor fails: 502 with fixed text, and the cooldown is still used.
+        let broken = send(pull(&owner, Some(&csrf), "rm3")).await;
+        let broken_again = send(pull(&owner, Some(&csrf), "rm3")).await;
+
+        let jobs: Vec<(String, String)> =
+            sqlx::query_as("SELECT mapping_id, payload FROM sync_jobs ORDER BY mapping_id, id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let audits: Vec<(Option<String>, String, Option<String>)> = sqlx::query_as(
+            "SELECT actor_user_id, target, details FROM audit_log
+             WHERE action = 'mapping.pull' ORDER BY target",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(anonymous.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(no_csrf.0, StatusCode::FORBIDDEN);
+        assert_eq!(foreign.0, StatusCode::NOT_FOUND);
+        assert_eq!(missing.0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            owned.0,
+            StatusCode::OK,
+            "owner pull was refused: {:?}",
+            owned.2
+        );
+        assert_eq!(owned.2, serde_json::json!({ "queued": 1 }));
+        assert_eq!(again.0, StatusCode::TOO_MANY_REQUESTS);
+        let wait: u64 = again.1.expect("429 carries Retry-After").parse().unwrap();
+        assert!((1..=300).contains(&wait), "Retry-After was {wait}");
+        assert_eq!(by_admin.0, StatusCode::OK, "admin pull was refused");
+        assert_eq!(by_admin.2, serde_json::json!({ "queued": 2 }));
+        assert_eq!(broken.0, StatusCode::BAD_GATEWAY);
+        assert_eq!(broken.2["error"]["code"], "upstream_unreachable");
+        let text = broken.2.to_string();
+        assert!(
+            !text.contains("exploded"),
+            "the Harbor answer leaked: {text}"
+        );
+        assert!(
+            !text.contains("harbor.example.com"),
+            "the URL leaked: {text}"
+        );
+        assert_eq!(broken_again.0, StatusCode::TOO_MANY_REQUESTS);
+
+        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs[0].0, "rm1");
+        let payload: serde_json::Value = serde_json::from_str(&jobs[0].1).unwrap();
+        assert_eq!(payload["trigger"], "poll");
+        assert_eq!(payload["digest"], "sha256:aaaa");
+
+        // One audit row per pull that finished, none for the Harbor failure.
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].0.as_deref(), Some("owner-1"));
+        assert_eq!(audits[0].1, "mapping:rm1");
+        let details: serde_json::Value =
+            serde_json::from_str(audits[0].2.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            details,
+            serde_json::json!({ "mapping_id": "rm1", "queued": 1 })
+        );
+        assert_eq!(audits[1].0.as_deref(), Some("admin-3"));
+        assert_eq!(audits[1].1, "mapping:rm2");
+    }
+
     /// A router over a fresh database, with the session and CSRF keys derived from
     /// the test key. Test values only.
     async fn test_router(name: &str) -> (Router, sqlx::SqlitePool, std::path::PathBuf) {
@@ -1041,6 +1284,31 @@ mod tests {
         std::path::PathBuf,
         api::hardening::RateLimiter,
     ) {
+        let fetch = api::state::HarborFetchHandle::outbound(false).unwrap();
+        test_router_with_fetch(
+            name,
+            login_throttle,
+            webhook_token_limiter,
+            harbor_probe,
+            fetch,
+        )
+        .await
+    }
+
+    /// The full test router with the given Harbor probe and Harbor reader. The manual
+    /// pull router test passes a fake reader here, so no live Harbor is called.
+    async fn test_router_with_fetch(
+        name: &str,
+        login_throttle: services::throttle::LoginThrottle,
+        webhook_token_limiter: api::hardening::RateLimiter,
+        harbor_probe: api::state::HarborProbeHandle,
+        harbor_fetch: api::state::HarborFetchHandle,
+    ) -> (
+        Router,
+        sqlx::SqlitePool,
+        std::path::PathBuf,
+        api::hardening::RateLimiter,
+    ) {
         let dir = std::env::temp_dir().join(format!("harborgate-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1072,6 +1340,8 @@ mod tests {
             app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
                 crate::services::app_log::REVERT_AFTER,
             )),
+            harbor_fetch,
+            pull_limiter: api::mappings::new_pull_limiter(),
         };
         (app(Vec::new(), state), pool, dir, handle)
     }

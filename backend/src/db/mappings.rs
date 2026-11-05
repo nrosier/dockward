@@ -338,8 +338,9 @@ pub async fn all_targets(pool: &SqlitePool) -> Result<Vec<TargetRow>, AppError> 
     .map_err(|_| AppError::InternalError)
 }
 
-/// Reads one mapping by id with no owner check. Only the webhook path uses it, after the
-/// token digest has selected the mapping.
+/// Reads one mapping by id with no owner check. Callers check access first or have already
+/// selected the mapping: the webhook path (by token digest), the worker, and the manual
+/// scan pull, which checks owner or admin in `services::poller::find_pullable`.
 pub async fn find_by_id(
     conn: &mut SqliteConnection,
     id: &str,

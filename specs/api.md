@@ -19,7 +19,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
   - `admin`: a valid session whose role, looked up from `users.role` on this request, is `admin`.
 - Decided (2026-11-03, delegated): a request for an object owned by another tenant returns `404`, not `403`, so existence is not revealed. No external source.
 - CSRF: Decided (2026-11-03): signed double-submit cookie (HMAC key derived via HKDF label `harborgate/csrf-v1`). Cookie `__Host-harborgate_csrf`, header `X-CSRF-Token`, required on every `POST`, `PUT`, `PATCH`, and `DELETE` under `/api`, except the webhook, login, and setup. Login and setup use the same-origin check in [security.md](security.md) instead (Decided 2026-11-03). A missing or wrong token returns `403` with code `csrf_invalid`. Source: OWASP CSRF Prevention Cheat Sheet (https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html). Details are in [security.md](security.md). Decided (2026-11-03): the token is bound only to the signed cookie value; there is no session `jti` binding. The cookie is set at login and OIDC callback.
-- Rate limits: login 10 per minute per IP, webhook 60 per minute per mapping token (both Decided (2026-11-03, delegated) in [security.md](security.md); no external standard; tune in deployment). Every route declares its limit explicitly, because an undeclared limit means unlimited. Decided (2026-11-03): no default limit on authenticated routes beyond login and webhook.
+- Rate limits: login 10 per minute per IP, webhook 60 per minute per mapping token (both Decided (2026-11-03, delegated) in [security.md](security.md); no external standard; tune in deployment), manual scan pull 1 per 5 minutes per mapping (Decided 2026-11-05, user, #131; see Mappings). Every route declares its limit explicitly, because an undeclared limit means unlimited. Decided (2026-11-03): no default limit on authenticated routes beyond login, webhook, and (Decided 2026-11-05, #131) the manual scan pull.
 
 ### Error envelope
 
@@ -106,6 +106,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 | DELETE | `/api/v1/mappings/:id` | session (owner only) | none | empty | 204, 404 |
 | POST | `/api/v1/mappings/:id/rotate-webhook-token` | session (owner only) | none | `{"webhook_url": "<new, shown once>"}` | 200, 404 |
 | POST | `/api/v1/mappings/:id/rotate-auth-secret` | session (owner only) | none | `{"auth_secret": "<shown once>"}` | 200, 404 |
+| POST | `/api/v1/mappings/:id/pull` | session (mapping owner, or any admin) | none | `{"queued": <n>}` | 200, 401, 403 `csrf_invalid`, 404, 429 (with `Retry-After`), 502 `upstream_unreachable` |
 
 - Decided (2026-11-03, user, #35): items of `GET /mappings` add `"open_cves": {"critical","high"}` and `"last_sync": {"status","updated_at"} or null`. `open_cves` follows the dashboard counting rules in [cve-lifecycle.md](cve-lifecycle.md) for that one mapping. `last_sync` is the mapping's most recently updated `sync_jobs` row. `GET /mappings/:id` does not carry these fields.
 - The duplicate error for the GitHub target is shown inline in the form ([frontend.md](frontend.md)). The `409` body names the conflicting mapping's label. Decided (2026-11-03, delegated): only if that mapping is owned by the caller; otherwise the message is generic, so another tenant's mapping is not revealed.
@@ -114,6 +115,11 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 - Rotation audits `mapping.webhook_token_rotate` and `mapping.auth_secret_rotate`. The old value stops working immediately.
 - Decided (2026-11-03): `DELETE` removes only HarborGate's own rows: `repo_mappings`, its `cve_findings`, `cve_acceptances`, `sync_jobs`, `sync_reports`, and its webhook token and auth secret. The `github_issues` rows for the mapping's GitHub target are deleted in the same transaction, matched by `github_owner` and `github_repo`. Open GitHub issues are NOT closed and are NOT changed on GitHub. The user must close each issue on GitHub manually. Only one mapping can exist per GitHub repository ([database.md](database.md)), so these rows belong to this mapping alone.
 - Audit: the delete writes `mapping.delete`. Its `details` list the GitHub issue numbers left open. It never contains tokens or secrets.
+- Manual pull (Decided 2026-11-05, user, #131): `POST /mappings/:id/pull` runs the scheduled poll for this one mapping, now. It uses the same code, page cap, and dedupe rule as backup polling ([integrations.md](integrations.md), Polling), so it queues only tagged `(digest, tag)` pairs that have no successful sync and no queued or running job, and never re-uploads a synced digest. A digest that Harbor is still scanning is queued and left to the existing "report not yet" backoff. `queued` is the number of jobs queued; it may be `0`. The jobs carry `"trigger": "poll"` and appear on the Sync jobs page.
+  - Rate limit: one pull per mapping per 5 minutes, held in memory and keyed by mapping id. A pull that fails at Harbor still uses the 5 minutes. A restart clears the cooldown. Over the limit the route returns `429` with `Retry-After`. The cooldown is checked after the tenancy check, so another tenant's mapping is `404`, never `429`.
+  - Who may pull: the mapping owner, and any admin, for any tenant's mapping. This is the second admin exception to read-only access, beside retry ([security.md](security.md), Tenancy).
+  - A Harbor error (unreachable, a non-`200` answer, or a body that does not parse) fails only this pull, with `502 upstream_unreachable` and its fixed message. Jobs already queued from earlier pages of the same pull stay queued, as in the scheduled poll.
+  - Audit: a pull that finishes writes `mapping.pull` with `details` `{"mapping_id","queued"}`. A pull that fails at Harbor writes no audit row. No URL, credential, or Harbor answer is recorded.
 
 ## CVEs
 
@@ -153,7 +159,7 @@ Decided (2026-11-03, user, #35): `SyncJob` also has `"trigger"` (`webhook` or `p
 - Retry (Decided 2026-11-03, delegated): sets `status` to `queued`, resets `attempts` to 0, clears `last_error`, sets `next_attempt_at` to now. Retry constants are in [backend.md](backend.md). Decided (2026-11-03): the mapping owner may retry their own failed jobs; admins may retry any job, of any tenant.
 - Decided (2026-11-03): `status` is `sync_jobs.status` (`queued`, `running`, `done`, `failed`). `report.sarif_status` is the SARIF upload result (`pending`, `success`, `failed`). The job status value is `done`, not `success`.
 - The Failed syncs admin tab is this list with `status=failed&scope=all` (read-only for admins except retry, see below).
-- Decided (2026-11-03): an admin may retry a failed job of any tenant. This is the one operational exception to read-only admin access, because retry only re-queues work and changes no mapping or credential. The owner may also retry their own jobs. See [security.md](security.md), Tenancy.
+- Decided (2026-11-03): an admin may retry a failed job of any tenant. This is the first operational exception to read-only admin access (the second is the manual scan pull, see Mappings), because retry only re-queues work and changes no mapping or credential. The owner may also retry their own jobs. See [security.md](security.md), Tenancy.
 
 ## Dashboard
 

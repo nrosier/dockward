@@ -25,6 +25,7 @@ pub const ACTIONS: &[&str] = &[
     "mapping.delete",
     "mapping.webhook_token_rotate",
     "mapping.auth_secret_rotate",
+    "mapping.pull",
     "alert.config_change",
     "backup.run",
     "restore.run",

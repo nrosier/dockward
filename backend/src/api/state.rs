@@ -12,7 +12,9 @@ use crate::api::hardening::RateLimiter;
 use crate::auth::crypto::DerivedKey;
 use crate::error::AppError;
 use crate::services::credential_probe::{HarborProbe, OutboundHarborProbe};
+use crate::services::harbor_client::HarborGet;
 use crate::services::oidc_jwt::JwksCache;
+use crate::services::sync::HarborFetch;
 use crate::services::throttle::LoginThrottle;
 
 /// The future a probe call returns. It is boxed so the probe can be a trait object.
@@ -109,6 +111,61 @@ impl HarborProbe for HarborProbeHandle {
     }
 }
 
+/// Object-safe view of `HarborFetch`, for the same reason as `DynHarborProbe`: the
+/// `HarborFetch` future cannot be a trait object, so this trait returns a boxed future.
+pub trait DynHarborFetch: Send + Sync {
+    /// Sends `GET url` with the robot's basic auth. Returns the status and the body.
+    fn fetch<'a>(
+        &'a self,
+        url: &'a Url,
+        username: &'a str,
+        secret: &'a [u8],
+        extra_headers: &'a [(&'a str, &'a str)],
+    ) -> ProbeFuture<'a, (u16, Vec<u8>)>;
+}
+
+impl DynHarborFetch for HarborGet {
+    fn fetch<'a>(
+        &'a self,
+        url: &'a Url,
+        username: &'a str,
+        secret: &'a [u8],
+        extra_headers: &'a [(&'a str, &'a str)],
+    ) -> ProbeFuture<'a, (u16, Vec<u8>)> {
+        Box::pin(self.get(url, username, secret, extra_headers))
+    }
+}
+
+/// The Harbor reader that `AppState` holds for the manual scan pull. It implements
+/// `HarborFetch`, so the poller code takes it. Production uses the guarded `HarborGet`;
+/// router tests inject a fake, so no live Harbor is needed.
+#[derive(Clone)]
+pub struct HarborFetchHandle(Arc<dyn DynHarborFetch>);
+
+impl HarborFetchHandle {
+    /// The production reader. `allow_private` is `HARBORGATE_ALLOW_PRIVATE_HARBOR`.
+    pub fn outbound(allow_private: bool) -> Result<Self, AppError> {
+        Ok(Self::new(Arc::new(HarborGet::new(allow_private)?)))
+    }
+
+    /// Wraps any reader, such as a test fake.
+    pub fn new(fetch: Arc<dyn DynHarborFetch>) -> Self {
+        Self(fetch)
+    }
+}
+
+impl HarborFetch for HarborFetchHandle {
+    async fn fetch(
+        &self,
+        url: &Url,
+        username: &str,
+        secret: &[u8],
+        extra_headers: &[(&str, &str)],
+    ) -> Result<(u16, Vec<u8>), AppError> {
+        self.0.fetch(url, username, secret, extra_headers).await
+    }
+}
+
 /// Pool and derived session key. The session key is kept behind an `Arc` because
 /// the derived key is not `Clone`.
 #[derive(Clone)]
@@ -151,4 +208,9 @@ pub struct AppState {
     /// The application log buffer and the global level controller
     /// (`specs/security.md`, Application log).
     pub app_log: Arc<crate::services::app_log::AppLog>,
+    /// The Harbor reader for the manual scan pull (`POST /api/v1/mappings/:id/pull`).
+    pub harbor_fetch: HarborFetchHandle,
+    /// Manual scan pulls per mapping: 1 per 5 minutes, in memory (`specs/security.md`,
+    /// Hardening). Keyed by mapping id.
+    pub pull_limiter: RateLimiter,
 }
