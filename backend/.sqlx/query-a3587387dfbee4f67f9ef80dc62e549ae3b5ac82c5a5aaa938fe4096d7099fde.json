@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", harbor_repository AS \"harbor_repository!\" FROM repo_mappings\n         WHERE harbor_base_url = ? AND harbor_project = ? AND harbor_repository = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "harbor_repository!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "harbor_repository"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "a3587387dfbee4f67f9ef80dc62e549ae3b5ac82c5a5aaa938fe4096d7099fde"
+}

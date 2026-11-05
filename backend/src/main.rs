@@ -2303,8 +2303,13 @@ mod tests {
 
     /// The event for repository `repo` on project `proj`.
     fn repo_event(repo: &str) -> String {
+        full_name_event(&format!("proj/{repo}"))
+    }
+
+    /// The event for an exact `repo_full_name`, whatever its project.
+    fn full_name_event(full_name: &str) -> String {
         format!(
-            r#"{{"type":"SCANNING_COMPLETED","event_data":{{"repository":{{"repo_full_name":"proj/{repo}"}},"resources":[{{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tag":"v1"}}],"scan":{{"scan_type":"vulnerability"}}}}}}"#
+            r#"{{"type":"SCANNING_COMPLETED","event_data":{{"repository":{{"repo_full_name":"{full_name}"}},"resources":[{{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tag":"v1"}}],"scan":{{"scan_type":"vulnerability"}}}}}}"#
         )
     }
 
@@ -2657,6 +2662,170 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unmatched, 0);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn post_project(
+        router: &Router,
+        auth: Option<&str>,
+        body: &str,
+    ) -> axum::http::StatusCode {
+        use tower::ServiceExt;
+        router
+            .clone()
+            .oneshot(project_request("proj-tok-fake", auth, body))
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn table_count(pool: &sqlx::SqlitePool, table: &str) -> i64 {
+        let sql = match table {
+            "sync_jobs" => "SELECT COUNT(*) FROM sync_jobs",
+            _ => "SELECT COUNT(*) FROM project_webhook_unmatched",
+        };
+        sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+    }
+
+    /// Project scope (#145): an event for another Harbor project is `202`, stores nothing and
+    /// is not counted, even when a mapping of that name exists on the project. A `proj/app`
+    /// event still routes.
+    #[tokio::test]
+    async fn project_event_for_another_project_is_ignored() {
+        use axum::http::StatusCode;
+        let (router, pool, dir) = test_router("project-scope").await;
+        project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+        let auth = Some("Bearer proj-sec-fake");
+        for name in ["otherproj/app", "otherproj/stranger", "proj2/app", "app"] {
+            let status = post_project(&router, auth, &full_name_event(name)).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{name}");
+        }
+        assert_eq!(table_count(&pool, "sync_jobs").await, 0);
+        assert_eq!(table_count(&pool, "project_webhook_unmatched").await, 0);
+        let status = post_project(&router, auth, &full_name_event("proj/app")).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(table_count(&pool, "sync_jobs").await, 1);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The job for a routed event carries the mapping's own repository name (#145).
+    #[tokio::test]
+    async fn project_event_job_uses_the_mapping_repository_name() {
+        use axum::http::StatusCode;
+        let (router, pool, dir) = test_router("project-route-name").await;
+        project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+        let status = post_project(
+            &router,
+            Some("Bearer proj-sec-fake"),
+            &full_name_event("proj/other"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let payload: String =
+            sqlx::query_scalar("SELECT payload FROM sync_jobs WHERE mapping_id = 'pm-other'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(payload.contains("proj/other"), "{payload}");
+        assert_eq!(table_count(&pool, "sync_jobs").await, 1);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unmatched name rule (#145): bad names are ignored with `202`, a valid one is counted.
+    #[tokio::test]
+    async fn unmatched_names_are_validated_before_storing() {
+        use axum::http::StatusCode;
+        let (router, pool, dir) = test_router("project-name-rule").await;
+        project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+        let auth = Some("Bearer proj-sec-fake");
+        let too_long = format!("proj/{}", "a".repeat(251));
+        let bad = [
+            "proj/Stranger".to_owned(),
+            "proj/has space".to_owned(),
+            too_long,
+            "proj/a/b".to_owned(),
+            "proj/".to_owned(),
+        ];
+        for name in &bad {
+            let status = post_project(&router, auth, &full_name_event(name)).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{name}");
+        }
+        assert_eq!(table_count(&pool, "project_webhook_unmatched").await, 0);
+        let at_limit = format!("proj/{}", "a".repeat(250));
+        for name in ["proj/stranger.v2_x-y", at_limit.as_str()] {
+            let status = post_project(&router, auth, &full_name_event(name)).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{name}");
+        }
+        assert_eq!(table_count(&pool, "project_webhook_unmatched").await, 2);
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count FROM project_webhook_unmatched WHERE repository = 'proj/stranger.v2_x-y'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A token-only caller gets `401` for any body, so a `400` does not reveal a valid token
+    /// (#145).
+    #[tokio::test]
+    async fn project_secret_is_checked_before_the_body() {
+        use axum::http::StatusCode;
+        let (router, pool, dir) = test_router("project-secret-first").await;
+        project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+        for body in ["{}", "not json", r#"{"type":"SCANNING_COMPLETED"}"#] {
+            assert_eq!(
+                post_project(&router, Some("Bearer wrong-secret"), body).await,
+                StatusCode::UNAUTHORIZED,
+                "{body}"
+            );
+            assert_eq!(
+                post_project(&router, None, body).await,
+                StatusCode::UNAUTHORIZED,
+                "{body}"
+            );
+        }
+        // With the right secret, a body with no repository is still a 400.
+        assert_eq!(
+            post_project(&router, Some("Bearer proj-sec-fake"), "{}").await,
+            StatusCode::BAD_REQUEST
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A wrong secret does not consume a mapping's request budget (#145).
+    #[tokio::test]
+    async fn wrong_project_secret_does_not_charge_the_mapping_budget() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let (router, pool, dir, budget) = test_router_with_limiters(
+            "project-budget",
+            services::throttle::LoginThrottle::new(),
+            api::webhooks::new_token_limiter(),
+        )
+        .await;
+        project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+        let status = post_project(&router, Some("Bearer wrong"), &repo_event("app")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(budget.len(), 0);
+        let ok = router
+            .clone()
+            .oneshot(project_request(
+                "proj-tok-fake",
+                Some("Bearer proj-sec-fake"),
+                &repo_event("app"),
+            ))
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(ok, StatusCode::ACCEPTED);
+        assert_eq!(budget.len(), 1);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

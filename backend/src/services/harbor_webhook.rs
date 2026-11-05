@@ -58,6 +58,31 @@ pub fn event_repository(body: &[u8]) -> Option<String> {
     string_at(&data, &["repository", "repo_full_name"])
 }
 
+/// The repository part of an event's `repo_full_name` when it names a repository in
+/// `harbor_project` (it starts with `<harbor_project>/`), else `None` (#145). The one place the
+/// project scope is decided for a project webhook.
+pub fn repository_in_project<'a>(harbor_project: &str, repo_full_name: &'a str) -> Option<&'a str> {
+    repo_full_name
+        .strip_prefix(harbor_project)?
+        .strip_prefix('/')
+}
+
+/// Whether an unmatched event's `repo_full_name` may be stored (#145): at most 255 characters,
+/// `<harbor_project>/<repository>` with exactly one slash, and the repository made only of
+/// lowercase letters, digits, dot, underscore and hyphen (Harbor's name rule).
+pub fn unmatched_name_is_valid(harbor_project: &str, repo_full_name: &str) -> bool {
+    if repo_full_name.chars().count() > 255 {
+        return false;
+    }
+    let Some(repository) = repository_in_project(harbor_project, repo_full_name) else {
+        return false;
+    };
+    !repository.is_empty()
+        && repository
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+}
+
 pub fn classify(body: &[u8], repo_full_name: &str) -> Result<Outcome, AppError> {
     let value: Value = serde_json::from_slice(body).map_err(|_| bad_request())?;
     let object = value.as_object().ok_or_else(bad_request)?;

@@ -38,16 +38,23 @@ pub async fn find_by_token_hash(
     }))
 }
 
-/// The id of the mapping on this project whose Harbor repository matches, or `None`.
+/// A mapping chosen by a project event: its id and its own Harbor repository name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutedMapping {
+    pub id: String,
+    pub harbor_repository: String,
+}
+
+/// The mapping on this project whose Harbor repository matches, or `None`.
 /// A mapping's Harbor repository is unique per Harbor instance, so at most one matches.
 pub async fn mapping_for_repository(
     pool: &SqlitePool,
     harbor_base_url: &str,
     harbor_project: &str,
     harbor_repository: &str,
-) -> Result<Option<String>, AppError> {
+) -> Result<Option<RoutedMapping>, AppError> {
     let row = sqlx::query!(
-        "SELECT id AS \"id!\" FROM repo_mappings
+        "SELECT id AS \"id!\", harbor_repository AS \"harbor_repository!\" FROM repo_mappings
          WHERE harbor_base_url = ? AND harbor_project = ? AND harbor_repository = ?",
         harbor_base_url,
         harbor_project,
@@ -56,7 +63,10 @@ pub async fn mapping_for_repository(
     .fetch_optional(pool)
     .await
     .map_err(|_| AppError::InternalError)?;
-    Ok(row.map(|r| r.id))
+    Ok(row.map(|r| RoutedMapping {
+        id: r.id,
+        harbor_repository: r.harbor_repository,
+    }))
 }
 
 /// Counts one unmatched event for a repository on a project webhook (#132). No event body is
