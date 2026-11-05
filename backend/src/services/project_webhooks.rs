@@ -343,13 +343,12 @@ pub async fn unmatched(
 /// owns moves to another user with a mapping on the same Harbor base URL and project, and
 /// the move writes `project_webhook.owner_transfer`. A project webhook with no candidate is
 /// left in place, so the `ON DELETE CASCADE` on `project_webhooks.user_id` deletes it with
-/// the user row (and its unmatched counts with it). Returns the ids left to the cascade.
+/// the user row (and its unmatched counts with it).
 pub async fn transfer_on_user_delete(
     conn: &mut SqliteConnection,
     actor: &Actor,
     user_id: &str,
-) -> Result<Vec<String>, AppError> {
-    let mut dropped = Vec::new();
+) -> Result<(), AppError> {
     for project in db::owned_by(conn, user_id).await? {
         let candidate = db::transfer_candidate(
             conn,
@@ -359,7 +358,6 @@ pub async fn transfer_on_user_delete(
         )
         .await?;
         let Some(new_owner) = candidate else {
-            dropped.push(project.id);
             continue;
         };
         if db::set_owner(conn, &project.id, &new_owner).await? == 0 {
@@ -377,7 +375,7 @@ pub async fn transfer_on_user_delete(
         )
         .await?;
     }
-    Ok(dropped)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -814,6 +812,71 @@ mod tests {
                 .await
                 .is_empty()
         );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn set_created_at(pool: &SqlitePool, mapping: &str, at: Option<i64>) {
+        sqlx::query("UPDATE repo_mappings SET created_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(mapping)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn owner_after_deleting(pool: &SqlitePool, webhook: &str, deleted: &str) -> String {
+        let admin = Actor {
+            user_id: Some("adm".to_owned()),
+            username: "name-adm".to_owned(),
+        };
+        crate::services::users::delete_user(pool, &admin, deleted)
+            .await
+            .unwrap();
+        sqlx::query_scalar("SELECT user_id FROM project_webhooks WHERE id = ?")
+            .bind(webhook)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn transfer_picks_the_earliest_then_lowest_user_id() {
+        // Earliest created_at wins; a NULL created_at must not win over a real timestamp.
+        let (pool, dir) = fresh_pool("transfer-order").await;
+        for u in ["adm", "u0", "u1", "u2", "u3"] {
+            add_user(&pool, u, if u == "adm" { "admin" } else { "user" }).await;
+        }
+        add_mapping(&pool, "m0", "u0", "proj", "app").await;
+        add_mapping(&pool, "m1", "u1", "proj", "a").await;
+        add_mapping(&pool, "m2", "u2", "proj", "b").await;
+        add_mapping(&pool, "m3", "u3", "proj", "c").await;
+        set_created_at(&pool, "m1", None).await;
+        set_created_at(&pool, "m2", Some(2000)).await;
+        set_created_at(&pool, "m3", Some(1000)).await;
+        let created = create(&pool, &user("u0", Role::User), "https://hg", "m0")
+            .await
+            .unwrap();
+        assert_eq!(owner_after_deleting(&pool, &created.id, "u0").await, "u3");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Same earliest created_at: the lower user id wins, whatever the insert order.
+        let (pool, dir) = fresh_pool("transfer-tie").await;
+        for u in ["adm", "u0", "u5", "u4", "u9"] {
+            add_user(&pool, u, if u == "adm" { "admin" } else { "user" }).await;
+        }
+        add_mapping(&pool, "m0", "u0", "proj", "app").await;
+        add_mapping(&pool, "m5", "u5", "proj", "a").await;
+        add_mapping(&pool, "m4", "u4", "proj", "b").await;
+        add_mapping(&pool, "m9", "u9", "proj", "c").await;
+        set_created_at(&pool, "m5", Some(1000)).await;
+        set_created_at(&pool, "m4", Some(1000)).await;
+        set_created_at(&pool, "m9", Some(3000)).await;
+        let created = create(&pool, &user("u0", Role::User), "https://hg", "m0")
+            .await
+            .unwrap();
+        assert_eq!(owner_after_deleting(&pool, &created.id, "u0").await, "u4");
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

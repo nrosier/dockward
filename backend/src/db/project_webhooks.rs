@@ -343,8 +343,8 @@ pub async fn owned_by(
 }
 
 /// The user to take over a project webhook: another user with a mapping on the same Harbor
-/// base URL and project. The user with the oldest such mapping wins, then the lowest id, so
-/// the choice is deterministic.
+/// base URL and project. The user with the oldest such mapping wins (a NULL `created_at`
+/// sorts last), then the lowest id, so the choice is deterministic.
 pub async fn transfer_candidate(
     conn: &mut sqlx::SqliteConnection,
     harbor_base_url: &str,
@@ -355,7 +355,7 @@ pub async fn transfer_candidate(
         r#"SELECT user_id AS "user_id!" FROM repo_mappings
            WHERE harbor_base_url = ? AND harbor_project = ? AND user_id <> ?
            GROUP BY user_id
-           ORDER BY MIN(created_at) ASC, user_id ASC
+           ORDER BY (MIN(created_at) IS NULL), MIN(created_at) ASC, user_id ASC
            LIMIT 1"#,
         harbor_base_url,
         harbor_project,
