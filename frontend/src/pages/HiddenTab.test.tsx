@@ -53,6 +53,38 @@ describe("Hidden tab", () => {
     expect(screen.getByText(t("mapping.hidden.instanceNote"))).toBeInTheDocument();
   });
 
+  it("draws one card per Harbor instance: Hidden on one, Visible on the other", async () => {
+    stub({
+      items: [
+        { id: "a", source: "harbor", full_name: "shared-name", harbor_base_url: "https://harbor-prod.example.com", created_at: "2026-11-05T10:12:00Z" },
+        { id: "b", source: "harbor", full_name: "other-name", harbor_base_url: "https://harbor-lab.example.com", created_at: "2026-11-04T10:12:00Z" },
+      ],
+    });
+    renderWithRoutes(routes, "/account/hidden");
+    await screen.findByRole("table");
+    const cards = screen.getAllByTestId("instance-card");
+    expect(cards).toHaveLength(2);
+    expect(within(cards[0]).getByText("https://harbor-prod.example.com")).toBeInTheDocument();
+    expect(within(cards[0]).getByText("shared-name")).toBeInTheDocument();
+    expect(within(cards[0]).getByText(t("mapping.hidden.hidden"))).toBeInTheDocument();
+    expect(within(cards[1]).getByText("https://harbor-lab.example.com")).toBeInTheDocument();
+    expect(within(cards[1]).getByText("shared-name")).toBeInTheDocument();
+    expect(within(cards[1]).getByText(t("mapping.hidden.visible"))).toBeInTheDocument();
+  });
+
+  it("shows only the instanceNote text when the hidden Harbor items sit on one instance", async () => {
+    stub({
+      items: [
+        { id: "a", source: "harbor", full_name: "one", harbor_base_url: "https://harbor-prod.example.com", created_at: "2026-11-05T10:12:00Z" },
+        { id: "b", source: "harbor", full_name: "two", harbor_base_url: "https://harbor-prod.example.com", created_at: "2026-11-04T10:12:00Z" },
+      ],
+    });
+    renderWithRoutes(routes, "/account/hidden");
+    await screen.findByRole("table");
+    expect(screen.queryAllByTestId("instance-card")).toHaveLength(0);
+    expect(screen.getByText(t("mapping.hidden.instanceNote"))).toBeInTheDocument();
+  });
+
   it("asks newest first", async () => {
     const fetchMock = stub();
     renderWithRoutes(routes, "/account/hidden");

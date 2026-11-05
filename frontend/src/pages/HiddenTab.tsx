@@ -14,6 +14,23 @@ import { t } from "../i18n";
 import { api } from "../lib/api";
 import type { HiddenItem, Page } from "../types/api";
 
+// When the hidden Harbor items span two or more instances, one card per instance
+// for the newest Harbor name: Hidden on the instance that hid it, Visible on the
+// others. Empty otherwise, so only the instanceNote text is shown.
+function instanceCards(items: HiddenItem[]): { url: string; name: string; hidden: boolean }[] {
+  const harbor = items.filter((i): i is HiddenItem & { harbor_base_url: string } => i.source === "harbor" && i.harbor_base_url !== null);
+  const urls = [...new Set(harbor.map((i) => i.harbor_base_url))];
+  const name = harbor[0]?.full_name;
+  if (name === undefined || urls.length < 2) {
+    return [];
+  }
+  return urls.map((url) => ({
+    url,
+    name,
+    hidden: harbor.some((i) => i.harbor_base_url === url && i.full_name === name),
+  }));
+}
+
 const PAGE_SIZE = 25;
 const CAP = 1000;
 type Filter = "all" | "harbor" | "github";
@@ -51,6 +68,8 @@ export default function HiddenTab() {
     },
   });
 
+  const cards = instanceCards(list.data?.items ?? []);
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
@@ -60,6 +79,20 @@ export default function HiddenTab() {
       <Card className="flex flex-col gap-2 p-4">
         <h3 className="text-[15px] font-semibold">{t("mapping.hidden.instanceTitle")}</h3>
         <p className="text-[12.5px] text-muted">{t("mapping.hidden.instanceNote")}</p>
+        {cards.length === 0 ? null : (
+          <div className="mt-1 grid grid-cols-1 gap-3 md:grid-cols-2">
+            {cards.map((card) => (
+              <Card key={card.url} className="flex flex-col gap-1.5 p-3" data-testid="instance-card">
+                <div className="font-mono text-xs text-muted">{card.url}</div>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono">{card.name}</span>
+                  <Pill kind={card.hidden ? "critical" : "fixed"} label={card.hidden ? t("mapping.hidden.hidden") : t("mapping.hidden.visible")} />
+                </div>
+                <p className="text-xs text-muted">{card.hidden ? t("mapping.hidden.hiddenHere") : t("mapping.hidden.visibleHere")}</p>
+              </Card>
+            ))}
+          </div>
+        )}
       </Card>
       <Segmented
         label={t("mapping.hidden.filter")}
