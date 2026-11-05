@@ -2690,6 +2690,111 @@ mod tests {
         assert_eq!(issues, 0);
     }
 
+    /// #129: the manual issue route for a LOW and an UNKNOWN CVE keeps every guard of the
+    /// CRITICAL route. A missing `X-CSRF-Token` is `403`, no session is `401`, another user and
+    /// an admin who does not own the mapping get `404`, and nothing is stored. The owner gets
+    /// past routing and tenancy (the fake stored token fails before any GitHub call).
+    #[tokio::test]
+    async fn low_and_unknown_cve_issue_route_is_owner_only_with_csrf() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, pool, dir) = test_router("cve-issue-route-low").await;
+        let mut conn = pool.acquire().await.unwrap();
+        for (id, role) in [
+            ("owner-1", "user"),
+            ("other-2", "user"),
+            ("admin-3", "admin"),
+        ] {
+            db::users::insert_local(&mut conn, id, id, None, "h", role)
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        sqlx::query(
+            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
+             VALUES ('rc1', 'owner-1', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
+                    ('rc2', 'owner-1', 'github', 'g', NULL, NULL, 'v1:fake')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+             VALUES ('rm1', 'owner-1', 'rc1', 'rc2', 'https://harbor.example.com', 'proj', 'app', 'octo', 'app', 'h1', 'h2')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, severity, status)
+             VALUES ('rf1', 'rm1', 'app', 'v1', 'CVE-2026-0004', 'LOW', 'open'),
+                    ('rf2', 'rm1', 'app', 'v1', 'CVE-2026-0005', 'UNKNOWN', 'open')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let key = auth::crypto::csrf_key(
+            &config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap(),
+        )
+        .unwrap();
+        let csrf = auth::csrf::issue(&key).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let mut results = Vec::new();
+        for cve in ["CVE-2026-0004", "CVE-2026-0005"] {
+            let uri = format!("/api/v1/cves/rm1%3A{cve}/issue");
+            let post = |cookie: String, token: Option<&str>| {
+                let mut builder = with_peer(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .header("cookie", cookie),
+                );
+                if let Some(token) = token {
+                    builder = builder.header("x-csrf-token", token);
+                }
+                builder.body(Body::empty()).unwrap()
+            };
+            let owner_session = session_cookie("owner-1", "user", 0);
+            let other_session = session_cookie("other-2", "user", 0);
+            let admin_session = session_cookie("admin-3", "admin", 0);
+            let status = |request: Request<Body>| {
+                let router = router.clone();
+                async move { router.oneshot(request).await.unwrap().status() }
+            };
+            results.push((
+                cve,
+                status(post(format!("{owner_session}; {csrf_cookie}"), None)).await,
+                status(post(csrf_cookie.clone(), Some(&csrf))).await,
+                status(post(format!("{other_session}; {csrf_cookie}"), Some(&csrf))).await,
+                status(post(format!("{admin_session}; {csrf_cookie}"), Some(&csrf))).await,
+                status(post(format!("{owner_session}; {csrf_cookie}"), Some(&csrf))).await,
+            ));
+        }
+        let issues: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM github_issues")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for (cve, no_csrf, no_session, foreign, admin, owner) in results {
+            assert_eq!(no_csrf, StatusCode::FORBIDDEN, "{cve}");
+            assert_eq!(no_session, StatusCode::UNAUTHORIZED, "{cve}");
+            assert_eq!(foreign, StatusCode::NOT_FOUND, "{cve}");
+            assert_eq!(
+                admin,
+                StatusCode::NOT_FOUND,
+                "{cve}: admins cannot log issues for others"
+            );
+            assert_ne!(owner, StatusCode::NOT_FOUND, "{cve}");
+            assert_ne!(owner, StatusCode::UNPROCESSABLE_ENTITY, "{cve}");
+        }
+        assert_eq!(issues, 0);
+    }
+
     /// `POST /api/v1/cves/:id/accept` and `/unaccept` through the full router: a missing
     /// `X-CSRF-Token` is `403`, a CSRF token with no session is `401`, and another user's
     /// mapping in the percent-encoded `<mapping_id>%3A<cve_id>` form is `404` with nothing

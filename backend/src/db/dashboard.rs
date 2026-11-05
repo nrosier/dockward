@@ -6,13 +6,16 @@ use sqlx::SqlitePool;
 
 use crate::error::AppError;
 
-/// Open CVEs of one mapping by severity. Only `CRITICAL` and `HIGH` are shown
-/// (`specs/cve-lifecycle.md`). A mapping with none is absent from the result.
+/// Open CVEs of one mapping by severity, every severity (`specs/cve-lifecycle.md`, changed
+/// on #129). A mapping with none is absent from the result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenCount {
     pub mapping_id: String,
     pub critical: i64,
     pub high: i64,
+    pub medium: i64,
+    pub low: i64,
+    pub unknown: i64,
 }
 
 /// Open CVEs by severity, per mapping. `mapping_id` `Some` limits the result to that mapping.
@@ -45,7 +48,10 @@ pub async fn open_by_mapping(
            )
            SELECT ob.mapping_id AS "mapping_id!",
                   COALESCE(SUM(CASE WHEN ob.sev_rank = 5 THEN 1 ELSE 0 END), 0) AS "critical!: i64",
-                  COALESCE(SUM(CASE WHEN ob.sev_rank = 4 THEN 1 ELSE 0 END), 0) AS "high!: i64"
+                  COALESCE(SUM(CASE WHEN ob.sev_rank = 4 THEN 1 ELSE 0 END), 0) AS "high!: i64",
+                  COALESCE(SUM(CASE WHEN ob.sev_rank = 3 THEN 1 ELSE 0 END), 0) AS "medium!: i64",
+                  COALESCE(SUM(CASE WHEN ob.sev_rank = 2 THEN 1 ELSE 0 END), 0) AS "low!: i64",
+                  COALESCE(SUM(CASE WHEN ob.sev_rank = 1 THEN 1 ELSE 0 END), 0) AS "unknown!: i64"
            FROM open_best ob
            WHERE NOT EXISTS (
                SELECT 1 FROM cve_acceptances ca
@@ -67,6 +73,9 @@ pub async fn open_by_mapping(
             mapping_id: row.mapping_id,
             critical: row.critical,
             high: row.high,
+            medium: row.medium,
+            low: row.low,
+            unknown: row.unknown,
         })
         .collect())
 }

@@ -26,7 +26,8 @@ use crate::services::sync_jobs::{self, LastSync};
 use crate::worker::now_secs;
 
 /// One `GET /mappings` item: the `Mapping` fields plus `open_cves` and `last_sync`
-/// (`specs/api.md`, Mappings; decided on #35). `GET /mappings/:id` does not carry them.
+/// (`specs/api.md`, Mappings; decided on #35). `open_cves` covers every severity with a
+/// `total` (#129). `GET /mappings/:id` does not carry them.
 #[derive(Debug, Serialize)]
 pub struct MappingListItem {
     #[serde(flatten)]
@@ -264,7 +265,8 @@ mod tests {
         (pool, dir)
     }
 
-    /// Two mappings for one user. `m1` has two open CVEs and a job; `m2` has nothing.
+    /// Two mappings for one user. `m1` has one open CVE of each severity and a job; `m2` has
+    /// nothing.
     async fn seed(pool: &SqlitePool) {
         sqlx::query("INSERT INTO users (id, username, role, token_version) VALUES ('owner', 'owner', 'user', 0)")
             .execute(pool)
@@ -292,7 +294,13 @@ mod tests {
             .await
             .unwrap();
         }
-        for (cve, severity) in [("CVE-2026-0001", "CRITICAL"), ("CVE-2026-0002", "HIGH")] {
+        for (cve, severity) in [
+            ("CVE-2026-0001", "CRITICAL"),
+            ("CVE-2026-0002", "HIGH"),
+            ("CVE-2026-0003", "MEDIUM"),
+            ("CVE-2026-0004", "LOW"),
+            ("CVE-2026-0005", "UNKNOWN"),
+        ] {
             sqlx::query(
                 "INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, severity, status)
                  VALUES (?, 'm1', 'm1', 'v1', ?, ?, 'open')",
@@ -336,7 +344,9 @@ mod tests {
         let busy = item_for(&json, "m1");
         assert_eq!(
             busy["open_cves"],
-            serde_json::json!({ "critical": 1, "high": 1 })
+            serde_json::json!({
+                "critical": 1, "high": 1, "medium": 1, "low": 1, "unknown": 1, "total": 5
+            })
         );
         assert_eq!(busy["last_sync"]["status"], "failed");
         assert_eq!(busy["last_sync"]["updated_at"], "1970-01-01T01:23:20Z");
@@ -346,7 +356,9 @@ mod tests {
         let quiet = item_for(&json, "m2");
         assert_eq!(
             quiet["open_cves"],
-            serde_json::json!({ "critical": 0, "high": 0 })
+            serde_json::json!({
+                "critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0, "total": 0
+            })
         );
         assert!(quiet["last_sync"].is_null());
 

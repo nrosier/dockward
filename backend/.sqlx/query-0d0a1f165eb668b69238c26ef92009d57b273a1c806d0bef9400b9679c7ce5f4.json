@@ -1,0 +1,61 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH open_best AS (\n               SELECT f.mapping_id AS mapping_id, f.cve_id AS cve_id,\n                      MAX(CASE f.severity WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4\n                           WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 ELSE 1 END) AS sev_rank\n               FROM cve_findings f\n               JOIN repo_mappings m ON m.id = f.mapping_id\n               WHERE f.status = 'open' AND (?1 IS NULL OR m.user_id = ?1)\n                 AND (?3 IS NULL OR f.mapping_id = ?3)\n               GROUP BY f.mapping_id, f.cve_id\n           )\n           SELECT ob.mapping_id AS \"mapping_id!\",\n                  COALESCE(SUM(CASE WHEN ob.sev_rank = 5 THEN 1 ELSE 0 END), 0) AS \"critical!: i64\",\n                  COALESCE(SUM(CASE WHEN ob.sev_rank = 4 THEN 1 ELSE 0 END), 0) AS \"high!: i64\",\n                  COALESCE(SUM(CASE WHEN ob.sev_rank = 3 THEN 1 ELSE 0 END), 0) AS \"medium!: i64\",\n                  COALESCE(SUM(CASE WHEN ob.sev_rank = 2 THEN 1 ELSE 0 END), 0) AS \"low!: i64\",\n                  COALESCE(SUM(CASE WHEN ob.sev_rank = 1 THEN 1 ELSE 0 END), 0) AS \"unknown!: i64\"\n           FROM open_best ob\n           WHERE NOT EXISTS (\n               SELECT 1 FROM cve_acceptances ca\n               WHERE ca.mapping_id = ob.mapping_id AND ca.cve_id = ob.cve_id\n                 AND ca.revoked_at IS NULL\n                 AND (ca.expires_at IS NULL OR ca.expires_at > ?2)\n           )\n           GROUP BY ob.mapping_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "mapping_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "mapping_id"
+          }
+        }
+      },
+      {
+        "name": "critical!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "high!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "medium!: i64",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "low!: i64",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "unknown!: i64",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0d0a1f165eb668b69238c26ef92009d57b273a1c806d0bef9400b9679c7ce5f4"
+}

@@ -32,7 +32,15 @@ const MAX_ID_BYTES: usize = 128;
 /// The longest `q` search text, in characters.
 pub const MAX_Q_CHARS: usize = 100;
 
-const SEVERITIES: &[&str] = &["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"];
+/// The longest `package`, `tag`, `harbor_project` or `harbor_repository` filter, in
+/// characters (`specs/api.md`, CVEs, list filters).
+pub const MAX_FILTER_CHARS: usize = 256;
+
+/// Every severity, highest first. The `severity` filter takes any of them.
+pub const SEVERITIES: &[&str] = &["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"];
+
+/// The values of the `status` filter. `accepted` matches an active acceptance.
+const STATUSES: &[&str] = &["open", "fixed", "accepted"];
 
 /// The caller of a read: who they are and whether they may read every tenant's data.
 pub struct Reader<'a> {
@@ -64,6 +72,10 @@ pub struct ListParams {
     pub status: Option<String>,
     pub accepted: Option<String>,
     pub q: Option<String>,
+    pub package: Option<String>,
+    pub tag: Option<String>,
+    pub harbor_project: Option<String>,
+    pub harbor_repository: Option<String>,
     pub mapping_id: Option<String>,
     pub scope: Option<String>,
 }
@@ -77,6 +89,9 @@ pub struct CveSummary {
     pub cve_id: String,
     /// The highest severity across the tags.
     pub severity: String,
+    /// The highest severity across the open tag rows, or `null` when every tag is fixed.
+    /// A manual issue uses it; the UI asks for confirmation when it is `LOW` or `UNKNOWN`.
+    pub open_severity: Option<String>,
     /// `open` when any tag's row is open, else `fixed`.
     pub status: String,
     pub package: Option<String>,
@@ -100,6 +115,7 @@ impl CveSummary {
             mapping_id: row.mapping_id,
             cve_id: row.cve_id,
             severity: row.severity,
+            open_severity: row.open_severity,
             status: row.status,
             package: row.package,
             first_seen_at: row.first_seen_at.map(time::rfc3339).transpose()?,
@@ -186,36 +202,68 @@ async fn check_mapping(
 
 /// The filters of a list, validated. Each failure is `400 invalid_request` with fixed text.
 struct Filters {
-    severity: Option<&'static str>,
-    status: Option<&'static str>,
+    severities: Vec<&'static str>,
+    statuses: Vec<&'static str>,
     accepted: Option<i64>,
     q: Option<String>,
+    package: Option<String>,
+    tag: Option<String>,
+    harbor_project: Option<String>,
+    harbor_repository: Option<String>,
+}
+
+/// A comma-separated list of known values, each kept once in the order of `known`. An
+/// absent parameter is an empty list (no filter). An empty or unknown item is `400` with
+/// `message`.
+fn parse_list(
+    value: Option<&str>,
+    known: &'static [&'static str],
+    message: &str,
+) -> Result<Vec<&'static str>, AppError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let mut picked = vec![false; known.len()];
+    for item in value.split(',') {
+        let index = known
+            .iter()
+            .position(|candidate| *candidate == item)
+            .ok_or_else(|| AppError::InvalidRequest(message.to_owned()))?;
+        picked[index] = true;
+    }
+    Ok(known
+        .iter()
+        .zip(picked)
+        .filter_map(|(value, on)| on.then_some(*value))
+        .collect())
+}
+
+/// An exact-match text filter. Empty means no filter. Over [`MAX_FILTER_CHARS`] characters,
+/// or a control character, is `400`.
+fn parse_text(value: Option<&str>, name: &str) -> Result<Option<String>, AppError> {
+    match value {
+        None | Some("") => Ok(None),
+        Some(text) if text.chars().count() > MAX_FILTER_CHARS => Err(AppError::InvalidRequest(
+            format!("{name} can have at most {MAX_FILTER_CHARS} characters."),
+        )),
+        Some(text) if text.chars().any(char::is_control) => Err(AppError::InvalidRequest(format!(
+            "{name} must not contain control characters."
+        ))),
+        Some(text) => Ok(Some(text.to_owned())),
+    }
 }
 
 fn parse_filters(params: &ListParams) -> Result<Filters, AppError> {
-    let severity = match params.severity.as_deref() {
-        None => None,
-        Some(value) => Some(
-            *SEVERITIES
-                .iter()
-                .find(|known| **known == value)
-                .ok_or_else(|| {
-                    AppError::InvalidRequest(
-                        "severity must be CRITICAL, HIGH, MEDIUM, LOW or UNKNOWN.".to_owned(),
-                    )
-                })?,
-        ),
-    };
-    let status = match params.status.as_deref() {
-        None => None,
-        Some("open") => Some("open"),
-        Some("fixed") => Some("fixed"),
-        Some(_) => {
-            return Err(AppError::InvalidRequest(
-                "status must be open or fixed.".to_owned(),
-            ));
-        }
-    };
+    let severities = parse_list(
+        params.severity.as_deref(),
+        SEVERITIES,
+        "severity must be a comma-separated list of CRITICAL, HIGH, MEDIUM, LOW or UNKNOWN.",
+    )?;
+    let statuses = parse_list(
+        params.status.as_deref(),
+        STATUSES,
+        "status must be a comma-separated list of open, fixed or accepted.",
+    )?;
     let accepted = match params.accepted.as_deref() {
         None => None,
         Some("true") => Some(1),
@@ -242,10 +290,14 @@ fn parse_filters(params: &ListParams) -> Result<Filters, AppError> {
         Some(text) => Some(text.to_ascii_lowercase()),
     };
     Ok(Filters {
-        severity,
-        status,
+        severities,
+        statuses,
         accepted,
         q,
+        package: parse_text(params.package.as_deref(), "package")?,
+        tag: parse_text(params.tag.as_deref(), "tag")?,
+        harbor_project: parse_text(params.harbor_project.as_deref(), "harbor_project")?,
+        harbor_repository: parse_text(params.harbor_repository.as_deref(), "harbor_repository")?,
     })
 }
 
@@ -317,10 +369,14 @@ pub async fn list(
         user_id,
         mapping_id,
         cve_id: None,
-        severity: filters.severity,
-        status: filters.status,
+        severities: &filters.severities,
+        statuses: &filters.statuses,
         accepted: filters.accepted,
         q: filters.q.as_deref(),
+        package: filters.package.as_deref(),
+        tag: filters.tag.as_deref(),
+        harbor_project: filters.harbor_project.as_deref(),
+        harbor_repository: filters.harbor_repository.as_deref(),
         sort: &paging.sort,
         sort_sign: if paging.ascending { 1 } else { -1 },
         limit: paging.page_size,
@@ -364,10 +420,14 @@ pub async fn detail(
         user_id: None,
         mapping_id: Some(mapping_id),
         cve_id: Some(cve_id),
-        severity: None,
-        status: None,
+        severities: &[],
+        statuses: &[],
         accepted: None,
         q: None,
+        package: None,
+        tag: None,
+        harbor_project: None,
+        harbor_repository: None,
         sort: "cve_id",
         sort_sign: 1,
         limit: 1,
@@ -438,13 +498,30 @@ mod tests {
 
     #[test]
     fn filters_reject_unknown_values() {
+        let long = "x".repeat(MAX_FILTER_CHARS + 1);
         let bad = [
             ListParams {
                 severity: Some("critical".to_owned()),
                 ..ListParams::default()
             },
             ListParams {
-                status: Some("accepted".to_owned()),
+                severity: Some("HIGH,".to_owned()),
+                ..ListParams::default()
+            },
+            ListParams {
+                severity: Some("".to_owned()),
+                ..ListParams::default()
+            },
+            ListParams {
+                severity: Some("HIGH, LOW".to_owned()),
+                ..ListParams::default()
+            },
+            ListParams {
+                status: Some("closed".to_owned()),
+                ..ListParams::default()
+            },
+            ListParams {
+                status: Some("open,,fixed".to_owned()),
                 ..ListParams::default()
             },
             ListParams {
@@ -459,24 +536,78 @@ mod tests {
                 q: Some("CVE\u{0}".to_owned()),
                 ..ListParams::default()
             },
+            ListParams {
+                package: Some(long.clone()),
+                ..ListParams::default()
+            },
+            ListParams {
+                tag: Some("v1\n".to_owned()),
+                ..ListParams::default()
+            },
+            ListParams {
+                harbor_project: Some(long.clone()),
+                ..ListParams::default()
+            },
+            ListParams {
+                harbor_repository: Some("a\u{7}".to_owned()),
+                ..ListParams::default()
+            },
         ];
         for params in &bad {
-            assert!(matches!(
-                parse_filters(params),
-                Err(AppError::InvalidRequest(_))
-            ));
+            assert!(
+                matches!(parse_filters(params), Err(AppError::InvalidRequest(_))),
+                "{params:?}"
+            );
         }
         let good = parse_filters(&ListParams {
             severity: Some("HIGH".to_owned()),
             status: Some("open".to_owned()),
             accepted: Some("false".to_owned()),
             q: Some("OpenSSL".to_owned()),
+            package: Some("OpenSSL".to_owned()),
+            tag: Some("v1.2".to_owned()),
+            harbor_project: Some("proj".to_owned()),
+            harbor_repository: Some("team/app".to_owned()),
             ..ListParams::default()
         })
         .unwrap();
-        assert_eq!(good.severity, Some("HIGH"));
-        assert_eq!(good.status, Some("open"));
+        assert_eq!(good.severities, ["HIGH"]);
+        assert_eq!(good.statuses, ["open"]);
         assert_eq!(good.accepted, Some(0));
         assert_eq!(good.q.as_deref(), Some("openssl"));
+        assert_eq!(
+            good.package.as_deref(),
+            Some("OpenSSL"),
+            "exact, not folded"
+        );
+        assert_eq!(good.tag.as_deref(), Some("v1.2"));
+        assert_eq!(good.harbor_project.as_deref(), Some("proj"));
+        assert_eq!(good.harbor_repository.as_deref(), Some("team/app"));
+    }
+
+    #[test]
+    fn multi_value_filters_are_deduplicated_and_ordered() {
+        let parsed = parse_filters(&ListParams {
+            severity: Some("UNKNOWN,LOW,UNKNOWN,CRITICAL".to_owned()),
+            status: Some("accepted,fixed,accepted".to_owned()),
+            ..ListParams::default()
+        })
+        .unwrap();
+        assert_eq!(parsed.severities, ["CRITICAL", "LOW", "UNKNOWN"]);
+        assert_eq!(parsed.statuses, ["fixed", "accepted"]);
+        // No parameter and an empty text filter mean no filter at all.
+        let none = parse_filters(&ListParams {
+            package: Some(String::new()),
+            ..ListParams::default()
+        })
+        .unwrap();
+        assert!(none.severities.is_empty() && none.statuses.is_empty());
+        assert!(none.package.is_none());
+        let every = parse_filters(&ListParams {
+            severity: Some(SEVERITIES.join(",")),
+            ..ListParams::default()
+        })
+        .unwrap();
+        assert_eq!(every.severities, SEVERITIES);
     }
 }
