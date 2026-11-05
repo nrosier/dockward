@@ -50,7 +50,7 @@ function stub(options: Options = {}) {
       return json({ items: [githubCred], page: 1, page_size: 200, total: 1 });
     }
     if (path === "/api/v1/mappings?page_size=200") {
-      return json({ items: [{ ...existing, open_cves: { critical: 0, high: 0 }, last_sync: null }], page: 1, page_size: 200, total: 1 });
+      return json({ items: [{ ...existing, open_cves: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0, total: 0 }, last_sync: null }], page: 1, page_size: 200, total: 1 });
     }
     if (path === "/api/v1/mappings" && init?.method === "POST") {
       return (
