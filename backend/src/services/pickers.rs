@@ -634,7 +634,9 @@ impl PickerState {
     }
 
     /// Reads the Harbor pages of `make_url` (at most 10 of 100). Returns the names and
-    /// whether the cap cut the list.
+    /// whether the cap cut the list. The list is truncated only when the 10th page was full
+    /// and a further item exists: `X-Total-Count` above the items read, or, with no header,
+    /// an 11th page that is not empty. Exactly 1,000 items is not truncated.
     async fn harbor_pages(
         &self,
         ctx: &HarborCtx,
@@ -658,7 +660,20 @@ impl PickerState {
             }
             if page == MAX_PAGES {
                 let fetched = i64::try_from(names.len()).unwrap_or(i64::MAX);
-                truncated = response.total_count.is_none_or(|total| total > fetched);
+                truncated = match response.total_count {
+                    Some(total) => total > fetched,
+                    None => {
+                        // No header: ask for the page after the cap; any item means more.
+                        let probe = make_url(MAX_PAGES + 1)?;
+                        let response = self.harbor_get(ctx, &probe).await?;
+                        if response.status != 200 {
+                            return Err(classify(response.status));
+                        }
+                        let more: Vec<NamedItem> =
+                            serde_json::from_slice(&response.body).map_err(|_| upstream())?;
+                        !more.is_empty()
+                    }
+                };
             }
         }
         Ok((names, truncated))

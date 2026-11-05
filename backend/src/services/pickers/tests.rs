@@ -1455,3 +1455,82 @@ async fn a_result_filled_under_an_old_generation_is_not_served_after_a_drop() {
         .unwrap();
     assert!(matches!(again, Cached::Projects(l) if l.items[0].name == "new"));
 }
+
+/// `n` Harbor project names, the first `start`.
+fn harbor_page_body(start: u32, n: u32) -> String {
+    projects_body((start..start + n).map(|i| format!("p{i:04}")))
+}
+
+#[tokio::test]
+async fn harbor_exactly_1000_with_no_next_page_is_not_truncated() {
+    // With and without the X-Total-Count header.
+    for total in [Some(1000i64), None] {
+        let fx = Fixture::new(&format!("harbor-exact-{}", total.is_some())).await;
+        let fake = Arc::new(Recorded::default());
+        robot_ok(&fake);
+        for page in 1..=10u32 {
+            let mut response = ok(&harbor_page_body((page - 1) * 100, 100));
+            response.total_count = total;
+            fake.on(page_is("/api/v2.0/projects", page), response);
+        }
+        // No header: the 11th page is asked for and is empty.
+        fake.on(page_is("/api/v2.0/projects", 11), ok("[]"));
+        let picker = state(fake.clone());
+        let page = picker
+            .harbor_projects(&fx.caller(), &fx.harbor, &ListQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1000);
+        assert!(!page.truncated, "exactly 1,000 with total {total:?}");
+        fx.close().await;
+    }
+}
+
+#[tokio::test]
+async fn harbor_more_than_1000_is_truncated_with_or_without_the_header() {
+    for total in [Some(1001i64), None] {
+        let fx = Fixture::new(&format!("harbor-over-{}", total.is_some())).await;
+        let fake = Arc::new(Recorded::default());
+        robot_ok(&fake);
+        for page in 1..=10u32 {
+            let mut response = ok(&harbor_page_body((page - 1) * 100, 100));
+            response.total_count = total;
+            fake.on(page_is("/api/v2.0/projects", page), response);
+        }
+        fake.on(
+            page_is("/api/v2.0/projects", 11),
+            ok(&harbor_page_body(1000, 1)),
+        );
+        let picker = state(fake.clone());
+        let page = picker
+            .harbor_projects(&fx.caller(), &fx.harbor, &ListQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1000);
+        assert!(page.truncated, "1,001 with total {total:?}");
+        fx.close().await;
+    }
+}
+
+#[tokio::test]
+async fn github_exactly_1000_with_no_next_page_is_not_truncated() {
+    let fx = Fixture::new("github-exact").await;
+    let fake = Arc::new(Recorded::default());
+    for page in 1..=10u32 {
+        let start = (page - 1) * 100;
+        let next = (page < 10).then_some(page + 1);
+        fake.on(
+            page_is("/user/repos", page),
+            github_page(start..start + 100, next),
+        );
+    }
+    let picker = state(fake.clone());
+    let page = picker
+        .github_repositories(&fx.caller(), &fx.github, &ListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(page.total, 1000);
+    assert!(!page.truncated, "the 10th page had no rel=next");
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 10);
+    fx.close().await;
+}
