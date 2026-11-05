@@ -29,6 +29,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 {"error": {"code": "<snake_case>", "message": "<safe text>"}}
 ```
 
+- Decided (2026-11-05, user, #126): the envelope may carry an optional fixed `detail` code, `{"error": {"code","message","detail"}}`, so a client can pick the fix when one `code` covers several causes. The only values are `harbor_identity`, `robot_scope`, `github_token` and `wrong_credential_type`, and only the picker `422 validation_failed` answers set one (see [integrations.md](integrations.md), "Errors and rate limits"). Every other error has no `detail` key.
 - `message` never contains a secret, a token, a stack trace, or SQL. It follows the error-handling rule in [backend.md](backend.md).
 - Codes (Decided 2026-11-03, delegated; no external source): `invalid_request` (400), `password_too_short` (400, Decided 2026-11-03, see [security.md](security.md)), `unauthenticated` (401), `invalid_credentials` (401), `forbidden` (403), `csrf_invalid` (403), `not_found` (404), `conflict` (409), `validation_failed` (422), `payload_too_large` (413), `rate_limited` (429), `internal_error` (500), `upstream_unreachable` (502), `code_scanning_unavailable` (422, Decided (2026-11-03, delegated): the GitHub repository cannot receive code scanning uploads, see [security.md](security.md), "GitHub token scope").
 - Status code sources: RFC 9110 section 15.5 (client errors) and section 15.6 (server errors), https://www.rfc-editor.org/rfc/rfc9110. `429` is from RFC 6585.

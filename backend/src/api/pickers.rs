@@ -18,7 +18,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::api::state::AppState;
-use crate::error::AppError;
+use crate::error::{AppError, envelope_response};
 use crate::services::pickers::{
     self, Caller, HiddenQuery, HideRequest, ListQuery, PickerFail, SuggestionQuery,
 };
@@ -73,10 +73,10 @@ pub fn fail_response(fail: PickerFail) -> Response {
             status,
             code,
             message,
+            detail,
             retry_after,
         } => {
-            let body = serde_json::json!({ "error": { "code": code, "message": message } });
-            let mut response = (status, Json(body)).into_response();
+            let mut response = envelope_response(status, code, message.to_owned(), detail);
             if let Some(wait) = retry_after
                 && let Ok(value) = HeaderValue::from_str(&wait.to_string())
             {

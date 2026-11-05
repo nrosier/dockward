@@ -43,6 +43,42 @@ struct ErrorEnvelope {
 struct ErrorBody {
     code: &'static str,
     message: String,
+    /// Optional fixed sub-code that tells a client which fix applies when one `code` covers
+    /// several causes (`specs/api.md`, Error envelope). Absent for every other error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<ErrorDetail>,
+}
+
+/// The fixed `detail` codes of the error envelope. Only the picker `422` answers set one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorDetail {
+    /// The Harbor credential does not authenticate as a robot.
+    HarborIdentity,
+    /// The Harbor robot lacks a permission the picker needs.
+    RobotScope,
+    /// The GitHub token is invalid or cannot list repositories.
+    GithubToken,
+    /// The credential is the wrong type for the route.
+    WrongCredentialType,
+}
+
+/// Builds an error envelope response. Every error response is built here, so the envelope
+/// has one shape.
+pub fn envelope_response(
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+    detail: Option<ErrorDetail>,
+) -> Response {
+    let body = ErrorEnvelope {
+        error: ErrorBody {
+            code,
+            message,
+            detail,
+        },
+    };
+    (status, Json(body)).into_response()
 }
 
 impl AppError {
@@ -116,13 +152,7 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let body = ErrorEnvelope {
-            error: ErrorBody {
-                code: self.code(),
-                message: self.message(),
-            },
-        };
-        (self.status(), Json(body)).into_response()
+        envelope_response(self.status(), self.code(), self.message(), None)
     }
 }
 
@@ -183,6 +213,30 @@ mod tests {
             json["error"]["message"],
             "The requested item was not found."
         );
+    }
+
+    #[tokio::test]
+    async fn existing_errors_carry_no_detail_key() {
+        for err in [
+            AppError::NotFound,
+            AppError::ValidationFailed("x".into()),
+            AppError::UpstreamUnreachable,
+        ] {
+            let (_, json) = render(err).await;
+            assert!(json["error"].get("detail").is_none(), "{json}");
+        }
+    }
+
+    #[test]
+    fn detail_codes_serialize_as_fixed_snake_case() {
+        for (detail, text) in [
+            (ErrorDetail::HarborIdentity, "harbor_identity"),
+            (ErrorDetail::RobotScope, "robot_scope"),
+            (ErrorDetail::GithubToken, "github_token"),
+            (ErrorDetail::WrongCredentialType, "wrong_credential_type"),
+        ] {
+            assert_eq!(serde_json::to_value(detail).unwrap(), text);
+        }
     }
 
     #[tokio::test]

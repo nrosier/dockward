@@ -267,6 +267,7 @@ Status: decided here, not yet built. Building it needs the Harbor and GitHub lis
 ### Errors and rate limits
 
 - Decided (2026-11-05, user, #126): errors use fixed text, and an upstream rate limit shows a fixed message with no retry loop. The upstream answer is mapped as follows (codes in [api.md](api.md), Error envelope):
+  - Detail codes (Decided 2026-11-05, user, #126): each of the `422 validation_failed` answers below carries a `detail` code: `harbor_identity` (Harbor identity refused), `robot_scope` (Harbor `403` on the repository or artifact list), `github_token` (GitHub `401` or the GitHub `403` token case), `wrong_credential_type` (wrong credential type, see [api.md](api.md), Pickers). Other `422` answers have no `detail`.
   - Harbor identity not `412`, or GitHub `401`: `422 validation_failed`, fixed message per service ("The Harbor credential does not work. Test it on the Account page." or "The GitHub token is not valid. Test it on the Account page.").
   - Harbor `403` on the repository list: `422 validation_failed`, the Repository List message above.
   - Harbor `404` on the repository list (no such project): `404 not_found`, "Harbor project not found."

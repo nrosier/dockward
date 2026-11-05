@@ -21,7 +21,7 @@ use crate::api::hardening::RateLimiter;
 use crate::auth::crypto::DerivedKey;
 use crate::db::credentials::CredentialRow;
 use crate::db::picker_hidden::{self as db, HiddenRow};
-use crate::error::AppError;
+use crate::error::{AppError, ErrorDetail};
 use crate::services::credential_probe::{encode_segment, valid_github_name, valid_harbor_name};
 use crate::services::credentials::{self, SERVICE_GITHUB, SERVICE_HARBOR};
 use crate::services::harbor_client::{artifact_url, artifacts_list_url, parse_artifact_list};
@@ -65,8 +65,8 @@ const MSG_REPOSITORY_NOT_FOUND: &str = "Harbor repository not found.";
 const MSG_BAD_NAME: &str = "The Harbor project or repository name is not valid.";
 
 /// A failure of a picker call. `App` is a normal error; `Fixed` carries its own status,
-/// code and fixed message (the custom `404` text and the two `429` messages with
-/// `Retry-After`).
+/// code, fixed message and optional `detail` code (the custom `404` text, the `422` answers
+/// with their detail, and the `429` messages with `Retry-After`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerFail {
     App(AppError),
@@ -74,6 +74,7 @@ pub enum PickerFail {
         status: StatusCode,
         code: &'static str,
         message: &'static str,
+        detail: Option<ErrorDetail>,
         retry_after: Option<u64>,
     },
 }
@@ -88,11 +89,23 @@ fn invalid(message: &'static str) -> PickerFail {
     PickerFail::App(AppError::ValidationFailed(message.to_owned()))
 }
 
+/// A `422 validation_failed` with a fixed `detail` code, so the client can pick the fix.
+fn invalid_with(message: &'static str, detail: ErrorDetail) -> PickerFail {
+    PickerFail::Fixed {
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        code: "validation_failed",
+        message,
+        detail: Some(detail),
+        retry_after: None,
+    }
+}
+
 fn not_found(message: &'static str) -> PickerFail {
     PickerFail::Fixed {
         status: StatusCode::NOT_FOUND,
         code: "not_found",
         message,
+        detail: None,
         retry_after: None,
     }
 }
@@ -102,6 +115,7 @@ fn rate_limited(message: &'static str, wait: u64) -> PickerFail {
         status: StatusCode::TOO_MANY_REQUESTS,
         code: "rate_limited",
         message,
+        detail: None,
         retry_after: Some(wait.max(1)),
     }
 }
@@ -486,7 +500,10 @@ async fn load_credential(
 ) -> Result<CredentialRow, PickerFail> {
     let row = credentials::load_owned(pool, user_id, id).await?;
     if row.service_type != want {
-        return Err(invalid(MSG_WRONG_TYPE));
+        return Err(invalid_with(
+            MSG_WRONG_TYPE,
+            ErrorDetail::WrongCredentialType,
+        ));
     }
     Ok(row)
 }
@@ -562,7 +579,10 @@ impl PickerState {
         if response.status == 412 {
             Ok(())
         } else {
-            Err(invalid(MSG_HARBOR_IDENTITY))
+            Err(invalid_with(
+                MSG_HARBOR_IDENTITY,
+                ErrorDetail::HarborIdentity,
+            ))
         }
     }
 
@@ -604,7 +624,7 @@ fn classify_projects(_status: u16) -> PickerFail {
 
 fn classify_repositories(status: u16) -> PickerFail {
     match status {
-        403 => invalid(MSG_REPO_LIST_FORBIDDEN),
+        403 => invalid_with(MSG_REPO_LIST_FORBIDDEN, ErrorDetail::RobotScope),
         404 => not_found(MSG_PROJECT_NOT_FOUND),
         _ => upstream(),
     }
@@ -612,7 +632,7 @@ fn classify_repositories(status: u16) -> PickerFail {
 
 fn classify_artifacts(status: u16) -> PickerFail {
     match status {
-        403 => invalid(MSG_ARTIFACT_FORBIDDEN),
+        403 => invalid_with(MSG_ARTIFACT_FORBIDDEN, ErrorDetail::RobotScope),
         404 => not_found(MSG_REPOSITORY_NOT_FOUND),
         _ => upstream(),
     }
@@ -871,8 +891,15 @@ impl PickerState {
                     let response = self.github_get(ctx, &url).await?;
                     match response.status {
                         200 => {}
-                        401 => return Err(invalid(MSG_GITHUB_INVALID)),
-                        403 => return Err(invalid(MSG_GITHUB_FORBIDDEN)),
+                        401 => {
+                            return Err(invalid_with(MSG_GITHUB_INVALID, ErrorDetail::GithubToken));
+                        }
+                        403 => {
+                            return Err(invalid_with(
+                                MSG_GITHUB_FORBIDDEN,
+                                ErrorDetail::GithubToken,
+                            ));
+                        }
                         _ => return Err(upstream()),
                     }
                     let parsed: Vec<GithubItem> =

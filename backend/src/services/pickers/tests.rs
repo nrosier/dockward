@@ -212,8 +212,25 @@ fn expect_fixed(
             code,
             message,
             retry_after,
+            ..
         }) => (status, code, message, retry_after),
         other => panic!("expected a fixed failure, got {other:?}"),
+    }
+}
+
+/// A `422 validation_failed` picker failure: its message and its `detail` code.
+fn expect_invalid(
+    result: Result<impl std::fmt::Debug, PickerFail>,
+) -> (&'static str, Option<ErrorDetail>) {
+    match result {
+        Err(PickerFail::Fixed {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "validation_failed",
+            message,
+            detail,
+            ..
+        }) => (message, detail),
+        other => panic!("expected a 422 validation_failed, got {other:?}"),
     }
 }
 
@@ -303,12 +320,9 @@ async fn identity_412_passes_and_anything_else_is_refused() {
         if ok_expected {
             assert_eq!(result.unwrap().items.len(), 1);
         } else {
-            match result {
-                Err(PickerFail::App(AppError::ValidationFailed(message))) => {
-                    assert_eq!(message, MSG_HARBOR_IDENTITY);
-                }
-                other => panic!("status {code}: expected the identity refusal, got {other:?}"),
-            }
+            let (message, detail) = expect_invalid(result);
+            assert_eq!(message, MSG_HARBOR_IDENTITY, "status {code}");
+            assert_eq!(detail, Some(ErrorDetail::HarborIdentity));
             // The project list is never read after a refusal.
             assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
         }
@@ -346,15 +360,13 @@ async fn harbor_repository_list_maps_errors_and_strips_the_prefix() {
         .collect();
     assert_eq!(items, [("app", "proj/app"), ("team/api", "proj/team/api")]);
 
-    match picker
-        .harbor_repositories(&fx.caller(), &fx.harbor, "locked", &ListQuery::default())
-        .await
-    {
-        Err(PickerFail::App(AppError::ValidationFailed(m))) => {
-            assert_eq!(m, MSG_REPO_LIST_FORBIDDEN)
-        }
-        other => panic!("{other:?}"),
-    }
+    let (message, detail) = expect_invalid(
+        picker
+            .harbor_repositories(&fx.caller(), &fx.harbor, "locked", &ListQuery::default())
+            .await,
+    );
+    assert_eq!(message, MSG_REPO_LIST_FORBIDDEN);
+    assert_eq!(detail, Some(ErrorDetail::RobotScope));
     let (code, _, message, _) = expect_fixed(
         picker
             .harbor_repositories(&fx.caller(), &fx.harbor, "gone", &ListQuery::default())
@@ -474,13 +486,13 @@ async fn github_errors_use_fixed_text() {
         let fake = Arc::new(Recorded::default());
         fake.on(path_is("/user/repos"), status(code));
         let picker = state(fake);
-        match picker
-            .github_repositories(&fx.caller(), &fx.github, &ListQuery::default())
-            .await
-        {
-            Err(PickerFail::App(AppError::ValidationFailed(m))) => assert_eq!(m, expected),
-            other => panic!("{other:?}"),
-        }
+        let (message, detail) = expect_invalid(
+            picker
+                .github_repositories(&fx.caller(), &fx.github, &ListQuery::default())
+                .await,
+        );
+        assert_eq!(message, expected);
+        assert_eq!(detail, Some(ErrorDetail::GithubToken));
         fx.close().await;
     }
 }
@@ -685,31 +697,31 @@ async fn another_users_credential_is_404_and_wrong_type_is_422() {
             .await,
         Err(PickerFail::App(AppError::NotFound))
     ));
-    match picker
-        .harbor_projects(&fx.caller(), &fx.github, &ListQuery::default())
-        .await
-    {
-        Err(PickerFail::App(AppError::ValidationFailed(m))) => assert_eq!(m, MSG_WRONG_TYPE),
-        other => panic!("{other:?}"),
-    }
-    match picker
-        .github_repositories(&fx.caller(), &fx.harbor, &ListQuery::default())
-        .await
-    {
-        Err(PickerFail::App(AppError::ValidationFailed(m))) => assert_eq!(m, MSG_WRONG_TYPE),
-        other => panic!("{other:?}"),
+    for result in [
+        picker
+            .harbor_projects(&fx.caller(), &fx.github, &ListQuery::default())
+            .await
+            .map(|_| ()),
+        picker
+            .github_repositories(&fx.caller(), &fx.harbor, &ListQuery::default())
+            .await
+            .map(|_| ()),
+    ] {
+        let (message, detail) = expect_invalid(result);
+        assert_eq!(message, MSG_WRONG_TYPE);
+        assert_eq!(detail, Some(ErrorDetail::WrongCredentialType));
     }
     let query = SuggestionQuery {
         project: Some("proj".to_owned()),
         repository: Some("app".to_owned()),
         github_cred_id: Some(fx.harbor.clone()),
     };
-    assert!(matches!(
+    let (_, detail) = expect_invalid(
         picker
             .source_suggestion(&fx.caller(), &fx.harbor, &query)
             .await,
-        Err(PickerFail::App(AppError::ValidationFailed(_)))
-    ));
+    );
+    assert_eq!(detail, Some(ErrorDetail::WrongCredentialType));
     assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
     fx.close().await;
 }
@@ -1284,4 +1296,50 @@ async fn the_sentinel_never_appears_in_any_response_or_error() {
         assert!(!text.contains("harbor.example.com"), "a URL leaked: {text}");
     }
     fx.close().await;
+}
+
+#[tokio::test]
+async fn a_picker_422_response_carries_its_detail_code() {
+    use axum::body::to_bytes;
+    let render = |fail: PickerFail| async move {
+        let response = crate::api::pickers::fail_response(fail);
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        (
+            status,
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        )
+    };
+    let cases = [
+        (
+            invalid_with(MSG_HARBOR_IDENTITY, ErrorDetail::HarborIdentity),
+            "harbor_identity",
+        ),
+        (classify_repositories(403), "robot_scope"),
+        (classify_artifacts(403), "robot_scope"),
+        (
+            invalid_with(MSG_GITHUB_INVALID, ErrorDetail::GithubToken),
+            "github_token",
+        ),
+        (
+            invalid_with(MSG_WRONG_TYPE, ErrorDetail::WrongCredentialType),
+            "wrong_credential_type",
+        ),
+    ];
+    for (fail, detail) in cases {
+        let (status, json) = render(fail).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(json["error"]["code"], "validation_failed");
+        assert_eq!(json["error"]["detail"], detail);
+        assert!(json["error"]["message"].is_string());
+    }
+    // A 422 without a detail code (a bad name) and a 404 have no detail key.
+    for fail in [
+        invalid(MSG_BAD_NAME),
+        not_found(MSG_PROJECT_NOT_FOUND),
+        upstream(),
+    ] {
+        let (_, json) = render(fail).await;
+        assert!(json["error"].get("detail").is_none(), "{json}");
+    }
 }
