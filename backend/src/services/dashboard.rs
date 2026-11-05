@@ -13,11 +13,31 @@ use crate::services::sync_jobs::{self, SyncJob};
 /// (`specs/cve-lifecycle.md`, Dashboard counts: last 90 days).
 pub const FAILED_SYNC_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
 
-/// Open CVEs by severity, summed over mappings. `CRITICAL` and `HIGH` only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Open CVEs by severity, summed over mappings: every severity and their `total`
+/// (`specs/api.md`, Dashboard and Mappings; changed on #129).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct OpenCves {
     pub critical: i64,
     pub high: i64,
+    pub medium: i64,
+    pub low: i64,
+    pub unknown: i64,
+    /// The sum of the five severities.
+    pub total: i64,
+}
+
+impl OpenCves {
+    /// Counts with `total` set to their sum.
+    fn of(critical: i64, high: i64, medium: i64, low: i64, unknown: i64) -> Self {
+        Self {
+            critical,
+            high,
+            medium,
+            low,
+            unknown,
+            total: critical + high + medium + low + unknown,
+        }
+    }
 }
 
 /// The `GET /dashboard/summary` response (`specs/api.md`, Dashboard).
@@ -33,16 +53,15 @@ pub struct Summary {
 /// Sums per-mapping open counts. A CVE in two mappings is counted in each, as the spec
 /// requires (`specs/cve-lifecycle.md`, Decided 2026-11-03).
 fn sum_open(rows: &[db::OpenCount]) -> OpenCves {
-    rows.iter().fold(
-        OpenCves {
-            critical: 0,
-            high: 0,
-        },
-        |acc, row| OpenCves {
-            critical: acc.critical + row.critical,
-            high: acc.high + row.high,
-        },
-    )
+    rows.iter().fold(OpenCves::default(), |acc, row| {
+        OpenCves::of(
+            acc.critical + row.critical,
+            acc.high + row.high,
+            acc.medium + row.medium,
+            acc.low + row.low,
+            acc.unknown + row.unknown,
+        )
+    })
 }
 
 /// The open CVEs of one mapping, for the mapping list. A mapping with no open CVEs gives
@@ -196,10 +215,7 @@ mod tests {
         }
         assert_eq!(
             open_totals(&pool, Some("u1")).await,
-            OpenCves {
-                critical: 1,
-                high: 0
-            }
+            OpenCves::of(1, 0, 0, 0, 0)
         );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -213,10 +229,7 @@ mod tests {
         finding(&pool, "m2", "v1", "CVE-2026-0001", "HIGH", "open").await;
         assert_eq!(
             open_totals(&pool, Some("u1")).await,
-            OpenCves {
-                critical: 0,
-                high: 2
-            }
+            OpenCves::of(0, 2, 0, 0, 0)
         );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -230,10 +243,7 @@ mod tests {
         finding(&pool, "m1", "v2", "CVE-2026-0001", "CRITICAL", "open").await;
         assert_eq!(
             open_totals(&pool, Some("u1")).await,
-            OpenCves {
-                critical: 1,
-                high: 0
-            }
+            OpenCves::of(1, 0, 0, 0, 0)
         );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -249,10 +259,7 @@ mod tests {
         accept(&pool, "m1", "CVE-2026-0001", None).await;
         assert_eq!(
             open_totals(&pool, Some("u1")).await,
-            OpenCves {
-                critical: 1,
-                high: 0
-            }
+            OpenCves::of(1, 0, 0, 0, 0)
         );
         // An acceptance whose expiry has passed no longer applies: CVE-0001 is open again.
         sqlx::query("UPDATE cve_acceptances SET expires_at = ? WHERE cve_id = 'CVE-2026-0001'")
@@ -262,10 +269,48 @@ mod tests {
             .unwrap();
         assert_eq!(
             open_totals(&pool, Some("u1")).await,
-            OpenCves {
-                critical: 2,
-                high: 0
-            }
+            OpenCves::of(2, 0, 0, 0, 0)
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #129: every severity is counted, each CVE once at its highest open severity, and
+    /// `total` is the sum.
+    #[tokio::test]
+    async fn every_severity_is_counted_with_a_total() {
+        let (pool, dir) = fresh_pool("every-severity").await;
+        seed(&pool, "u1", &[("m1", "app"), ("m2", "other")]).await;
+        finding(&pool, "m1", "v1", "CVE-2026-0001", "CRITICAL", "open").await;
+        finding(&pool, "m1", "v1", "CVE-2026-0002", "HIGH", "open").await;
+        finding(&pool, "m1", "v1", "CVE-2026-0003", "MEDIUM", "open").await;
+        finding(&pool, "m1", "v1", "CVE-2026-0004", "LOW", "open").await;
+        finding(&pool, "m1", "v2", "CVE-2026-0004", "LOW", "open").await;
+        finding(&pool, "m1", "v1", "CVE-2026-0005", "UNKNOWN", "open").await;
+        // LOW on one tag and MEDIUM on another counts once, as MEDIUM.
+        finding(&pool, "m2", "v1", "CVE-2026-0006", "LOW", "open").await;
+        finding(&pool, "m2", "v2", "CVE-2026-0006", "MEDIUM", "open").await;
+        // A fixed LOW and an accepted UNKNOWN are not open.
+        finding(&pool, "m2", "v1", "CVE-2026-0007", "LOW", "fixed").await;
+        finding(&pool, "m2", "v1", "CVE-2026-0008", "UNKNOWN", "open").await;
+        accept(&pool, "m2", "CVE-2026-0008", None).await;
+
+        assert_eq!(
+            open_totals(&pool, Some("u1")).await,
+            OpenCves::of(1, 1, 2, 1, 1)
+        );
+        assert_eq!(open_totals(&pool, Some("u1")).await.total, 6);
+        assert_eq!(
+            open_cves_for_mapping(&pool, "m2", NOW).await.unwrap(),
+            OpenCves::of(0, 0, 1, 0, 0)
+        );
+        let summary = summary(&pool, Some("u1"), NOW).await.unwrap();
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(
+            json["open_cves"],
+            serde_json::json!({
+                "critical": 1, "high": 1, "medium": 2, "low": 1, "unknown": 1, "total": 6
+            })
         );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -340,10 +385,7 @@ mod tests {
         finding(&pool, "m1", "v2", "CVE-2026-0002", "CRITICAL", "fixed").await;
         assert_eq!(
             open_totals(&pool, Some("u1")).await,
-            OpenCves {
-                critical: 0,
-                high: 1
-            },
+            OpenCves::of(0, 1, 0, 0, 0),
             "open_cves must use the open rows only and skip fully fixed CVEs"
         );
         pool.close().await;
@@ -365,10 +407,7 @@ mod tests {
 
         assert_eq!(
             open_totals(&pool, Some("u1")).await,
-            OpenCves {
-                critical: 0,
-                high: 0
-            },
+            OpenCves::of(0, 0, 0, 0, 0),
             "an active acceptance must hide an open CVE"
         );
         assert_eq!(
@@ -385,10 +424,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             open_totals(&pool, Some("u1")).await,
-            OpenCves {
-                critical: 1,
-                high: 0
-            },
+            OpenCves::of(1, 0, 0, 0, 0),
             "an expired acceptance must not hide an open CVE"
         );
         pool.close().await;

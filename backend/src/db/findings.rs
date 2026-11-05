@@ -182,6 +182,9 @@ pub async fn mapping_readable(
 
 /// What a CVE list selects and how it is ordered and paged. The service validates every
 /// value before it gets here. `sort` is one of the keys in the query's `CASE` terms.
+///
+/// Every filter is a bound parameter. The multi-value filters go to SQLite as one JSON array
+/// each, read with `json_each`, so no value is ever part of the SQL text.
 pub struct CveListFilter<'a> {
     /// `None` reads every user's mappings: admin `scope=all`, or a mapping the service has
     /// already checked.
@@ -189,14 +192,24 @@ pub struct CveListFilter<'a> {
     pub mapping_id: Option<&'a str>,
     /// Exactly one CVE (the detail route).
     pub cve_id: Option<&'a str>,
-    /// `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `UNKNOWN`, matched against the highest severity.
-    pub severity: Option<&'a str>,
-    /// `open` or `fixed`, matched against the aggregated status.
-    pub status: Option<&'a str>,
+    /// Any of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `UNKNOWN`, matched against the highest
+    /// severity. Empty means no severity filter.
+    pub severities: &'a [&'a str],
+    /// Any of `open` and `fixed` (matched against the aggregated status) and `accepted`
+    /// (matched against an active acceptance). Empty means no status filter.
+    pub statuses: &'a [&'a str],
     /// `Some(1)` keeps accepted CVEs, `Some(0)` the others.
     pub accepted: Option<i64>,
     /// Lowercase ASCII text searched in the CVE id and the package.
     pub q: Option<&'a str>,
+    /// The summary's `package` equals this.
+    pub package: Option<&'a str>,
+    /// The CVE has a row, open or fixed, for this image tag.
+    pub tag: Option<&'a str>,
+    /// The mapping's `harbor_project` equals this.
+    pub harbor_project: Option<&'a str>,
+    /// The mapping's `harbor_repository` equals this.
+    pub harbor_repository: Option<&'a str>,
     /// `severity`, `cve_id`, `first_seen_at` or `last_seen_at`.
     pub sort: &'a str,
     /// `1` ascending, `-1` descending.
@@ -207,12 +220,24 @@ pub struct CveListFilter<'a> {
     pub now: i64,
 }
 
+/// A list filter as one JSON array for `json_each`, or `None` for an empty list (no filter).
+fn json_list(values: &[&str]) -> Result<Option<String>, AppError> {
+    if values.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(values)
+        .map(Some)
+        .map_err(|_| AppError::InternalError)
+}
+
 /// One CVE of one mapping, aggregated over the mapping's tags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CveSummaryRow {
     pub mapping_id: String,
     pub cve_id: String,
     pub severity: String,
+    /// The highest severity among the open rows, `None` when every row is fixed.
+    pub open_severity: Option<String>,
     pub status: String,
     pub package: Option<String>,
     pub fixed_in_version: Option<String>,
@@ -235,7 +260,11 @@ pub struct CveSummaryRow {
 /// latest successful `sync_reports.synced_at`, then the later `last_seen_at`. `open_tags`
 /// counts the tags whose row is open. `tracked_tags` counts the mapping's tags with a
 /// successful report, at most 10. The issue is the `github_issues` row of the mapping's
-/// GitHub target. `accepted` means an active acceptance exists.
+/// GitHub target. `accepted` means an active acceptance exists. `open_severity` is the
+/// highest severity of the open rows only.
+///
+/// The filters in the outer `WHERE` and in `tag_rows` are the same text as in
+/// [`count_cves`], so `total` always matches the items. Keep the two in step.
 ///
 /// A CVE id that the `<mapping_id>:<cve_id>` route id cannot carry (over 128 bytes, or a
 /// character outside letters, digits, `.`, `_`, `-` and `:`) is left out, so every listed
@@ -244,6 +273,8 @@ pub async fn list_cves(
     pool: &SqlitePool,
     filter: &CveListFilter<'_>,
 ) -> Result<Vec<CveSummaryRow>, AppError> {
+    let severities = json_list(filter.severities)?;
+    let statuses = json_list(filter.statuses)?;
     let rows = sqlx::query!(
         r#"WITH tag_scans AS (
                SELECT mapping_id, image_tag, MAX(synced_at) AS scan_at
@@ -271,12 +302,15 @@ pub async fn list_cves(
                WHERE (?1 IS NULL OR m.user_id = ?1)
                  AND (?2 IS NULL OR f.mapping_id = ?2)
                  AND (?3 IS NULL OR f.cve_id = ?3)
+                 AND (?15 IS NULL OR m.harbor_project = ?15)
+                 AND (?16 IS NULL OR m.harbor_repository = ?16)
                  AND length(CAST(f.cve_id AS BLOB)) BETWEEN 1 AND 128
                  AND f.cve_id NOT GLOB '*[^A-Za-z0-9._:-]*'
                  AND instr(CAST(f.cve_id AS BLOB), x'00') = 0
            ),
            summary AS (
                SELECT mapping_id, cve_id, MAX(sev_rank) AS sev_rank,
+                      MAX(CASE WHEN status = 'open' THEN sev_rank END) AS open_rank,
                       MIN(first_seen_at) AS first_seen_at, MAX(last_seen_at) AS last_seen_at,
                       COUNT(DISTINCT CASE WHEN status = 'open' THEN image_tag END) AS open_tags,
                       MAX(status = 'open') AS any_open,
@@ -289,6 +323,9 @@ pub async fn list_cves(
                SELECT s.mapping_id AS mapping_id, s.cve_id AS cve_id, s.sev_rank AS sev_rank,
                       CASE s.sev_rank WHEN 5 THEN 'CRITICAL' WHEN 4 THEN 'HIGH'
                            WHEN 3 THEN 'MEDIUM' WHEN 2 THEN 'LOW' ELSE 'UNKNOWN' END AS severity,
+                      CASE s.open_rank WHEN 5 THEN 'CRITICAL' WHEN 4 THEN 'HIGH'
+                           WHEN 3 THEN 'MEDIUM' WHEN 2 THEN 'LOW' WHEN 1 THEN 'UNKNOWN'
+                           END AS open_severity,
                       CASE WHEN s.any_open = 1 THEN 'open' ELSE 'fixed' END AS status,
                       s.package AS package, s.fixed_in_version AS fixed_in_version,
                       s.first_seen_at AS first_seen_at, s.last_seen_at AS last_seen_at,
@@ -309,7 +346,8 @@ pub async fn list_cves(
                     AND gi.github_repo = m.github_repo AND gi.cve_id = s.cve_id
            )
            SELECT mapping_id AS "mapping_id!: String", cve_id AS "cve_id!: String",
-                  severity AS "severity!: String", status AS "status!: String",
+                  severity AS "severity!: String", open_severity AS "open_severity?: String",
+                  status AS "status!: String",
                   package AS "package?: String", fixed_in_version AS "fixed_in_version?: String",
                   first_seen_at AS "first_seen_at?: i64", last_seen_at AS "last_seen_at?: i64",
                   open_tags AS "open_tags!: i64", tracked_tags AS "tracked_tags!: i64",
@@ -318,11 +356,18 @@ pub async fn list_cves(
                   github_issue_status AS "github_issue_status?: String",
                   accepted AS "accepted!: i64"
            FROM items
-           WHERE (?5 IS NULL OR severity = ?5)
-             AND (?6 IS NULL OR status = ?6)
+           WHERE (?5 IS NULL OR severity IN (SELECT value FROM json_each(?5)))
+             AND (?6 IS NULL OR EXISTS (
+                  SELECT 1 FROM json_each(?6) st
+                  WHERE st.value = items.status OR (st.value = 'accepted' AND items.accepted = 1)))
              AND (?7 IS NULL OR accepted = ?7)
              AND (?8 IS NULL OR instr(lower(cve_id), ?8) > 0
                   OR instr(lower(COALESCE(package, '')), ?8) > 0)
+             AND (?13 IS NULL OR package = ?13)
+             AND (?14 IS NULL OR EXISTS (
+                  SELECT 1 FROM cve_findings tf
+                  WHERE tf.mapping_id = items.mapping_id AND tf.cve_id = items.cve_id
+                    AND tf.image_tag = ?14))
            ORDER BY
              CASE WHEN ?9 = 'severity' AND ?10 = 1 THEN sev_rank END ASC,
              CASE WHEN ?9 = 'severity' AND ?10 = -1 THEN sev_rank END DESC,
@@ -338,14 +383,18 @@ pub async fn list_cves(
         filter.mapping_id,
         filter.cve_id,
         filter.now,
-        filter.severity,
-        filter.status,
+        severities,
+        statuses,
         filter.accepted,
         filter.q,
         filter.sort,
         filter.sort_sign,
         filter.limit,
-        filter.offset
+        filter.offset,
+        filter.package,
+        filter.tag,
+        filter.harbor_project,
+        filter.harbor_repository
     )
     .fetch_all(pool)
     .await
@@ -356,6 +405,7 @@ pub async fn list_cves(
             mapping_id: row.mapping_id,
             cve_id: row.cve_id,
             severity: row.severity,
+            open_severity: row.open_severity,
             status: row.status,
             package: row.package,
             fixed_in_version: row.fixed_in_version,
@@ -372,8 +422,11 @@ pub async fn list_cves(
 }
 
 /// The number of summaries [`list_cves`] matches for the same filter, over all pages.
-/// `sort`, `limit` and `offset` are ignored.
+/// `sort`, `limit` and `offset` are ignored. The predicates are the same text as in
+/// [`list_cves`]; only the parameter numbers differ.
 pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result<i64, AppError> {
+    let severities = json_list(filter.severities)?;
+    let statuses = json_list(filter.statuses)?;
     let row = sqlx::query!(
         r#"WITH tag_rows AS (
                SELECT f.mapping_id AS mapping_id, f.cve_id AS cve_id, f.image_tag AS image_tag,
@@ -393,6 +446,8 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
                WHERE (?1 IS NULL OR m.user_id = ?1)
                  AND (?2 IS NULL OR f.mapping_id = ?2)
                  AND (?3 IS NULL OR f.cve_id = ?3)
+                 AND (?11 IS NULL OR m.harbor_project = ?11)
+                 AND (?12 IS NULL OR m.harbor_repository = ?12)
                  AND length(CAST(f.cve_id AS BLOB)) BETWEEN 1 AND 128
                  AND f.cve_id NOT GLOB '*[^A-Za-z0-9._:-]*'
                  AND instr(CAST(f.cve_id AS BLOB), x'00') = 0
@@ -415,19 +470,30 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
            )
            SELECT COUNT(*) AS "total!: i64"
            FROM items
-           WHERE (?5 IS NULL OR severity = ?5)
-             AND (?6 IS NULL OR status = ?6)
+           WHERE (?5 IS NULL OR severity IN (SELECT value FROM json_each(?5)))
+             AND (?6 IS NULL OR EXISTS (
+                  SELECT 1 FROM json_each(?6) st
+                  WHERE st.value = items.status OR (st.value = 'accepted' AND items.accepted = 1)))
              AND (?7 IS NULL OR accepted = ?7)
              AND (?8 IS NULL OR instr(lower(cve_id), ?8) > 0
-                  OR instr(lower(COALESCE(package, '')), ?8) > 0)"#,
+                  OR instr(lower(COALESCE(package, '')), ?8) > 0)
+             AND (?9 IS NULL OR package = ?9)
+             AND (?10 IS NULL OR EXISTS (
+                  SELECT 1 FROM cve_findings tf
+                  WHERE tf.mapping_id = items.mapping_id AND tf.cve_id = items.cve_id
+                    AND tf.image_tag = ?10))"#,
         filter.user_id,
         filter.mapping_id,
         filter.cve_id,
         filter.now,
-        filter.severity,
-        filter.status,
+        severities,
+        statuses,
         filter.accepted,
-        filter.q
+        filter.q,
+        filter.package,
+        filter.tag,
+        filter.harbor_project,
+        filter.harbor_repository
     )
     .fetch_one(pool)
     .await
