@@ -9,12 +9,15 @@ const CSRF_COOKIE = "__Host-harborgate_csrf";
 export class ApiError extends Error {
   status: number;
   code: string;
+  // Seconds from a `Retry-After` header, when the response had a valid one.
+  retryAfter?: number;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, retryAfter?: number) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -42,7 +45,14 @@ function isEnvelope(value: unknown): value is { error: { code: string; message: 
   );
 }
 
+function retryAfterOf(response: Response): number | undefined {
+  const raw = response.headers.get("Retry-After");
+  const seconds = raw === null ? Number.NaN : Number(raw);
+  return Number.isInteger(seconds) && seconds >= 0 ? seconds : undefined;
+}
+
 async function toApiError(response: Response): Promise<ApiError> {
+  const retryAfter = retryAfterOf(response);
   let parsed: unknown = undefined;
   try {
     parsed = await response.json();
@@ -50,9 +60,9 @@ async function toApiError(response: Response): Promise<ApiError> {
     parsed = undefined;
   }
   if (isEnvelope(parsed)) {
-    return new ApiError(response.status, parsed.error.code, parsed.error.message);
+    return new ApiError(response.status, parsed.error.code, parsed.error.message, retryAfter);
   }
-  return new ApiError(response.status, "internal_error", response.statusText);
+  return new ApiError(response.status, "internal_error", response.statusText, retryAfter);
 }
 
 export async function api<T>(method: Method, path: string, body?: unknown): Promise<T> {
