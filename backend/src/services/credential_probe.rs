@@ -87,14 +87,16 @@ impl HarborProbe for OutboundHarborProbe {
 impl OutboundHarborProbe {
     async fn send_get(&self, url: &Url, username: &str, secret: &[u8]) -> Result<u16, AppError> {
         let secret = std::str::from_utf8(secret).map_err(|_| AppError::InternalError)?;
-        let response = self
+        let sent = self
             .client
             .get(url)
             .map_err(|_| AppError::UpstreamUnreachable)?
             .basic_auth(username, Some(secret))
             .send()
-            .await
-            .map_err(|_| AppError::UpstreamUnreachable)?;
+            .await;
+        let status = sent.as_ref().ok().map(|r| r.status().as_u16());
+        crate::services::app_log::log_outbound("GET", url, status);
+        let response = sent.map_err(|_| AppError::UpstreamUnreachable)?;
         Ok(response.status().as_u16())
     }
 }
@@ -241,7 +243,7 @@ impl GithubProbe for OutboundGithubProbe {
         let base = Url::parse(GITHUB_API).map_err(|_| AppError::InternalError)?;
         let url = base.join(path).map_err(|_| AppError::InternalError)?;
         let token = std::str::from_utf8(token).map_err(|_| AppError::InternalError)?;
-        let response = self
+        let sent = self
             .client
             .get(&url)
             .map_err(|_| AppError::UpstreamUnreachable)?
@@ -250,8 +252,13 @@ impl GithubProbe for OutboundGithubProbe {
             .header("x-github-api-version", "2022-11-28")
             .header("user-agent", "HarborGate")
             .send()
-            .await
-            .map_err(|_| AppError::UpstreamUnreachable)?;
+            .await;
+        crate::services::app_log::log_outbound(
+            "GET",
+            &url,
+            sent.as_ref().ok().map(|r| r.status().as_u16()),
+        );
+        let response = sent.map_err(|_| AppError::UpstreamUnreachable)?;
         let status = response.status().as_u16();
         let accepted_permissions = response
             .headers()

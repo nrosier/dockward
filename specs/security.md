@@ -128,7 +128,8 @@ Decisions are marked `Decided (<date>)`. On 2026-11-03 the user delegated every 
   - Decided (2026-11-03), as implemented in `backend/src/api/hardening.rs`: entries that do not parse as an IP address are skipped. If the header is missing, or every usable entry is a trusted proxy, the client IP is the TCP peer address.
   - The addresses themselves depend on the host, because Docker assigns network subnets dynamically. The operator confirms them with the client IP check on the Health page ([api.md](api.md), "Health"). The live smoke test records them once.
 - Decided (2026-11-03, delegated): rate limits on the webhook endpoint: 60 requests per minute per mapping token, and 30 failed authentications (`401`) per minute per client IP, so requests with unknown tokens are limited too. No external standard; tune in deployment.
-- Decided (2026-11-03): no default rate limit on authenticated routes beyond the login and webhook limits above.
+- Decided (2026-11-03): no default rate limit on authenticated routes beyond the login and webhook limits above, and the manual scan pull below.
+- Decided (2026-11-05, user, #131): the manual scan pull (`POST /api/v1/mappings/:id/pull`) is limited to one pull per mapping per 5 minutes, held in memory, so a restart clears it. A pull that fails at Harbor still uses the 5 minutes. Over the limit: `429` with `Retry-After`.
 - Decided (2026-11-04, #50): every response under `/api/` carries `Cache-Control: no-store`. Those responses can hold one-time secrets (the mapping create and rotate responses) and authenticated data. Source: OWASP REST Security Cheat Sheet, "Security headers" (https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html).
 - Decided (2026-11-03, delegated): rate-limited responses return 429 with a `Retry-After` header. Source: RFC 6585 section 4 (429 Too Many Requests, https://www.rfc-editor.org/rfc/rfc6585), and RFC 9110 section 10.2.3 (Retry-After, https://www.rfc-editor.org/rfc/rfc9110).
 - Decided (2026-11-03, delegated): request body cap on the webhook endpoint is 64 KiB. Harbor webhook payloads are small. Verified (2026-11-03) in the Harbor source (`src/pkg/notifier/model/event.go`, `src/controller/event/handler/webhook/scan/scan.go`): a scan event carries one resource (digest, tag, resource URL, scan overview summary) and the repository fields. The live smoke test records the size of a real payload. The cap is 413 Content Too Large above the limit (RFC 9110 section 15.5.14).
@@ -160,7 +161,8 @@ Decisions are marked `Decided (<date>)`. On 2026-11-03 the user delegated every 
 - Users see only their own credentials, mappings, and sync history.
 - Admins may view all of it, read-only.
 - Admins cannot change another user's credentials or mappings.
-- Decided (2026-11-03): the one operational exception to read-only admin access is retry. An admin may retry failed sync jobs of any tenant (`POST /api/v1/sync-jobs/:id/retry`). Retry only re-queues work and changes no mapping or credential.
+- Decided (2026-11-03): the first operational exception to read-only admin access is retry. An admin may retry failed sync jobs of any tenant (`POST /api/v1/sync-jobs/:id/retry`). Retry only re-queues work and changes no mapping or credential.
+- Decided (2026-11-05, user, #131): the second operational exception is the manual scan pull. An admin may pull scan reports from Harbor for any tenant's mapping (`POST /api/v1/mappings/:id/pull`). The pull only queues sync jobs, the same as the scheduled poll, and changes no mapping or credential. It uses the owner's Harbor credential on the server, and no credential value is shown to the admin.
 - A credential may be referenced only by a mapping owned by the same user. The application checks this on write.
 
 ## Secrets in logs
@@ -169,6 +171,20 @@ Decisions are marked `Decided (<date>)`. On 2026-11-03 the user delegated every 
 - The webhook URL token is redacted or omitted from access logs and traces. Access logs record the route template `/api/v1/webhooks/harbor/:mapping_token`, not the value.
 - Audit `details` never contain tokens or key material.
 - Error messages never include a secret value. Source: CLAUDE.md non-negotiable rules.
+
+### Application log
+
+Decided (2026-11-05, user, #136). The application log is the `tracing` output used for diagnosis. Admins can read the recent part of it and change its level in the web interface.
+
+- The rules in "Secrets in logs" apply at every level (`info`, `debug`, `trace`) and to the in-memory buffer the admin reads. No level may log a token, a key, a webhook URL token, an auth header value, a request or response body, or a request header.
+- Fields whose names contain one of the audit secret fragments (`token`, `secret`, `password`, `cookie`, `authorization`, `private`, `credential_value`) or that name key material (`key`, `*_key`, `key_*`) are dropped from a buffered line, whatever their value. The audit `details` check uses the same list (`services/audit.rs`).
+- Storage: an in-memory ring buffer of at most 500 lines. A line longer than 1000 characters is cut, with a marker. The buffer is lost on restart. No database table holds log lines.
+- Level: the admin can set the global level to `info`, `debug`, or `trace`. There are no per-module filters. `RUST_LOG` is ignored; every start uses `info`. `debug` and `trace` apply to HarborGate's own code only. Dependency crates (such as `hyper`, `h2`, `rustls`, `sqlx`, `reqwest`) stay at `info` or higher at every level.
+- Automatic revert: a level above `info` reverts to `info` 30 minutes after it was set. A later change restarts the timer. A restart also returns to `info`.
+- Audit: every level change, by an admin or by the automatic revert, writes `log.level_change` with `details` `{"old","new"}`. The automatic revert uses the actor `system`.
+- At `debug`, each outbound Harbor and GitHub request logs its method, its URL path (no query string, no userinfo, no host credentials) and the response status code. OIDC and alert webhook URLs are not logged, because they can carry tokens.
+- Access: admin only, for reading the log and for changing the level. A regular user gets `403`; no session gets `401`. Log lines can name any tenant's mapping, so a regular user never sees them.
+- Separation: log lines are never written to `audit_log`, and audit rows are never shown as log lines. The audit log is the record of who did what; the application log is for diagnosis only.
 
 ## Outbound HTTP (SSRF)
 

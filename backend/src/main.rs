@@ -88,6 +88,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/mappings/{id}/rotate-auth-secret",
             post(api::mappings::rotate_auth_secret),
         )
+        .route("/api/v1/mappings/{id}/pull", post(api::mappings::pull))
         .route(
             "/api/v1/mappings/{id}/cves",
             get(api::cves::list_for_mapping),
@@ -113,6 +114,11 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         .route("/api/v1/admin/jobs", get(api::admin::admin_jobs))
         .route("/api/v1/admin/health", get(api::admin::health))
         .route("/api/v1/admin/backup", post(api::admin::backup))
+        .route("/api/v1/admin/logs", get(api::admin::logs))
+        .route(
+            "/api/v1/admin/log-level",
+            get(api::admin::get_log_level).put(api::admin::put_log_level),
+        )
         .route(
             "/api/v1/admin/alert-channels",
             get(api::admin::list_alert_channels).post(api::admin::create_alert_channel),
@@ -161,13 +167,10 @@ async fn shutdown_signal(mut terminate: Signal) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Logs go to stdout. The access log records route templates, so tokens in paths stay out.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Logs go to stdout and to the admin's in-memory buffer. Every start is at `info`;
+    // `RUST_LOG` is ignored (`specs/security.md`, Application log). The access log
+    // records route templates, so tokens in paths stay out.
+    let app_log = services::app_log::install()?;
 
     let args: Vec<String> = std::env::args().collect();
     let command = match cli::parse(args.get(1..).unwrap_or_default()) {
@@ -178,7 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     match command {
-        cli::Command::Serve => serve().await,
+        cli::Command::Serve => serve(app_log).await,
         cli::Command::Restore(file) => {
             if let Err(message) = run_restore(&file).await {
                 eprintln!("{message}");
@@ -511,7 +514,7 @@ async fn record_restore(
         .map_err(|_| error::AppError::InternalError)
 }
 
-async fn serve() -> Result<(), Box<dyn std::error::Error>> {
+async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn std::error::Error>> {
     // Refuse to start without a valid key or settings. This runs before the port is bound.
     let encryption_key = config::load_encryption_key()?;
     let settings = config::load_settings()?;
@@ -556,6 +559,10 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         ),
         harbor_probe: api::state::HarborProbeHandle::outbound(settings.allow_private_harbor)
             .map_err(|_| "could not build the Harbor probe")?,
+        app_log,
+        harbor_fetch: api::state::HarborFetchHandle::outbound(settings.allow_private_harbor)
+            .map_err(|_| "could not build the Harbor client")?,
+        pull_limiter: api::mappings::new_pull_limiter(),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -567,9 +574,11 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         public_url = %settings.public_url,
         data_dir = %settings.data_dir.display(),
         backup_dir = %settings.backup_dir.display(),
-        allow_private_harbor = settings.allow_private_harbor,
-        allow_private_oidc = settings.allow_private_oidc,
-        allow_private_alerts = settings.allow_private_alerts,
+        // Named without "private": the application log drops fields whose names hold
+        // an audit secret fragment (`specs/security.md`, Application log).
+        harbor_range_opt_out = settings.allow_private_harbor,
+        oidc_range_opt_out = settings.allow_private_oidc,
+        alerts_range_opt_out = settings.allow_private_alerts,
         "HarborGate starting"
     );
 
@@ -797,6 +806,11 @@ mod tests {
                 crate::services::github_issues::GithubIssues::new().unwrap(),
             ),
             harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
+            app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
+                crate::services::app_log::REVERT_AFTER,
+            )),
+            harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
+            pull_limiter: crate::api::mappings::new_pull_limiter(),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -987,6 +1001,243 @@ mod tests {
         assert!(json.get("auth_secret").is_none());
     }
 
+    /// A Harbor reader that answers the artifact list from recorded bodies. Page 1 of a
+    /// repository has its body; later pages are empty. An unknown repository answers `500`.
+    /// No socket is opened.
+    struct RecordedHarbor;
+
+    impl api::state::DynHarborFetch for RecordedHarbor {
+        fn fetch<'a>(
+            &'a self,
+            url: &'a reqwest::Url,
+            _username: &'a str,
+            _secret: &'a [u8],
+            _extra_headers: &'a [(&'a str, &'a str)],
+        ) -> api::state::ProbeFuture<'a, (u16, Vec<u8>)> {
+            let repository = url
+                .path()
+                .split('/')
+                .rev()
+                .nth(1)
+                .unwrap_or_default()
+                .to_owned();
+            let first_page = url.query().unwrap_or_default().starts_with("page=1&");
+            Box::pin(async move {
+                let body = match repository.as_str() {
+                    "app" => r#"[{"digest": "sha256:aaaa", "tags": [{"name": "v1"}]}]"#,
+                    "two" => {
+                        r#"[{"digest": "sha256:bbbb", "tags": [{"name": "v1"}, {"name": "v2"}]}]"#
+                    }
+                    _ => return Ok((500, b"harbor exploded".to_vec())),
+                };
+                if first_page {
+                    Ok((200, body.as_bytes().to_vec()))
+                } else {
+                    Ok((200, b"[]".to_vec()))
+                }
+            })
+        }
+    }
+
+    /// `POST /api/v1/mappings/:id/pull` through the router (#131). Checks session (`401`),
+    /// CSRF (`403`), tenancy (another user `404`, the owner and an admin `200`), the
+    /// 5-minute cooldown (`429` with `Retry-After`), a Harbor error (`502` with fixed text,
+    /// which still uses the cooldown), and the `mapping.pull` audit row. Harbor is a fake.
+    #[tokio::test]
+    async fn mapping_pull_route_checks_session_csrf_tenancy_and_cooldown() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let fetch = api::state::HarborFetchHandle::new(Arc::new(RecordedHarbor));
+        let (router, pool, dir, _) = test_router_with_fetch(
+            "mapping-pull-route",
+            services::throttle::LoginThrottle::new(),
+            api::webhooks::new_token_limiter(),
+            api::state::HarborProbeHandle::new(Arc::new(ReadableHarbor)),
+            fetch,
+        )
+        .await;
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        for (id, role) in [
+            ("owner-1", "user"),
+            ("other-2", "user"),
+            ("admin-3", "admin"),
+        ] {
+            db::users::insert_local(&mut conn, id, id, None, "h", role)
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        let owner_actor = services::audit::Actor {
+            user_id: Some("owner-1".to_owned()),
+            username: "owner-1".to_owned(),
+        };
+        let mut cred_ids = Vec::new();
+        for (service, base_url, username) in [
+            (
+                services::credentials::SERVICE_HARBOR,
+                Some("https://harbor.example.com"),
+                Some("robot$hg"),
+            ),
+            (services::credentials::SERVICE_GITHUB, None, None),
+        ] {
+            let created = services::credentials::create(
+                &pool,
+                &auth::crypto::credentials_key(&root).unwrap(),
+                &owner_actor,
+                "owner-1",
+                services::credentials::NewCredential {
+                    service_type: service.to_owned(),
+                    label: service.to_owned(),
+                    base_url: base_url.map(str::to_owned),
+                    username: username.map(str::to_owned),
+                    token: "test-fake-secret".to_owned(),
+                    expires_at: None,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+            cred_ids.push(created.id);
+        }
+        // rm1 (repository app), rm2 (two) and rm3 (broken, Harbor answers 500).
+        for (id, repository) in [("rm1", "app"), ("rm2", "two"), ("rm3", "broken")] {
+            sqlx::query(
+                "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+                 VALUES (?, 'owner-1', ?, ?, 'https://harbor.example.com', 'proj', ?, 'octo', ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(&cred_ids[0])
+            .bind(&cred_ids[1])
+            .bind(repository)
+            .bind(repository)
+            .bind(format!("{id}-token"))
+            .bind(format!("{id}-secret"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let key = auth::crypto::csrf_key(&root).unwrap();
+        let csrf = auth::csrf::issue(&key).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let owner = format!("{}; {csrf_cookie}", session_cookie("owner-1", "user", 0));
+        let other = format!("{}; {csrf_cookie}", session_cookie("other-2", "user", 0));
+        let admin = format!("{}; {csrf_cookie}", session_cookie("admin-3", "admin", 0));
+        let pull = |cookie: &str, token: Option<&str>, id: &str| {
+            let mut builder = with_peer(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/mappings/{id}/pull"))
+                    .header("cookie", cookie),
+            );
+            if let Some(token) = token {
+                builder = builder.header("x-csrf-token", token);
+            }
+            builder.body(Body::empty()).unwrap()
+        };
+        let send = |request: Request<Body>| {
+            let router = router.clone();
+            async move {
+                let response = router.oneshot(request).await.unwrap();
+                let status = response.status();
+                let retry_after = response
+                    .headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .map(|value| value.to_str().unwrap().to_owned());
+                let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .unwrap();
+                let json: serde_json::Value =
+                    serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                (status, retry_after, json)
+            }
+        };
+
+        // No session, CSRF passes: 401.
+        let anonymous = send(pull(&csrf_cookie, Some(&csrf), "rm1")).await;
+        // A session but no CSRF token: 403.
+        let no_csrf = send(pull(&owner, None, "rm1")).await;
+        // Another user: 404, and the cooldown is not used.
+        let foreign = send(pull(&other, Some(&csrf), "rm1")).await;
+        let missing = send(pull(&owner, Some(&csrf), "nope")).await;
+        // The owner: 200, one job queued.
+        let owned = send(pull(&owner, Some(&csrf), "rm1")).await;
+        // The owner again within 5 minutes: 429 with Retry-After.
+        let again = send(pull(&owner, Some(&csrf), "rm1")).await;
+        // An admin on the owner's other mapping: 200, two jobs (one per tag).
+        let by_admin = send(pull(&admin, Some(&csrf), "rm2")).await;
+        // Harbor fails: 502 with fixed text, and the cooldown is still used.
+        let broken = send(pull(&owner, Some(&csrf), "rm3")).await;
+        let broken_again = send(pull(&owner, Some(&csrf), "rm3")).await;
+
+        let jobs: Vec<(String, String)> =
+            sqlx::query_as("SELECT mapping_id, payload FROM sync_jobs ORDER BY mapping_id, id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let audits: Vec<(Option<String>, String, Option<String>)> = sqlx::query_as(
+            "SELECT actor_user_id, target, details FROM audit_log
+             WHERE action = 'mapping.pull' ORDER BY target",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(anonymous.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(no_csrf.0, StatusCode::FORBIDDEN);
+        assert_eq!(foreign.0, StatusCode::NOT_FOUND);
+        assert_eq!(missing.0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            owned.0,
+            StatusCode::OK,
+            "owner pull was refused: {:?}",
+            owned.2
+        );
+        assert_eq!(owned.2, serde_json::json!({ "queued": 1 }));
+        assert_eq!(again.0, StatusCode::TOO_MANY_REQUESTS);
+        let wait: u64 = again.1.expect("429 carries Retry-After").parse().unwrap();
+        assert!((1..=300).contains(&wait), "Retry-After was {wait}");
+        assert_eq!(by_admin.0, StatusCode::OK, "admin pull was refused");
+        assert_eq!(by_admin.2, serde_json::json!({ "queued": 2 }));
+        assert_eq!(broken.0, StatusCode::BAD_GATEWAY);
+        assert_eq!(broken.2["error"]["code"], "upstream_unreachable");
+        let text = broken.2.to_string();
+        assert!(
+            !text.contains("exploded"),
+            "the Harbor answer leaked: {text}"
+        );
+        assert!(
+            !text.contains("harbor.example.com"),
+            "the URL leaked: {text}"
+        );
+        assert_eq!(broken_again.0, StatusCode::TOO_MANY_REQUESTS);
+
+        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs[0].0, "rm1");
+        let payload: serde_json::Value = serde_json::from_str(&jobs[0].1).unwrap();
+        assert_eq!(payload["trigger"], "poll");
+        assert_eq!(payload["digest"], "sha256:aaaa");
+
+        // One audit row per pull that finished, none for the Harbor failure.
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].0.as_deref(), Some("owner-1"));
+        assert_eq!(audits[0].1, "mapping:rm1");
+        let details: serde_json::Value =
+            serde_json::from_str(audits[0].2.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            details,
+            serde_json::json!({ "mapping_id": "rm1", "queued": 1 })
+        );
+        assert_eq!(audits[1].0.as_deref(), Some("admin-3"));
+        assert_eq!(audits[1].1, "mapping:rm2");
+    }
+
     /// A router over a fresh database, with the session and CSRF keys derived from
     /// the test key. Test values only.
     async fn test_router(name: &str) -> (Router, sqlx::SqlitePool, std::path::PathBuf) {
@@ -1033,6 +1284,31 @@ mod tests {
         std::path::PathBuf,
         api::hardening::RateLimiter,
     ) {
+        let fetch = api::state::HarborFetchHandle::outbound(false).unwrap();
+        test_router_with_fetch(
+            name,
+            login_throttle,
+            webhook_token_limiter,
+            harbor_probe,
+            fetch,
+        )
+        .await
+    }
+
+    /// The full test router with the given Harbor probe and Harbor reader. The manual
+    /// pull router test passes a fake reader here, so no live Harbor is called.
+    async fn test_router_with_fetch(
+        name: &str,
+        login_throttle: services::throttle::LoginThrottle,
+        webhook_token_limiter: api::hardening::RateLimiter,
+        harbor_probe: api::state::HarborProbeHandle,
+        harbor_fetch: api::state::HarborFetchHandle,
+    ) -> (
+        Router,
+        sqlx::SqlitePool,
+        std::path::PathBuf,
+        api::hardening::RateLimiter,
+    ) {
         let dir = std::env::temp_dir().join(format!("harborgate-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1061,6 +1337,11 @@ mod tests {
                 crate::services::github_issues::GithubIssues::new().unwrap(),
             ),
             harbor_probe,
+            app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
+                crate::services::app_log::REVERT_AFTER,
+            )),
+            harbor_fetch,
+            pull_limiter: api::mappings::new_pull_limiter(),
         };
         (app(Vec::new(), state), pool, dir, handle)
     }
@@ -2967,5 +3248,142 @@ mod tests {
         assert_eq!(owner_status, StatusCode::OK);
         assert_eq!(retried["status"], "queued");
         assert!(retried["created_at"].as_str().unwrap().ends_with('Z'));
+    }
+
+    /// The application log routes: no session is `401`, a regular user is `403` on
+    /// both routes, a PUT without a CSRF token is `403 csrf_invalid`, an invalid level
+    /// is `422` with fixed text that does not echo the value, and an admin change is
+    /// `200` and audited as `log.level_change` with `{"old","new"}` only.
+    #[tokio::test]
+    async fn admin_log_routes_check_role_csrf_and_level() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, pool, dir) = test_router("app-log-routes").await;
+        let mut conn = pool.acquire().await.unwrap();
+        db::users::insert_local(&mut conn, "admin-1", "admin-1", None, "h", "admin")
+            .await
+            .unwrap();
+        db::users::insert_local(&mut conn, "user-1", "user-1", None, "h", "user")
+            .await
+            .unwrap();
+        drop(conn);
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let csrf = auth::csrf::issue(&auth::crypto::csrf_key(&root).unwrap()).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let admin = format!("{}; {csrf_cookie}", session_cookie("admin-1", "admin", 0));
+        let user = format!("{}; {csrf_cookie}", session_cookie("user-1", "user", 0));
+        let put = |cookie: &str, token: Option<&str>, body: &str| {
+            let mut builder = with_peer(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/admin/log-level")
+                    .header("content-type", "application/json")
+                    .header("cookie", cookie),
+            );
+            if let Some(token) = token {
+                builder = builder.header("x-csrf-token", token);
+            }
+            builder.body(Body::from(body.to_owned())).unwrap()
+        };
+        let debug = r#"{"level":"debug"}"#;
+
+        let (anon_logs, _) = get_json(&router, "/api/v1/admin/logs", &csrf_cookie).await;
+        let (user_logs, _) = get_json(&router, "/api/v1/admin/logs", &user).await;
+        let (user_level, _) = get_json(&router, "/api/v1/admin/log-level", &user).await;
+        let anon_put = router
+            .clone()
+            .oneshot(put(&csrf_cookie, Some(&csrf), debug))
+            .await
+            .unwrap()
+            .status();
+        let user_put = router
+            .clone()
+            .oneshot(put(&user, Some(&csrf), debug))
+            .await
+            .unwrap()
+            .status();
+        let no_csrf = router
+            .clone()
+            .oneshot(put(&admin, None, debug))
+            .await
+            .unwrap();
+        let no_csrf_status = no_csrf.status();
+        let no_csrf_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(no_csrf.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let invalid = router
+            .clone()
+            .oneshot(put(&admin, Some(&csrf), r#"{"level":"verbose-xyz"}"#))
+            .await
+            .unwrap();
+        let invalid_status = invalid.status();
+        let invalid_text = String::from_utf8(
+            axum::body::to_bytes(invalid.into_body(), 64 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let ok = router
+            .clone()
+            .oneshot(put(&admin, Some(&csrf), debug))
+            .await
+            .unwrap();
+        let ok_status = ok.status();
+        let ok_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(ok.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let (level_status, level_body) = get_json(&router, "/api/v1/admin/log-level", &admin).await;
+        let (logs_status, logs_body) =
+            get_json(&router, "/api/v1/admin/logs?level=warn&q=x", &admin).await;
+        let (bad_filter, _) = get_json(&router, "/api/v1/admin/logs?level=loud", &admin).await;
+        let audit: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT action, actor_username, target, details FROM audit_log ORDER BY rowid",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(anon_logs, StatusCode::UNAUTHORIZED);
+        assert_eq!(anon_put, StatusCode::UNAUTHORIZED);
+        assert_eq!(user_logs, StatusCode::FORBIDDEN);
+        assert_eq!(user_level, StatusCode::FORBIDDEN);
+        assert_eq!(user_put, StatusCode::FORBIDDEN);
+        assert_eq!(no_csrf_status, StatusCode::FORBIDDEN);
+        assert_eq!(no_csrf_body["error"]["code"], "csrf_invalid");
+        assert_eq!(invalid_status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(invalid_text.contains("level must be info, debug, or trace."));
+        assert!(
+            !invalid_text.contains("verbose-xyz"),
+            "the value was echoed"
+        );
+        assert_eq!(ok_status, StatusCode::OK);
+        assert_eq!(ok_body["level"], "debug");
+        assert!(ok_body["reverts_at"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(level_status, StatusCode::OK);
+        assert_eq!(level_body["level"], "debug");
+        assert_eq!(logs_status, StatusCode::OK);
+        assert!(logs_body["items"].is_array());
+        assert_eq!(logs_body["level"], "debug");
+        assert_eq!(bad_filter, StatusCode::BAD_REQUEST);
+        // Only the admin's change is audited; refused requests write nothing.
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].0, "log.level_change");
+        assert_eq!(audit[0].1, "admin-1");
+        assert_eq!(audit[0].2, "log_level");
+        let details: serde_json::Value =
+            serde_json::from_str(audit[0].3.as_deref().unwrap()).unwrap();
+        assert_eq!(details, serde_json::json!({"old": "info", "new": "debug"}));
     }
 }
