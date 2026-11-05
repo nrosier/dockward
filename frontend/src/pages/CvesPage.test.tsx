@@ -132,6 +132,15 @@ describe("CvesPage", () => {
     await vi.waitFor(() => expect(onIssue).toHaveBeenCalledTimes(1));
   });
 
+  it("names the LOW confirmation dialog after its visible title", async () => {
+    stub([row({ severity: "LOW", open_severity: "LOW" })]);
+    renderAt(<CvesPage />);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.action.createIssue") }));
+    const title = t("cves.confirm.title", { cve: "CVE-2026-0002" });
+    const dialog = await screen.findByRole("dialog", { name: title });
+    expect(within(dialog).getByText(title)).toBeInTheDocument();
+  });
+
   it("offers no Create issue for a CVE fixed on every tag", async () => {
     stub([row({ severity: "CRITICAL", open_severity: null, status: "fixed" })]);
     renderAt(<CvesPage />);
