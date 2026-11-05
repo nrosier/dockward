@@ -524,7 +524,10 @@ mod tests {
             .unwrap();
         // Same project from another user's own mapping: 409.
         let dup = create(&pool, &user("u2", Role::User), "https://hg", "m2").await;
-        assert!(matches!(dup, Err(AppError::Conflict(_))), "{dup:?}");
+        assert!(
+            matches!(dup, Err(AppError::Conflict(_))),
+            "duplicate create must be a conflict"
+        );
         // Another user's mapping, an admin, and an unknown id: 404.
         let foreign = create(&pool, &user("u2", Role::User), "https://hg", "m1").await;
         let admin = create(&pool, &user("adm", Role::Admin), "https://hg", "m1").await;
@@ -604,8 +607,14 @@ mod tests {
         for caller in [user("u2", Role::User), user("adm", Role::Admin)] {
             let token = rotate_token(&pool, &caller, "https://hg", &created.id).await;
             let secret = rotate_secret(&pool, &caller, &created.id).await;
-            assert!(matches!(token, Err(AppError::Forbidden)), "{token:?}");
-            assert!(matches!(secret, Err(AppError::Forbidden)), "{secret:?}");
+            assert!(
+                matches!(token, Err(AppError::Forbidden)),
+                "rotate_token must be refused for a non-owner"
+            );
+            assert!(
+                matches!(secret, Err(AppError::Forbidden)),
+                "rotate_secret must be refused for a non-owner"
+            );
         }
         assert_eq!(stored_hashes(&pool, &created.id).await, before);
         assert!(
