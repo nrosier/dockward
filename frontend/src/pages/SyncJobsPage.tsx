@@ -10,6 +10,7 @@ import { mappingName, useMappingLookup, useScopeAll } from "../components/mappin
 import { ImageCell } from "../components/syncjobs/ImageCell";
 import { JobStatusPill } from "../components/syncjobs/jobPill";
 import { RetryButton } from "../components/syncjobs/RetryButton";
+import { formatDateTime } from "../components/syncjobs/dates";
 import { Time } from "../components/syncjobs/Time";
 import { Card } from "../components/ui/Card";
 import { currentPage, Pagination } from "../components/ui/Pagination";
@@ -24,6 +25,27 @@ const PAGE_SIZE = 50;
 const MAX_ATTEMPTS = 8;
 const STATUSES = ["queued", "running", "done", "failed"] as const;
 const COLUMNS = 7;
+// The API read cuts last_error to MAX_TEXT_CHARS (500 characters, backend/src/db/sync_jobs.rs).
+// The page shows at most 300 of them, so a long message does not push the table wide.
+const ERROR_DISPLAY_MAX = 300;
+
+// A job that has run and is queued again is retrying. A job that has never run is plain Queued.
+function isRetrying(job: SyncJob): boolean {
+  return job.status === "queued" && job.attempts > 0;
+}
+
+function capText(text: string, max: number): string {
+  const chars = Array.from(text);
+  return chars.length <= max ? text : `${chars.slice(0, max).join("")}…`;
+}
+
+// The error row shows for a failed job with an error, and for a retrying job with an error or a next attempt time.
+function showErrorRow(job: SyncJob): boolean {
+  if (job.status === "failed") {
+    return job.last_error !== null;
+  }
+  return isRetrying(job) && (job.last_error !== null || job.next_attempt_at !== null);
+}
 
 export default function SyncJobsPage() {
   const scopeAll = useScopeAll();
@@ -154,7 +176,10 @@ export default function SyncJobsPage() {
                           {t(job.trigger === "poll" ? "syncJobs.trigger.poll" : "syncJobs.trigger.webhook")}
                         </td>
                         <td className={TD}>
-                          <JobStatusPill status={job.status} />
+                          <JobStatusPill
+                            status={job.status}
+                            label={isRetrying(job) ? t("syncJobs.retrying", { attempts: job.attempts, max: MAX_ATTEMPTS }) : undefined}
+                          />
                         </td>
                         <td className={`${TD} text-muted`}>
                           {t("syncJobs.attempts", { attempts: job.attempts, max: MAX_ATTEMPTS })}
@@ -167,11 +192,20 @@ export default function SyncJobsPage() {
                         </td>
                         <td className={`${TD} text-right`}>{canRetry(job) ? <RetryButton job={job} /> : null}</td>
                       </tr>
-                      {job.status === "failed" && job.last_error !== null ? (
+                      {showErrorRow(job) ? (
                         <tr>
                           <td colSpan={COLUMNS} className="border-b border-border/60 px-3.5 pb-3">
                             <div className="rounded-lg border border-crit/30 bg-crit/5 px-3 py-2.5 text-[13px] text-crit-ink">
-                              {job.last_error}
+                              {job.last_error === null ? null : capText(job.last_error, ERROR_DISPLAY_MAX)}
+                              {isRetrying(job) && job.next_attempt_at !== null ? (
+                                <time
+                                  dateTime={job.next_attempt_at}
+                                  title={job.next_attempt_at}
+                                  className="mt-1 block text-[12.5px] text-muted"
+                                >
+                                  {t("syncJobs.nextAttempt", { time: formatDateTime(job.next_attempt_at) })}
+                                </time>
+                              ) : null}
                             </div>
                           </td>
                         </tr>

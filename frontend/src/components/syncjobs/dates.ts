@@ -32,6 +32,19 @@ export function formatWhen(iso: string | null, now: number = Date.now()): string
   return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
 }
 
+// `YYYY-MM-DD HH:mm` in local time, for a time in the future (the next attempt).
+// Unlike formatWhen, it never says "Just now" for a future time.
+export function formatDateTime(iso: string | null): string {
+  if (iso === null) {
+    return "";
+  }
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) {
+    return "";
+  }
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
 // `YYYY-MM-DD` in local time, for "first seen".
 export function formatDate(iso: string | null): string {
   if (iso === null) {

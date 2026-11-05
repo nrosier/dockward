@@ -67,4 +67,23 @@ describe("MappingsPage", () => {
     // Not the owner: no Edit link.
     expect(within(second).queryByRole("link")).not.toBeInTheDocument();
   });
+
+  it("mapping with no sync job shows the reason", async () => {
+    stubApi((path) => {
+      if (path === "/api/v1/account/me") return json({ user: user("user") });
+      if (path.startsWith("/api/v1/mappings")) {
+        return json({
+          items: [mapping({ id: "m2", harbor_repository: "web", last_sync: null })],
+          page: 1,
+          page_size: 50,
+          total: 1,
+        });
+      }
+      return undefined;
+    });
+    renderAt(<MappingsPage />);
+    const row = (await screen.findByText("platform/web")).closest("tr") as HTMLElement;
+    expect(within(row).getByText(t("mappings.never"))).toBeInTheDocument();
+    expect(within(row).getByText(t("mappings.neverReason"))).toBeInTheDocument();
+  });
 });

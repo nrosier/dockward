@@ -45,13 +45,14 @@ const TONE: Record<PillKind, string> = {
   unknown: "text-text bg-text/5 border-border",
 };
 
-export function Pill({ kind }: { kind: PillKind }) {
+// `label` replaces the default text for the kind, for example a retry state.
+export function Pill({ kind, label }: { kind: PillKind; label?: string }) {
   return (
     <span
       className={`inline-flex h-[22px] items-center gap-1.5 rounded-full border px-[9px] text-[11px] leading-none font-semibold tracking-[0.05em] whitespace-nowrap uppercase ${TONE[kind]}`}
     >
       <span aria-hidden="true" className="size-1.5 rounded-full bg-current" />
-      {t(LABEL[kind])}
+      {label ?? t(LABEL[kind])}
     </span>
   );
 }
