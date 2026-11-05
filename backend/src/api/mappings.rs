@@ -11,6 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+use crate::api::hardening::{RateLimiter, too_many_requests};
 use crate::api::state::AppState;
 use crate::error::AppError;
 use crate::models::role::Role;
@@ -19,6 +20,7 @@ use crate::services::credential_probe::OutboundGithubProbe;
 use crate::services::dashboard::{self, OpenCves};
 use crate::services::mappings::{self, Created, ListQuery, Mapping, MappingPatch, NewMapping};
 use crate::services::pagination::Page;
+use crate::services::poller;
 use crate::services::sessions::AuthUser;
 use crate::services::sync_jobs::{self, LastSync};
 use crate::worker::now_secs;
@@ -56,6 +58,22 @@ async fn with_list_extras(
         page_size: page.page_size,
         total: page.total,
     })
+}
+
+/// Manual scan pulls allowed per mapping in one cooldown window (`specs/security.md`).
+const PULL_LIMIT: u32 = 1;
+/// The manual scan pull cooldown: 5 minutes per mapping (decided on #131).
+const PULL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// A fresh manual pull cooldown, held in memory. The router state holds one.
+pub fn new_pull_limiter() -> RateLimiter {
+    RateLimiter::new(PULL_LIMIT, PULL_COOLDOWN)
+}
+
+/// The `POST /api/v1/mappings/:id/pull` response: how many sync jobs were queued.
+#[derive(Debug, Serialize)]
+pub struct Pulled {
+    pub queued: u64,
 }
 
 /// Raw query values for `GET /api/v1/mappings`.
@@ -198,6 +216,35 @@ pub async fn rotate_auth_secret(
     let actor = actor_of(&user);
     let secret = mappings::rotate_auth_secret(&state.pool, &actor, &user.id, &id).await?;
     Ok(Json(serde_json::json!({ "auth_secret": secret })))
+}
+
+/// `POST /api/v1/mappings/:id/pull`. The mapping owner or an admin (`specs/security.md`,
+/// Tenancy). Runs the scheduled poll for this mapping now and returns `{"queued": n}`.
+/// One pull per mapping per 5 minutes; the cooldown is checked after access, so another
+/// tenant's mapping is `404`, and it is used even when the pull then fails at Harbor.
+pub async fn pull(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let is_admin = user.role == Role::Admin;
+    let mapping = poller::find_pullable(&state.pool, &user.id, is_admin, &id).await?;
+    if let Err(retry) = state.pull_limiter.check(
+        &format!("mapping:{}", mapping.id),
+        std::time::Instant::now(),
+    ) {
+        return Ok(too_many_requests(retry));
+    }
+    let queued = poller::pull_mapping(
+        &state.pool,
+        &state.credentials_key,
+        &state.harbor_fetch,
+        &actor_of(&user),
+        &mapping,
+        now_secs(),
+    )
+    .await?;
+    Ok(Json(Pulled { queued }).into_response())
 }
 
 #[cfg(test)]
