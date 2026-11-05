@@ -30,6 +30,20 @@ pub enum Outcome {
 
 /// Parses the body and decides. Returns `400` for a body that is not JSON or matches
 /// neither format. `repo_full_name` is the mapping's `<harbor_project>/<harbor_repository>`.
+/// The event's `repository.repo_full_name`, read in either payload format, or `None` when the
+/// body does not name one. A project webhook uses it to choose the mapping (#132). The body
+/// is validated by `classify` after the mapping is chosen.
+pub fn event_repository(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let object = value.as_object()?;
+    let data = if object.contains_key("specversion") {
+        value.get("data").cloned().unwrap_or(Value::Null)
+    } else {
+        value.get("event_data").cloned().unwrap_or(Value::Null)
+    };
+    string_at(&data, &["repository", "repo_full_name"])
+}
+
 pub fn classify(body: &[u8], repo_full_name: &str) -> Result<Outcome, AppError> {
     let value: Value = serde_json::from_slice(body).map_err(|_| bad_request())?;
     let object = value.as_object().ok_or_else(bad_request)?;
@@ -235,6 +249,16 @@ pub async fn find_mapping(pool: &SqlitePool, token: &str) -> Result<Option<Strin
     mapping_db::find_by_token_hash(pool, &digest(token)).await
 }
 
+/// Checks an `Authorization` value against a stored secret digest, in constant time. The value
+/// must be `Bearer <secret>`; the prefix is stripped before hashing (`specs/integrations.md`).
+/// Shared by mapping and project webhooks, so both check the secret the same way.
+pub fn secret_matches(stored_digest: &str, authorization: Option<&str>) -> bool {
+    let Some(presented) = authorization.and_then(|value| value.strip_prefix("Bearer ")) else {
+        return false;
+    };
+    constant_time_eq(digest(presented).as_bytes(), stored_digest.as_bytes())
+}
+
 /// Handles one webhook body for an already-found mapping (`specs/integrations.md`). A bad
 /// `Authorization` value returns `401`, the same as an unknown token. The secret is
 /// compared by digest in constant time.
@@ -247,22 +271,30 @@ pub async fn receive_for(
     new_job_id: &str,
 ) -> Result<Received, AppError> {
     let unauthorized = || AppError::InvalidCredentials;
-    let presented = authorization
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or_else(unauthorized)?;
     let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
     let row = mapping_db::find_by_id(&mut conn, mapping_id)
         .await?
         .ok_or_else(unauthorized)?;
-    let presented_digest = digest(presented);
-    if !constant_time_eq(
-        presented_digest.as_bytes(),
-        row.webhook_auth_secret_hash.as_bytes(),
-    ) {
+    if !secret_matches(&row.webhook_auth_secret_hash, authorization) {
         return Err(unauthorized());
     }
     let repo_full_name = format!("{}/{}", row.harbor_project, row.harbor_repository);
-    match classify(body, &repo_full_name)? {
+    queue_event(pool, mapping_id, &repo_full_name, body, now, new_job_id).await
+}
+
+/// Classifies one event for a mapping's repository and queues it if it is a tagged vulnerability
+/// scan. The caller has already checked the `Authorization` secret: the mapping's own for a
+/// mapping webhook, or the project's for a project webhook (#132). Both routes share this, so
+/// the event rules are the same.
+pub async fn queue_event(
+    pool: &SqlitePool,
+    mapping_id: &str,
+    repo_full_name: &str,
+    body: &[u8],
+    now: i64,
+    new_job_id: &str,
+) -> Result<Received, AppError> {
+    match classify(body, repo_full_name)? {
         Outcome::Ignore => Ok(Received::Ignored),
         Outcome::Queue(event) => {
             let payload = serde_json::to_string(&event).map_err(|_| AppError::InternalError)?;

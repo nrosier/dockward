@@ -105,6 +105,10 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/webhooks/harbor/{mapping_token}",
             post(api::webhooks::receive),
         )
+        .route(
+            "/api/v1/webhooks/harbor/project/{project_token}",
+            post(api::webhooks::receive_project),
+        )
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
         .route("/api/v1/admin/jobs", get(api::admin::admin_jobs))
         .route("/api/v1/admin/health", get(api::admin::health))
@@ -1335,6 +1339,76 @@ mod tests {
         .unwrap();
     }
 
+    /// One project webhook on `proj` with two mappings: `proj/app` and `proj/other`. The
+    /// project token and secret are the given fake values.
+    async fn project_fixture(pool: &sqlx::SqlitePool, token: &str, secret: &str) {
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, token_version)
+             VALUES ('pu', 'pu', NULL, 'user', 0)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
+             VALUES ('pc1', 'pu', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
+                    ('pc2', 'pu', 'github', 'g', NULL, NULL, 'v1:fake')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO project_webhooks (id, user_id, harbor_base_url, harbor_project, token_hash, secret_hash)
+             VALUES ('pw1', 'pu', 'https://harbor.example.com', 'proj', ?, ?)",
+        )
+        .bind(services::mappings::digest(token))
+        .bind(services::mappings::digest(secret))
+        .execute(pool)
+        .await
+        .unwrap();
+        for (id, repo) in [("pm-app", "app"), ("pm-other", "other")] {
+            sqlx::query(
+                "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash, auto_create_issues, min_issue_severity, default_branch)
+                 VALUES (?, 'pu', 'pc1', 'pc2', 'https://harbor.example.com', 'proj', ?, 'o', ?, ?, ?, 0, 'CRITICAL', 'main')",
+            )
+            .bind(id)
+            .bind(repo)
+            .bind(repo)
+            .bind(services::mappings::digest(&format!("mt-{id}")))
+            .bind(services::mappings::digest(&format!("ms-{id}")))
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    /// A project webhook request to `project_token`, with the given body and auth value.
+    fn project_request(
+        project_token: &str,
+        auth: Option<&str>,
+        body: &str,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut builder = with_peer(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/webhooks/harbor/project/{project_token}"))
+                .header("content-type", "application/json"),
+        );
+        if let Some(value) = auth {
+            builder = builder.header("authorization", value);
+        }
+        builder
+            .body(axum::body::Body::from(body.to_owned()))
+            .unwrap()
+    }
+
+    /// The event for repository `repo` on project `proj`.
+    fn repo_event(repo: &str) -> String {
+        format!(
+            r#"{{"type":"SCANNING_COMPLETED","event_data":{{"repository":{{"repo_full_name":"proj/{repo}"}},"resources":[{{"digest":"sha256:aaaa","tag":"v1"}}],"scan":{{"scan_type":"vulnerability"}}}}}}"#
+        )
+    }
+
     /// A default-format vulnerability event for `proj/app`.
     const WEBHOOK_BODY: &str = r#"{"type":"SCANNING_COMPLETED","event_data":{"repository":{"repo_full_name":"proj/app"},"resources":[{"digest":"sha256:aaaa"}],"scan":{"scan_type":"vulnerability"}}}"#;
 
@@ -1355,6 +1429,114 @@ mod tests {
         builder
             .body(axum::body::Body::from(body.to_owned()))
             .unwrap()
+    }
+
+    /// A project event for a mapped repository is routed to that mapping and queues a job.
+    #[tokio::test]
+    async fn project_event_routes_to_the_matching_mapping() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("project-route").await;
+        project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+        let response = router
+            .oneshot(project_request(
+                "proj-tok-fake",
+                Some("Bearer proj-sec-fake"),
+                &repo_event("app"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let jobs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sync_jobs WHERE mapping_id = 'pm-app'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(jobs, 1);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An event for a repository with no mapping is counted and queues nothing: the project
+    /// webhook does not silently drop it, and it does not create a job for another mapping.
+    #[tokio::test]
+    async fn unmatched_project_event_is_counted_and_queues_nothing() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("project-unmatched").await;
+        project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+        let response = router
+            .oneshot(project_request(
+                "proj-tok-fake",
+                Some("Bearer proj-sec-fake"),
+                &repo_event("stranger"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(jobs, 0);
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count FROM project_webhook_unmatched WHERE repository = 'proj/stranger'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A wrong project secret is refused, even for an event that would be unmatched, so an
+    /// unknown sender cannot fill the unmatched count.
+    #[tokio::test]
+    async fn project_wrong_secret_is_refused_before_counting() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("project-secret").await;
+        project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+        for repo in ["app", "stranger"] {
+            let response = router
+                .clone()
+                .oneshot(project_request(
+                    "proj-tok-fake",
+                    Some("Bearer wrong-secret"),
+                    &repo_event(repo),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let unmatched: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_webhook_unmatched")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(unmatched, 0);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unknown project token is refused with the same 401 as a wrong secret.
+    #[tokio::test]
+    async fn unknown_project_token_is_refused() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("project-unknown").await;
+        project_fixture(&pool, "proj-tok-fake", "proj-sec-fake").await;
+        let response = router
+            .oneshot(project_request(
+                "no-such-token",
+                Some("Bearer proj-sec-fake"),
+                &repo_event("app"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The value the create and rotate responses return is the full `Authorization` header.
@@ -2088,8 +2270,9 @@ mod tests {
             .unwrap();
         let before = schema_state(&pool).await;
         pool.close().await;
+        // Migration 2 is removed; migration 3 (project webhooks, #132) is still applied.
         assert!(
-            before == (vec![1], 0),
+            before == (vec![1, 3], 0),
             "the setup did not remove migration 2"
         );
 
