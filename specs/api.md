@@ -298,7 +298,7 @@ All routes below are `admin`.
 - Format detection by `specversion`, the `Authorization` header contract, and the response code rules are in [integrations.md](integrations.md). The header is decided (2026-11-03): `Authorization: Bearer <secret>`.
 - A wrong URL token and a wrong or missing `Authorization` value return the same `401` and the same body (Decided 2026-11-03, delegated).
 - The route never echoes the token and never logs it. The access log records the route template.
-- Handling: validate, store a `sync_jobs` row, return `202`. See [backend.md](backend.md). Decided (2026-11-05, user, #132): an untagged event with a valid digest stores one resolve job and returns `202` with no Harbor call. An untagged event with a missing or invalid digest returns `400`.
+- Handling: validate, store a `sync_jobs` row, return `202`. See [backend.md](backend.md). Decided (2026-11-05, user, #132): an untagged event with a valid digest stores one resolve job and returns `202` with no Harbor call. Decided (2026-11-05, user, #132): a `SCANNING_COMPLETED` vulnerability event with a missing or invalid digest returns `400`, tagged or not.
 
 ## Verification
 
