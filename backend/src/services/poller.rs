@@ -398,6 +398,39 @@ mod tests {
     ]"#;
 
     #[tokio::test]
+    async fn permanently_failed_digest_is_not_requeued() {
+        let fx = Fixture::new("permanent-skip").await;
+        let harbor = FakeHarbor::with("app", 200, TWO_ARTIFACTS);
+        harbor.set("other", 200, "[]");
+
+        assert_eq!(
+            poll_once(&fx.pool, &key(), &harbor, 1_000).await.unwrap(),
+            2
+        );
+        // Record each job as a permanent failure: one attempt, status failed, as the worker does.
+        for (job_id, _) in fx.jobs().await {
+            sync_jobs::record_failure(
+                &mut fx.pool.acquire().await.unwrap(),
+                &job_id,
+                1,
+                None,
+                "the image has no org.opencontainers.image.revision label.",
+                true,
+                2_000,
+            )
+            .await
+            .unwrap();
+        }
+
+        // The next poll does not queue the permanently failed digests again.
+        assert_eq!(
+            poll_once(&fx.pool, &key(), &harbor, 3_000).await.unwrap(),
+            0
+        );
+        assert_eq!(fx.jobs().await.len(), 2);
+    }
+
+    #[tokio::test]
     async fn second_poll_queues_nothing_for_synced_digests() {
         let fx = Fixture::new("second").await;
         let harbor = FakeHarbor::with("app", 200, TWO_ARTIFACTS);
