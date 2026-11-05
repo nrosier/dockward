@@ -26,9 +26,14 @@ export interface Mapping {
   created_at: string | null;
 }
 
+// Open CVEs per severity, and their sum (#129).
 export interface OpenCves {
   critical: number;
   high: number;
+  medium: number;
+  low: number;
+  unknown: number;
+  total: number;
 }
 
 export type JobStatus = "queued" | "running" | "done" | "failed";
@@ -62,6 +67,8 @@ export interface CveSummary {
   mapping_id: string;
   cve_id: string;
   severity: Severity;
+  // Highest severity across the open tags, or null when every tag is fixed.
+  open_severity: Severity | null;
   status: "open" | "fixed";
   package: string | null;
   first_seen_at: string | null;

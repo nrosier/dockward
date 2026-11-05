@@ -107,6 +107,30 @@ export default function DashboardPage() {
           to={`/cves?severity=HIGH&status=open${scopeQuery}`}
         />
         <CountCard
+          kind="medium"
+          count={data.open_cves.medium}
+          label={t("dashboard.openCves")}
+          to={`/cves?severity=MEDIUM&status=open${scopeQuery}`}
+        />
+        <CountCard
+          kind="low"
+          count={data.open_cves.low}
+          label={t("dashboard.openCves")}
+          to={`/cves?severity=LOW&status=open${scopeQuery}`}
+        />
+        <CountCard
+          kind="unknown"
+          count={data.open_cves.unknown}
+          label={t("dashboard.openCves")}
+          to={`/cves?severity=UNKNOWN&status=open${scopeQuery}`}
+        />
+        <CountCard
+          kind="open"
+          count={data.open_cves.total}
+          label={t("dashboard.openCvesTotal")}
+          to={`/cves?status=open${scopeQuery}`}
+        />
+        <CountCard
           kind="fixed"
           count={data.fixed_cves}
           label={t("dashboard.fixedCves")}
