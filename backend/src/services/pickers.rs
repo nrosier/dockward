@@ -195,6 +195,10 @@ struct CacheMap {
 /// first), one shared fill per key, and nothing cached on error.
 pub struct PickerCache {
     map: Mutex<CacheMap>,
+    /// Per credential, how many times it was dropped. A fill stores its result only if the
+    /// number is the one captured before the credential was loaded, so a request that
+    /// loaded the old credential cannot cache its old view after an update.
+    generations: Mutex<HashMap<String, u64>>,
     ttl: Duration,
     max_entries: usize,
     /// Seconds added to the clock. Tests move time forward with it.
@@ -208,6 +212,7 @@ impl PickerCache {
                 slots: HashMap::new(),
                 next_seq: 0,
             }),
+            generations: Mutex::new(HashMap::new()),
             ttl,
             max_entries,
             skew_secs: std::sync::atomic::AtomicU64::new(0),
@@ -249,9 +254,26 @@ impl PickerCache {
         slot
     }
 
+    /// The current generation of a credential. Capture it before loading the credential.
+    fn generation(&self, credential: &str) -> u64 {
+        self.generations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(credential)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// The cached value, or the result of `fill`. Concurrent callers for one key wait on
-    /// the same slot, so one upstream fill serves them all. A failed fill is not stored.
-    async fn get_or_fill<F>(&self, key: CacheKey, fill: F) -> Result<Cached, PickerFail>
+    /// the same slot, so one upstream fill serves them all. A failed fill is not stored,
+    /// and neither is a fill whose credential was dropped since `generation` was captured
+    /// (its result still goes to the caller that asked).
+    async fn get_or_fill<F>(
+        &self,
+        key: CacheKey,
+        generation: u64,
+        fill: F,
+    ) -> Result<Cached, PickerFail>
     where
         F: std::future::Future<Output = Result<Cached, PickerFail>>,
     {
@@ -263,12 +285,20 @@ impl PickerCache {
             return Ok(value.clone());
         }
         let value = fill.await?;
-        *guard = Some((self.now(), value.clone()));
+        if self.generation(&key.credential) == generation {
+            *guard = Some((self.now(), value.clone()));
+        }
         Ok(value)
     }
 
     /// Drops every entry of one credential.
     fn drop_credential(&self, credential: &str) {
+        *self
+            .generations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(credential.to_owned())
+            .or_insert(0) += 1;
         let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
         map.slots.retain(|key, _| key.credential != credential);
     }
@@ -458,6 +488,8 @@ fn page_of<T>(
 /// A Harbor credential ready for calls. The secret is zeroized on drop.
 struct HarborCtx {
     id: String,
+    /// The cache generation captured before the credential was loaded.
+    generation: u64,
     base: Url,
     base_text: String,
     username: String,
@@ -466,16 +498,22 @@ struct HarborCtx {
 
 struct GithubCtx {
     id: String,
+    generation: u64,
     token: zeroize::Zeroizing<Vec<u8>>,
 }
 
-fn harbor_ctx(key: &DerivedKey, row: &CredentialRow) -> Result<HarborCtx, PickerFail> {
+fn harbor_ctx(
+    key: &DerivedKey,
+    row: &CredentialRow,
+    generation: u64,
+) -> Result<HarborCtx, PickerFail> {
     let base_text = row.base_url.clone().ok_or(AppError::InternalError)?;
     let base = credentials::base_for_join(&base_text)?;
     let username = row.username.clone().ok_or(AppError::InternalError)?;
     let secret = credentials::decrypt_token(key, row)?;
     Ok(HarborCtx {
         id: row.id.clone(),
+        generation,
         base,
         base_text,
         username,
@@ -483,9 +521,14 @@ fn harbor_ctx(key: &DerivedKey, row: &CredentialRow) -> Result<HarborCtx, Picker
     })
 }
 
-fn github_ctx(key: &DerivedKey, row: &CredentialRow) -> Result<GithubCtx, PickerFail> {
+fn github_ctx(
+    key: &DerivedKey,
+    row: &CredentialRow,
+    generation: u64,
+) -> Result<GithubCtx, PickerFail> {
     Ok(GithubCtx {
         id: row.id.clone(),
+        generation,
         token: credentials::decrypt_token(key, row)?,
     })
 }
@@ -680,6 +723,7 @@ impl PickerState {
         credential_id: &str,
         query: &ListQuery,
     ) -> Result<PickerPage<HarborProject>, PickerFail> {
+        let generation = self.cache.generation(credential_id);
         let row =
             load_credential(caller.pool, caller.user_id, credential_id, SERVICE_HARBOR).await?;
         self.check_user_limit(caller.user_id)?;
@@ -687,7 +731,7 @@ impl PickerState {
         let Ok(search) = harbor_search(q.as_deref()) else {
             return Ok(empty_page(&paging));
         };
-        let ctx = harbor_ctx(caller.key, &row)?;
+        let ctx = harbor_ctx(caller.key, &row, generation)?;
         let cache_key = CacheKey {
             credential: ctx.id.clone(),
             list: "harbor_projects",
@@ -696,7 +740,7 @@ impl PickerState {
         };
         let cached = self
             .cache
-            .get_or_fill(cache_key, async {
+            .get_or_fill(cache_key, ctx.generation, async {
                 self.harbor_identity(&ctx).await?;
                 let (names, truncated) = self
                     .harbor_pages(
@@ -756,6 +800,7 @@ impl PickerState {
         project: &str,
         query: &ListQuery,
     ) -> Result<PickerPage<HarborRepository>, PickerFail> {
+        let generation = self.cache.generation(credential_id);
         let row =
             load_credential(caller.pool, caller.user_id, credential_id, SERVICE_HARBOR).await?;
         self.check_user_limit(caller.user_id)?;
@@ -766,7 +811,7 @@ impl PickerState {
         let Ok(search) = harbor_search(q.as_deref()) else {
             return Ok(empty_page(&paging));
         };
-        let ctx = harbor_ctx(caller.key, &row)?;
+        let ctx = harbor_ctx(caller.key, &row, generation)?;
         let hidden =
             hidden_set(caller.pool, caller.user_id, "harbor", Some(&ctx.base_text)).await?;
         // Hiding a project also hides its repositories from the picker.
@@ -781,7 +826,7 @@ impl PickerState {
         };
         let cached = self
             .cache
-            .get_or_fill(cache_key, async {
+            .get_or_fill(cache_key, ctx.generation, async {
                 self.harbor_identity(&ctx).await?;
                 let (names, truncated) = self
                     .harbor_pages(
@@ -881,7 +926,7 @@ impl PickerState {
         };
         let cached = self
             .cache
-            .get_or_fill(cache_key, async {
+            .get_or_fill(cache_key, ctx.generation, async {
                 let mut url = Url::parse("https://api.github.com/user/repos")
                     .map_err(|_| AppError::InternalError)?;
                 url.query_pairs_mut()
@@ -948,11 +993,12 @@ impl PickerState {
         credential_id: &str,
         query: &ListQuery,
     ) -> Result<PickerPage<GitHubRepository>, PickerFail> {
+        let generation = self.cache.generation(credential_id);
         let row =
             load_credential(caller.pool, caller.user_id, credential_id, SERVICE_GITHUB).await?;
         self.check_user_limit(caller.user_id)?;
         let (paging, q) = parse_query(query, &["full_name"])?;
-        let ctx = github_ctx(caller.key, &row)?;
+        let ctx = github_ctx(caller.key, &row, generation)?;
         let listing = self.github_listing(&ctx).await?;
         let hidden = hidden_set(caller.pool, caller.user_id, "github", None).await?;
         let needle = q.map(|text| text.to_ascii_lowercase());
@@ -1084,11 +1130,15 @@ impl PickerState {
         credential_id: &str,
         query: &SuggestionQuery,
     ) -> Result<SuggestionResponse, PickerFail> {
+        let generation = self.cache.generation(credential_id);
         let row =
             load_credential(caller.pool, caller.user_id, credential_id, SERVICE_HARBOR).await?;
+        // The GitHub credential's generation is captured before it is loaded, too.
         let github_row = match query.github_cred_id.as_deref() {
             Some(id) => {
-                Some(load_credential(caller.pool, caller.user_id, id, SERVICE_GITHUB).await?)
+                let github_generation = self.cache.generation(id);
+                let row = load_credential(caller.pool, caller.user_id, id, SERVICE_GITHUB).await?;
+                Some((row, github_generation))
             }
             None => None,
         };
@@ -1105,7 +1155,7 @@ impl PickerState {
         if project.contains('/') || !valid_harbor_name(project) || !valid_harbor_name(repository) {
             return Err(invalid(MSG_BAD_NAME));
         }
-        let ctx = harbor_ctx(caller.key, &row)?;
+        let ctx = harbor_ctx(caller.key, &row, generation)?;
         let cache_key = CacheKey {
             credential: ctx.id.clone(),
             list: "source_suggestion",
@@ -1114,7 +1164,7 @@ impl PickerState {
         };
         let cached = self
             .cache
-            .get_or_fill(cache_key, async {
+            .get_or_fill(cache_key, ctx.generation, async {
                 let outcome = self.read_source_label(&ctx, project, repository).await?;
                 Ok(Cached::Suggestion(Arc::new(outcome)))
             })
@@ -1133,8 +1183,8 @@ impl PickerState {
                 image_tag,
             } => {
                 let github_listed = match &github_row {
-                    Some(github_row) => {
-                        let github = github_ctx(caller.key, github_row)?;
+                    Some((github_row, github_generation)) => {
+                        let github = github_ctx(caller.key, github_row, *github_generation)?;
                         let listing = self.github_listing(&github).await?;
                         let wanted = format!("{owner}/{repo}").to_ascii_lowercase();
                         Some(

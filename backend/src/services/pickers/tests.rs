@@ -644,7 +644,7 @@ async fn cache_is_bounded_and_evicts_the_oldest() {
             search: format!("s{i}"),
         };
         cache
-            .get_or_fill(key, async {
+            .get_or_fill(key, 0, async {
                 Ok(Cached::Suggestion(Arc::new(SuggestionOutcome::None(
                     "no_label",
                 ))))
@@ -1348,4 +1348,110 @@ async fn a_picker_422_response_carries_its_detail_code() {
         let (_, json) = render(fail).await;
         assert!(json["error"].get("detail").is_none(), "{json}");
     }
+}
+
+/// A transport that parks every call until released, so a test can drop a credential while a
+/// fill is in flight.
+struct Gated {
+    inner: Recorded,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl PickerHttp for Gated {
+    fn get<'a>(&'a self, url: &'a Url, auth: UpstreamAuth<'a>) -> UpstreamFuture<'a> {
+        Box::pin(async move {
+            let answer = self.inner.get(url, auth).await;
+            if url.path() == "/api/v2.0/projects" {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            answer
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_fill_that_started_before_a_credential_drop_is_not_cached() {
+    let fx = Fixture::new("cache-race").await;
+    let gated = Arc::new(Gated {
+        inner: Recorded::default(),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    robot_ok(&gated.inner);
+    gated.inner.on(
+        path_is("/api/v2.0/projects"),
+        ok(r#"[{"name":"old-view"}]"#),
+    );
+    let picker = PickerState::new(gated.clone());
+    let caller = fx.caller();
+    let query = ListQuery::default();
+    let fill = picker.harbor_projects(&caller, &fx.harbor, &query);
+    let update = async {
+        // The fill has loaded the old credential and is waiting on the upstream.
+        gated.entered.notified().await;
+        picker.drop_credential(&fx.harbor);
+        gated.release.notify_one();
+    };
+    let (result, ()) = tokio::join!(fill, update);
+    // The request that was running still gets its answer.
+    assert_eq!(result.unwrap().items[0].name, "old-view");
+    // But the old view was not stored: the next request fetches again.
+    gated.inner.calls.store(0, Ordering::SeqCst);
+    let next = picker.harbor_projects(&caller, &fx.harbor, &query);
+    let release = async {
+        gated.entered.notified().await;
+        gated.release.notify_one();
+    };
+    let (next, ()) = tokio::join!(next, release);
+    next.unwrap();
+    assert_eq!(
+        gated.inner.calls.load(Ordering::SeqCst),
+        2,
+        "identity and list were fetched again; the stale result was not served"
+    );
+    fx.close().await;
+}
+
+#[tokio::test]
+async fn a_result_filled_under_an_old_generation_is_not_served_after_a_drop() {
+    // The race: a request loads the old credential (captures generation 0), the credential
+    // is updated (drop), and only then does the old request reach the cache and fill.
+    let cache = PickerCache::new(CACHE_TTL, 10);
+    let key = || CacheKey {
+        credential: "c".to_owned(),
+        list: "harbor_projects",
+        project: String::new(),
+        search: String::new(),
+    };
+    let view = |name: &'static str| {
+        Cached::Projects(Arc::new(Listing {
+            items: vec![HarborProject {
+                name: name.to_owned(),
+            }],
+            truncated: false,
+        }))
+    };
+    let stale_generation = cache.generation("c");
+    cache.drop_credential("c");
+    assert_eq!(cache.generation("c"), stale_generation + 1);
+    // The old request still gets its own answer ...
+    let old = cache
+        .get_or_fill(key(), stale_generation, async { Ok(view("old")) })
+        .await
+        .unwrap();
+    assert!(matches!(old, Cached::Projects(l) if l.items[0].name == "old"));
+    // ... but a request on the new credential does not see it.
+    let fresh = cache
+        .get_or_fill(key(), cache.generation("c"), async { Ok(view("new")) })
+        .await
+        .unwrap();
+    assert!(matches!(fresh, Cached::Projects(l) if l.items[0].name == "new"));
+    // A fill under the current generation is stored.
+    let again = cache
+        .get_or_fill(key(), cache.generation("c"), async { Ok(view("never")) })
+        .await
+        .unwrap();
+    assert!(matches!(again, Cached::Projects(l) if l.items[0].name == "new"));
 }
