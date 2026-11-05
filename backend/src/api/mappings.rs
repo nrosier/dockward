@@ -15,7 +15,7 @@ use crate::api::state::AppState;
 use crate::error::AppError;
 use crate::models::role::Role;
 use crate::services::audit::Actor;
-use crate::services::credential_probe::{OutboundGithubProbe, OutboundHarborProbe};
+use crate::services::credential_probe::OutboundGithubProbe;
 use crate::services::dashboard::{self, OpenCves};
 use crate::services::mappings::{self, Created, ListQuery, Mapping, MappingPatch, NewMapping};
 use crate::services::pagination::Page;
@@ -112,12 +112,11 @@ pub async fn create(
 ) -> Result<Response, AppError> {
     let input: NewMapping = parse_body(&body)?;
     let actor = actor_of(&user);
-    let probe = OutboundHarborProbe::new(state.allow_private_harbor)?;
     let github_probe = OutboundGithubProbe::new()?;
     let created: Created = mappings::create(
         &state.pool,
         &state.credentials_key,
-        &probe,
+        &state.harbor_probe,
         &github_probe,
         &actor,
         &user.id,

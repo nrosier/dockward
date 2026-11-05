@@ -449,6 +449,12 @@ pub async fn create<P: HarborProbe, G: GithubProbe>(
 /// and probed. The webhook token and auth secret are not touched, and no shown-once
 /// value is returned. Writes `mapping.update` with the changed field names only, in the
 /// same transaction as the change.
+///
+/// The work runs in three phases. Validation, the ownership reads and the outbound probes
+/// run on a plain connection, with no write lock held, so a slow probe does not block other
+/// writers. The ownership checks, the collision check and the write then run again in one
+/// `BEGIN IMMEDIATE` transaction. A competing write that lands during the probes is seen
+/// by the second phase, and a UNIQUE violation there is `409`.
 pub async fn update<P: HarborProbe, G: GithubProbe>(
     pool: &SqlitePool,
     credentials_key: &DerivedKey,
@@ -458,13 +464,132 @@ pub async fn update<P: HarborProbe, G: GithubProbe>(
     id: &str,
     patch: MappingPatch,
 ) -> Result<Mapping, AppError> {
-    let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
-    let current = db::find_owned(&mut tx, user_id, id)
+    // Phase 1 and 2: no transaction. Each step takes its own connection.
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    let current = db::find_owned(&mut conn, user_id, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let mut next = current.clone();
-    let mut changed: Vec<&str> = Vec::new();
+    let (mut next, changed) = apply_patch(&current, &patch)?;
+    let harbor_changed = patch.harbor_cred_id.is_some()
+        || patch.harbor_project.is_some()
+        || patch.harbor_repository.is_some();
+    let github_changed = patch.github_cred_id.is_some()
+        || patch.github_owner.is_some()
+        || patch.github_repo.is_some();
+    let issues_on = next.auto_create_issues.unwrap_or(false);
+    let issues_turned_on = issues_on && current.auto_create_issues != Some(true);
+    // Ownership first: a foreign credential is `404` before any probe runs.
+    check_update_owners(&mut conn, user_id, &patch, &mut next).await?;
+    // Probe again only for the parts that changed. A Harbor repository change, or a Harbor
+    // credential change, re-checks the repository. A GitHub target change re-checks code
+    // scanning. Turning issues on, or changing the GitHub target while they are on, re-checks
+    // the Issues permission.
+    if harbor_changed {
+        check_harbor_repository(
+            &mut conn,
+            credentials_key,
+            probes.harbor,
+            user_id,
+            &next.harbor_cred_id,
+            &next.harbor_project,
+            &next.harbor_repository,
+        )
+        .await?;
+    }
+    if github_changed {
+        check_code_scanning(
+            &mut conn,
+            credentials_key,
+            probes.github,
+            user_id,
+            &next.github_cred_id,
+            &next.github_owner,
+            &next.github_repo,
+        )
+        .await?;
+    }
+    if issues_on && (github_changed || issues_turned_on) {
+        check_issues(
+            &mut conn,
+            credentials_key,
+            probes.github,
+            user_id,
+            &next.github_cred_id,
+            &next.github_owner,
+            &next.github_repo,
+        )
+        .await?;
+    }
+    drop(conn);
 
+    // Phase 3: one write transaction. It takes the write lock at BEGIN, so the checks below
+    // see the state that the write will change.
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| AppError::InternalError)?;
+    let locked = db::find_owned(&mut tx, user_id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if changed.is_empty() {
+        tx.commit().await.map_err(|_| AppError::InternalError)?;
+        return to_mapping(locked);
+    }
+    check_update_owners(&mut tx, user_id, &patch, &mut next).await?;
+    let target_changed =
+        harbor_changed || patch.github_owner.is_some() || patch.github_repo.is_some();
+    if target_changed {
+        let collision = db::find_conflict(
+            &mut tx,
+            &next.harbor_base_url,
+            &next.harbor_project,
+            &next.harbor_repository,
+            &next.github_owner,
+            &next.github_repo,
+            id,
+        )
+        .await?;
+        if let Some((other_id, other_user)) = collision {
+            return Err(conflict_error(&other_id, &other_user, user_id));
+        }
+    }
+
+    let written = db::update_owned(&mut tx, user_id, &next)
+        .await
+        .map_err(|err| match err {
+            // A UNIQUE violation is the same collision as the check above. The id of the
+            // other mapping is unknown here, so the message is the generic one.
+            sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
+                AppError::Conflict(
+                    "this Harbor repository or GitHub target is already mapped.".to_owned(),
+                )
+            }
+            _ => AppError::InternalError,
+        })?;
+    if written == 0 {
+        return Err(AppError::NotFound);
+    }
+    let details = serde_json::json!({ "changed_fields": changed });
+    audit::record(
+        &mut tx,
+        actor,
+        "mapping.update",
+        &format!("mapping:{id}"),
+        Some(&details),
+    )
+    .await?;
+    tx.commit().await.map_err(|_| AppError::InternalError)?;
+    to_mapping(load_row_owned(pool, user_id, id).await?)
+}
+
+/// Applies a patch to a copy of `current`. Validates each changed field with the create
+/// rules and returns the new row with the names of the changed fields. Does no I/O.
+fn apply_patch(
+    current: &MappingRow,
+    patch: &MappingPatch,
+) -> Result<(MappingRow, Vec<&'static str>), AppError> {
+    let mut next = current.clone();
+    let mut changed: Vec<&'static str> = Vec::new();
     if let Some(value) = patch.harbor_project.as_deref() {
         validate_text("harbor_project", value)?;
         next.harbor_project = value.to_owned();
@@ -503,118 +628,32 @@ pub async fn update<P: HarborProbe, G: GithubProbe>(
         changed.push("auto_create_issues");
     }
     if let Some(value) = patch.harbor_cred_id.as_deref() {
-        // The mapping copies the base URL of its Harbor credential, so a credential
-        // change refreshes the copy. The caller must own the credential.
-        next.harbor_base_url = harbor_base_of(&mut tx, user_id, value).await?;
         next.harbor_cred_id = value.to_owned();
         changed.push("harbor_cred_id");
     }
     if let Some(value) = patch.github_cred_id.as_deref() {
-        check_github(&mut tx, user_id, value).await?;
         next.github_cred_id = value.to_owned();
         changed.push("github_cred_id");
     }
+    Ok((next, changed))
+}
 
-    // Probe again only for the parts that changed. A Harbor repository change, or a Harbor
-    // credential change, re-checks the repository. A GitHub target change re-checks code
-    // scanning. Turning issues on, or changing the GitHub target while they are on, re-checks
-    // the Issues permission.
-    let harbor_changed = patch.harbor_cred_id.is_some()
-        || patch.harbor_project.is_some()
-        || patch.harbor_repository.is_some();
-    if harbor_changed {
-        check_harbor_repository(
-            &mut tx,
-            credentials_key,
-            probes.harbor,
-            user_id,
-            &next.harbor_cred_id,
-            &next.harbor_project,
-            &next.harbor_repository,
-        )
-        .await?;
+/// Checks that each credential the patch names is owned by the caller, and copies the
+/// Harbor base URL of a new Harbor credential into `next`. A foreign or unknown credential
+/// is `404`. Runs in both phases, so the write phase sees the same ownership.
+async fn check_update_owners(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: &str,
+    patch: &MappingPatch,
+    next: &mut MappingRow,
+) -> Result<(), AppError> {
+    if patch.harbor_cred_id.is_some() {
+        next.harbor_base_url = harbor_base_of(conn, user_id, &next.harbor_cred_id).await?;
     }
-    let github_changed = patch.github_cred_id.is_some()
-        || patch.github_owner.is_some()
-        || patch.github_repo.is_some();
-    if github_changed {
-        check_code_scanning(
-            &mut tx,
-            credentials_key,
-            probes.github,
-            user_id,
-            &next.github_cred_id,
-            &next.github_owner,
-            &next.github_repo,
-        )
-        .await?;
+    if patch.github_cred_id.is_some() {
+        check_github(conn, user_id, &next.github_cred_id).await?;
     }
-    let issues_on = next.auto_create_issues.unwrap_or(false);
-    let issues_turned_on = issues_on && current.auto_create_issues != Some(true);
-    if issues_on && (github_changed || issues_turned_on) {
-        check_issues(
-            &mut tx,
-            credentials_key,
-            probes.github,
-            user_id,
-            &next.github_cred_id,
-            &next.github_owner,
-            &next.github_repo,
-        )
-        .await?;
-    }
-
-    let target_changed =
-        harbor_changed || patch.github_owner.is_some() || patch.github_repo.is_some();
-    let collision = if target_changed {
-        db::find_conflict(
-            &mut tx,
-            &next.harbor_base_url,
-            &next.harbor_project,
-            &next.harbor_repository,
-            &next.github_owner,
-            &next.github_repo,
-            id,
-        )
-        .await?
-    } else {
-        None
-    };
-    if let Some((other_id, other_user)) = collision {
-        return Err(conflict_error(&other_id, &other_user, user_id));
-    }
-
-    if changed.is_empty() {
-        tx.commit().await.map_err(|_| AppError::InternalError)?;
-        return to_mapping(current);
-    }
-
-    let written = db::update_owned(&mut tx, user_id, &next)
-        .await
-        .map_err(|err| match err {
-            // A UNIQUE violation is a race with another write. The id of the other
-            // mapping is unknown here, so the message is the generic one.
-            sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
-                AppError::Conflict(
-                    "this Harbor repository or GitHub target is already mapped.".to_owned(),
-                )
-            }
-            _ => AppError::InternalError,
-        })?;
-    if written == 0 {
-        return Err(AppError::NotFound);
-    }
-    let details = serde_json::json!({ "changed_fields": changed });
-    audit::record(
-        &mut tx,
-        actor,
-        "mapping.update",
-        &format!("mapping:{id}"),
-        Some(&details),
-    )
-    .await?;
-    tx.commit().await.map_err(|_| AppError::InternalError)?;
-    to_mapping(load_row_owned(pool, user_id, id).await?)
+    Ok(())
 }
 
 /// Reads one owned row. Used after a write, so the response shows the stored values.
@@ -1800,5 +1839,136 @@ mod tests {
         assert!(matches!(err, AppError::NotFound), "{err:?}");
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_foreign_harbor_credential_in_an_update_is_not_found() {
+        let (pool, dir) = fresh_pool("update-foreign-harbor").await;
+        let owner = user(&pool, "owner").await;
+        let other = user(&pool, "other").await;
+        let id = mapping_for(&pool, &owner, "repo", "gh").await;
+        let (other_harbor, _) = creds(&pool, &other).await;
+        let err = update_with(
+            &pool,
+            Probes {
+                harbor: &READABLE,
+                github: &GH_READY,
+            },
+            &owner,
+            &id,
+            MappingPatch {
+                harbor_cred_id: Some(other_harbor),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap_err();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(err, AppError::NotFound), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_foreign_github_credential_in_an_update_is_not_found() {
+        let (pool, dir) = fresh_pool("update-foreign-github").await;
+        let owner = user(&pool, "owner").await;
+        let other = user(&pool, "other").await;
+        let id = mapping_for(&pool, &owner, "repo", "gh").await;
+        let (_, other_github) = creds(&pool, &other).await;
+        let err = update_with(
+            &pool,
+            Probes {
+                harbor: &READABLE,
+                github: &GH_READY,
+            },
+            &owner,
+            &id,
+            MappingPatch {
+                github_cred_id: Some(other_github),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap_err();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(err, AppError::NotFound), "{err:?}");
+    }
+
+    /// A Harbor probe that writes a competing mapping through the pool while the owner's
+    /// update is still probing. The competing mapping takes the Harbor repository the
+    /// update is moving to. No socket.
+    struct CompetingWriteHarbor {
+        pool: SqlitePool,
+        user_id: String,
+        harbor_cred: String,
+        github_cred: String,
+    }
+
+    impl HarborProbe for CompetingWriteHarbor {
+        async fn users_current(
+            &self,
+            _base: &reqwest::Url,
+            _username: &str,
+            _secret: &[u8],
+        ) -> Result<u16, AppError> {
+            Ok(200)
+        }
+
+        async fn artifacts_status(
+            &self,
+            _base: &reqwest::Url,
+            _username: &str,
+            _secret: &[u8],
+            _project: &str,
+            _repository: &str,
+        ) -> Result<u16, AppError> {
+            // A second writer commits the competing row during the probe.
+            sqlx::query(
+                "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+                 VALUES ('competing', ?, ?, ?, ?, 'proj', 'moved', 'gh-competing', 'gh-competing', 'competing-token', 'competing-secret')",
+            )
+            .bind(&self.user_id)
+            .bind(&self.harbor_cred)
+            .bind(&self.github_cred)
+            .bind(HARBOR_URL)
+            .execute(&self.pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+            Ok(200)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_competing_write_during_the_probe_is_a_409_not_a_500() {
+        let (pool, dir) = fresh_pool("update-race").await;
+        let owner = user(&pool, "owner").await;
+        let id = mapping_for(&pool, &owner, "repo", "gh").await;
+        let (h, g) = creds(&pool, &owner).await;
+        let harbor = CompetingWriteHarbor {
+            pool: pool.clone(),
+            user_id: owner.clone(),
+            harbor_cred: h,
+            github_cred: g,
+        };
+        let err = update_with(
+            &pool,
+            Probes {
+                harbor: &harbor,
+                github: &GH_READY,
+            },
+            &owner,
+            &id,
+            MappingPatch {
+                harbor_repository: Some("moved".to_owned()),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap_err();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(err, AppError::Conflict(_)), "{err:?}");
+        assert_eq!(err.status(), axum::http::StatusCode::CONFLICT);
     }
 }
