@@ -10,6 +10,7 @@ pub mod hardening;
 pub mod mappings;
 #[allow(dead_code)] // The OIDC routes are mounted by the app router.
 pub mod oidc;
+pub mod pickers;
 pub mod project_webhooks;
 #[allow(dead_code)] // Shared by the extractor and the routes.
 pub mod state;

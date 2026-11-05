@@ -17,6 +17,7 @@ pub mod github_issues;
 pub mod job_runs;
 pub mod key_rotation;
 pub mod mappings;
+pub mod picker_hidden;
 pub mod project_webhooks;
 pub mod retention;
 #[allow(dead_code)] // Used by the setup and login services.

@@ -316,6 +316,7 @@ mod tests {
             )),
             harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
             pull_limiter: crate::api::mappings::new_pull_limiter(),
+            pickers: crate::services::pickers::PickerState::outbound(false).unwrap(),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }

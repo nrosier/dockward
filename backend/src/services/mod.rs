@@ -34,6 +34,8 @@ pub mod key_rotation;
 pub mod mappings;
 #[allow(dead_code)] // The list routes that use this are added with the admin routes.
 pub mod pagination;
+pub mod picker_upstream;
+pub mod pickers;
 pub mod poller;
 pub mod project_webhooks;
 pub mod retention;

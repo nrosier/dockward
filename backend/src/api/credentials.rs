@@ -111,6 +111,8 @@ pub async fn update(
         state.allow_private_harbor,
     )
     .await?;
+    // A rotated token or a changed base URL must not serve the old picker lists.
+    state.pickers.drop_credential(&id);
     Ok(Json(updated))
 }
 
@@ -122,6 +124,7 @@ pub async fn delete(
 ) -> Result<StatusCode, AppError> {
     let actor = actor_of(&user);
     credentials::delete(&state.pool, &actor, &user.id, &id).await?;
+    state.pickers.drop_credential(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -531,6 +534,7 @@ mod tests {
             )),
             harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
             pull_limiter: crate::api::mappings::new_pull_limiter(),
+            pickers: crate::services::pickers::PickerState::outbound(false).unwrap(),
         }
     }
 }
