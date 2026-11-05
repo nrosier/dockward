@@ -181,12 +181,17 @@ All routes below are `admin`.
 | GET | `/api/v1/admin/audit-log` | list params; `sort` (`created_at`), `action`, `actor_user_id` | list of `{"id","actor_user_id","actor_username","action","target","created_at","details"}` | 200 |
 | GET | `/api/v1/admin/jobs` | list params; `kind` | list of housekeeping runs (cleanup, retention, polling) with counts and errors | 200 |
 | POST | `/api/v1/admin/backup` | none | `{"file": "<name>", "path": "<dir>"}` | 201, 500 `internal_error` (directory missing or not writable) |
+| GET | `/api/v1/admin/logs` | query `level` (minimum level: `error`, `warn`, `info`, `debug`, `trace`; default `trace`, all lines), `q` (case-insensitive text search, at most 200 characters) | `{"items": [LogLine], "level": "<current>", "reverts_at": "<date-time>" or null}`, oldest first | 200, 400 `invalid_request` (unknown `level`, `q` too long) |
+| GET | `/api/v1/admin/log-level` | none | `{"level","reverts_at"}` | 200 |
+| PUT | `/api/v1/admin/log-level` | `{"level": "info" or "debug" or "trace"}` | `{"level","reverts_at"}` | 200, 400 `invalid_request` (malformed body), 422 `validation_failed` (level not `info`, `debug`, or `trace`) |
 
+- Application log (Decided 2026-11-05, user, #136): rules are in [security.md](security.md), "Application log". `LogLine` is `{"seq","timestamp","level","target","message"}`. `seq` increases by one per line since the start, so a client can tell lines apart. `message` holds the event message and its fields, with secret-named fields removed; it is at most 1000 characters, and a longer line ends with `… [truncated]`. The buffer holds at most 500 lines, so the list is not paginated. `reverts_at` is when a level above `info` returns to `info`, or `null` at `info`. An invalid level in `PUT` returns `422 validation_failed` with the fixed message "level must be info, debug, or trace." and never echoes the value. `PUT` is CSRF-protected like every state-changing route. A change audits `log.level_change` with `{"old","new"}`, also when the level does not change, and restarts the 30-minute timer.
+- Rate limits for the application log routes: Decided (2026-11-05, #136): none. They are admin-session routes, and the rule above (no default limit on authenticated routes beyond login and webhook) applies. The buffer is bounded at 500 lines, so a read is cheap.
 - Note (Decided 2026-11-03): key re-encryption is a CLI command, not an HTTP route. There is no `/admin/key/reencrypt` route and no key rotation button in the admin UI. Run it offline with the app stopped, with `HARBORGATE_OLD_ENCRYPTION_KEY` and `HARBORGATE_ENCRYPTION_KEY` set in the environment ([security.md](security.md)).
 
 - Decided (2026-11-03): `POST /admin/users` creates local accounts only. OIDC users are created by the OIDC login flow (just-in-time) and do not appear via this POST. The `DELETE` and `PUT .../role` routes are used for both local and OIDC users.
 - `DELETE /admin/users/:id` follows the deletion order in [database.md](database.md). Decided (2026-11-03, delegated): the last remaining local admin cannot be deleted or demoted (`409`). An OIDC login can demote an OIDC admin, because the group claim wins, so counting only local admins guarantees the instance always keeps a break-glass admin. First-run setup always creates a local admin. No external source.
-- Audit: `user.create`, `user.delete`, `user.role_change`, `oidc.config_change`, `alert.config_change`, `backup.run`, `restore.run`, `key.rotate`.
+- Audit: `user.create`, `user.delete`, `user.role_change`, `oidc.config_change`, `alert.config_change`, `backup.run`, `restore.run`, `key.rotate`, `log.level_change`.
 - `PUT /admin/oidc` takes the client secret in the request body over TLS and stores it encrypted. It is never returned.
 - Note (Decided 2026-11-03): restore is a CLI command, not an HTTP route. No admin restore route exists. Run `harborgate restore <file>` with the app stopped. There is no restore route and no restore button in the admin UI. The restore command verifies the `HGBK1` header and the GCM tag before it replaces the database ([security.md](security.md)).
 - Backup: Decided (2026-11-03, delegated): the server names the file `harborgate-<UTC yyyymmddThhmmssZ>.hgbk`. `file` in the response is that name, which always matches `^[A-Za-z0-9._-]+$` and has no path separators. The handler writes only to `HARBORGATE_BACKUP_DIR`. The copy method (`VACUUM INTO`) is in [security.md](security.md).
@@ -233,6 +238,7 @@ Required test scenarios for the planner (high level):
 - Login and setup with a cross-site `Origin`, or with neither `Origin` nor `Sec-Fetch-Site`, return `403 csrf_invalid`.
 - A session issued before `logout-all` or a password change returns `401`.
 - `PUT /admin/users/:id/role` on an OIDC user returns `409`.
+- Application log: a regular user gets `403` on `GET /admin/logs` and `PUT /admin/log-level`; `PUT /admin/log-level` without a CSRF token returns `403 csrf_invalid`; an invalid level returns `422` with the fixed message.
 - No response body ever contains a webhook URL except the create and rotate responses.
 - Credential delete is blocked with `409` while a mapping uses it.
 - Accept then un-accept then accept again succeeds. Accepting twice returns `409`.

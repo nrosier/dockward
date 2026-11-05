@@ -170,6 +170,20 @@ Decisions are marked `Decided (<date>)`. On 2026-11-03 the user delegated every 
 - Audit `details` never contain tokens or key material.
 - Error messages never include a secret value. Source: CLAUDE.md non-negotiable rules.
 
+### Application log
+
+Decided (2026-11-05, user, #136). The application log is the `tracing` output used for diagnosis. Admins can read the recent part of it and change its level in the web interface.
+
+- The rules in "Secrets in logs" apply at every level (`info`, `debug`, `trace`) and to the in-memory buffer the admin reads. No level may log a token, a key, a webhook URL token, an auth header value, a request or response body, or a request header.
+- Fields whose names contain one of the audit secret fragments (`token`, `secret`, `password`, `cookie`, `authorization`, `private`, `credential_value`) or that name key material (`key`, `*_key`, `key_*`) are dropped from a buffered line, whatever their value. The audit `details` check uses the same list (`services/audit.rs`).
+- Storage: an in-memory ring buffer of at most 500 lines. A line longer than 1000 characters is cut, with a marker. The buffer is lost on restart. No database table holds log lines.
+- Level: the admin can set the global level to `info`, `debug`, or `trace`. There are no per-module filters. `RUST_LOG` is ignored; every start uses `info`. `debug` and `trace` apply to HarborGate's own code only. Dependency crates (such as `hyper`, `h2`, `rustls`, `sqlx`, `reqwest`) stay at `info` or higher at every level.
+- Automatic revert: a level above `info` reverts to `info` 30 minutes after it was set. A later change restarts the timer. A restart also returns to `info`.
+- Audit: every level change, by an admin or by the automatic revert, writes `log.level_change` with `details` `{"old","new"}`. The automatic revert uses the actor `system`.
+- At `debug`, each outbound Harbor and GitHub request logs its method, its URL path (no query string, no userinfo, no host credentials) and the response status code. OIDC and alert webhook URLs are not logged, because they can carry tokens.
+- Access: admin only, for reading the log and for changing the level. A regular user gets `403`; no session gets `401`. Log lines can name any tenant's mapping, so a regular user never sees them.
+- Separation: log lines are never written to `audit_log`, and audit rows are never shown as log lines. The audit log is the record of who did what; the application log is for diagnosis only.
+
 ## Outbound HTTP (SSRF)
 
 - Decided (2026-11-03, delegated): the Harbor base URL must use HTTPS. Plain HTTP is rejected.
