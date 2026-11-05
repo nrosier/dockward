@@ -87,7 +87,9 @@ Verification status (2026-11-03, updated 2026-11-05):
 
 ### 3c. Create the project webhook
 
-Harbor webhooks are configured per project, so one webhook sends HarborGate the scan events of every repository in the project. HarborGate ignores events for repositories that have no mapping, and it ignores untagged pushes (an image pushed by digest only, with no tag). Only tagged events from a mapped repository are synced.
+Harbor webhooks are configured per project, so one project webhook sends HarborGate the scan events of every repository in that project. Use it for any project with more than one mapping. HarborGate routes each event to the mapping whose repository matches, and ignores events for repositories that have no mapping. It also ignores untagged pushes (an image pushed by digest only, with no tag). Only tagged events from a mapped repository are synced.
+
+If a project has only one mapping, the per-mapping URL from section 5 still works, and you can keep it.
 
 1. In Harbor, open the project `<project>`, go to **Webhooks**, and create a new endpoint (requires project administrator rights).
 2. Set the notify type to **HTTP**.
@@ -96,11 +98,12 @@ Harbor webhooks are configured per project, so one webhook sends HarborGate the 
 5. Set the endpoint URL to HarborGate's webhook URL:
 
 ```text
-https://<your-host>/api/v1/webhooks/harbor/<mapping_token>
+https://<your-host>/api/v1/webhooks/harbor/project/<project_token>
 ```
 
 - `<your-host>` is the public hostname of your HarborGate instance. Use HTTPS only. HarborGate builds this URL from `HARBORGATE_PUBLIC_URL`, so the hostname here must match it.
-- `<mapping_token>` is the webhook token shown in the HarborGate mapping screen. You get it in section 5, after you create the mapping. Create the mapping first, then return here.
+- `<project_token>` is the project webhook URL token. You get it when you create the project webhook in HarborGate (`POST /api/v1/project-webhooks`, from the project page). It is shown once, with the auth secret. Create the first mapping for the project first, then create the project webhook from that mapping, then return here.
+- The project webhook is owned by the user who created it. Only that owner can rotate its URL or auth secret. If you rotate it, update Harbor straight after, because the old URL stops working when you confirm.
 
 6. Set the auth header on the webhook. In HarborGate, copy the **Auth header value** shown once on the mapping screen. It already starts with `Bearer `. Paste it into Harbor's webhook **Auth Header** field exactly as copied. Do not add `Bearer ` yourself. Harbor sends this value as the `Authorization` header with every notification, and HarborGate checks it. Treat it as a secret. The field is labelled **Auth Header** in the Add Webhook form (verified in Harbor's string catalog).
 
