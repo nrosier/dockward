@@ -24,6 +24,7 @@ use crate::error::AppError;
 use crate::models::role::Role;
 use crate::models::user::User;
 use crate::services::alert_channels::{self, Channel, ListQuery};
+use crate::services::app_log;
 use crate::services::audit::{self, AuditEntry, AuditQuery};
 use crate::services::backup as backup_service;
 use crate::services::credential_probe::{
@@ -338,6 +339,57 @@ pub async fn set_role(
     Ok(Json(User::try_from(row)?))
 }
 
+/// Raw query values for `GET /api/v1/admin/logs`.
+#[derive(Debug, Deserialize)]
+pub struct LogsParams {
+    pub level: Option<String>,
+    pub q: Option<String>,
+}
+
+/// `GET /api/v1/admin/logs`. The recent application log, oldest first, with an optional
+/// minimum level and text search. Never mixed with the audit log.
+pub async fn logs(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Query(params): Query<LogsParams>,
+) -> Result<Json<app_log::LogsView>, AppError> {
+    Ok(Json(
+        app_log::read(&state.app_log, params.level.as_deref(), params.q.as_deref()).await?,
+    ))
+}
+
+/// `GET /api/v1/admin/log-level`. The current level and when it reverts to `info`.
+pub async fn get_log_level(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+) -> Result<Json<app_log::LevelStatus>, AppError> {
+    Ok(Json(state.app_log.level.status().await?))
+}
+
+/// Body for `PUT /api/v1/admin/log-level`.
+#[derive(Debug, Deserialize)]
+pub struct LogLevelBody {
+    pub level: String,
+}
+
+/// `PUT /api/v1/admin/log-level`. Sets the global level and audits `log.level_change`.
+/// An invalid level is `422` with fixed text.
+pub async fn put_log_level(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    body: axum::body::Bytes,
+) -> Result<Json<app_log::LevelStatus>, AppError> {
+    let body: LogLevelBody = parse_body(&body)?;
+    let level = app_log::parse_level(&body.level)?;
+    let actor = audit::Actor {
+        user_id: Some(admin.id),
+        username: admin.username,
+    };
+    Ok(Json(
+        state.app_log.level.set(&state.pool, &actor, level).await?,
+    ))
+}
+
 /// The `request` block of the health response: the caller's client IP and where it came
 /// from (`specs/api.md`, Health). It shows only the caller's own address.
 #[derive(Debug, Serialize)]
@@ -590,6 +642,9 @@ pub(crate) mod test_support {
                 crate::services::github_issues::GithubIssues::new().unwrap(),
             ),
             harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
+            app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
+                crate::services::app_log::REVERT_AFTER,
+            )),
         };
         (state, dir)
     }
@@ -845,6 +900,9 @@ mod tests {
                 crate::services::github_issues::GithubIssues::new().unwrap(),
             ),
             harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
+            app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
+                crate::services::app_log::REVERT_AFTER,
+            )),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }

@@ -113,6 +113,11 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         .route("/api/v1/admin/jobs", get(api::admin::admin_jobs))
         .route("/api/v1/admin/health", get(api::admin::health))
         .route("/api/v1/admin/backup", post(api::admin::backup))
+        .route("/api/v1/admin/logs", get(api::admin::logs))
+        .route(
+            "/api/v1/admin/log-level",
+            get(api::admin::get_log_level).put(api::admin::put_log_level),
+        )
         .route(
             "/api/v1/admin/alert-channels",
             get(api::admin::list_alert_channels).post(api::admin::create_alert_channel),
@@ -161,13 +166,10 @@ async fn shutdown_signal(mut terminate: Signal) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Logs go to stdout. The access log records route templates, so tokens in paths stay out.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Logs go to stdout and to the admin's in-memory buffer. Every start is at `info`;
+    // `RUST_LOG` is ignored (`specs/security.md`, Application log). The access log
+    // records route templates, so tokens in paths stay out.
+    let app_log = services::app_log::install()?;
 
     let args: Vec<String> = std::env::args().collect();
     let command = match cli::parse(args.get(1..).unwrap_or_default()) {
@@ -178,7 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     match command {
-        cli::Command::Serve => serve().await,
+        cli::Command::Serve => serve(app_log).await,
         cli::Command::Restore(file) => {
             if let Err(message) = run_restore(&file).await {
                 eprintln!("{message}");
@@ -511,7 +513,7 @@ async fn record_restore(
         .map_err(|_| error::AppError::InternalError)
 }
 
-async fn serve() -> Result<(), Box<dyn std::error::Error>> {
+async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn std::error::Error>> {
     // Refuse to start without a valid key or settings. This runs before the port is bound.
     let encryption_key = config::load_encryption_key()?;
     let settings = config::load_settings()?;
@@ -556,6 +558,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         ),
         harbor_probe: api::state::HarborProbeHandle::outbound(settings.allow_private_harbor)
             .map_err(|_| "could not build the Harbor probe")?,
+        app_log,
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -567,9 +570,11 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         public_url = %settings.public_url,
         data_dir = %settings.data_dir.display(),
         backup_dir = %settings.backup_dir.display(),
-        allow_private_harbor = settings.allow_private_harbor,
-        allow_private_oidc = settings.allow_private_oidc,
-        allow_private_alerts = settings.allow_private_alerts,
+        // Named without "private": the application log drops fields whose names hold
+        // an audit secret fragment (`specs/security.md`, Application log).
+        harbor_range_opt_out = settings.allow_private_harbor,
+        oidc_range_opt_out = settings.allow_private_oidc,
+        alerts_range_opt_out = settings.allow_private_alerts,
         "HarborGate starting"
     );
 
@@ -797,6 +802,9 @@ mod tests {
                 crate::services::github_issues::GithubIssues::new().unwrap(),
             ),
             harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
+            app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
+                crate::services::app_log::REVERT_AFTER,
+            )),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -1061,6 +1069,9 @@ mod tests {
                 crate::services::github_issues::GithubIssues::new().unwrap(),
             ),
             harbor_probe,
+            app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
+                crate::services::app_log::REVERT_AFTER,
+            )),
         };
         (app(Vec::new(), state), pool, dir, handle)
     }
@@ -2862,5 +2873,142 @@ mod tests {
         assert_eq!(owner_status, StatusCode::OK);
         assert_eq!(retried["status"], "queued");
         assert!(retried["created_at"].as_str().unwrap().ends_with('Z'));
+    }
+
+    /// The application log routes: no session is `401`, a regular user is `403` on
+    /// both routes, a PUT without a CSRF token is `403 csrf_invalid`, an invalid level
+    /// is `422` with fixed text that does not echo the value, and an admin change is
+    /// `200` and audited as `log.level_change` with `{"old","new"}` only.
+    #[tokio::test]
+    async fn admin_log_routes_check_role_csrf_and_level() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, pool, dir) = test_router("app-log-routes").await;
+        let mut conn = pool.acquire().await.unwrap();
+        db::users::insert_local(&mut conn, "admin-1", "admin-1", None, "h", "admin")
+            .await
+            .unwrap();
+        db::users::insert_local(&mut conn, "user-1", "user-1", None, "h", "user")
+            .await
+            .unwrap();
+        drop(conn);
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let csrf = auth::csrf::issue(&auth::crypto::csrf_key(&root).unwrap()).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let admin = format!("{}; {csrf_cookie}", session_cookie("admin-1", "admin", 0));
+        let user = format!("{}; {csrf_cookie}", session_cookie("user-1", "user", 0));
+        let put = |cookie: &str, token: Option<&str>, body: &str| {
+            let mut builder = with_peer(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/admin/log-level")
+                    .header("content-type", "application/json")
+                    .header("cookie", cookie),
+            );
+            if let Some(token) = token {
+                builder = builder.header("x-csrf-token", token);
+            }
+            builder.body(Body::from(body.to_owned())).unwrap()
+        };
+        let debug = r#"{"level":"debug"}"#;
+
+        let (anon_logs, _) = get_json(&router, "/api/v1/admin/logs", &csrf_cookie).await;
+        let (user_logs, _) = get_json(&router, "/api/v1/admin/logs", &user).await;
+        let (user_level, _) = get_json(&router, "/api/v1/admin/log-level", &user).await;
+        let anon_put = router
+            .clone()
+            .oneshot(put(&csrf_cookie, Some(&csrf), debug))
+            .await
+            .unwrap()
+            .status();
+        let user_put = router
+            .clone()
+            .oneshot(put(&user, Some(&csrf), debug))
+            .await
+            .unwrap()
+            .status();
+        let no_csrf = router
+            .clone()
+            .oneshot(put(&admin, None, debug))
+            .await
+            .unwrap();
+        let no_csrf_status = no_csrf.status();
+        let no_csrf_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(no_csrf.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let invalid = router
+            .clone()
+            .oneshot(put(&admin, Some(&csrf), r#"{"level":"verbose-xyz"}"#))
+            .await
+            .unwrap();
+        let invalid_status = invalid.status();
+        let invalid_text = String::from_utf8(
+            axum::body::to_bytes(invalid.into_body(), 64 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let ok = router
+            .clone()
+            .oneshot(put(&admin, Some(&csrf), debug))
+            .await
+            .unwrap();
+        let ok_status = ok.status();
+        let ok_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(ok.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let (level_status, level_body) = get_json(&router, "/api/v1/admin/log-level", &admin).await;
+        let (logs_status, logs_body) =
+            get_json(&router, "/api/v1/admin/logs?level=warn&q=x", &admin).await;
+        let (bad_filter, _) = get_json(&router, "/api/v1/admin/logs?level=loud", &admin).await;
+        let audit: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT action, actor_username, target, details FROM audit_log ORDER BY rowid",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(anon_logs, StatusCode::UNAUTHORIZED);
+        assert_eq!(anon_put, StatusCode::UNAUTHORIZED);
+        assert_eq!(user_logs, StatusCode::FORBIDDEN);
+        assert_eq!(user_level, StatusCode::FORBIDDEN);
+        assert_eq!(user_put, StatusCode::FORBIDDEN);
+        assert_eq!(no_csrf_status, StatusCode::FORBIDDEN);
+        assert_eq!(no_csrf_body["error"]["code"], "csrf_invalid");
+        assert_eq!(invalid_status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(invalid_text.contains("level must be info, debug, or trace."));
+        assert!(
+            !invalid_text.contains("verbose-xyz"),
+            "the value was echoed"
+        );
+        assert_eq!(ok_status, StatusCode::OK);
+        assert_eq!(ok_body["level"], "debug");
+        assert!(ok_body["reverts_at"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(level_status, StatusCode::OK);
+        assert_eq!(level_body["level"], "debug");
+        assert_eq!(logs_status, StatusCode::OK);
+        assert!(logs_body["items"].is_array());
+        assert_eq!(logs_body["level"], "debug");
+        assert_eq!(bad_filter, StatusCode::BAD_REQUEST);
+        // Only the admin's change is audited; refused requests write nothing.
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].0, "log.level_change");
+        assert_eq!(audit[0].1, "admin-1");
+        assert_eq!(audit[0].2, "log_level");
+        let details: serde_json::Value =
+            serde_json::from_str(audit[0].3.as_deref().unwrap()).unwrap();
+        assert_eq!(details, serde_json::json!({"old": "info", "new": "debug"}));
     }
 }

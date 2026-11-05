@@ -6,6 +6,7 @@ pub mod account;
 pub mod alert_channels;
 pub mod alert_send;
 pub mod alerts;
+pub mod app_log;
 pub mod audit;
 #[allow(dead_code)] // Used by the setup and login routes.
 pub mod auth;
