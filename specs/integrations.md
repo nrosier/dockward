@@ -194,7 +194,7 @@ Read these from the Harbor artifact (`GET .../artifacts/{reference}` or the arti
 
 Decided (2026-11-05, user, #126): when a user creates or edits a mapping, they pick the Harbor project, the Harbor repository and the GitHub repository from lists instead of typing them. The routes are in [api.md](api.md), "Pickers". The hide table is in [database.md](database.md), `picker_hidden_items`. Decisions marked `delegated` below were not covered by the #126 decisions; each has a one-line reason so the user can review it.
 
-Status: decided here, not yet built. Building it needs the Harbor and GitHub list methods with recorded-response tests, the in-memory list cache, the hide table and its migration, the suggestion reader, and the routes.
+Status: built (backend, #126): the Harbor and GitHub list methods, the in-memory list cache, the hide table, the suggestion reader and the routes. The mapping form that uses them is not built yet.
 
 ### Basis
 
@@ -271,6 +271,8 @@ Status: decided here, not yet built. Building it needs the Harbor and GitHub lis
   - Harbor identity: a `4xx` refusal gives `422`, a `5xx` gives `502`. A Harbor identity refusal (a `4xx` such as `401`, or a `200` that is not a robot identity), or GitHub `401`: `422 validation_failed`, fixed message per service ("The Harbor credential does not work. Test it on the Account page." or "The GitHub token is not valid. Test it on the Account page.").
   - Harbor `403` on the repository list: `422 validation_failed`, the Repository List message above.
   - Harbor `404` on the repository list (no such project): `404 not_found`, "Harbor project not found."
+  - Harbor `403` on the artifact list or read (the source suggestion): `422 validation_failed`, detail `robot_scope`, "The Harbor robot cannot read artifacts in this repository. Grant it Artifact List and Artifact Read."
+  - Harbor `404` on the artifact list or read (no such repository): `404 not_found`, "Harbor repository not found."
   - GitHub `429`, or a `403` with `x-ratelimit-remaining: 0` or a `retry-after` header (the same test as the SARIF upload, see "SARIF conversion and upload"), and a Harbor `429`: `429 rate_limited` with "GitHub rate limit reached. Try again later." or "Harbor rate limit reached. Try again later.", and `Retry-After`.
   - Any other GitHub `403`: `422 validation_failed`, "The GitHub token cannot list repositories. Check its permissions."
   - Unreachable, a timeout, a redirect, a `5xx`, another status, or a body that does not parse: `502 upstream_unreachable` with its fixed message.
