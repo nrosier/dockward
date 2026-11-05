@@ -1125,6 +1125,19 @@ struct ImageConfig {
     labels: Option<HashMap<String, String>>,
 }
 
+/// Whether `tag` is a valid OCI image tag. The OCI distribution spec grammar is
+/// `[A-Za-z0-9_][A-Za-z0-9._-]{0,127}`: 1 to 128 characters, the first a letter, digit or
+/// underscore, the rest also allowing `.` and `-`.
+fn valid_image_tag(tag: &str) -> bool {
+    let mut bytes = tag.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    tag.len() <= 128
+        && (first.is_ascii_alphanumeric() || first == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
 /// The `suggestion` object of the response.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct Suggestion {
@@ -1263,6 +1276,10 @@ impl PickerState {
         let Some(image_tag) = tags.into_iter().next() else {
             return Ok(SuggestionOutcome::None("no_tagged_artifact"));
         };
+        // The tag goes back to the client and into the cache, so it must be a real OCI tag.
+        if !valid_image_tag(&image_tag) {
+            return Ok(SuggestionOutcome::None("invalid_label"));
+        }
         // Defence in depth: the digest goes into a URL path, so it must be `sha256:<64 hex>`.
         if !valid_digest(&digest) {
             return Err(upstream());

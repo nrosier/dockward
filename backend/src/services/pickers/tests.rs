@@ -1489,6 +1489,19 @@ async fn a_result_filled_under_an_old_generation_is_not_served_after_a_drop() {
     assert!(matches!(again, Cached::Projects(l) if l.items[0].name == "new"));
 }
 
+#[test]
+fn image_tag_grammar() {
+    assert!(valid_image_tag("v1.2.3-rc_1"));
+    assert!(valid_image_tag("_x"));
+    assert!(valid_image_tag(&"a".repeat(128)));
+    assert!(!valid_image_tag("team/app"));
+    assert!(!valid_image_tag("v 1"));
+    assert!(!valid_image_tag(".hidden"));
+    assert!(!valid_image_tag("-dash"));
+    assert!(!valid_image_tag(&"a".repeat(129)));
+    assert!(!valid_image_tag(""));
+}
+
 /// `n` Harbor project names, the first `start`.
 fn harbor_page_body(start: u32, n: u32) -> String {
     projects_body((start..start + n).map(|i| format!("p{i:04}")))
