@@ -246,3 +246,65 @@ export interface UnmatchedRepository {
   count: number;
   last_seen_at: string;
 }
+
+// Mapping pickers (specs/api.md, "Pickers"). Names only: no token, no URL
+// with credentials.
+export interface PickerList<T> extends Page<T> {
+  // True when the upstream list was cut at the 1,000-item fetch cap.
+  truncated: boolean;
+}
+
+export interface HarborProject {
+  name: string;
+}
+
+export interface HarborRepository {
+  project: string;
+  repository: string;
+  // `<project>/<repository>`.
+  full_name: string;
+}
+
+export interface GitHubRepository {
+  owner: string;
+  repo: string;
+  full_name: string;
+  private: boolean;
+  archived: boolean;
+}
+
+export type HiddenSource = "harbor" | "github";
+
+export interface HiddenItem {
+  id: string;
+  source: HiddenSource;
+  full_name: string;
+  // Null for GitHub items.
+  harbor_base_url: string | null;
+  created_at: string;
+}
+
+export interface HideRequest {
+  source: HiddenSource;
+  full_name: string;
+  // Required for `harbor`, rejected for `github`.
+  harbor_base_url?: string;
+}
+
+export interface SourceSuggestion {
+  github_owner: string;
+  github_repo: string;
+  image_tag: string;
+  // Null when no GitHub credential was sent.
+  github_listed: boolean | null;
+}
+
+export type SuggestionReason = "no_tagged_artifact" | "no_label" | "not_github" | "invalid_label";
+
+export interface SourceSuggestionResponse {
+  suggestion: SourceSuggestion | null;
+  reason: SuggestionReason | null;
+}
+
+// The `detail` codes of the picker 422 answers (error envelope).
+export type PickerErrorDetail = "harbor_identity" | "robot_scope" | "github_token" | "wrong_credential_type";
