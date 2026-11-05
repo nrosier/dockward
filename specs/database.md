@@ -275,6 +275,8 @@ Decided (2026-11-03) for `restore.run`: the offline restore command appends one 
 - `key.rotate`
 - `retention.run`
 - `sync_job.retry` (manual retry of a failed sync job; `details` is `{"job_id","mapping_id"}`; Decided (2026-11-03, delegated))
+- `log.level_change` (application log level change; `details` is `{"old","new"}`, each one of `info`, `debug`, `trace`; target `log_level`; the automatic revert to `info` uses the actor `system`. Decided (2026-11-05, user, #136). The application log itself is an in-memory buffer and has no table; see [security.md](security.md), "Application log")
+- `mapping.pull` (manual scan pull from Harbor for one mapping; `details` is `{"mapping_id","queued"}`, the number of jobs queued, and no values; Decided (2026-11-05, user, #131))
 
 Source: none external. The list follows the audit examples in [frontend.md](frontend.md) (Admin, Audit log) and the events in [security.md](security.md). The vocabulary is a local convention, so it is Decided (2026-11-03, delegated).
 
@@ -287,6 +289,7 @@ Source: none external. The list follows the audit examples in [frontend.md](fron
 - **Sync jobs:** `sync_jobs.payload` holds the validated event only. It never contains tokens or header secrets.
 - **Retention:** `sync_reports` and related logs are kept 90 days. `sync_jobs` is kept 90 days (Decided 2026-11-03). `job_runs` is kept 90 days (Decided 2026-11-03). `alert_deliveries` is kept 30 days (Decided 2026-11-03). `audit_log` is kept 365 days. See [cve-lifecycle.md](cve-lifecycle.md) for the per-tag limit.
 - Decided (2026-11-03, delegated): `CHECK` constraints on enumerated TEXT columns (`sync_jobs.status`, `github_issues.status`, `cve_findings.status` and `severity`, `repo_mappings.min_issue_severity`, `alert_channels.kind`, `job_runs.job_kind` and `job_runs.status`). Source: SQLite CREATE TABLE documentation, CHECK constraints (https://www.sqlite.org/lang_createtable.html). The index `idx_sync_reports_digest` is Decided (2026-11-03, delegated) for the polling dedupe lookup; no external source.
+- Decided (2026-11-05, user, #129): showing, filtering and manually logging every severity needs no constraint change and no migration. `cve_findings.severity` already allows all five values (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `UNKNOWN`), and the findings were always stored at every severity. `repo_mappings.min_issue_severity` keeps `CHECK (min_issue_severity IN ('CRITICAL', 'HIGH'))`, because it governs automatic issues only and the user decided automatic issues stay CRITICAL and HIGH. Manual logging at any severity reads no column that has a severity constraint, and the `github_issues` table has no severity column. The issue body of #129 assumed a constraint change; the decision recorded on the issue made it unnecessary.
 - **Source for the 90 and 365 day values:** these are the user's decided retention rules, not external standards.
 
 ## Decisions

@@ -7,6 +7,10 @@
 //!
 //! The poller only reads from Harbor. It queues jobs; the worker does the syncs. Error
 //! text kept in `job_runs` names mapping ids only, never a URL, token, or Harbor answer.
+//!
+//! The manual scan pull (`POST /api/v1/mappings/:id/pull`, issue #131) runs the same
+//! per-mapping poll, [`poll_mapping`], for one mapping on demand, so both obey one set of
+//! dedupe rules and one page cap.
 
 use std::time::Duration;
 
@@ -20,6 +24,7 @@ use crate::db::job_runs::{self, JobRun};
 use crate::db::mappings::{self as mapping_db, ListFilter, MappingRow};
 use crate::db::{credentials as credential_db, sync_jobs, sync_reports};
 use crate::error::AppError;
+use crate::services::audit::{self, Actor};
 use crate::services::credentials::{base_for_join, decrypt_token};
 use crate::services::harbor_client::{HarborGet, artifacts_list_url, parse_artifact_list};
 use crate::services::ids;
@@ -92,6 +97,50 @@ pub async fn poll_once<H: HarborFetch>(
             processed_count: i64::try_from(queued).unwrap_or(i64::MAX),
             error_summary,
         },
+    )
+    .await?;
+    Ok(queued)
+}
+
+/// The mapping a caller may pull: their own, or any mapping when the caller is an admin
+/// (`specs/security.md`, Tenancy, the second admin exception). Another tenant's mapping
+/// and a missing one are both `NotFound`, so existence is not revealed.
+pub async fn find_pullable(
+    pool: &SqlitePool,
+    caller_id: &str,
+    caller_is_admin: bool,
+    mapping_id: &str,
+) -> Result<MappingRow, AppError> {
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    let mapping = mapping_db::find_by_id(&mut conn, mapping_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !caller_is_admin && mapping.user_id != caller_id {
+        return Err(AppError::NotFound);
+    }
+    Ok(mapping)
+}
+
+/// The manual scan pull for one mapping. Runs the scheduled per-mapping poll and audits
+/// `mapping.pull` with the mapping id and the count queued. Returns the count. A Harbor
+/// error fails only this pull, with the poll's fixed error, and writes no audit row.
+/// The caller checks access with [`find_pullable`] and applies the cooldown first.
+pub async fn pull_mapping<H: HarborFetch>(
+    pool: &SqlitePool,
+    key: &DerivedKey,
+    http: &H,
+    actor: &Actor,
+    mapping: &MappingRow,
+    now: i64,
+) -> Result<u64, AppError> {
+    let queued = poll_mapping(pool, key, http, mapping, now).await?;
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    audit::record(
+        &mut conn,
+        actor,
+        "mapping.pull",
+        &format!("mapping:{}", mapping.id),
+        Some(&json!({ "mapping_id": mapping.id, "queued": queued })),
     )
     .await?;
     Ok(queued)
@@ -635,5 +684,142 @@ mod tests {
                 "trigger": "poll",
             })
         );
+    }
+
+    fn owner() -> Actor {
+        Actor {
+            user_id: Some("u1".to_owned()),
+            username: "u1".to_owned(),
+        }
+    }
+
+    async fn mapping(fx: &Fixture, id: &str) -> MappingRow {
+        find_pullable(&fx.pool, "u1", false, id).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn manual_pull_uses_the_poll_dedupe_rules() {
+        let fx = Fixture::new("pull-dedupe").await;
+        let harbor = FakeHarbor::with("app", 200, TWO_ARTIFACTS);
+        let m1 = mapping(&fx, "m1").await;
+
+        assert_eq!(
+            pull_mapping(&fx.pool, &key(), &harbor, &owner(), &m1, 1_000)
+                .await
+                .unwrap(),
+            2
+        );
+        // Queued jobs are not duplicated by the scheduled poll or a second pull.
+        harbor.set("other", 200, "[]");
+        assert_eq!(
+            poll_once(&fx.pool, &key(), &harbor, 1_500).await.unwrap(),
+            0
+        );
+        assert_eq!(
+            pull_mapping(&fx.pool, &key(), &harbor, &owner(), &m1, 1_600)
+                .await
+                .unwrap(),
+            0
+        );
+        // Synced digests are not re-queued, so nothing is uploaded twice.
+        fx.finish_all_jobs_successfully().await;
+        assert_eq!(
+            pull_mapping(&fx.pool, &key(), &harbor, &owner(), &m1, 2_000)
+                .await
+                .unwrap(),
+            0
+        );
+        let jobs = fx.jobs().await;
+        assert_eq!(jobs.len(), 2);
+        assert!(
+            jobs.iter()
+                .all(|(mapping, payload)| { mapping == "m1" && payload["trigger"] == "poll" })
+        );
+        // A manual pull is audited, not recorded in job_runs.
+        let poll_runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job_runs")
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+        assert_eq!(poll_runs, 1, "only the scheduled poll writes job_runs");
+    }
+
+    #[tokio::test]
+    async fn manual_pull_reads_at_most_ten_pages() {
+        let fx = Fixture::new("pull-cap").await;
+        let harbor = Arc::new(EndlessHarbor::default());
+        let m1 = mapping(&fx, "m1").await;
+
+        pull_mapping(&fx.pool, &key(), &harbor, &owner(), &m1, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(*lock(&harbor.calls), MAX_PAGES);
+    }
+
+    #[tokio::test]
+    async fn manual_pull_harbor_error_is_fixed_and_not_audited() {
+        let fx = Fixture::new("pull-error").await;
+        let harbor = FakeHarbor::with("app", 503, "secret harbor text");
+        let m1 = mapping(&fx, "m1").await;
+
+        let result = pull_mapping(&fx.pool, &key(), &harbor, &owner(), &m1, 1_000).await;
+        assert!(
+            matches!(result, Err(AppError::UpstreamUnreachable)),
+            "{result:?}"
+        );
+        let audits: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'mapping.pull'")
+                .fetch_one(&fx.pool)
+                .await
+                .unwrap();
+        assert_eq!(audits, 0);
+        assert!(fx.jobs().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pullable_is_owner_or_admin_only() {
+        let fx = Fixture::new("pull-tenancy").await;
+        assert_eq!(
+            find_pullable(&fx.pool, "u1", false, "m1").await.unwrap().id,
+            "m1"
+        );
+        assert!(matches!(
+            find_pullable(&fx.pool, "stranger", false, "m1").await,
+            Err(AppError::NotFound)
+        ));
+        assert_eq!(
+            find_pullable(&fx.pool, "an-admin", true, "m1")
+                .await
+                .unwrap()
+                .id,
+            "m1"
+        );
+        assert!(matches!(
+            find_pullable(&fx.pool, "an-admin", true, "missing").await,
+            Err(AppError::NotFound)
+        ));
+    }
+
+    /// Answers every page with one new artifact, so only the page cap stops the poll.
+    #[derive(Default)]
+    struct EndlessHarbor {
+        calls: Mutex<u32>,
+    }
+
+    impl HarborFetch for Arc<EndlessHarbor> {
+        async fn fetch(
+            &self,
+            _url: &Url,
+            _username: &str,
+            _secret: &[u8],
+            _extra_headers: &[(&str, &str)],
+        ) -> Result<(u16, Vec<u8>), AppError> {
+            let mut calls = lock(&self.calls);
+            *calls += 1;
+            let body = format!(
+                r#"[{{"digest": "sha256:{:04}", "tags": [{{"name": "v{}"}}]}}]"#,
+                *calls, *calls
+            );
+            Ok((200, body.into_bytes()))
+        }
     }
 }

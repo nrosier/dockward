@@ -25,6 +25,7 @@ pub const ACTIONS: &[&str] = &[
     "mapping.delete",
     "mapping.webhook_token_rotate",
     "mapping.auth_secret_rotate",
+    "mapping.pull",
     "project_webhook.create",
     "project_webhook.token_rotate",
     "project_webhook.secret_rotate",
@@ -35,6 +36,7 @@ pub const ACTIONS: &[&str] = &[
     "key.rotate",
     "retention.run",
     "sync_job.retry",
+    "log.level_change",
 ];
 
 /// Key names (lowercased) that mark a value as a secret. Any key that contains
@@ -98,6 +100,16 @@ pub struct AuditQuery {
     pub actor_user_id: Option<String>,
 }
 
+/// True when a key name marks a secret: it contains one of [`SECRET_KEY_FRAGMENTS`]
+/// (ignoring case) or names key material (`key`, `*_key`, `key_*`). The application log
+/// drops fields with these names (`services/app_log.rs`).
+pub fn is_secret_key_name(name: &str) -> bool {
+    let lowered = name.to_ascii_lowercase();
+    let is_key_material =
+        lowered == "key" || lowered.ends_with("_key") || lowered.starts_with("key_");
+    is_key_material || SECRET_KEY_FRAGMENTS.iter().any(|f| lowered.contains(f))
+}
+
 /// Refuses an action that is not in [`ACTIONS`].
 pub fn validate_action(action: &str) -> Result<(), AppError> {
     if ACTIONS.contains(&action) {
@@ -113,10 +125,7 @@ pub fn check_details(value: &serde_json::Value) -> Result<(), AppError> {
     match value {
         serde_json::Value::Object(map) => {
             for (key, nested) in map {
-                let lowered = key.to_ascii_lowercase();
-                let is_key_material =
-                    lowered == "key" || lowered.ends_with("_key") || lowered.starts_with("key_");
-                if is_key_material || SECRET_KEY_FRAGMENTS.iter().any(|f| lowered.contains(f)) {
+                if is_secret_key_name(key) {
                     return Err(AppError::InternalError);
                 }
                 check_details(nested)?;

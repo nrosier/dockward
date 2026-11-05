@@ -173,7 +173,9 @@ impl From<AppError> for Failure {
     }
 }
 
-/// Severity order for the issue rule. Only `CRITICAL` (2) and `HIGH` (1) can create issues.
+/// Severity order for the automatic issue rule. Only `CRITICAL` (2) and `HIGH` (1) can
+/// create issues automatically; every other severity is 0 and never reaches a minimum
+/// (`specs/integrations.md`, "GitHub issues"; unchanged by #129).
 fn rank(severity: &str) -> u8 {
     match severity {
         "CRITICAL" => 2,
@@ -182,7 +184,8 @@ fn rank(severity: &str) -> u8 {
     }
 }
 
-/// True when `severity` reaches the mapping's `min_issue_severity`.
+/// True when `severity` reaches the mapping's `min_issue_severity`. Used by the automatic
+/// path only; MEDIUM, LOW and UNKNOWN never pass.
 fn meets_minimum(severity: &str, min_issue_severity: Option<&str>) -> bool {
     let needed = if min_issue_severity == Some("HIGH") {
         1
@@ -192,10 +195,22 @@ fn meets_minimum(severity: &str, min_issue_severity: Option<&str>) -> bool {
     rank(severity) >= needed
 }
 
+/// Every severity, highest first, for picking the highest of a CVE's rows. A value outside
+/// the five (the CHECK constraint makes it impossible) sorts as `UNKNOWN`.
+const SEVERITY_ORDER: [&str; 5] = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"];
+
+/// The position of `severity` in [`SEVERITY_ORDER`] as a rank: CRITICAL 4 down to UNKNOWN 0.
+fn full_rank(severity: &str) -> usize {
+    SEVERITY_ORDER
+        .iter()
+        .position(|known| *known == severity)
+        .map_or(0, |index| SEVERITY_ORDER.len() - 1 - index)
+}
+
 /// What the open rows of one CVE say, for the issue text and the rules.
 struct CveView {
     cve_id: String,
-    /// The highest severity among the open rows.
+    /// The highest severity among the open rows, over all five severities.
     severity: &'static str,
     /// Package of the most recently scanned open row.
     package: Option<String>,
@@ -216,18 +231,12 @@ fn summarize(cve_id: &str, rows: &[FindingRow]) -> Option<CveView> {
                 .then_with(|| b.image_tag.cmp(&a.image_tag))
         })
         .copied()?;
-    let severity = match open.iter().map(|row| rank(&row.severity)).max() {
-        Some(2) => "CRITICAL",
-        Some(1) => "HIGH",
-        _ => {
-            // No CRITICAL or HIGH row: keep the latest row's own severity for the text.
-            match latest.severity.as_str() {
-                "MEDIUM" => "MEDIUM",
-                "LOW" => "LOW",
-                _ => "UNKNOWN",
-            }
-        }
-    };
+    let highest = open
+        .iter()
+        .map(|row| full_rank(&row.severity))
+        .max()
+        .unwrap_or(0);
+    let severity = SEVERITY_ORDER[SEVERITY_ORDER.len() - 1 - highest];
     let mut tags: Vec<String> = open.iter().map(|row| row.image_tag.clone()).collect();
     tags.sort();
     tags.dedup();
@@ -636,9 +645,10 @@ fn manual_error(failure: Failure) -> AppError {
 ///
 /// - `404` when the mapping has no finding for the CVE.
 /// - `409` (with the URL) when its issue is open, and `409` while an active acceptance exists.
-/// - `422` unless the highest open severity is `CRITICAL` or `HIGH`. The mapping's
-///   `min_issue_severity` and `auto_create_issues` do not apply: the manual action overrides
-///   them.
+/// - `422` when no tracked tag reports the CVE as open. Any open severity is allowed, LOW
+///   and UNKNOWN included (#129); the confirmation for those is a frontend step. The
+///   mapping's `min_issue_severity` and `auto_create_issues` do not apply: the manual action
+///   overrides them.
 /// - A closed issue is reopened, never duplicated. Otherwise an open labelled issue with the
 ///   marker is adopted, or a new one is created.
 /// - A GitHub failure is `502`.
@@ -680,13 +690,11 @@ pub async fn create_manual<G: IssueApi>(
             "This CVE has an active risk acceptance.".to_owned(),
         ));
     }
-    let view = summarize(cve_id, &rows)
-        .filter(|view| rank(view.severity) > 0)
-        .ok_or_else(|| {
-            AppError::ValidationFailed(
-                "Only a CVE that is open as CRITICAL or HIGH can get an issue.".to_owned(),
-            )
-        })?;
+    let view = summarize(cve_id, &rows).ok_or_else(|| {
+        AppError::ValidationFailed(
+            "Only a CVE that is open on a tracked tag can get an issue.".to_owned(),
+        )
+    })?;
     let ctx = Ctx {
         pool,
         gh,
@@ -1643,6 +1651,164 @@ mod tests {
         let body = creates[0]["body"].as_str().unwrap();
         assert!(body.contains("| Package | `@scope/pkg` |"));
         assert!(!body.contains("| Package | @scope"));
+    }
+
+    /// #129: automatic creation is unchanged. MEDIUM, LOW and UNKNOWN never get an issue
+    /// from a sync, whatever the minimum, and HIGH only when the minimum is HIGH.
+    #[tokio::test]
+    async fn automatic_creation_never_goes_below_the_minimum() {
+        for min in ["CRITICAL", "HIGH"] {
+            let fx = Fixture::new(&format!("auto-min-{min}"), min, true).await;
+            fx.finding("m1", "v1", "CVE-2026-0002", "HIGH", 10).await;
+            fx.finding("m1", "v1", "CVE-2026-0003", "MEDIUM", 10).await;
+            fx.finding("m1", "v1", "CVE-2026-0004", "LOW", 10).await;
+            fx.finding("m1", "v1", "CVE-2026-0005", "UNKNOWN", 10).await;
+
+            assert_eq!(fx.reconcile("proj/app:v1").await, Outcome::Complete);
+
+            let created: Vec<String> = fx.issues().await.into_iter().map(|(id, _, _)| id).collect();
+            let expected: &[&str] = if min == "HIGH" {
+                &["CVE-2026-0002"]
+            } else {
+                &[]
+            };
+            assert_eq!(created, expected, "min {min}");
+            assert_eq!(fx.github.creates().len(), expected.len(), "min {min}");
+        }
+        for severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN", "BOGUS"] {
+            assert_eq!(
+                meets_minimum(severity, Some("HIGH")),
+                matches!(severity, "CRITICAL" | "HIGH"),
+                "{severity}"
+            );
+            assert_eq!(
+                meets_minimum(severity, Some("CRITICAL")),
+                severity == "CRITICAL",
+                "{severity}"
+            );
+            assert_eq!(meets_minimum(severity, None), severity == "CRITICAL");
+        }
+    }
+
+    /// A manual LOW issue does not make the next sync create issues for other LOW CVEs, and
+    /// the sync keeps the manual issue open while the CVE is reported.
+    #[tokio::test]
+    async fn manual_low_issue_is_kept_by_sync_and_others_stay_without() {
+        let fx = Fixture::new("manual-low-sync", "HIGH", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0004", "LOW", 10).await;
+        fx.finding("m1", "v1", "CVE-2026-0005", "LOW", 10).await;
+        let mapping = fx.mapping("m1").await;
+
+        let made = create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0004", 1_000)
+            .await
+            .unwrap();
+        assert_eq!(made.number, 1);
+        assert_eq!(
+            fx.github.creates()[0]["title"],
+            "CVE-2026-0004: openssl (LOW) in proj/app"
+        );
+        fx.reconcile("proj/app:v1").await;
+
+        assert_eq!(
+            fx.github.creates().len(),
+            1,
+            "the other LOW CVE gets no issue"
+        );
+        assert_eq!(
+            fx.issues().await,
+            vec![("CVE-2026-0004".to_owned(), 1, "open".to_owned())]
+        );
+    }
+
+    /// The manual route at UNKNOWN severity: an active acceptance is 409, a closed issue is
+    /// reopened (never a second one), and an open issue is 409 with its URL.
+    #[tokio::test]
+    async fn manual_unknown_follows_the_acceptance_reopen_and_open_rules() {
+        let fx = Fixture::new("manual-unknown", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0005", "UNKNOWN", 10).await;
+        let mapping = fx.mapping("m1").await;
+        sqlx::query(
+            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username)
+             VALUES ('a1', 'm1', 'CVE-2026-0005', 'accepted for the test', 'u1', 'u1')",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+
+        let refused = create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0005", 1_000)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.status(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(fx.github.requests(), 0);
+
+        sqlx::query("UPDATE cve_acceptances SET revoked_at = 5, revoked_by = 'u1'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        let first = create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0005", 1_000)
+            .await
+            .unwrap();
+
+        // The issue is closed on GitHub and in the row; the manual route reopens it.
+        sqlx::query("UPDATE github_issues SET status = 'closed'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        fx.github.with(|state| state.issues[0].open = false);
+        let reopened = create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0005", 1_000)
+            .await
+            .unwrap();
+        assert_eq!(reopened, first);
+        assert_eq!(fx.github.creates().len(), 1, "no second issue");
+        let writes = fx.github.writes();
+        assert_eq!(writes.last().unwrap().2["body"], MANUAL_REOPEN_COMMENT);
+
+        let open = create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0005", 1_000)
+            .await
+            .unwrap_err();
+        assert_eq!(open.status(), axum::http::StatusCode::CONFLICT);
+        assert!(open.message().contains(&first.url));
+    }
+
+    /// The issue text uses the highest open severity over all five values.
+    #[test]
+    fn summarize_takes_the_highest_of_all_five_severities() {
+        let row = |tag: &str, severity: &str, status: &str, at: i64| FindingRow {
+            cve_id: "CVE-1".to_owned(),
+            image_tag: tag.to_owned(),
+            package: None,
+            severity: severity.to_owned(),
+            fixed_in_version: None,
+            status: status.to_owned(),
+            last_seen_at: Some(at),
+        };
+        for (rows, expected) in [
+            (
+                vec![row("a", "UNKNOWN", "open", 9), row("b", "LOW", "open", 1)],
+                "LOW",
+            ),
+            (
+                vec![row("a", "LOW", "open", 9), row("b", "MEDIUM", "open", 1)],
+                "MEDIUM",
+            ),
+            (
+                vec![row("a", "MEDIUM", "open", 9), row("b", "HIGH", "open", 1)],
+                "HIGH",
+            ),
+            (
+                vec![row("a", "HIGH", "open", 1), row("b", "CRITICAL", "open", 9)],
+                "CRITICAL",
+            ),
+            (vec![row("a", "UNKNOWN", "open", 1)], "UNKNOWN"),
+            // A fixed CRITICAL row does not count.
+            (
+                vec![row("a", "CRITICAL", "fixed", 9), row("b", "LOW", "open", 1)],
+                "LOW",
+            ),
+        ] {
+            assert_eq!(summarize("CVE-1", &rows).unwrap().severity, expected);
+        }
+        assert!(summarize("CVE-1", &[row("a", "HIGH", "fixed", 1)]).is_none());
     }
 
     #[test]

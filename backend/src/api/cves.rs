@@ -106,9 +106,10 @@ pub struct IssueCreated {
 }
 
 /// `POST /api/v1/cves/:id/issue`. `:id` is `<mapping_id>:<cve_id>`. The caller must own the
-/// mapping. Returns `201`; `404` for an unknown or foreign mapping or CVE; `409` when an
-/// open issue exists (the body names its URL) or the CVE has an active acceptance; `422`
-/// when the highest open severity is not CRITICAL or HIGH; `502` when GitHub fails.
+/// mapping. Any open severity may get an issue (#129). Returns `201`; `404` for an unknown or
+/// foreign mapping or CVE; `409` when an open issue exists (the body names its URL) or the
+/// CVE has an active acceptance; `422` when no tracked tag reports the CVE as open; `502` when
+/// GitHub fails.
 pub async fn issue(
     State(state): State<AppState>,
     user: AuthUser,
@@ -269,41 +270,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manual_issue_409_when_open_and_422_when_ineligible() {
+    async fn manual_issue_any_severity_and_409_when_open() {
         let (state, dir, github, gh) = setup("manual").await;
         finding(&state, "v1", "CVE-2026-0001", "CRITICAL").await;
         finding(&state, "v1", "CVE-2026-0002", "MEDIUM").await;
         finding(&state, "v1", "CVE-2026-0003", "HIGH").await;
 
-        // 422: MEDIUM can never get an issue. Nothing is sent to GitHub.
-        let medium = call(&state, "u1", "m1:CVE-2026-0002", &gh)
-            .await
-            .unwrap_err();
-        assert_eq!(medium.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(github.requests(), 0);
+        // 201: MEDIUM may get an issue by hand since #129, although it never does automatically.
+        let (status, Json(medium)) = call(&state, "u1", "m1:CVE-2026-0002", &gh).await.unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(medium.github_issue_number, 1);
 
         // 201: a HIGH CVE gets an issue although the mapping's minimum is CRITICAL.
         let (status, Json(high)) = call(&state, "u1", "m1:CVE-2026-0003", &gh).await.unwrap();
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(high.github_issue_number, 1);
+        assert_eq!(high.github_issue_number, 2);
 
         // 201, then 409 with the URL of the open issue, and no second create.
         let (_, Json(first)) = call(&state, "u1", "m1:CVE-2026-0001", &gh).await.unwrap();
         assert_eq!(
             first.github_issue_url,
-            "https://github.com/octo/app/issues/2"
+            "https://github.com/octo/app/issues/3"
         );
         let again = call(&state, "u1", "m1:CVE-2026-0001", &gh)
             .await
             .unwrap_err();
         assert_eq!(again.status(), StatusCode::CONFLICT);
         assert!(again.message().contains(&first.github_issue_url));
-        assert_eq!(github.creates().len(), 2);
-
-        // The highest open severity across tags decides: MEDIUM on v1 and HIGH on v2 is eligible.
-        finding(&state, "v2", "CVE-2026-0002", "HIGH").await;
-        let (status, _) = call(&state, "u1", "m1:CVE-2026-0002", &gh).await.unwrap();
-        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(github.creates().len(), 3);
 
         // 404: another tenant's mapping, an unknown CVE, and a malformed id.
         for (who, id) in [
@@ -314,6 +308,82 @@ mod tests {
             let error = call(&state, who, id, &gh).await.unwrap_err();
             assert_eq!(error.status(), StatusCode::NOT_FOUND);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #129: LOW and UNKNOWN get an issue by hand. The title carries the highest open
+    /// severity over all five, and the issue has the same marker and label as any other.
+    #[tokio::test]
+    async fn manual_issue_is_allowed_for_low_and_unknown() {
+        let (state, dir, github, gh) = setup("manual-low").await;
+        finding(&state, "v1", "CVE-2026-0010", "LOW").await;
+        finding(&state, "v1", "CVE-2026-0011", "UNKNOWN").await;
+        // UNKNOWN on v1 and LOW on v2: the highest open severity is LOW.
+        finding(&state, "v1", "CVE-2026-0012", "UNKNOWN").await;
+        finding(&state, "v2", "CVE-2026-0012", "LOW").await;
+
+        for id in ["m1:CVE-2026-0010", "m1:CVE-2026-0011", "m1:CVE-2026-0012"] {
+            let (status, _) = call(&state, "u1", id, &gh).await.unwrap();
+            assert_eq!(status, StatusCode::CREATED, "{id}");
+        }
+        let creates = github.creates();
+        let titles: Vec<&str> = creates
+            .iter()
+            .map(|body| body["title"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "CVE-2026-0010: openssl (LOW) in proj/m1",
+                "CVE-2026-0011: openssl (UNKNOWN) in proj/m1",
+                "CVE-2026-0012: openssl (LOW) in proj/m1",
+            ]
+        );
+        for body in &creates {
+            assert_eq!(body["labels"], serde_json::json!(["harborgate"]));
+            assert!(
+                body["body"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("<!-- harborgate:CVE-2026-00")
+            );
+        }
+        // The second click is 409 with the URL, never a second issue.
+        let again = call(&state, "u1", "m1:CVE-2026-0010", &gh)
+            .await
+            .unwrap_err();
+        assert_eq!(again.status(), StatusCode::CONFLICT);
+        assert!(
+            again
+                .message()
+                .contains("https://github.com/octo/app/issues/1")
+        );
+        assert_eq!(github.creates().len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A CVE that no tracked tag reports as open is `422`, at any severity, with no GitHub
+    /// call.
+    #[tokio::test]
+    async fn manual_issue_is_refused_for_a_cve_fixed_on_every_tag() {
+        let (state, dir, github, gh) = setup("manual-fixed").await;
+        finding(&state, "v1", "CVE-2026-0001", "CRITICAL").await;
+        finding(&state, "v2", "CVE-2026-0001", "LOW").await;
+        sqlx::query("UPDATE cve_findings SET status = 'fixed'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+
+        let refused = call(&state, "u1", "m1:CVE-2026-0001", &gh)
+            .await
+            .unwrap_err();
+
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            refused.message(),
+            "Only a CVE that is open on a tracked tag can get an issue."
+        );
+        assert_eq!(github.requests(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1168,13 +1238,259 @@ mod tests {
         assert_eq!(none.total, 0, "% is plain text, not a wildcard");
         for q in [
             "severity=high",
-            "status=accepted",
+            "status=closed",
             "accepted=yes",
             &format!("q={}", "a".repeat(101)),
         ] {
             let error = all_cves(&state, &user("u1"), q).await.unwrap_err();
             assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{q}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- All severities and filters (#129) ----
+
+    /// Stores one tag row with its own package.
+    async fn seen_pkg(
+        state: &AppState,
+        mapping: &str,
+        tag: &str,
+        cve: &str,
+        severity: &str,
+        package: &str,
+    ) {
+        store(
+            state,
+            &db::findings::Finding {
+                id: &crate::services::ids::new_id().unwrap_or_default(),
+                mapping_id: mapping,
+                harbor_repository: mapping,
+                image_tag: tag,
+                cve_id: cve,
+                package: Some(package),
+                severity,
+                fixed_in_version: None,
+                description: None,
+                now: AT,
+            },
+        )
+        .await;
+    }
+
+    /// The sorted CVE ids of every page of `GET /cves?<q>`, read one item per page, and the
+    /// `total` of the single-page read. Asserts that `total` matches both reads.
+    async fn every_page(state: &AppState, who: &AuthUser, q: &str) -> (Vec<String>, i64) {
+        let sep = if q.is_empty() { "" } else { "&" };
+        let whole = all_cves(state, who, &format!("{q}{sep}page_size=200"))
+            .await
+            .unwrap();
+        let mut ids: Vec<String> = whole.items.iter().map(|item| item.id.clone()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            whole.total,
+            ids.len() as i64,
+            "total matches the items for {q:?}"
+        );
+        let mut paged = Vec::new();
+        for page in 1..=(whole.total + 1) {
+            let one = all_cves(state, who, &format!("{q}{sep}page_size=1&page={page}"))
+                .await
+                .unwrap();
+            assert_eq!(
+                one.total, whole.total,
+                "total is the same on page {page} of {q:?}"
+            );
+            paged.extend(one.items.into_iter().map(|item| item.id));
+        }
+        paged.sort_unstable();
+        assert_eq!(paged, ids, "the pages hold exactly the items of {q:?}");
+        (ids, whole.total)
+    }
+
+    #[tokio::test]
+    async fn every_severity_is_listed_and_each_filter_matches_its_total() {
+        let (state, dir, _, _) = setup("read-all-filters").await;
+        seed_mapping(&state.pool, "u1", "m2", "ch", "cg", "octo", "second").await;
+        sqlx::query("UPDATE repo_mappings SET harbor_project = 'team' WHERE id = 'm2'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        // Another tenant's mapping with matching values must never appear.
+        seed_harbor(&state.pool, "u2", "ch2", "harbor", None).await;
+        seed_github(&state.pool, "u2", "cg2", "github").await;
+        seed_mapping(&state.pool, "u2", "m3", "ch2", "cg2", "octo", "third").await;
+
+        seen_pkg(&state, "m1", "v1", "CVE-2026-0001", "CRITICAL", "openssl").await;
+        seen_pkg(&state, "m1", "v1", "CVE-2026-0002", "HIGH", "zlib").await;
+        seen_pkg(&state, "m1", "v2", "CVE-2026-0003", "MEDIUM", "openssl").await;
+        seen_pkg(&state, "m1", "v2", "CVE-2026-0004", "LOW", "busybox").await;
+        seen_pkg(&state, "m1", "v1", "CVE-2026-0005", "UNKNOWN", "busybox").await;
+        // Fixed LOW on m1.
+        seen_pkg(&state, "m1", "v1", "CVE-2026-0006", "LOW", "zlib").await;
+        fix(&state, "m1", "v1", "CVE-2026-0006").await;
+        // Accepted MEDIUM on m2 (project `team`, repository `m2`).
+        seen_pkg(&state, "m2", "v9", "CVE-2026-0007", "MEDIUM", "openssl").await;
+        seen_pkg(&state, "m2", "v9", "CVE-2026-0008", "UNKNOWN", "OpenSSL").await;
+        sqlx::query(
+            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username)
+             VALUES ('a1', 'm2', 'CVE-2026-0007', 'accepted for the test', 'u1', 'u1')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        seen_pkg(&state, "m3", "v1", "CVE-2026-0001", "LOW", "openssl").await;
+
+        let ids = |list: &[&str]| -> Vec<String> {
+            let mut ids: Vec<String> = list.iter().map(|id| (*id).to_owned()).collect();
+            ids.sort_unstable();
+            ids
+        };
+        let me = user("u1");
+        // The default is every severity, open, fixed and accepted alike.
+        let (all, total) = every_page(&state, &me, "").await;
+        assert_eq!(total, 8);
+        assert_eq!(
+            all,
+            ids(&[
+                "m1:CVE-2026-0001",
+                "m1:CVE-2026-0002",
+                "m1:CVE-2026-0003",
+                "m1:CVE-2026-0004",
+                "m1:CVE-2026-0005",
+                "m1:CVE-2026-0006",
+                "m2:CVE-2026-0007",
+                "m2:CVE-2026-0008",
+            ])
+        );
+        for (q, expected) in [
+            ("severity=LOW", vec!["m1:CVE-2026-0004", "m1:CVE-2026-0006"]),
+            (
+                "severity=UNKNOWN",
+                vec!["m1:CVE-2026-0005", "m2:CVE-2026-0008"],
+            ),
+            (
+                "severity=LOW,UNKNOWN",
+                vec![
+                    "m1:CVE-2026-0004",
+                    "m1:CVE-2026-0005",
+                    "m1:CVE-2026-0006",
+                    "m2:CVE-2026-0008",
+                ],
+            ),
+            (
+                "severity=CRITICAL,HIGH",
+                vec!["m1:CVE-2026-0001", "m1:CVE-2026-0002"],
+            ),
+            ("status=fixed", vec!["m1:CVE-2026-0006"]),
+            ("status=accepted", vec!["m2:CVE-2026-0007"]),
+            (
+                "status=fixed,accepted",
+                vec!["m1:CVE-2026-0006", "m2:CVE-2026-0007"],
+            ),
+            (
+                "status=open&accepted=false",
+                vec![
+                    "m1:CVE-2026-0001",
+                    "m1:CVE-2026-0002",
+                    "m1:CVE-2026-0003",
+                    "m1:CVE-2026-0004",
+                    "m1:CVE-2026-0005",
+                    "m2:CVE-2026-0008",
+                ],
+            ),
+            (
+                "status=open,fixed,accepted",
+                all.iter().map(String::as_str).collect(),
+            ),
+            // Exact and case-sensitive: `OpenSSL` is not `openssl`.
+            (
+                "package=openssl",
+                vec!["m1:CVE-2026-0001", "m1:CVE-2026-0003", "m2:CVE-2026-0007"],
+            ),
+            ("package=OpenSSL", vec!["m2:CVE-2026-0008"]),
+            ("package=", all.iter().map(String::as_str).collect()),
+            // A fixed row still matches its tag.
+            (
+                "tag=v1",
+                vec![
+                    "m1:CVE-2026-0001",
+                    "m1:CVE-2026-0002",
+                    "m1:CVE-2026-0005",
+                    "m1:CVE-2026-0006",
+                ],
+            ),
+            ("tag=v9", vec!["m2:CVE-2026-0007", "m2:CVE-2026-0008"]),
+            ("tag=nope", vec![]),
+            (
+                "harbor_project=team",
+                vec!["m2:CVE-2026-0007", "m2:CVE-2026-0008"],
+            ),
+            (
+                "harbor_repository=m2",
+                vec!["m2:CVE-2026-0007", "m2:CVE-2026-0008"],
+            ),
+            ("harbor_project=proj&harbor_repository=m2", vec![]),
+            (
+                "severity=MEDIUM&harbor_project=team",
+                vec!["m2:CVE-2026-0007"],
+            ),
+            (
+                "severity=LOW&tag=v2&package=busybox",
+                vec!["m1:CVE-2026-0004"],
+            ),
+            ("q=busybox&severity=UNKNOWN", vec!["m1:CVE-2026-0005"]),
+        ] {
+            let (got, total) = every_page(&state, &me, q).await;
+            assert_eq!(got, ids(&expected), "{q}");
+            assert_eq!(total, expected.len() as i64, "{q}");
+        }
+        // The path route takes the same filters.
+        let page = by_mapping(&state, &me, "m2", "status=accepted")
+            .await
+            .unwrap();
+        assert_eq!((page.total, page.items.len()), (1, 1));
+        // The tenancy of the filters: another user sees only their own LOW.
+        let (theirs, _) = every_page(&state, &user("u2"), "severity=LOW&package=openssl").await;
+        assert_eq!(theirs, ["m3:CVE-2026-0001"]);
+        // open_severity is the highest open severity, null once every tag is fixed.
+        let fixed = one(&state, &me, "m1:CVE-2026-0006").await.unwrap();
+        assert_eq!(fixed.summary.open_severity, None);
+        let low = one(&state, &me, "m1:CVE-2026-0004").await.unwrap();
+        assert_eq!(low.summary.open_severity.as_deref(), Some("LOW"));
+        // Bad values are 400 with fixed text, never echoed.
+        for q in [
+            "severity=LOW,",
+            "severity=low",
+            "severity=",
+            "status=open,closed",
+            "status=",
+            "tag=v1%0A",
+            &format!("package={}", "p".repeat(257)),
+        ] {
+            let error = all_cves(&state, &me, q).await.unwrap_err();
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{q}");
+            assert!(
+                !error.message().contains("closed") && !error.message().contains("ppp"),
+                "{q}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The open severity ignores fixed rows: CRITICAL fixed on v1 and LOW open on v2 lists as
+    /// CRITICAL (`severity`) with `open_severity` LOW, so the UI asks for confirmation.
+    #[tokio::test]
+    async fn open_severity_uses_open_rows_only() {
+        let (state, dir, _, _) = setup("read-open-severity").await;
+        seen(&state, "m1", "v1", "CVE-2026-0001", "CRITICAL", AT).await;
+        seen(&state, "m1", "v2", "CVE-2026-0001", "LOW", AT).await;
+        fix(&state, "m1", "v1", "CVE-2026-0001").await;
+        let page = by_mapping(&state, &user("u1"), "m1", "").await.unwrap();
+        let cve = item(&page, "CVE-2026-0001");
+        assert_eq!(cve.severity, "CRITICAL");
+        assert_eq!(cve.open_severity.as_deref(), Some("LOW"));
+        let json = serde_json::to_value(&page).unwrap();
+        assert_eq!(json["items"][0]["open_severity"], "LOW");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

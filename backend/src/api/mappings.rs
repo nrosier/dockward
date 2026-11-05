@@ -11,6 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+use crate::api::hardening::{RateLimiter, too_many_requests};
 use crate::api::state::AppState;
 use crate::error::AppError;
 use crate::models::role::Role;
@@ -19,12 +20,14 @@ use crate::services::credential_probe::OutboundGithubProbe;
 use crate::services::dashboard::{self, OpenCves};
 use crate::services::mappings::{self, Created, ListQuery, Mapping, MappingPatch, NewMapping};
 use crate::services::pagination::Page;
+use crate::services::poller;
 use crate::services::sessions::AuthUser;
 use crate::services::sync_jobs::{self, LastSync};
 use crate::worker::now_secs;
 
 /// One `GET /mappings` item: the `Mapping` fields plus `open_cves` and `last_sync`
-/// (`specs/api.md`, Mappings; decided on #35). `GET /mappings/:id` does not carry them.
+/// (`specs/api.md`, Mappings; decided on #35). `open_cves` covers every severity with a
+/// `total` (#129). `GET /mappings/:id` does not carry them.
 #[derive(Debug, Serialize)]
 pub struct MappingListItem {
     #[serde(flatten)]
@@ -56,6 +59,22 @@ async fn with_list_extras(
         page_size: page.page_size,
         total: page.total,
     })
+}
+
+/// Manual scan pulls allowed per mapping in one cooldown window (`specs/security.md`).
+const PULL_LIMIT: u32 = 1;
+/// The manual scan pull cooldown: 5 minutes per mapping (decided on #131).
+const PULL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// A fresh manual pull cooldown, held in memory. The router state holds one.
+pub fn new_pull_limiter() -> RateLimiter {
+    RateLimiter::new(PULL_LIMIT, PULL_COOLDOWN)
+}
+
+/// The `POST /api/v1/mappings/:id/pull` response: how many sync jobs were queued.
+#[derive(Debug, Serialize)]
+pub struct Pulled {
+    pub queued: u64,
 }
 
 /// Raw query values for `GET /api/v1/mappings`.
@@ -200,6 +219,35 @@ pub async fn rotate_auth_secret(
     Ok(Json(serde_json::json!({ "auth_secret": secret })))
 }
 
+/// `POST /api/v1/mappings/:id/pull`. The mapping owner or an admin (`specs/security.md`,
+/// Tenancy). Runs the scheduled poll for this mapping now and returns `{"queued": n}`.
+/// One pull per mapping per 5 minutes; the cooldown is checked after access, so another
+/// tenant's mapping is `404`, and it is used even when the pull then fails at Harbor.
+pub async fn pull(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let is_admin = user.role == Role::Admin;
+    let mapping = poller::find_pullable(&state.pool, &user.id, is_admin, &id).await?;
+    if let Err(retry) = state.pull_limiter.check(
+        &format!("mapping:{}", mapping.id),
+        std::time::Instant::now(),
+    ) {
+        return Ok(too_many_requests(retry));
+    }
+    let queued = poller::pull_mapping(
+        &state.pool,
+        &state.credentials_key,
+        &state.harbor_fetch,
+        &actor_of(&user),
+        &mapping,
+        now_secs(),
+    )
+    .await?;
+    Ok(Json(Pulled { queued }).into_response())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,7 +265,8 @@ mod tests {
         (pool, dir)
     }
 
-    /// Two mappings for one user. `m1` has two open CVEs and a job; `m2` has nothing.
+    /// Two mappings for one user. `m1` has one open CVE of each severity and a job; `m2` has
+    /// nothing.
     async fn seed(pool: &SqlitePool) {
         sqlx::query("INSERT INTO users (id, username, role, token_version) VALUES ('owner', 'owner', 'user', 0)")
             .execute(pool)
@@ -245,7 +294,13 @@ mod tests {
             .await
             .unwrap();
         }
-        for (cve, severity) in [("CVE-2026-0001", "CRITICAL"), ("CVE-2026-0002", "HIGH")] {
+        for (cve, severity) in [
+            ("CVE-2026-0001", "CRITICAL"),
+            ("CVE-2026-0002", "HIGH"),
+            ("CVE-2026-0003", "MEDIUM"),
+            ("CVE-2026-0004", "LOW"),
+            ("CVE-2026-0005", "UNKNOWN"),
+        ] {
             sqlx::query(
                 "INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, severity, status)
                  VALUES (?, 'm1', 'm1', 'v1', ?, ?, 'open')",
@@ -289,7 +344,9 @@ mod tests {
         let busy = item_for(&json, "m1");
         assert_eq!(
             busy["open_cves"],
-            serde_json::json!({ "critical": 1, "high": 1 })
+            serde_json::json!({
+                "critical": 1, "high": 1, "medium": 1, "low": 1, "unknown": 1, "total": 5
+            })
         );
         assert_eq!(busy["last_sync"]["status"], "failed");
         assert_eq!(busy["last_sync"]["updated_at"], "1970-01-01T01:23:20Z");
@@ -299,7 +356,9 @@ mod tests {
         let quiet = item_for(&json, "m2");
         assert_eq!(
             quiet["open_cves"],
-            serde_json::json!({ "critical": 0, "high": 0 })
+            serde_json::json!({
+                "critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0, "total": 0
+            })
         );
         assert!(quiet["last_sync"].is_null());
 
