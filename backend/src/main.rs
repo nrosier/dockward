@@ -2578,6 +2578,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `rotate-secret` needs a CSRF token (`403`) and the owner (`403` for another user), and
+    /// neither refused call changes the stored secret (#145).
+    #[tokio::test]
+    async fn rotate_secret_needs_csrf_and_the_owner() {
+        use axum::http::StatusCode;
+        let (router, pool, dir) = test_router("project-rotate-secret").await;
+        webhook_fixture(&pool, "map-tok-fake", "map-sec-fake").await;
+        let mut conn = pool.acquire().await.unwrap();
+        db::users::insert_local(&mut conn, "px", "px", None, "h", "user")
+            .await
+            .unwrap();
+        drop(conn);
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let csrf = auth::csrf::issue(&auth::crypto::csrf_key(&root).unwrap()).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let owner = format!("{}; {csrf_cookie}", session_cookie("wu", "user", 0));
+        let other = format!("{}; {csrf_cookie}", session_cookie("px", "user", 0));
+        let (created_status, created) = send_json(
+            &router,
+            "POST",
+            "/api/v1/project-webhooks",
+            Some(&owner),
+            Some(&csrf),
+            r#"{"mapping_id":"wm1"}"#,
+        )
+        .await;
+        assert_eq!(created_status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_owned();
+        let uri = format!("/api/v1/project-webhooks/{id}/rotate-secret");
+        let before: String =
+            sqlx::query_scalar("SELECT secret_hash FROM project_webhooks WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let (no_csrf, _) = send_json(&router, "POST", &uri, Some(&owner), None, "").await;
+        let (non_owner, _) = send_json(&router, "POST", &uri, Some(&other), Some(&csrf), "").await;
+        assert_eq!(no_csrf, StatusCode::FORBIDDEN);
+        assert_eq!(non_owner, StatusCode::FORBIDDEN);
+        let after: String =
+            sqlx::query_scalar("SELECT secret_hash FROM project_webhooks WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A project event for a mapped repository is routed to that mapping and queues a job.
     #[tokio::test]
     async fn project_event_routes_to_the_matching_mapping() {

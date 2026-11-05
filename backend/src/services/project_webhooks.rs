@@ -889,4 +889,89 @@ mod tests {
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A mapping on another Harbor base URL, same project name.
+    async fn add_mapping_on(pool: &SqlitePool, id: &str, owner: &str, base: &str, repo: &str) {
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+             VALUES (?, ?, ?, ?, ?, 'proj', ?, 'o', ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(format!("{owner}-h"))
+        .bind(format!("{owner}-g"))
+        .bind(base)
+        .bind(repo)
+        .bind(id)
+        .bind(format!("t-{id}"))
+        .bind(format!("s-{id}"))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A user with a mapping only on another Harbor base URL is not a transfer candidate, even
+    /// with the same project name (#145).
+    #[tokio::test]
+    async fn transfer_candidate_ignores_another_base_url() {
+        let (pool, dir) = fresh_pool("transfer-base").await;
+        for u in ["adm", "u0", "u1"] {
+            add_user(&pool, u, if u == "adm" { "admin" } else { "user" }).await;
+        }
+        add_mapping(&pool, "m0", "u0", "proj", "app").await;
+        add_mapping_on(&pool, "m1", "u1", "https://other-harbor.example.com", "app").await;
+        let created = create(&pool, &user("u0", Role::User), "https://hg", "m0")
+            .await
+            .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let candidate = db::transfer_candidate(&mut conn, BASE, "proj", "u0")
+            .await
+            .unwrap();
+        assert_eq!(candidate, None);
+        drop(conn);
+        // With no candidate, deleting the owner deletes the project webhook.
+        let admin = Actor {
+            user_id: Some("adm".to_owned()),
+            username: "name-adm".to_owned(),
+        };
+        crate::services::users::delete_user(&pool, &admin, "u0")
+            .await
+            .unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_webhooks WHERE id = ?")
+            .bind(&created.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A same-name mapping on another base URL does not hide an unmatched row (#145).
+    #[tokio::test]
+    async fn unmatched_row_stays_visible_with_a_same_name_mapping_on_another_base_url() {
+        let (pool, dir) = fresh_pool("unmatched-base").await;
+        add_user(&pool, "u1", "user").await;
+        add_user(&pool, "u2", "user").await;
+        add_mapping(&pool, "m1", "u1", "proj", "app").await;
+        let owner = user("u1", Role::User);
+        let created = create(&pool, &owner, "https://hg", "m1").await.unwrap();
+        db::record_unmatched(&pool, &created.id, "proj/b", 100)
+            .await
+            .unwrap();
+        add_mapping_on(&pool, "m2", "u2", "https://other-harbor.example.com", "b").await;
+        let page = unmatched(&pool, &owner, &created.id, &UnmatchedQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].repository, "proj/b");
+        // The same-name mapping on the project's own base URL does hide it.
+        add_mapping(&pool, "m3", "u2", "proj", "b").await;
+        let hidden = unmatched(&pool, &owner, &created.id, &UnmatchedQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(hidden.total, 0);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
