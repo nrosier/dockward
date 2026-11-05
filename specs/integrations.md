@@ -86,9 +86,14 @@ Status: the project webhook receiver is built. The management API (create, owner
 
     | Cause | `last_error` |
     | --- | --- |
-    | Lookup failed (network error, non-2xx other than 429, or an unreadable body) | `digest lookup failed` |
-    | The artifact has no tags | `digest has no tags` |
-    | The artifact is not found (404) | `digest not found` |
+    | Harbor cannot be reached (network error) | `Harbor could not be reached` |
+    | Harbor answers 401 or 403 | `Harbor rejected the robot account credentials` |
+    | The artifact is not found (404) | `digest not found in Harbor` |
+    | Any other non-2xx answer except 429, with N the status code | `Harbor returned status N` |
+    | The answer body is unreadable | `Harbor returned an artifact that could not be read` |
+    | The artifact has no tags | `digest has no tags to sync` |
+
+    Decided (2026-11-05, user, #132): fixed failure messages match the built code (PR #165). The old single row `digest lookup failed` is split into the four lookup causes above, because the code names each one.
 
     Reason: fixed text keeps the alert and the Sync jobs API free of upstream content.
   - Field paths: under `event_data` in the default format and under `data` in CloudEvents (verified (2026-11-03), `src/pkg/notifier/formats/default.go` and `cloudevents.go`). The artifact digest is `resources[0].digest`.
