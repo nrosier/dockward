@@ -667,21 +667,54 @@ async fn dropping_a_credential_clears_its_entries_and_block() {
     let fake = Arc::new(Recorded::default());
     robot_ok(&fake);
     fake.on(path_is("/api/v2.0/projects"), ok(r#"[{"name":"alpha"}]"#));
+    let mut limited = status(429);
+    limited.retry_after = Some(300);
+    fake.on(path_is("/user/repos"), limited);
     let picker = state(fake.clone());
     picker
         .harbor_projects(&fx.caller(), &fx.harbor, &ListQuery::default())
         .await
         .unwrap();
     assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
+
+    // Set a block on the GitHub credential, and see that it holds without a call.
+    for _ in 0..2 {
+        let (code, ..) = expect_fixed(
+            picker
+                .github_repositories(&fx.caller(), &fx.github, &ListQuery::default())
+                .await,
+        );
+        assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
+    }
+    assert_eq!(
+        fake.calls.load(Ordering::SeqCst),
+        3,
+        "the block made no call"
+    );
+    assert_eq!(picker.held().1, 1, "a block is set");
+
     picker.drop_credential(&fx.harbor);
+    picker.drop_credential(&fx.github);
+    assert_eq!(picker.held(), (0, 0), "entries and block are gone");
     picker
         .harbor_projects(&fx.caller(), &fx.harbor, &ListQuery::default())
         .await
         .unwrap();
     assert_eq!(
         fake.calls.load(Ordering::SeqCst),
-        4,
+        5,
         "the dropped entry is fetched again"
+    );
+    // The block is cleared: the GitHub list calls upstream again instead of failing at once.
+    expect_fixed(
+        picker
+            .github_repositories(&fx.caller(), &fx.github, &ListQuery::default())
+            .await,
+    );
+    assert_eq!(
+        fake.calls.load(Ordering::SeqCst),
+        6,
+        "a cleared block lets the call through"
     );
     fx.close().await;
 }
@@ -1569,4 +1602,142 @@ async fn a_bad_digest_is_refused_without_a_request() {
         );
         fx.close().await;
     }
+}
+
+/// A credential of `user` with its own base URL, for tests that need one the fixture lacks.
+async fn extra_credential(
+    fx: &Fixture,
+    user: &'static str,
+    service: &'static str,
+    base_url: Option<&str>,
+) -> String {
+    crate::services::credentials::create(
+        &fx.pool,
+        &fx.key,
+        &Actor {
+            user_id: Some(user.to_owned()),
+            username: user.to_owned(),
+        },
+        user,
+        NewCredential {
+            service_type: service.to_owned(),
+            label: format!("extra-{service}"),
+            base_url: base_url.map(str::to_owned),
+            username: (service == SERVICE_HARBOR).then(|| "robot$hg".to_owned()),
+            token: SENTINEL.to_owned(),
+            expires_at: None,
+        },
+        false,
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+#[tokio::test]
+async fn the_suggestion_refuses_a_401_identity_answer() {
+    let fx = Fixture::new("suggest-identity-401").await;
+    let fake = Arc::new(Recorded::default());
+    fake.on(path_is("/api/v2.0/users/current"), status(401));
+    fake.on(
+        path_is("/api/v2.0/projects/proj/repositories/app/artifacts"),
+        ok("[]"),
+    );
+    let picker = state(fake.clone());
+    let (message, detail) = expect_invalid(
+        picker
+            .source_suggestion(&fx.caller(), &fx.harbor, &suggestion_query(None))
+            .await,
+    );
+    assert_eq!(message, MSG_HARBOR_IDENTITY);
+    assert_eq!(detail, Some(ErrorDetail::HarborIdentity));
+    assert_eq!(
+        fake.calls.load(Ordering::SeqCst),
+        1,
+        "the artifact list is never read after a refused identity"
+    );
+    fx.close().await;
+}
+
+#[tokio::test]
+async fn the_repositories_route_refuses_a_failed_identity() {
+    for code in [401u16, 200] {
+        let fx = Fixture::new(&format!("repos-identity-{code}")).await;
+        let fake = Arc::new(Recorded::default());
+        fake.on(path_is("/api/v2.0/users/current"), status(code));
+        fake.on(
+            path_is("/api/v2.0/projects/proj/repositories"),
+            ok(r#"[{"name":"proj/app"}]"#),
+        );
+        let picker = state(fake.clone());
+        let (message, detail) = expect_invalid(
+            picker
+                .harbor_repositories(&fx.caller(), &fx.harbor, "proj", &ListQuery::default())
+                .await,
+        );
+        assert_eq!(message, MSG_HARBOR_IDENTITY, "identity {code}");
+        assert_eq!(detail, Some(ErrorDetail::HarborIdentity));
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "identity {code}");
+        fx.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_suggestion_with_another_users_github_credential_is_404() {
+    let fx = Fixture::new("suggest-foreign-github").await;
+    let other_github = extra_credential(&fx, "other-2", SERVICE_GITHUB, None).await;
+    let fake = Arc::new(Recorded::default());
+    artifact_routes(&fake, Some("https://github.com/octo/app"));
+    let picker = state(fake.clone());
+    let result = picker
+        .source_suggestion(
+            &fx.caller(),
+            &fx.harbor,
+            &suggestion_query(Some(&other_github)),
+        )
+        .await;
+    assert!(matches!(result, Err(PickerFail::App(AppError::NotFound))));
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0, "no upstream call");
+    fx.close().await;
+}
+
+#[tokio::test]
+async fn a_base_url_with_a_path_prefix_keeps_the_prefix_on_every_call() {
+    let fx = Fixture::new("path-prefix").await;
+    let prefixed = extra_credential(
+        &fx,
+        "owner-1",
+        SERVICE_HARBOR,
+        Some("https://harbor.example.com/registry"),
+    )
+    .await;
+    let fake = Arc::new(Recorded::default());
+    fake.on(path_is("/registry/api/v2.0/users/current"), status(412));
+    fake.on(
+        path_is("/registry/api/v2.0/projects"),
+        ok(r#"[{"name":"alpha"}]"#),
+    );
+    fake.on(
+        path_is("/registry/api/v2.0/projects/alpha/repositories"),
+        ok(r#"[{"name":"alpha/app"}]"#),
+    );
+    let picker = state(fake.clone());
+    let projects = picker
+        .harbor_projects(&fx.caller(), &prefixed, &ListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(projects.items[0].name, "alpha");
+    let repos = picker
+        .harbor_repositories(&fx.caller(), &prefixed, "alpha", &ListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(repos.items[0].full_name, "alpha/app");
+    assert!(
+        fake.urls()
+            .iter()
+            .all(|u| u.starts_with("https://harbor.example.com/registry/api/v2.0/")),
+        "{:?}",
+        fake.urls()
+    );
+    fx.close().await;
 }

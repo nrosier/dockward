@@ -1308,6 +1308,152 @@ mod tests {
         }
     }
 
+    /// An admin session gets `404` on another user's credential for every picker route
+    /// (`specs/api.md`, Pickers: there is no admin exception), and a credential update
+    /// clears the credential's upstream rate-limit block (#126).
+    #[tokio::test]
+    async fn picker_routes_give_an_admin_404_and_an_update_clears_the_block() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use services::pickers::tests::{Recorded, SENTINEL, ok, robot_ok, status};
+        use std::sync::atomic::Ordering;
+        use tower::ServiceExt;
+
+        let fake = Arc::new(Recorded::default());
+        robot_ok(&fake);
+        fake.on(
+            |url: &reqwest::Url| url.path() == "/api/v2.0/projects",
+            ok(r#"[{"name":"alpha"}]"#),
+        );
+        let mut limited = status(429);
+        limited.retry_after = Some(300);
+        fake.on(|url: &reqwest::Url| url.path() == "/user/repos", limited);
+        let (router, pool, dir, _) = test_router_full(
+            "picker-admin-404",
+            services::throttle::LoginThrottle::new(),
+            api::webhooks::new_token_limiter(),
+            api::state::HarborProbeHandle::new(Arc::new(ReadableHarbor)),
+            api::state::HarborFetchHandle::outbound(false).unwrap(),
+            services::pickers::PickerState::new(fake.clone()),
+        )
+        .await;
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        db::users::insert_local(&mut conn, "owner-1", "owner-1", None, "h", "user")
+            .await
+            .unwrap();
+        db::users::insert_local(&mut conn, "admin-3", "admin-3", None, "h", "admin")
+            .await
+            .unwrap();
+        drop(conn);
+        let mut ids = Vec::new();
+        for (service, base_url, username) in [
+            (
+                services::credentials::SERVICE_HARBOR,
+                Some("https://harbor.example.com"),
+                Some("robot$hg"),
+            ),
+            (services::credentials::SERVICE_GITHUB, None, None),
+        ] {
+            let created = services::credentials::create(
+                &pool,
+                &auth::crypto::credentials_key(&root).unwrap(),
+                &services::audit::Actor {
+                    user_id: Some("owner-1".to_owned()),
+                    username: "owner-1".to_owned(),
+                },
+                "owner-1",
+                services::credentials::NewCredential {
+                    service_type: service.to_owned(),
+                    label: service.to_owned(),
+                    base_url: base_url.map(str::to_owned),
+                    username: username.map(str::to_owned),
+                    token: SENTINEL.to_owned(),
+                    expires_at: None,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+            ids.push(created.id);
+        }
+        let (harbor, github) = (ids[0].clone(), ids[1].clone());
+        let key = auth::crypto::csrf_key(&root).unwrap();
+        let csrf = auth::csrf::issue(&key).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let owner = format!("{}; {csrf_cookie}", session_cookie("owner-1", "user", 0));
+        let admin = format!("{}; {csrf_cookie}", session_cookie("admin-3", "admin", 0));
+        let send = |method: &str, uri: String, cookie: &str, body: &str| {
+            let request = with_peer(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("cookie", cookie)
+                    .header("x-csrf-token", csrf.as_str())
+                    .header("content-type", "application/json"),
+            )
+            .body(Body::from(body.to_owned()))
+            .unwrap();
+            let router = router.clone();
+            async move { router.oneshot(request).await.unwrap().status() }
+        };
+
+        // Admin on the owner's credential: 404 on all four routes, and no upstream call.
+        for uri in [
+            format!("/api/v1/credentials/{harbor}/harbor-projects"),
+            format!("/api/v1/credentials/{harbor}/harbor-projects/proj/repositories"),
+            format!("/api/v1/credentials/{github}/github-repositories"),
+            format!("/api/v1/credentials/{harbor}/source-suggestion?project=proj&repository=app"),
+        ] {
+            assert_eq!(
+                send("GET", uri.clone(), &admin, "").await,
+                StatusCode::NOT_FOUND,
+                "{uri}"
+            );
+        }
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+
+        // Set a block with a GitHub 429, and check it holds without a call.
+        let github_list = format!("/api/v1/credentials/{github}/github-repositories");
+        assert_eq!(
+            send("GET", github_list.clone(), &owner, "").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            send("GET", github_list.clone(), &owner, "").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            1,
+            "the block made no call"
+        );
+
+        // Updating the credential clears the block, so the next request calls upstream.
+        assert_eq!(
+            send(
+                "PUT",
+                format!("/api/v1/credentials/{github}"),
+                &owner,
+                r#"{"label":"renamed"}"#
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send("GET", github_list, &owner, "").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            2,
+            "the update cleared the block, so upstream was called again"
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Deleting a user through `DELETE /admin/users/:id` drops the picker cache entries and
     /// the rate-limit block of each credential the user owned (#126).
     #[tokio::test]
