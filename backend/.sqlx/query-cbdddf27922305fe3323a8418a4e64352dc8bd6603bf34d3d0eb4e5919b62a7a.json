@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", source, harbor_base_url, full_name, created_at\n           FROM picker_hidden_items\n           WHERE user_id = ? AND (? IS NULL OR source = ?)\n           ORDER BY\n             CASE WHEN ? = 'created_at' AND ? = 1 THEN created_at END ASC,\n             CASE WHEN ? = 'created_at' AND ? = -1 THEN created_at END DESC,\n             CASE WHEN ? = 'full_name' AND ? = 1 THEN full_name END ASC,\n             CASE WHEN ? = 'full_name' AND ? = -1 THEN full_name END DESC,\n             id ASC\n           LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "picker_hidden_items",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "source",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "picker_hidden_items",
+            "name": "source"
+          }
+        }
+      },
+      {
+        "name": "harbor_base_url",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "picker_hidden_items",
+            "name": "harbor_base_url"
+          }
+        }
+      },
+      {
+        "name": "full_name",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "picker_hidden_items",
+            "name": "full_name"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "picker_hidden_items",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 13
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "cbdddf27922305fe3323a8418a4e64352dc8bd6603bf34d3d0eb4e5919b62a7a"
+}

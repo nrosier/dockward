@@ -315,7 +315,11 @@ pub async fn delete_user(
         user_id: Some(admin.id),
         username: admin.username,
     };
-    user_service::delete_user(&state.pool, &actor, &id).await?;
+    let credential_ids = user_service::delete_user(&state.pool, &actor, &id).await?;
+    // The deleted credentials must not linger in the picker cache or block list.
+    for credential_id in &credential_ids {
+        state.pickers.drop_credential(credential_id);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -647,6 +651,7 @@ pub(crate) mod test_support {
             )),
             harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
             pull_limiter: crate::api::mappings::new_pull_limiter(),
+            pickers: crate::services::pickers::PickerState::outbound(false).unwrap(),
         };
         (state, dir)
     }
@@ -907,6 +912,7 @@ mod tests {
             )),
             harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
             pull_limiter: crate::api::mappings::new_pull_limiter(),
+            pickers: crate::services::pickers::PickerState::outbound(false).unwrap(),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }

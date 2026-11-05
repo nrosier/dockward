@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO picker_hidden_items (id, user_id, source, harbor_base_url, full_name, created_at)\n         SELECT CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT),\n                CAST(? AS TEXT), CAST(? AS INTEGER)\n         WHERE (SELECT COUNT(*) FROM picker_hidden_items WHERE user_id = ?) < ?\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "c31a25811596e1abae2d6e83e10f6d964012ca6c1bbba6116fcba0d9ba2939e4"
+}

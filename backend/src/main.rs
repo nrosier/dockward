@@ -70,6 +70,32 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/credentials/{id}/test",
             post(api::credentials::test),
         )
+        // Picker lists and suggestion: 60 per minute per user, shared (`specs/api.md`, Pickers).
+        .route(
+            "/api/v1/credentials/{id}/harbor-projects",
+            get(api::pickers::harbor_projects),
+        )
+        .route(
+            "/api/v1/credentials/{id}/harbor-projects/{project}/repositories",
+            get(api::pickers::harbor_repositories),
+        )
+        .route(
+            "/api/v1/credentials/{id}/github-repositories",
+            get(api::pickers::github_repositories),
+        )
+        .route(
+            "/api/v1/credentials/{id}/source-suggestion",
+            get(api::pickers::source_suggestion),
+        )
+        // Hidden items: no limit, own rows only, no upstream call (`specs/api.md`, Pickers).
+        .route(
+            "/api/v1/pickers/hidden",
+            get(api::pickers::list_hidden).post(api::pickers::hide),
+        )
+        .route(
+            "/api/v1/pickers/hidden/{id}",
+            axum::routing::delete(api::pickers::restore),
+        )
         .route(
             "/api/v1/mappings",
             get(api::mappings::list).post(api::mappings::create),
@@ -583,6 +609,8 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         harbor_fetch: api::state::HarborFetchHandle::outbound(settings.allow_private_harbor)
             .map_err(|_| "could not build the Harbor client")?,
         pull_limiter: api::mappings::new_pull_limiter(),
+        pickers: services::pickers::PickerState::outbound(settings.allow_private_harbor)
+            .map_err(|_| "could not build the picker client")?,
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -831,6 +859,7 @@ mod tests {
             )),
             harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
             pull_limiter: crate::api::mappings::new_pull_limiter(),
+            pickers: crate::services::pickers::PickerState::outbound(false).unwrap(),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -1019,6 +1048,537 @@ mod tests {
         assert_eq!(json["harbor_repository"], "app-two");
         assert!(json.get("webhook_url").is_none());
         assert!(json.get("auth_secret").is_none());
+    }
+
+    /// The picker routes through the router (#126). Checks session (`401`), tenancy (`404`
+    /// for another user's credential), the wrong type (`422`), the upstream rate limit (`429`
+    /// with `Retry-After`), CSRF on the hide routes, hide `201` then `200`, restore `204`, the
+    /// cache drop on `PUT /credentials/:id`, and that the sentinel secret never appears in a
+    /// response body. The upstream is a recorded fake; no live Harbor or GitHub is used.
+    #[tokio::test]
+    async fn picker_routes_check_session_tenancy_csrf_cache_and_secrets() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use services::pickers::tests::{Recorded, SENTINEL, ok, robot_ok, status};
+        use std::sync::atomic::Ordering;
+        use tower::ServiceExt;
+
+        let fake = Arc::new(Recorded::default());
+        robot_ok(&fake);
+        fake.on(
+            |url: &reqwest::Url| url.path() == "/api/v2.0/projects",
+            ok(r#"[{"name":"alpha"},{"name":"beta"}]"#),
+        );
+        let mut limited = status(429);
+        limited.retry_after = Some(30);
+        fake.on(|url: &reqwest::Url| url.path() == "/user/repos", limited);
+        let (router, pool, dir, _) = test_router_full(
+            "picker-routes",
+            services::throttle::LoginThrottle::new(),
+            api::webhooks::new_token_limiter(),
+            api::state::HarborProbeHandle::new(Arc::new(ReadableHarbor)),
+            api::state::HarborFetchHandle::outbound(false).unwrap(),
+            services::pickers::PickerState::new(fake.clone()),
+        )
+        .await;
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        for id in ["owner-1", "other-2"] {
+            db::users::insert_local(&mut conn, id, id, None, "h", "user")
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        let mut ids = Vec::new();
+        for (service, base_url, username) in [
+            (
+                services::credentials::SERVICE_HARBOR,
+                Some("https://harbor.example.com"),
+                Some("robot$hg"),
+            ),
+            (services::credentials::SERVICE_GITHUB, None, None),
+        ] {
+            let created = services::credentials::create(
+                &pool,
+                &auth::crypto::credentials_key(&root).unwrap(),
+                &services::audit::Actor {
+                    user_id: Some("owner-1".to_owned()),
+                    username: "owner-1".to_owned(),
+                },
+                "owner-1",
+                services::credentials::NewCredential {
+                    service_type: service.to_owned(),
+                    label: service.to_owned(),
+                    base_url: base_url.map(str::to_owned),
+                    username: username.map(str::to_owned),
+                    token: SENTINEL.to_owned(),
+                    expires_at: None,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+            ids.push(created.id);
+        }
+        let (harbor, github) = (ids[0].clone(), ids[1].clone());
+
+        let key = auth::crypto::csrf_key(&root).unwrap();
+        let csrf = auth::csrf::issue(&key).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let owner = format!("{}; {csrf_cookie}", session_cookie("owner-1", "user", 0));
+        let other = format!("{}; {csrf_cookie}", session_cookie("other-2", "user", 0));
+        let send = |method: &str, uri: String, cookie: &str, token: Option<&str>, body: &str| {
+            let mut builder = with_peer(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("cookie", cookie)
+                    .header("content-type", "application/json"),
+            );
+            if let Some(token) = token {
+                builder = builder.header("x-csrf-token", token);
+            }
+            let request = builder.body(Body::from(body.to_owned())).unwrap();
+            let router = router.clone();
+            async move {
+                let response = router.oneshot(request).await.unwrap();
+                let status = response.status();
+                let retry = response
+                    .headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .map(|v| v.to_str().unwrap().to_owned());
+                let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                (status, retry, String::from_utf8_lossy(&bytes).into_owned())
+            }
+        };
+        let projects = format!("/api/v1/credentials/{harbor}/harbor-projects");
+        let mut bodies = Vec::new();
+
+        let anonymous = send("GET", projects.clone(), &csrf_cookie, None, "").await;
+        let foreign = send("GET", projects.clone(), &other, None, "").await;
+        let owned = send("GET", projects.clone(), &owner, None, "").await;
+        let wrong_type = send(
+            "GET",
+            format!("/api/v1/credentials/{github}/harbor-projects"),
+            &owner,
+            None,
+            "",
+        )
+        .await;
+        let rate = send(
+            "GET",
+            format!("/api/v1/credentials/{github}/github-repositories"),
+            &owner,
+            None,
+            "",
+        )
+        .await;
+        let hide_body = r#"{"source":"harbor","full_name":"alpha","harbor_base_url":"https://harbor.example.com"}"#;
+        let no_csrf = send(
+            "POST",
+            "/api/v1/pickers/hidden".to_owned(),
+            &owner,
+            None,
+            hide_body,
+        )
+        .await;
+        let hidden = send(
+            "POST",
+            "/api/v1/pickers/hidden".to_owned(),
+            &owner,
+            Some(&csrf),
+            hide_body,
+        )
+        .await;
+        let hidden_again = send(
+            "POST",
+            "/api/v1/pickers/hidden".to_owned(),
+            &owner,
+            Some(&csrf),
+            hide_body,
+        )
+        .await;
+        let github_with_base = send(
+            "POST",
+            "/api/v1/pickers/hidden".to_owned(),
+            &owner,
+            Some(&csrf),
+            r#"{"source":"github","full_name":"octo/app","harbor_base_url":"https://harbor.example.com"}"#,
+        )
+        .await;
+        let filtered = send("GET", projects.clone(), &owner, None, "").await;
+        let calls_before_put = fake.calls.load(Ordering::SeqCst);
+        let put = send(
+            "PUT",
+            format!("/api/v1/credentials/{harbor}"),
+            &owner,
+            Some(&csrf),
+            r#"{"label":"renamed"}"#,
+        )
+        .await;
+        let after_put = send("GET", projects.clone(), &owner, None, "").await;
+        let calls_after_put = fake.calls.load(Ordering::SeqCst);
+        let item: serde_json::Value = serde_json::from_str(&hidden.2).unwrap();
+        let item_id = item["id"].as_str().unwrap().to_owned();
+        let foreign_restore = send(
+            "DELETE",
+            format!("/api/v1/pickers/hidden/{item_id}"),
+            &other,
+            Some(&csrf),
+            "",
+        )
+        .await;
+        let restored = send(
+            "DELETE",
+            format!("/api/v1/pickers/hidden/{item_id}"),
+            &owner,
+            Some(&csrf),
+            "",
+        )
+        .await;
+        let listed = send("GET", "/api/v1/pickers/hidden".to_owned(), &owner, None, "").await;
+        for response in [
+            &anonymous,
+            &foreign,
+            &owned,
+            &wrong_type,
+            &rate,
+            &no_csrf,
+            &hidden,
+            &hidden_again,
+            &github_with_base,
+            &filtered,
+            &put,
+            &after_put,
+            &foreign_restore,
+            &restored,
+            &listed,
+        ] {
+            bodies.push(response.2.clone());
+        }
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(anonymous.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(foreign.0, StatusCode::NOT_FOUND);
+        assert_eq!(owned.0, StatusCode::OK, "{}", owned.2);
+        let page: serde_json::Value = serde_json::from_str(&owned.2).unwrap();
+        assert_eq!(page["total"], 2);
+        assert_eq!(page["truncated"], false);
+        assert_eq!(page["items"][0], serde_json::json!({"name": "alpha"}));
+        assert_eq!(wrong_type.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(rate.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(rate.1.as_deref(), Some("30"));
+        assert!(
+            rate.2
+                .contains("GitHub rate limit reached. Try again later.")
+        );
+        assert_eq!(no_csrf.0, StatusCode::FORBIDDEN);
+        assert_eq!(hidden.0, StatusCode::CREATED, "{}", hidden.2);
+        assert_eq!(item["harbor_base_url"], "https://harbor.example.com");
+        assert_eq!(hidden_again.0, StatusCode::OK);
+        assert_eq!(github_with_base.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            github_with_base
+                .2
+                .contains("harbor_base_url is only for Harbor items.")
+        );
+        let page: serde_json::Value = serde_json::from_str(&filtered.2).unwrap();
+        assert_eq!(page["total"], 1, "the hidden project is left out");
+        assert_eq!(put.0, StatusCode::OK);
+        assert_eq!(after_put.0, StatusCode::OK);
+        assert_eq!(
+            calls_after_put - calls_before_put,
+            2,
+            "the credential update dropped the cache, so the list was fetched again"
+        );
+        assert_eq!(foreign_restore.0, StatusCode::NOT_FOUND);
+        assert_eq!(restored.0, StatusCode::NO_CONTENT);
+        let listed: serde_json::Value = serde_json::from_str(&listed.2).unwrap();
+        assert_eq!(listed["total"], 0);
+        for body in bodies {
+            assert!(!body.contains(SENTINEL), "the sentinel leaked: {body}");
+            assert!(
+                !body.contains("upstream detail"),
+                "an upstream body leaked: {body}"
+            );
+        }
+    }
+
+    /// An admin session gets `404` on another user's credential for every picker route
+    /// (`specs/api.md`, Pickers: there is no admin exception), and a credential update
+    /// clears the credential's upstream rate-limit block (#126).
+    #[tokio::test]
+    async fn picker_routes_give_an_admin_404_and_an_update_clears_the_block() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use services::pickers::tests::{Recorded, SENTINEL, ok, robot_ok, status};
+        use std::sync::atomic::Ordering;
+        use tower::ServiceExt;
+
+        let fake = Arc::new(Recorded::default());
+        robot_ok(&fake);
+        fake.on(
+            |url: &reqwest::Url| url.path() == "/api/v2.0/projects",
+            ok(r#"[{"name":"alpha"}]"#),
+        );
+        let mut limited = status(429);
+        limited.retry_after = Some(300);
+        fake.on(|url: &reqwest::Url| url.path() == "/user/repos", limited);
+        let (router, pool, dir, _) = test_router_full(
+            "picker-admin-404",
+            services::throttle::LoginThrottle::new(),
+            api::webhooks::new_token_limiter(),
+            api::state::HarborProbeHandle::new(Arc::new(ReadableHarbor)),
+            api::state::HarborFetchHandle::outbound(false).unwrap(),
+            services::pickers::PickerState::new(fake.clone()),
+        )
+        .await;
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        db::users::insert_local(&mut conn, "owner-1", "owner-1", None, "h", "user")
+            .await
+            .unwrap();
+        db::users::insert_local(&mut conn, "admin-3", "admin-3", None, "h", "admin")
+            .await
+            .unwrap();
+        drop(conn);
+        let mut ids = Vec::new();
+        for (service, base_url, username) in [
+            (
+                services::credentials::SERVICE_HARBOR,
+                Some("https://harbor.example.com"),
+                Some("robot$hg"),
+            ),
+            (services::credentials::SERVICE_GITHUB, None, None),
+        ] {
+            let created = services::credentials::create(
+                &pool,
+                &auth::crypto::credentials_key(&root).unwrap(),
+                &services::audit::Actor {
+                    user_id: Some("owner-1".to_owned()),
+                    username: "owner-1".to_owned(),
+                },
+                "owner-1",
+                services::credentials::NewCredential {
+                    service_type: service.to_owned(),
+                    label: service.to_owned(),
+                    base_url: base_url.map(str::to_owned),
+                    username: username.map(str::to_owned),
+                    token: SENTINEL.to_owned(),
+                    expires_at: None,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+            ids.push(created.id);
+        }
+        let (harbor, github) = (ids[0].clone(), ids[1].clone());
+        let key = auth::crypto::csrf_key(&root).unwrap();
+        let csrf = auth::csrf::issue(&key).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let owner = format!("{}; {csrf_cookie}", session_cookie("owner-1", "user", 0));
+        let admin = format!("{}; {csrf_cookie}", session_cookie("admin-3", "admin", 0));
+        let send = |method: &str, uri: String, cookie: &str, body: &str| {
+            let request = with_peer(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("cookie", cookie)
+                    .header("x-csrf-token", csrf.as_str())
+                    .header("content-type", "application/json"),
+            )
+            .body(Body::from(body.to_owned()))
+            .unwrap();
+            let router = router.clone();
+            async move { router.oneshot(request).await.unwrap().status() }
+        };
+
+        // Admin on the owner's credential: 404 on all four routes, and no upstream call.
+        for uri in [
+            format!("/api/v1/credentials/{harbor}/harbor-projects"),
+            format!("/api/v1/credentials/{harbor}/harbor-projects/proj/repositories"),
+            format!("/api/v1/credentials/{github}/github-repositories"),
+            format!("/api/v1/credentials/{harbor}/source-suggestion?project=proj&repository=app"),
+        ] {
+            assert_eq!(
+                send("GET", uri.clone(), &admin, "").await,
+                StatusCode::NOT_FOUND,
+                "{uri}"
+            );
+        }
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+
+        // Set a block with a GitHub 429, and check it holds without a call.
+        let github_list = format!("/api/v1/credentials/{github}/github-repositories");
+        assert_eq!(
+            send("GET", github_list.clone(), &owner, "").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            send("GET", github_list.clone(), &owner, "").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            1,
+            "the block made no call"
+        );
+
+        // Updating the credential clears the block, so the next request calls upstream.
+        assert_eq!(
+            send(
+                "PUT",
+                format!("/api/v1/credentials/{github}"),
+                &owner,
+                r#"{"label":"renamed"}"#
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send("GET", github_list, &owner, "").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            2,
+            "the update cleared the block, so upstream was called again"
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Deleting a user through `DELETE /admin/users/:id` drops the picker cache entries and
+    /// the rate-limit block of each credential the user owned (#126).
+    #[tokio::test]
+    async fn deleting_a_user_drops_their_picker_cache_and_blocks() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use services::pickers::tests::{Recorded, SENTINEL, ok, robot_ok, status};
+        use tower::ServiceExt;
+
+        let fake = Arc::new(Recorded::default());
+        robot_ok(&fake);
+        fake.on(
+            |url: &reqwest::Url| url.path() == "/api/v2.0/projects",
+            ok(r#"[{"name":"alpha"}]"#),
+        );
+        let mut limited = status(429);
+        limited.retry_after = Some(300);
+        fake.on(|url: &reqwest::Url| url.path() == "/user/repos", limited);
+        let pickers = services::pickers::PickerState::new(fake.clone());
+        let (router, pool, dir, _) = test_router_full(
+            "picker-user-delete",
+            services::throttle::LoginThrottle::new(),
+            api::webhooks::new_token_limiter(),
+            api::state::HarborProbeHandle::new(Arc::new(ReadableHarbor)),
+            api::state::HarborFetchHandle::outbound(false).unwrap(),
+            pickers.clone(),
+        )
+        .await;
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        db::users::insert_local(&mut conn, "owner-1", "owner-1", None, "h", "user")
+            .await
+            .unwrap();
+        db::users::insert_local(&mut conn, "admin-3", "admin-3", None, "h", "admin")
+            .await
+            .unwrap();
+        drop(conn);
+        let mut ids = Vec::new();
+        for (service, base_url, username) in [
+            (
+                services::credentials::SERVICE_HARBOR,
+                Some("https://harbor.example.com"),
+                Some("robot$hg"),
+            ),
+            (services::credentials::SERVICE_GITHUB, None, None),
+        ] {
+            let created = services::credentials::create(
+                &pool,
+                &auth::crypto::credentials_key(&root).unwrap(),
+                &services::audit::Actor {
+                    user_id: Some("owner-1".to_owned()),
+                    username: "owner-1".to_owned(),
+                },
+                "owner-1",
+                services::credentials::NewCredential {
+                    service_type: service.to_owned(),
+                    label: service.to_owned(),
+                    base_url: base_url.map(str::to_owned),
+                    username: username.map(str::to_owned),
+                    token: SENTINEL.to_owned(),
+                    expires_at: None,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+            ids.push(created.id);
+        }
+        let key = auth::crypto::csrf_key(&root).unwrap();
+        let csrf = auth::csrf::issue(&key).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let owner = format!("{}; {csrf_cookie}", session_cookie("owner-1", "user", 0));
+        let admin = format!("{}; {csrf_cookie}", session_cookie("admin-3", "admin", 0));
+        let send = |method: &str, uri: String, cookie: &str, token: Option<&str>| {
+            let mut builder = with_peer(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("cookie", cookie),
+            );
+            if let Some(token) = token {
+                builder = builder.header("x-csrf-token", token);
+            }
+            let request = builder.body(Body::empty()).unwrap();
+            let router = router.clone();
+            async move { router.oneshot(request).await.unwrap().status() }
+        };
+
+        // One cached Harbor list, and a GitHub rate-limit block.
+        let listed = send(
+            "GET",
+            format!("/api/v1/credentials/{}/harbor-projects", ids[0]),
+            &owner,
+            None,
+        )
+        .await;
+        let limited = send(
+            "GET",
+            format!("/api/v1/credentials/{}/github-repositories", ids[1]),
+            &owner,
+            None,
+        )
+        .await;
+        assert_eq!(listed, StatusCode::OK);
+        assert_eq!(limited, StatusCode::TOO_MANY_REQUESTS);
+        // Two slots (the Harbor list, and the empty slot of the rate-limited GitHub fill) and
+        // one block.
+        assert_eq!(pickers.held(), (2, 1), "entries and a block are held");
+
+        let deleted = send(
+            "DELETE",
+            "/api/v1/admin/users/owner-1".to_owned(),
+            &admin,
+            Some(&csrf),
+        )
+        .await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(deleted, StatusCode::NO_CONTENT);
+        assert_eq!(
+            pickers.held(),
+            (0, 0),
+            "the deleted user's cache entry and block were dropped"
+        );
     }
 
     /// A Harbor reader that answers the artifact list from recorded bodies. Page 1 of a
@@ -1329,6 +1889,32 @@ mod tests {
         std::path::PathBuf,
         api::hardening::RateLimiter,
     ) {
+        test_router_full(
+            name,
+            login_throttle,
+            webhook_token_limiter,
+            harbor_probe,
+            harbor_fetch,
+            services::pickers::PickerState::outbound(false).unwrap(),
+        )
+        .await
+    }
+
+    /// The full test router with every injectable part. The picker router tests pass a
+    /// fake picker transport here, so no live Harbor or GitHub is called.
+    pub(crate) async fn test_router_full(
+        name: &str,
+        login_throttle: services::throttle::LoginThrottle,
+        webhook_token_limiter: api::hardening::RateLimiter,
+        harbor_probe: api::state::HarborProbeHandle,
+        harbor_fetch: api::state::HarborFetchHandle,
+        pickers: services::pickers::PickerState,
+    ) -> (
+        Router,
+        sqlx::SqlitePool,
+        std::path::PathBuf,
+        api::hardening::RateLimiter,
+    ) {
         let dir = std::env::temp_dir().join(format!("harborgate-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1362,6 +1948,7 @@ mod tests {
             )),
             harbor_fetch,
             pull_limiter: api::mappings::new_pull_limiter(),
+            pickers,
         };
         (app(Vec::new(), state), pool, dir, handle)
     }
@@ -2813,9 +3400,10 @@ mod tests {
             .unwrap();
         let before = schema_state(&pool).await;
         pool.close().await;
-        // Migration 2 is removed; migration 3 (project webhooks, #132) is still applied.
+        // Migration 2 is removed; migrations 3 (project webhooks, #132) and 4 (picker hidden
+        // items, #126) are still applied.
         assert!(
-            before == (vec![1, 3], 0),
+            before == (vec![1, 3, 4], 0),
             "the setup did not remove migration 2"
         );
 

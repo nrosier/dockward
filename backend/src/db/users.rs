@@ -153,6 +153,21 @@ pub async fn delete_mappings(
         .map_err(|_| AppError::InternalError)
 }
 
+/// The ids of a user's credentials. Read before they are deleted, so the caller can drop
+/// the in-memory picker entries of each.
+pub async fn credential_ids(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: &str,
+) -> Result<Vec<String>, AppError> {
+    sqlx::query_scalar!(
+        r#"SELECT id AS "id!: String" FROM user_credentials WHERE user_id = ?"#,
+        user_id
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
 /// Deletes a user's credentials. Step two of the user-deletion order.
 pub async fn delete_credentials(
     conn: &mut sqlx::SqliteConnection,
