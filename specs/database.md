@@ -231,16 +231,20 @@ CREATE TABLE IF NOT EXISTS project_webhook_unmatched (
 );
 
 -- Picker Hidden Items (per-user hide list for the mapping pickers)
--- Decided (2026-11-05, user, #126): keyed by user, source, and the item's full name. Not built yet; needs its own migration.
+-- Decided (2026-11-05, user, #126): hidden items are keyed by Harbor base URL. A row is keyed by user, source, and the item's full name, and for harbor source also the Harbor base URL. Not built yet; needs its own migration.
 -- A row changes only the user's own pickers. It never changes a mapping, a sync, or another user's view.
 CREATE TABLE IF NOT EXISTS picker_hidden_items (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     source TEXT NOT NULL CHECK (source IN ('harbor', 'github')),
+    harbor_base_url TEXT, -- harbor: the credential's base_url the item was hidden on (user_credentials.base_url); NULL for github
     full_name TEXT NOT NULL, -- harbor: '<project>' or '<project>/<repository>'; github: '<owner>/<repo>' lowercased. See integrations.md, "Hide and restore".
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-    UNIQUE (user_id, source, full_name)
+    CHECK ((source = 'harbor') = (harbor_base_url IS NOT NULL))
 );
+-- Uniqueness: one partial unique index per source. A plain UNIQUE over the nullable harbor_base_url would not stop duplicate github rows, because SQLite treats NULLs as distinct.
+CREATE UNIQUE INDEX IF NOT EXISTS picker_hidden_items_harbor_key ON picker_hidden_items (user_id, harbor_base_url, full_name) WHERE source = 'harbor';
+CREATE UNIQUE INDEX IF NOT EXISTS picker_hidden_items_github_key ON picker_hidden_items (user_id, full_name) WHERE source = 'github';
 ```
 
 ## system_config keys
@@ -304,7 +308,7 @@ Source: none external. The list follows the audit examples in [frontend.md](fron
 - **Retention:** `sync_reports` and related logs are kept 90 days. `sync_jobs` is kept 90 days (Decided 2026-11-03). `job_runs` is kept 90 days (Decided 2026-11-03). `alert_deliveries` is kept 30 days (Decided 2026-11-03). `audit_log` is kept 365 days. See [cve-lifecycle.md](cve-lifecycle.md) for the per-tag limit.
 - Decided (2026-11-03, delegated): `CHECK` constraints on enumerated TEXT columns (`sync_jobs.status`, `github_issues.status`, `cve_findings.status` and `severity`, `repo_mappings.min_issue_severity`, `alert_channels.kind`, `job_runs.job_kind` and `job_runs.status`). Source: SQLite CREATE TABLE documentation, CHECK constraints (https://www.sqlite.org/lang_createtable.html). The index `idx_sync_reports_digest` is Decided (2026-11-03, delegated) for the polling dedupe lookup; no external source.
 - Decided (2026-11-05, user, #129): showing, filtering and manually logging every severity needs no constraint change and no migration. `cve_findings.severity` already allows all five values (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `UNKNOWN`), and the findings were always stored at every severity. `repo_mappings.min_issue_severity` keeps `CHECK (min_issue_severity IN ('CRITICAL', 'HIGH'))`, because it governs automatic issues only and the user decided automatic issues stay CRITICAL and HIGH. Manual logging at any severity reads no column that has a severity constraint, and the `github_issues` table has no severity column. The issue body of #129 assumed a constraint change; the decision recorded on the issue made it unnecessary.
-- Decided (2026-11-05, user, #126): `picker_hidden_items` holds one row per user, source, and full name, enforced with `UNIQUE (user_id, source, full_name)`; a repeated hide is a no-op that returns the existing row. Decided (2026-11-05, delegated, #126): the table has no Harbor base URL or credential column, because the decided key is user, source, and full name, so a hidden Harbor name is hidden for all of the user's Harbor credentials; `ON DELETE CASCADE` on `user_id` removes a deleted user's rows (the user deletion order is unchanged, because no other table references this one); `source` has a `CHECK` like the other enumerated columns; the table is not covered by retention, because rows are user-managed and capped at 1,000 per user by the application ([integrations.md](integrations.md), "Hide and restore"). The table is included in backups like every other table. Picker lists themselves are never stored: the 5-minute cache is in memory.
+- Decided (2026-11-05, user, #126): `picker_hidden_items` holds one row per user, source, and full name, and for harbor source also per Harbor base URL, enforced by the two partial unique indexes in the table definition; a repeated hide is a no-op that returns the existing row. Decided (2026-11-05, user, #126): a hidden Harbor name is hidden only on the Harbor base URL it was hidden on, so the table stores `harbor_base_url` (the credential's `base_url`, NULL for github source) and no credential id. The `CHECK` ties `harbor_base_url` to `source`. `ON DELETE CASCADE` on `user_id` removes a deleted user's rows (the user deletion order is unchanged, because no other table references this one); `source` has a `CHECK` like the other enumerated columns; the table is not covered by retention, because rows are user-managed and capped at 1,000 per user by the application ([integrations.md](integrations.md), "Hide and restore"). The table is included in backups like every other table. Picker lists themselves are never stored: the 5-minute cache is in memory.
 - **Source for the 90 and 365 day values:** these are the user's decided retention rules, not external standards.
 
 ## Decisions
