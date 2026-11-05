@@ -146,7 +146,11 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          labels: ${{ steps.meta-digest.outputs.labels }}
+          # The revision label is set explicitly to the commit being built, so consumers such as
+          # HarborGate can read the source commit of this image (org.opencontainers.image.revision).
+          labels: |
+            ${{ steps.meta-digest.outputs.labels }}
+            org.opencontainers.image.revision=${{ github.sha }}
           outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/harborgate,push-by-digest=true,name-canonical=true,push=true
           provenance: mode=max
           sbom: true
