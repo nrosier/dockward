@@ -14,6 +14,7 @@ use serde::Serialize;
 
 use crate::api::hardening::{ClientIp, RateLimiter, too_many_requests};
 use crate::api::state::AppState;
+use crate::db;
 use crate::error::AppError;
 use crate::services::harbor_webhook::{self, Received};
 use crate::worker::now_secs;
@@ -48,6 +49,103 @@ fn refuse(state: &AppState, failure_key: Option<&str>, now: Instant) -> AppError
         let _ = state.webhook_failure_limiter.check(key, now);
     }
     AppError::InvalidCredentials
+}
+
+/// `POST /api/v1/webhooks/harbor/project/:project_token` (#132, `specs/integrations.md`).
+///
+/// One project webhook serves every mapping on its Harbor project. Order, as for the mapping
+/// receiver:
+/// 1. The per-IP failure budget is checked, not consumed.
+/// 2. The body is read under the 64 KiB cap.
+/// 3. The project token is looked up by digest. An unknown token is a `401` and counts one IP
+///    failure.
+/// 4. The event's repository picks the mapping on that project. No mapping matches: the event
+///    is counted as unmatched and the request returns `202` with nothing queued.
+/// 5. The per-mapping budget is charged, then the `Authorization` secret and the event logic
+///    run. The secret is the project secret, checked against its digest.
+pub async fn receive_project(
+    State(state): State<AppState>,
+    Path(project_token): Path<String>,
+    client: Option<axum::Extension<ClientIp>>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, AppError> {
+    let client_ip = client.map(|axum::Extension(ClientIp(ip))| ip);
+    let now = Instant::now();
+    let failure_key = client_ip.map(|ip| format!("fail:{ip}"));
+    if let Some(key) = &failure_key
+        && state.webhook_failure_limiter.is_exhausted(key, now)
+    {
+        return Ok(too_many_requests(WINDOW.as_secs()));
+    }
+    let body = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES)
+        .await
+        .map_err(|_| AppError::PayloadTooLarge)?;
+    let token_hash = crate::services::mappings::digest(&project_token);
+    let Some(project) = db::project_webhooks::find_by_token_hash(&state.pool, &token_hash).await?
+    else {
+        return Err(refuse(&state, failure_key.as_deref(), now));
+    };
+    let authorization = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    let Some(repository) = harbor_webhook::event_repository(&body) else {
+        return Err(AppError::InvalidRequest(
+            "the event does not name a repository.".to_owned(),
+        ));
+    };
+    let Some(mapping_id) = db::project_webhooks::mapping_for_repository(
+        &state.pool,
+        &project.harbor_base_url,
+        &project.harbor_project,
+        repository_name(&repository),
+    )
+    .await?
+    else {
+        // No mapping covers this repository. The event is authenticated first, so an unknown
+        // sender cannot fill the count, then counted and acknowledged with nothing queued.
+        if !harbor_webhook::secret_matches(&project.secret_hash, authorization) {
+            return Err(refuse(&state, failure_key.as_deref(), now));
+        }
+        db::project_webhooks::record_unmatched(&state.pool, &project.id, &repository, now_secs())
+            .await?;
+        return Ok((StatusCode::ACCEPTED, Json(Accepted { status: "accepted" })).into_response());
+    };
+    if let Err(retry) = state
+        .webhook_token_limiter
+        .check(&format!("mapping:{mapping_id}"), now)
+    {
+        return Ok(too_many_requests(retry));
+    }
+    // The project secret is checked here, not the mapping's: a project event is authenticated
+    // by the project webhook it arrived at (#132).
+    if !harbor_webhook::secret_matches(&project.secret_hash, authorization) {
+        return Err(refuse(&state, failure_key.as_deref(), now));
+    }
+    let job_id = crate::services::ids::new_id()?;
+    // The event's own repo_full_name is already `project/repository`, the form classify compares.
+    let repo_full_name = repository.clone();
+    match harbor_webhook::queue_event(
+        &state.pool,
+        &mapping_id,
+        &repo_full_name,
+        &body,
+        now_secs(),
+        &job_id,
+    )
+    .await
+    {
+        Ok(Received::Queued) | Ok(Received::Ignored) => {
+            Ok((StatusCode::ACCEPTED, Json(Accepted { status: "accepted" })).into_response())
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// The repository part of `owner/name` (the Harbor repository), as the mapping stores it.
+fn repository_name(full: &str) -> &str {
+    full.split_once('/')
+        .map_or(full, |(_, repository)| repository)
 }
 
 /// `POST /api/v1/webhooks/harbor/:mapping_token`.

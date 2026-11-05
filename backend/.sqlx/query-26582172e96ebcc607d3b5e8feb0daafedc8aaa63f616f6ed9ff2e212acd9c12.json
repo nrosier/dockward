@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO project_webhook_unmatched (project_webhook_id, repository, count, last_seen_at)\n         VALUES (?, ?, 1, ?)\n         ON CONFLICT (project_webhook_id, repository)\n         DO UPDATE SET count = count + 1, last_seen_at = excluded.last_seen_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "26582172e96ebcc607d3b5e8feb0daafedc8aaa63f616f6ed9ff2e212acd9c12"
+}
