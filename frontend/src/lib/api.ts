@@ -11,13 +11,16 @@ export class ApiError extends Error {
   code: string;
   // Seconds from a `Retry-After` header, when the response had a valid one.
   retryAfter?: number;
+  // The envelope's `detail` code (picker 422 answers only), e.g. `robot_scope`.
+  detail?: string;
 
-  constructor(status: number, code: string, message: string, retryAfter?: number) {
+  constructor(status: number, code: string, message: string, retryAfter?: number, detail?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.retryAfter = retryAfter;
+    this.detail = detail;
   }
 }
 
@@ -60,7 +63,14 @@ async function toApiError(response: Response): Promise<ApiError> {
     parsed = undefined;
   }
   if (isEnvelope(parsed)) {
-    return new ApiError(response.status, parsed.error.code, parsed.error.message, retryAfter);
+    const detail = (parsed.error as { detail?: unknown }).detail;
+    return new ApiError(
+      response.status,
+      parsed.error.code,
+      parsed.error.message,
+      retryAfter,
+      typeof detail === "string" ? detail : undefined,
+    );
   }
   return new ApiError(response.status, "internal_error", response.statusText, retryAfter);
 }

@@ -51,6 +51,18 @@ describe("api", () => {
     expect((failure as ApiError).message).toBe("Already used.");
   });
 
+  it("carries Retry-After seconds and the detail code on ApiError", async () => {
+    stubFetch(
+      new Response(JSON.stringify({ error: { code: "rate_limited", message: "Slow down.", detail: "robot_scope" } }), {
+        status: 429,
+        headers: { "Retry-After": "900" },
+      }),
+    );
+    const failure = (await api("GET", "/x").catch((error: unknown) => error)) as ApiError;
+    expect(failure.retryAfter).toBe(900);
+    expect(failure.detail).toBe("robot_scope");
+  });
+
   it("returns undefined on 204", async () => {
     stubFetch(new Response(null, { status: 204 }));
     await expect(api("POST", "/auth/logout")).resolves.toBeUndefined();

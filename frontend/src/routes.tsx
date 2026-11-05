@@ -5,6 +5,7 @@ import { NotFoundMessage } from "./components/ui/StatusMessage";
 import { RequireAdmin, RequireAuth } from "./lib/session";
 import { ProfileTab } from "./pages/ProfileTab";
 import { AppearanceTab } from "./pages/AppearanceTab";
+import HiddenTab from "./pages/HiddenTab";
 import CredentialsTab from "./pages/CredentialsTab";
 import { AccountLayout } from "./components/shell/AccountLayout";
 import AdminAlertsPage from "./pages/AdminAlertsPage";
@@ -54,6 +55,7 @@ export const routes: RouteObject[] = [
               { path: "profile", element: <ProfileTab /> },
               { path: "appearance", element: <AppearanceTab /> },
               { path: "credentials", element: <CredentialsTab /> },
+              { path: "hidden", element: <HiddenTab /> },
             ],
           },
           { path: "account/credentials/new", element: <CredentialFormPage /> },
