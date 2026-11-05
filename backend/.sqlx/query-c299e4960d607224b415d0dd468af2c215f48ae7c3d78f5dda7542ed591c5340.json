@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT user_id AS \"user_id!\" FROM repo_mappings\n           WHERE harbor_base_url = ? AND harbor_project = ? AND user_id <> ?\n           GROUP BY user_id\n           ORDER BY MIN(created_at) ASC, user_id ASC\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "c299e4960d607224b415d0dd468af2c215f48ae7c3d78f5dda7542ed591c5340"
+}
