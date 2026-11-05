@@ -93,7 +93,7 @@ Status: the project webhook receiver is built. The management API (create, owner
     | The answer body is unreadable | `Harbor returned an artifact that could not be read` |
     | The artifact has no tags | `digest has no tags to sync` |
 
-    Decided (2026-11-05, user, #132): fixed failure messages match the built code (PR #165). The old single row `digest lookup failed` is split into the four lookup causes above, because the code names each one.
+    Decided (2026-11-05, user, #132): fixed failure messages match the built code (PR #165). The code names each lookup cause, so the table lists them separately.
 
     Reason: fixed text keeps the alert and the Sync jobs API free of upstream content.
   - Field paths: under `event_data` in the default format and under `data` in CloudEvents (verified (2026-11-03), `src/pkg/notifier/formats/default.go` and `cloudevents.go`). The artifact digest is `resources[0].digest`.
