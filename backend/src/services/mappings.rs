@@ -452,9 +452,10 @@ pub async fn create<P: HarborProbe, G: GithubProbe>(
 ///
 /// The work runs in three phases. Validation, the ownership reads and the outbound probes
 /// run on a plain connection, with no write lock held, so a slow probe does not block other
-/// writers. The ownership checks, the collision check and the write then run again in one
-/// `BEGIN IMMEDIATE` transaction. A competing write that lands during the probes is seen
-/// by the second phase, and a UNIQUE violation there is `409`.
+/// writers. Then one `BEGIN IMMEDIATE` transaction reads the row under the lock, reapplies
+/// the patch to that row, and rechecks the owners and the collision before the write. A
+/// change to a probed field during the probes is `409`, because the probes checked a
+/// different combination. A UNIQUE violation at the write is also `409`.
 pub async fn update<P: HarborProbe, G: GithubProbe>(
     pool: &SqlitePool,
     credentials_key: &DerivedKey,
@@ -535,6 +536,16 @@ pub async fn update<P: HarborProbe, G: GithubProbe>(
         tx.commit().await.map_err(|_| AppError::InternalError)?;
         return to_mapping(locked);
     }
+    // The probes validated the probed fields of `current`. If one of them changed under the
+    // lock, the probes checked a different combination than the one this write would store.
+    if probed_fields_changed(&current, &locked) {
+        return Err(AppError::Conflict(
+            "the mapping changed, try again.".to_owned(),
+        ));
+    }
+    // Reapply the patch to the row read under the lock, so a concurrent write to a field the
+    // patch does not name is kept.
+    let (mut next, _) = apply_patch(&locked, &patch)?;
     check_update_owners(&mut tx, user_id, &patch, &mut next).await?;
     let target_changed =
         harbor_changed || patch.github_owner.is_some() || patch.github_repo.is_some();
@@ -580,6 +591,18 @@ pub async fn update<P: HarborProbe, G: GithubProbe>(
     .await?;
     tx.commit().await.map_err(|_| AppError::InternalError)?;
     to_mapping(load_row_owned(pool, user_id, id).await?)
+}
+
+/// True when a field the Harbor and GitHub probes read differs between two reads of the
+/// same mapping. Those fields are the Harbor project and repository, the GitHub owner and
+/// repository, and the two credential ids.
+fn probed_fields_changed(before: &MappingRow, after: &MappingRow) -> bool {
+    before.harbor_cred_id != after.harbor_cred_id
+        || before.github_cred_id != after.github_cred_id
+        || before.harbor_project != after.harbor_project
+        || before.harbor_repository != after.harbor_repository
+        || before.github_owner != after.github_owner
+        || before.github_repo != after.github_repo
 }
 
 /// Applies a patch to a copy of `current`. Validates each changed field with the create
@@ -638,22 +661,21 @@ fn apply_patch(
     Ok((next, changed))
 }
 
-/// Checks that each credential the patch names is owned by the caller, and copies the
-/// Harbor base URL of a new Harbor credential into `next`. A foreign or unknown credential
-/// is `404`. Runs in both phases, so the write phase sees the same ownership.
+/// Checks that both credentials the mapping uses are owned by the caller. A foreign or
+/// unknown credential is `404`. This runs for every update, not only when the patch names
+/// a credential, so a credential moved to another user during the probes is refused. When
+/// the patch names the Harbor credential, its base URL is copied into `next`.
 async fn check_update_owners(
     conn: &mut sqlx::SqliteConnection,
     user_id: &str,
     patch: &MappingPatch,
     next: &mut MappingRow,
 ) -> Result<(), AppError> {
+    let base = harbor_base_of(conn, user_id, &next.harbor_cred_id).await?;
     if patch.harbor_cred_id.is_some() {
-        next.harbor_base_url = harbor_base_of(conn, user_id, &next.harbor_cred_id).await?;
+        next.harbor_base_url = base;
     }
-    if patch.github_cred_id.is_some() {
-        check_github(conn, user_id, &next.github_cred_id).await?;
-    }
-    Ok(())
+    check_github(conn, user_id, &next.github_cred_id).await
 }
 
 /// Reads one owned row. Used after a write, so the response shows the stored values.
@@ -1602,6 +1624,14 @@ mod tests {
         .id
     }
 
+    /// Reads one owned mapping row, for a test that needs its credential ids.
+    async fn load_owned_row(pool: &SqlitePool, owner: &str, id: &str) -> MappingRow {
+        db::find_owned(&mut pool.acquire().await.unwrap(), owner, id)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
     /// A patch with every field unset.
     fn no_change() -> MappingPatch {
         MappingPatch::default()
@@ -1970,5 +2000,263 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(matches!(err, AppError::Conflict(_)), "{err:?}");
         assert_eq!(err.status(), axum::http::StatusCode::CONFLICT);
+    }
+
+    /// A Harbor probe that changes one untouched column, `default_branch`, on the mapping
+    /// while the update is probing. The update does not name that column. No socket.
+    struct ConcurrentDefaultBranchHarbor {
+        pool: SqlitePool,
+        mapping_id: String,
+    }
+
+    impl HarborProbe for ConcurrentDefaultBranchHarbor {
+        async fn users_current(
+            &self,
+            _base: &reqwest::Url,
+            _username: &str,
+            _secret: &[u8],
+        ) -> Result<u16, AppError> {
+            Ok(200)
+        }
+
+        async fn artifacts_status(
+            &self,
+            _base: &reqwest::Url,
+            _username: &str,
+            _secret: &[u8],
+            _project: &str,
+            _repository: &str,
+        ) -> Result<u16, AppError> {
+            sqlx::query("UPDATE repo_mappings SET default_branch = 'concurrent' WHERE id = ?")
+                .bind(&self.mapping_id)
+                .execute(&self.pool)
+                .await
+                .map_err(|_| AppError::InternalError)?;
+            Ok(200)
+        }
+    }
+
+    /// A PUT that changes only `harbor_repository`, while a concurrent write changes
+    /// `default_branch` during the probe. The concurrent value must be kept in the stored
+    /// row. The request may instead fail with `409`, but it must never revert the
+    /// concurrent write.
+    #[tokio::test]
+    async fn a_concurrent_write_to_an_untouched_field_is_not_lost() {
+        let (pool, dir) = fresh_pool("update-lost-write").await;
+        let owner = user(&pool, "owner").await;
+        let id = mapping_for(&pool, &owner, "repo", "gh").await;
+        let harbor = ConcurrentDefaultBranchHarbor {
+            pool: pool.clone(),
+            mapping_id: id.clone(),
+        };
+        let result = update_with(
+            &pool,
+            Probes {
+                harbor: &harbor,
+                github: &GH_READY,
+            },
+            &owner,
+            &id,
+            MappingPatch {
+                harbor_repository: Some("repo-two".to_owned()),
+                ..no_change()
+            },
+        )
+        .await;
+        let stored = load_owned(&pool, &owner, &id).await.unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        match result {
+            Ok(_) => assert_eq!(stored.default_branch, "concurrent"),
+            Err(err) => {
+                assert!(matches!(err, AppError::Conflict(_)), "{err:?}");
+                assert_eq!(stored.default_branch, "concurrent");
+            }
+        }
+    }
+
+    /// Probe that changes `harbor_project` on the mapping during the probe. That field is
+    /// probed, so the update must refuse with `409` rather than store an unprobed combination.
+    struct ConcurrentProjectHarbor {
+        pool: SqlitePool,
+        mapping_id: String,
+    }
+
+    impl HarborProbe for ConcurrentProjectHarbor {
+        async fn users_current(
+            &self,
+            _base: &reqwest::Url,
+            _username: &str,
+            _secret: &[u8],
+        ) -> Result<u16, AppError> {
+            Ok(200)
+        }
+
+        async fn artifacts_status(
+            &self,
+            _base: &reqwest::Url,
+            _username: &str,
+            _secret: &[u8],
+            _project: &str,
+            _repository: &str,
+        ) -> Result<u16, AppError> {
+            sqlx::query("UPDATE repo_mappings SET harbor_project = 'other-proj' WHERE id = ?")
+                .bind(&self.mapping_id)
+                .execute(&self.pool)
+                .await
+                .map_err(|_| AppError::InternalError)?;
+            Ok(200)
+        }
+    }
+
+    /// A probed field changed during the probes is `409`, with the fixed text.
+    #[tokio::test]
+    async fn a_probed_field_changed_during_the_probe_is_a_409() {
+        let (pool, dir) = fresh_pool("update-probed-changed").await;
+        let owner = user(&pool, "owner").await;
+        let id = mapping_for(&pool, &owner, "repo", "gh").await;
+        let harbor = ConcurrentProjectHarbor {
+            pool: pool.clone(),
+            mapping_id: id.clone(),
+        };
+        let err = update_with(
+            &pool,
+            Probes {
+                harbor: &harbor,
+                github: &GH_READY,
+            },
+            &owner,
+            &id,
+            MappingPatch {
+                harbor_repository: Some("repo-two".to_owned()),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap_err();
+        let stored = load_owned(&pool, &owner, &id).await.unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(err.status(), axum::http::StatusCode::CONFLICT, "{err:?}");
+        assert_eq!(err.message(), "the mapping changed, try again.");
+        assert_eq!(stored.harbor_repository, "repo");
+    }
+
+    /// Harbor credential change: the stored Harbor base URL is the new credential's base,
+    /// not the old one.
+    #[tokio::test]
+    async fn a_harbor_credential_change_refreshes_the_base_url() {
+        let (pool, dir) = fresh_pool("update-base-url").await;
+        let owner = user(&pool, "owner").await;
+        let id = mapping_for(&pool, &owner, "repo", "gh").await;
+        let (_, g) = creds(&pool, &owner).await;
+        let new_harbor = credentials::create(
+            &pool,
+            &key(),
+            &actor(&owner),
+            &owner,
+            NewCredential {
+                service_type: SERVICE_HARBOR.to_owned(),
+                label: "h2".to_owned(),
+                base_url: Some("https://harbor-two.example.com".to_owned()),
+                username: Some("robot$hg".to_owned()),
+                token: "test-harbor-secret".to_owned(),
+                expires_at: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let _ = g;
+        update_with(
+            &pool,
+            Probes {
+                harbor: &READABLE,
+                github: &GH_READY,
+            },
+            &owner,
+            &id,
+            MappingPatch {
+                harbor_cred_id: Some(new_harbor.id),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap();
+        let stored = load_owned(&pool, &owner, &id).await.unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(stored.harbor_base_url, "https://harbor-two.example.com");
+    }
+
+    /// A Harbor probe that transfers the caller's Harbor credential to another user while
+    /// the update is probing. The phase-3 ownership recheck must refuse it. No socket.
+    struct TransferCredentialHarbor {
+        pool: SqlitePool,
+        credential_id: String,
+        new_owner: String,
+    }
+
+    impl HarborProbe for TransferCredentialHarbor {
+        async fn users_current(
+            &self,
+            _base: &reqwest::Url,
+            _username: &str,
+            _secret: &[u8],
+        ) -> Result<u16, AppError> {
+            Ok(200)
+        }
+
+        async fn artifacts_status(
+            &self,
+            _base: &reqwest::Url,
+            _username: &str,
+            _secret: &[u8],
+            _project: &str,
+            _repository: &str,
+        ) -> Result<u16, AppError> {
+            sqlx::query("UPDATE user_credentials SET user_id = ? WHERE id = ?")
+                .bind(&self.new_owner)
+                .bind(&self.credential_id)
+                .execute(&self.pool)
+                .await
+                .map_err(|_| AppError::InternalError)?;
+            Ok(200)
+        }
+    }
+
+    /// A credential that moves to another user during the probe is refused by the
+    /// phase-3 ownership recheck, with `404`.
+    #[tokio::test]
+    async fn a_credential_transferred_during_the_probe_is_not_found() {
+        let (pool, dir) = fresh_pool("update-transfer").await;
+        let owner = user(&pool, "owner").await;
+        let other = user(&pool, "other").await;
+        let id = mapping_for(&pool, &owner, "repo", "gh").await;
+        // The Harbor credential the mapping actually uses, not a new one.
+        let mapped_harbor = load_owned_row(&pool, &owner, &id).await.harbor_cred_id;
+        let harbor = TransferCredentialHarbor {
+            pool: pool.clone(),
+            credential_id: mapped_harbor,
+            new_owner: other.clone(),
+        };
+        let err = update_with(
+            &pool,
+            Probes {
+                harbor: &harbor,
+                github: &GH_READY,
+            },
+            &owner,
+            &id,
+            MappingPatch {
+                harbor_repository: Some("repo-two".to_owned()),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap_err();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(err, AppError::NotFound), "{err:?}");
     }
 }
