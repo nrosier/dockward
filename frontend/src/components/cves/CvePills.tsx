@@ -21,6 +21,13 @@ export function CveStatusPill({ cve }: { cve: Pick<CveSummary, "accepted" | "sta
   return <Pill kind={cve.status === "fixed" ? "fixed" : "open"} />;
 }
 
-export function issueEligible(severity: Severity): boolean {
-  return severity === "CRITICAL" || severity === "HIGH";
+// A CVE can get an issue while at least one tag reports it open (#129).
+// open_severity is null when every tag is fixed.
+export function issueEligible(cve: Pick<CveSummary, "open_severity">): boolean {
+  return cve.open_severity !== null;
+}
+
+// CRITICAL, HIGH and MEDIUM create in one click; LOW and UNKNOWN confirm first.
+export function issueNeedsConfirm(severity: Severity | null): boolean {
+  return severity === "LOW" || severity === "UNKNOWN";
 }

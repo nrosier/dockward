@@ -5,6 +5,7 @@ import { MappingForm } from "../components/mappings/MappingForm";
 import { ShownOnce } from "../components/mappings/ShownOnce";
 import { LINK } from "../components/mappings/styles";
 import { mappingName } from "../components/mappings/useMappings";
+import { PullScans } from "../components/mappings/PullScans";
 import { WebhookCard, type Rotated } from "../components/mappings/WebhookCard";
 import { PageTitle } from "../components/ui/PageTitle";
 import { ErrorMessage, LoadingMessage, NotFoundMessage } from "../components/ui/StatusMessage";
@@ -84,6 +85,7 @@ export default function MappingFormPage() {
   }
   const mapping = existing.data;
   const owned = me.data?.id === mapping.user_id;
+  const canPull = owned || me.data?.role === "admin";
 
   const onRotated = (rotated: Rotated) => setShown({ kind: "rotated", mapping, ...rotated });
 
@@ -94,6 +96,7 @@ export default function MappingFormPage() {
         <PageTitle title={t("page.mappingEdit")} />
         <p className="text-muted">{mappingName(mapping)}</p>
       </div>
+      {canPull ? <PullScans key={`pull-${mapping.id}`} mapping={mapping} /> : null}
       <MappingForm key={mapping.id} mapping={mapping} readOnly={!owned} onCreated={() => undefined} />
       {owned ? (
         <WebhookCard mapping={mapping} onRotated={onRotated} onDeleted={() => void navigate("/mappings")} />

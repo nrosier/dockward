@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router";
 import { AcceptDialog } from "../components/cves/AcceptDialog";
 import { CveStatusPill, SeverityPill, issueEligible } from "../components/cves/CvePills";
+import { IssueAction } from "../components/cves/IssueAction";
 import { safeHttpsUrl } from "../components/cves/safeUrl";
 import { ConfirmDialog } from "../components/mappings/ConfirmDialog";
 import { LINK, TABLE, TD, TH } from "../components/mappings/styles";
@@ -97,14 +98,15 @@ export default function CveDetailPage() {
                 {t("cves.detail.issueLink", { number: cve.github_issue_number })}
               </a>
             )}
-            {owner && issueEligible(cve.severity) ? (
-              <Button
-                disabled={openIssue || createIssue.isPending}
+            {owner && issueEligible(cve) ? (
+              <IssueAction
+                cve={cve}
+                label={t("cves.detail.createIssue")}
+                disabled={openIssue}
+                pending={createIssue.isPending}
                 title={openIssue ? t("cves.detail.createIssueDisabled") : undefined}
-                onClick={() => createIssue.mutate()}
-              >
-                {t("cves.detail.createIssue")}
-              </Button>
+                onCreate={() => createIssue.mutate()}
+              />
             ) : null}
             {owner ? (
               cve.accepted ? (

@@ -28,6 +28,7 @@ function cve(over: Partial<CveDetail>): CveDetail {
     mapping_id: "m1",
     cve_id: "CVE-2026-0001",
     severity: "CRITICAL",
+    open_severity: "CRITICAL",
     status: "open",
     package: "golang.org/x/crypto",
     first_seen_at: "2026-10-14T10:00:00Z",
@@ -67,12 +68,18 @@ describe("CveDetailPage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("hides Create issue for MEDIUM", async () => {
-    stub(cve({ severity: "MEDIUM" }));
+  it("hides Create issue when the CVE is fixed on every tag", async () => {
+    stub(cve({ severity: "CRITICAL", open_severity: null, status: "fixed" }));
     renderWithRoutes(routes, url);
     await screen.findByRole("heading", { name: "CVE-2026-0001" });
     await screen.findByRole("button", { name: t("cves.detail.accept") });
     expect(screen.queryByRole("button", { name: t("cves.detail.createIssue") })).not.toBeInTheDocument();
+  });
+
+  it("shows Create issue for MEDIUM", async () => {
+    stub(cve({ severity: "MEDIUM", open_severity: "MEDIUM" }));
+    renderWithRoutes(routes, url);
+    expect(await screen.findByRole("button", { name: t("cves.detail.createIssue") })).toBeEnabled();
   });
 
   it("disables Create issue while an open issue exists", async () => {
