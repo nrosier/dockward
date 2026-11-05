@@ -24,6 +24,7 @@ use crate::db::picker_hidden::{self as db, HiddenRow};
 use crate::error::{AppError, ErrorDetail};
 use crate::services::credential_probe::{encode_segment, valid_github_name, valid_harbor_name};
 use crate::services::credentials::{self, SERVICE_GITHUB, SERVICE_HARBOR};
+use crate::services::github_scanning::DEFAULT_WAIT_SECS;
 use crate::services::harbor_client::{artifact_url, artifacts_list_url, parse_artifact_list};
 use crate::services::pagination::Pagination;
 use crate::services::picker_upstream::{
@@ -392,14 +393,14 @@ impl PickerState {
 }
 
 /// Seconds to wait after a rate-limited answer: `retry-after`, else the reset time, else
-/// 60; at least 1 and at most one hour.
+/// `DEFAULT_WAIT_SECS` (60, shared with the SARIF upload deferral); at least 1 and at most one hour.
 fn wait_secs(response: &UpstreamResponse, now: i64) -> i64 {
     let wait = if let Some(seconds) = response.retry_after {
         seconds
     } else if let Some(reset) = response.ratelimit_reset {
         reset.saturating_sub(now)
     } else {
-        60
+        DEFAULT_WAIT_SECS
     };
     wait.clamp(1, MAX_BLOCK_SECS)
 }

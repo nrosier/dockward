@@ -22,8 +22,9 @@ use crate::services::outbound::{self, OutboundClient, TargetClass};
 /// Largest gzip-compressed SARIF that GitHub accepts in one upload.
 pub const MAX_COMPRESSED_BYTES: usize = 10 * 1024 * 1024;
 
-/// Seconds to wait when a rate-limited answer gives no retry time.
-const DEFAULT_WAIT_SECS: i64 = 60;
+/// Seconds to wait when a rate-limited answer gives no retry time. Also the picker fallback
+/// (`services/pickers.rs`).
+pub const DEFAULT_WAIT_SECS: i64 = 60;
 
 /// Largest response body that is parsed. The upload calls return small bodies, but a page of
 /// 100 issues can carry 100 bodies of up to 65,536 characters each (GitHub's limit), about
