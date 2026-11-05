@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE project_webhooks SET token_hash = ?, rotated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "d7a3f62fc9962a9bafbaec1d18a82dd53166fba3b6111fa31517172acc66409f"
+}

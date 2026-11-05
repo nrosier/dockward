@@ -93,6 +93,26 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/mappings/{id}/cves",
             get(api::cves::list_for_mapping),
         )
+        .route(
+            "/api/v1/project-webhooks",
+            post(api::project_webhooks::create),
+        )
+        .route(
+            "/api/v1/project-webhooks/{id}",
+            get(api::project_webhooks::get),
+        )
+        .route(
+            "/api/v1/project-webhooks/{id}/rotate-token",
+            post(api::project_webhooks::rotate_token),
+        )
+        .route(
+            "/api/v1/project-webhooks/{id}/rotate-secret",
+            post(api::project_webhooks::rotate_secret),
+        )
+        .route(
+            "/api/v1/project-webhooks/{id}/unmatched",
+            get(api::project_webhooks::unmatched),
+        )
         .route("/api/v1/sync-jobs", get(api::sync_jobs::list))
         .route("/api/v1/sync-jobs/{id}", get(api::sync_jobs::get))
         .route("/api/v1/sync-jobs/{id}/retry", post(api::sync_jobs::retry))
@@ -1710,6 +1730,248 @@ mod tests {
         builder
             .body(axum::body::Body::from(body.to_owned()))
             .unwrap()
+    }
+
+    /// A JSON request with optional cookie and CSRF header. Returns status and parsed body.
+    async fn send_json(
+        router: &Router,
+        method: &str,
+        uri: &str,
+        cookie: Option<&str>,
+        csrf: Option<&str>,
+        body: &str,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let mut builder = with_peer(
+            axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json"),
+        );
+        if let Some(cookie) = cookie {
+            builder = builder.header("cookie", cookie);
+        }
+        if let Some(token) = csrf {
+            builder = builder.header("x-csrf-token", token);
+        }
+        let request = builder
+            .body(axum::body::Body::from(body.to_owned()))
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// The project webhook management routes through the router (#132): session (`401`),
+    /// CSRF (`403`), create (`201`), duplicate (`409`), unowned mapping (`404`), admin read
+    /// (`200`) but admin rotate (`403`), owner rotation with the old token refused and the new
+    /// one accepted, the unmatched list, and the per-mapping URL still `202`.
+    #[tokio::test]
+    async fn project_webhook_routes_check_session_csrf_owner_and_admin() {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let (router, pool, dir) = test_router("project-webhook-api").await;
+        webhook_fixture(&pool, "map-tok-fake", "map-sec-fake").await;
+        let mut conn = pool.acquire().await.unwrap();
+        for (id, role) in [("pa", "admin"), ("px", "user")] {
+            db::users::insert_local(&mut conn, id, id, None, "h", role)
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let csrf = auth::csrf::issue(&auth::crypto::csrf_key(&root).unwrap()).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let owner = format!("{}; {csrf_cookie}", session_cookie("wu", "user", 0));
+        let admin = format!("{}; {csrf_cookie}", session_cookie("pa", "admin", 0));
+        let other = format!("{}; {csrf_cookie}", session_cookie("px", "user", 0));
+        let body = r#"{"mapping_id":"wm1"}"#;
+        let create = "/api/v1/project-webhooks";
+
+        let (anonymous, _) = send_json(
+            &router,
+            "POST",
+            create,
+            Some(&csrf_cookie),
+            Some(&csrf),
+            body,
+        )
+        .await;
+        let (no_csrf, _) = send_json(&router, "POST", create, Some(&owner), None, body).await;
+        let (foreign, _) =
+            send_json(&router, "POST", create, Some(&other), Some(&csrf), body).await;
+        let (created_status, created) =
+            send_json(&router, "POST", create, Some(&owner), Some(&csrf), body).await;
+        let (duplicate, dup_body) =
+            send_json(&router, "POST", create, Some(&owner), Some(&csrf), body).await;
+        assert_eq!(anonymous, StatusCode::UNAUTHORIZED);
+        assert_eq!(no_csrf, StatusCode::FORBIDDEN);
+        assert_eq!(foreign, StatusCode::NOT_FOUND);
+        assert_eq!(created_status, StatusCode::CREATED);
+        assert_eq!(duplicate, StatusCode::CONFLICT);
+        assert_eq!(dup_body["error"]["code"], "conflict");
+        let id = created["id"].as_str().unwrap().to_owned();
+        let url = created["webhook_url"].as_str().unwrap().to_owned();
+        let auth_secret = created["auth_secret"].as_str().unwrap().to_owned();
+        assert!(url.starts_with("https://harborgate.example.com/api/v1/webhooks/harbor/project/"));
+        let old_token = url.rsplit('/').next().unwrap().to_owned();
+
+        // The per-mapping URL keeps working after a project webhook exists.
+        let per_mapping = router
+            .clone()
+            .oneshot(webhook_request(
+                "map-tok-fake",
+                Some("Bearer map-sec-fake"),
+                WEBHOOK_BODY,
+            ))
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(per_mapping, StatusCode::ACCEPTED);
+        // The project URL accepts the shown values.
+        let via_project = router
+            .clone()
+            .oneshot(project_request(
+                &old_token,
+                Some(&auth_secret),
+                &repo_event("app"),
+            ))
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(via_project, StatusCode::ACCEPTED);
+
+        // Reads: no session 401, owner and admin 200, another user 403. No values in GET.
+        let item = format!("/api/v1/project-webhooks/{id}");
+        let (read_anon, _) = get_json(&router, &item, &csrf_cookie).await;
+        let (read_other, _) = get_json(&router, &item, &other).await;
+        let (read_admin, admin_view) = get_json(&router, &item, &admin).await;
+        let (read_owner, owner_view) = get_json(&router, &item, &owner).await;
+        assert_eq!(read_anon, StatusCode::UNAUTHORIZED);
+        assert_eq!(read_other, StatusCode::FORBIDDEN);
+        assert_eq!(read_admin, StatusCode::OK);
+        assert_eq!(read_owner, StatusCode::OK);
+        assert_eq!(admin_view["owner"], "wu");
+        assert_eq!(admin_view["mappings"], serde_json::json!(["app"]));
+        assert!(owner_view["rotated_at"].is_null());
+        let text = owner_view.to_string();
+        assert!(!text.contains(&old_token) && !text.contains(&auth_secret));
+
+        // Rotation: CSRF-less 403, admin 403, other 403, owner 200.
+        let rotate = format!("/api/v1/project-webhooks/{id}/rotate-token");
+        let (rot_no_csrf, _) = send_json(&router, "POST", &rotate, Some(&owner), None, "").await;
+        let (rot_admin, _) =
+            send_json(&router, "POST", &rotate, Some(&admin), Some(&csrf), "").await;
+        let (rot_other, _) =
+            send_json(&router, "POST", &rotate, Some(&other), Some(&csrf), "").await;
+        let (rot_anon, _) = send_json(
+            &router,
+            "POST",
+            &rotate,
+            Some(&csrf_cookie),
+            Some(&csrf),
+            "",
+        )
+        .await;
+        let (rot_owner, rotated) =
+            send_json(&router, "POST", &rotate, Some(&owner), Some(&csrf), "").await;
+        assert_eq!(rot_no_csrf, StatusCode::FORBIDDEN);
+        assert_eq!(rot_admin, StatusCode::FORBIDDEN);
+        assert_eq!(rot_other, StatusCode::FORBIDDEN);
+        assert_eq!(rot_anon, StatusCode::UNAUTHORIZED);
+        assert_eq!(rot_owner, StatusCode::OK);
+        assert_eq!(rotated["mappings"], serde_json::json!(["app"]));
+        let new_token = rotated["webhook_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_owned();
+        let old_refused = router
+            .clone()
+            .oneshot(project_request(
+                &old_token,
+                Some(&auth_secret),
+                &repo_event("app"),
+            ))
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(old_refused, StatusCode::UNAUTHORIZED);
+
+        let secret_uri = format!("/api/v1/project-webhooks/{id}/rotate-secret");
+        let (sec_admin, _) =
+            send_json(&router, "POST", &secret_uri, Some(&admin), Some(&csrf), "").await;
+        let (sec_owner, secret) =
+            send_json(&router, "POST", &secret_uri, Some(&owner), Some(&csrf), "").await;
+        assert_eq!(sec_admin, StatusCode::FORBIDDEN);
+        assert_eq!(sec_owner, StatusCode::OK);
+        let new_secret = secret["auth_secret"].as_str().unwrap().to_owned();
+        let old_secret = router
+            .clone()
+            .oneshot(project_request(
+                &new_token,
+                Some(&auth_secret),
+                &repo_event("app"),
+            ))
+            .await
+            .unwrap()
+            .status();
+        let both_new = router
+            .clone()
+            .oneshot(project_request(
+                &new_token,
+                Some(&new_secret),
+                &repo_event("stranger"),
+            ))
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(old_secret, StatusCode::UNAUTHORIZED);
+        assert_eq!(both_new, StatusCode::ACCEPTED);
+
+        // The unmatched event is listed for the owner and an admin, and refused for others.
+        let list = format!("/api/v1/project-webhooks/{id}/unmatched?page_size=10");
+        let (list_owner, page) = get_json(&router, &list, &owner).await;
+        let (list_admin, _) = get_json(&router, &list, &admin).await;
+        let (list_other, _) = get_json(&router, &list, &other).await;
+        let (list_anon, _) = get_json(&router, &list, &csrf_cookie).await;
+        assert_eq!(list_owner, StatusCode::OK);
+        assert_eq!(list_admin, StatusCode::OK);
+        assert_eq!(list_other, StatusCode::FORBIDDEN);
+        assert_eq!(list_anon, StatusCode::UNAUTHORIZED);
+        assert_eq!(page["total"], 1);
+        assert_eq!(page["page_size"], 10);
+        assert_eq!(page["items"][0]["repository"], "proj/stranger");
+        assert_eq!(page["items"][0]["count"], 1);
+
+        let (missing, _) = get_json(&router, "/api/v1/project-webhooks/nope", &owner).await;
+        assert_eq!(missing, StatusCode::NOT_FOUND);
+
+        let actions: Vec<String> = sqlx::query_scalar(
+            "SELECT action FROM audit_log WHERE action LIKE 'project_webhook.%' ORDER BY rowid",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                "project_webhook.create",
+                "project_webhook.token_rotate",
+                "project_webhook.secret_rotate"
+            ]
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A project event for a mapped repository is routed to that mapping and queues a job.

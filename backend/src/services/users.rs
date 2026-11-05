@@ -11,7 +11,7 @@ use crate::db::users;
 use crate::error::AppError;
 use crate::models::role::Role;
 use crate::services::audit::{self, Actor};
-use crate::services::{auth as local_auth, ids};
+use crate::services::{auth as local_auth, ids, project_webhooks};
 
 /// Creates a local user. Local accounts only: OIDC accounts are created by login.
 /// `POST /api/v1/admin/users` returns `409` when the username is taken.
@@ -56,7 +56,9 @@ pub async fn create_local(
 }
 
 /// Deletes a user in the order from `specs/database.md`: mappings, then credentials,
-/// then the user row, all in one transaction. The rules are checked first:
+/// then the user row, all in one transaction. Before that, each project webhook the user
+/// owns is transferred or left to the user cascade (`specs/integrations.md`, #132). The
+/// rules are checked first:
 /// - an admin cannot delete themselves (`409`);
 /// - the last local admin cannot be deleted (`409`).
 pub async fn delete_user(pool: &SqlitePool, actor: &Actor, user_id: &str) -> Result<(), AppError> {
@@ -74,6 +76,9 @@ pub async fn delete_user(pool: &SqlitePool, actor: &Actor, user_id: &str) -> Res
             "The last local admin cannot be deleted.".to_owned(),
         ));
     }
+    // Project webhooks the user owns move to another user on the same Harbor project first.
+    // Any without a candidate stay, and the user row's cascade deletes them (#132).
+    project_webhooks::transfer_on_user_delete(&mut tx, actor, user_id).await?;
     users::delete_mappings(&mut tx, user_id).await?;
     users::delete_credentials(&mut tx, user_id).await?;
     if users::delete_user_row(&mut tx, user_id).await? == 0 {

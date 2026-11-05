@@ -23,6 +23,7 @@ import DashboardPage from "./pages/DashboardPage";
 import LoginPage from "./pages/LoginPage";
 import MappingFormPage from "./pages/MappingFormPage";
 import MappingsPage from "./pages/MappingsPage";
+import ProjectWebhookPage from "./pages/ProjectWebhookPage";
 import SetupPage from "./pages/SetupPage";
 import SyncJobsPage from "./pages/SyncJobsPage";
 
@@ -41,6 +42,7 @@ export const routes: RouteObject[] = [
           { path: "mappings", element: <MappingsPage /> },
           { path: "mappings/new", element: <MappingFormPage /> },
           { path: "mappings/:id", element: <MappingFormPage /> },
+          { path: "project-webhooks/:id", element: <ProjectWebhookPage /> },
           { path: "cves", element: <CvesPage /> },
           { path: "cves/:id", element: <CveDetailPage /> },
           { path: "sync-jobs", element: <SyncJobsPage /> },

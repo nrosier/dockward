@@ -205,6 +205,30 @@ CREATE TABLE IF NOT EXISTS alert_deliveries (
     sent_at INTEGER NOT NULL DEFAULT (unixepoch()),
     UNIQUE (channel_id, dedupe_key)
 );
+
+-- Project Webhooks (one Harbor webhook per Harbor base URL and project, #132)
+-- Decided 2026-11-05. Holds the owner and the digests of the project token and secret. The values are shown once and never stored in plain text.
+CREATE TABLE IF NOT EXISTS project_webhooks (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- owner; the user-deletion hook transfers it first (integrations.md)
+    harbor_base_url TEXT NOT NULL,
+    harbor_project TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    secret_hash TEXT NOT NULL,
+    created_at INTEGER DEFAULT (unixepoch()),
+    rotated_at INTEGER DEFAULT (unixepoch()), -- NULL until the first rotation: the API inserts NULL, which overrides the column default
+    UNIQUE (harbor_base_url, harbor_project)
+);
+
+-- Project Webhook Unmatched (events for a repository no mapping on the project covers, counted per repository)
+-- Decided 2026-11-05. No event body is stored.
+CREATE TABLE IF NOT EXISTS project_webhook_unmatched (
+    project_webhook_id TEXT NOT NULL REFERENCES project_webhooks(id) ON DELETE CASCADE,
+    repository TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    last_seen_at INTEGER NOT NULL,
+    PRIMARY KEY (project_webhook_id, repository)
+);
 ```
 
 ## system_config keys
@@ -241,6 +265,10 @@ Decided (2026-11-03) for `restore.run`: the offline restore command appends one 
 - `mapping.delete`
 - `mapping.webhook_token_rotate`
 - `mapping.auth_secret_rotate`
+- `project_webhook.create`
+- `project_webhook.token_rotate`
+- `project_webhook.secret_rotate`
+- `project_webhook.owner_transfer`
 - `alert.config_change`
 - `backup.run`
 - `restore.run`

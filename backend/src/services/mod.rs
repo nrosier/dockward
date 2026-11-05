@@ -35,6 +35,7 @@ pub mod mappings;
 #[allow(dead_code)] // The list routes that use this are added with the admin routes.
 pub mod pagination;
 pub mod poller;
+pub mod project_webhooks;
 pub mod retention;
 #[allow(dead_code)] // Used by the sync pipeline.
 pub mod sarif;
