@@ -213,3 +213,29 @@ export interface AlertChannel {
   created_at: string;
   updated_at: string;
 }
+
+export interface ProjectWebhook {
+  id: string;
+  harbor_base_url: string;
+  harbor_project: string;
+  owner: string;
+  created_at: string | null;
+  rotated_at: string | null;
+  mappings: string[];
+}
+
+export interface ProjectWebhookTokenRotated {
+  webhook_url: string;
+  mappings: string[];
+}
+
+export interface ProjectWebhookSecretRotated {
+  auth_secret: string;
+  mappings: string[];
+}
+
+export interface UnmatchedRepository {
+  repository: string;
+  count: number;
+  last_seen_at: string;
+}
