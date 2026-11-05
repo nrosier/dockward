@@ -4,6 +4,27 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.11.0
+
+### Added
+- Mapping pickers: choose the Harbor project and repository and the GitHub repository from lists instead of typing them (#126).
+- The mapping form suggests the GitHub source repository from the image's source label (#126).
+- Per-instance hide and restore of picker items, with a Hidden tab to restore them (#126).
+- Project webhook setup guide in `docs/SETUP.md` (#132).
+
+### Changed
+- The picker backend caps the upstream response body while reading it, and marks a Harbor list as truncated only when a further item exists (#126).
+- A Harbor identity 5xx answers 502 instead of 422, and the picker 422 error carries a fixed detail code (#126).
+- The setup guide documents the Repository List and Repository Read robot permissions (#126, #159).
+
+### Fixed
+- The suggested image tag is validated against the OCI tag grammar, and an artifact digest that is not `sha256:<64 hex>` is refused (#126).
+- Picker cache ordering: cache slots are dropped and the generation bumped under one lock, a fill is not cached if its credential was updated meanwhile, and a deleted user's cache entries are dropped (#126).
+- Hidden picker items are keyed by Harbor base URL (#126).
+
+### Security
+- The picker refuses an oversized upstream body before buffering it whole (#126).
+
 ## 0.10.1
 
 ### Fixed
