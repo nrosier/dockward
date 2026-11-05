@@ -590,6 +590,8 @@ pub(crate) mod test_support {
                 crate::services::github_issues::GithubIssues::new().unwrap(),
             ),
             harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
+            harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
+            pull_limiter: crate::api::mappings::new_pull_limiter(),
         };
         (state, dir)
     }
@@ -845,6 +847,8 @@ mod tests {
                 crate::services::github_issues::GithubIssues::new().unwrap(),
             ),
             harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
+            harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
+            pull_limiter: crate::api::mappings::new_pull_limiter(),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }

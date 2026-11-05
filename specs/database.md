@@ -247,6 +247,7 @@ Decided (2026-11-03) for `restore.run`: the offline restore command appends one 
 - `key.rotate`
 - `retention.run`
 - `sync_job.retry` (manual retry of a failed sync job; `details` is `{"job_id","mapping_id"}`; Decided (2026-11-03, delegated))
+- `mapping.pull` (manual scan pull from Harbor for one mapping; `details` is `{"mapping_id","queued"}`, the number of jobs queued, and no values; Decided (2026-11-05, user, #131))
 
 Source: none external. The list follows the audit examples in [frontend.md](frontend.md) (Admin, Audit log) and the events in [security.md](security.md). The vocabulary is a local convention, so it is Decided (2026-11-03, delegated).
 

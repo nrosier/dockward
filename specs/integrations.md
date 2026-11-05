@@ -127,6 +127,8 @@ Status: decided here, not yet built. Building it needs the new route, the projec
 - Decided: polling skips an image whose digest already has a successful sync for that mapping and tag. "Successful" means `sync_jobs.status = 'done'` and `sarif_status = 'success'` on the linked report (Decided 2026-11-03 in [database.md](database.md)).
 - Source for the artifact list endpoint: Harbor swagger, `GET /api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts`, with `page` and `page_size` query parameters. The artifact object includes `digest`, `tags`, `push_time`, and `pull_time` (verified in this session).
 - Note: "backup polling" here means Harbor polling. It is not the admin backup command. See [security.md](security.md).
+- Decided (2026-11-05, user, #131): a page holds 100 artifacts, and polling reads at most 10 pages per mapping per run, so a large repository cannot flood Harbor.
+- Manual pull (Decided 2026-11-05, user, #131): `POST /api/v1/mappings/:id/pull` ([api.md](api.md), Mappings) runs the same per-mapping poll for one mapping on demand. It calls the same code as the scheduled poll, with no second implementation, so it obeys the same rules: tagged artifacts only, one job per `(digest, tag)`, the same dedupe (no successful sync and no queued or running job), the same page cap, and the same payload, including `"trigger": "poll"`. Digests that Harbor is still scanning are queued and handled by the existing "report not yet" backoff. The pull uses the mapping's Harbor credential on the server; no token reaches the browser. A Harbor error fails only that pull with a fixed message. A manual pull is not recorded in `job_runs`; it is audited as `mapping.pull`.
 
 ## OCI labels
 
