@@ -842,7 +842,7 @@ fn artifact_routes(fake: &Recorded, label: Option<&str>) {
     robot_ok(fake);
     fake.on(
         path_is("/api/v2.0/projects/proj/repositories/app/artifacts"),
-        ok(r#"[{"digest":"sha256:abcd","tags":[{"name":"v2"}]}]"#),
+        ok(r#"[{"digest":"sha256:abababababababababababababababababababababababababababababababab","tags":[{"name":"v2"}]}]"#),
     );
     let labels = match label {
         Some(value) => format!(
@@ -852,9 +852,9 @@ fn artifact_routes(fake: &Recorded, label: Option<&str>) {
         None => r#"{"other":"x"}"#.to_owned(),
     };
     fake.on(
-        path_is("/api/v2.0/projects/proj/repositories/app/artifacts/sha256%3Aabcd"),
+        path_is("/api/v2.0/projects/proj/repositories/app/artifacts/sha256%3Aabababababababababababababababababababababababababababababababab"),
         ok(&format!(
-            r#"{{"digest":"sha256:abcd","extra_attrs":{{"config":{{"Labels":{labels}}}}}}}"#
+            r#"{{"digest":"sha256:abababababababababababababababababababababababababababababababab","extra_attrs":{{"config":{{"Labels":{labels}}}}}}}"#
         )),
     );
 }
@@ -1533,4 +1533,40 @@ async fn github_exactly_1000_with_no_next_page_is_not_truncated() {
     assert!(!page.truncated, "the 10th page had no rel=next");
     assert_eq!(fake.calls.load(Ordering::SeqCst), 10);
     fx.close().await;
+}
+
+#[tokio::test]
+async fn a_bad_digest_is_refused_without_a_request() {
+    for digest in [
+        "..",
+        "sha256:abcd",
+        "sha256:../../x",
+        &format!("sha256:{}", "AB".repeat(32)),
+    ] {
+        let fx = Fixture::new("suggest-digest").await;
+        let fake = Arc::new(Recorded::default());
+        robot_ok(&fake);
+        fake.on(
+            path_is("/api/v2.0/projects/proj/repositories/app/artifacts"),
+            ok(&format!(
+                r#"[{{"digest":"{digest}","tags":[{{"name":"v2"}}]}}]"#
+            )),
+        );
+        let picker = state(fake.clone());
+        let result = picker
+            .source_suggestion(&fx.caller(), &fx.harbor, &suggestion_query(None))
+            .await;
+        assert!(
+            matches!(result, Err(PickerFail::App(AppError::UpstreamUnreachable))),
+            "{digest}: {result:?}"
+        );
+        // The identity check and the artifact list only; no artifact detail request.
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 2, "{digest}");
+        assert!(
+            fake.urls().iter().all(|u| !u.contains("/artifacts/")),
+            "{:?}",
+            fake.urls()
+        );
+        fx.close().await;
+    }
 }

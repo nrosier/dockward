@@ -1093,6 +1093,13 @@ pub fn parse_source_label(label: &str) -> LabelParse {
     }
 }
 
+/// True for `sha256:` followed by exactly 64 lowercase hex digits.
+fn valid_digest(digest: &str) -> bool {
+    digest.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
 #[derive(Deserialize)]
 struct ArtifactDetail {
     #[serde(default)]
@@ -1249,6 +1256,10 @@ impl PickerState {
         let Some(image_tag) = tags.into_iter().next() else {
             return Ok(SuggestionOutcome::None("no_tagged_artifact"));
         };
+        // Defence in depth: the digest goes into a URL path, so it must be `sha256:<64 hex>`.
+        if !valid_digest(&digest) {
+            return Err(upstream());
+        }
         let detail_url = artifact_url(&ctx.base, project, repository, &digest)?;
         let response = self.harbor_get(ctx, &detail_url).await?;
         if response.status != 200 {
