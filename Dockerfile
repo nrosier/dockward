@@ -21,6 +21,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked && cp target/release/harborgate /harborgate
 
 FROM alpine:3.24
+# The source commit. Required: the build fails without it, so every image carries
+# org.opencontainers.image.revision. HarborGate reads that label on the image it scans.
+ARG REVISION
+RUN test -n "$REVISION" || { echo 'REVISION build argument is required (the source commit)' >&2; exit 1; }
 # System roots for outbound TLS: rustls-platform-verifier reads the OS trust store.
 # The repository index is pinned by the alpine:3.24 tag, so the version follows the release branch.
 RUN apk add --no-cache ca-certificates
@@ -35,5 +39,6 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget 
 LABEL org.opencontainers.image.title="HarborGate" \
       org.opencontainers.image.source="https://github.com/nrosier/harborgate" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.description="Harbor to GitHub Code Scanning relay"
+      org.opencontainers.image.description="Harbor to GitHub Code Scanning relay" \
+      org.opencontainers.image.revision="$REVISION"
 ENTRYPOINT ["/usr/local/bin/harborgate"]
