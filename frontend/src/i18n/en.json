@@ -149,7 +149,6 @@
   "mappings.form.harborSection": "Harbor source",
   "mappings.form.harborProject": "Harbor project",
   "mappings.form.harborRepository": "Harbor repository",
-  "mappings.form.harborRepositoryHelp": "The name inside the project, without the project prefix.",
   "mappings.form.harborCredential": "Harbor credential",
   "mappings.form.credentialOption": "{label} · {host}",
   "mappings.form.noCredential": "Add a credential on the Account page first.",

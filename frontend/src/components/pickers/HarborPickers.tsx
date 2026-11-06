@@ -193,7 +193,6 @@ function RepositoryField({ credentialId, baseUrl, project, value, error, onText,
     <Field
       id="harbor-repository"
       label={t("mappings.form.harborRepository")}
-      help={t("mappings.form.harborRepositoryHelp")}
       error={error}
     >
       <Combobox
