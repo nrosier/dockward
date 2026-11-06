@@ -141,6 +141,7 @@ Status: the project webhook receiver and its management API (create, owner-only 
   - Verified: Harbor swagger `/users/current` returns 412 for robot accounts ("Returns 412 if the caller is authenticated via a non-local context such as a robot account"). That 412 is what makes it the test.
   - Verified: `GET /api/v2.0/systeminfo` is documented as callable anonymously ("this can be called by anonymous request"), so it cannot prove the robot secret is valid. Not used for the test.
   - The `projects?name=` call is not used: with a wrong secret it runs as anonymous and can still return a public project.
+- GitHub test: the token's first visible repository is checked with three probes. See [api.md](api.md), "Test button", and [security.md](security.md), "GitHub token scope".
 
 ## Polling
 

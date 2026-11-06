@@ -82,7 +82,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 | POST | `/api/v1/credentials` | session | `{"service_type","label","base_url","username","token","expires_at"}` | `Credential` | 201, 400, 422 (not HTTPS, blocked address) |
 | PUT | `/api/v1/credentials/:id` | session (owner only) | any subset of `label`, `base_url`, `username`, `token`, `expires_at` | `Credential` | 200, 404, 409 `conflict` (`base_url` change while a mapping uses the credential), 422 |
 | DELETE | `/api/v1/credentials/:id` | session (owner only) | none | empty | 204, 404, 409 `conflict` (in use by a mapping) |
-| POST | `/api/v1/credentials/:id/test` | session (owner only) | Harbor: none. GitHub: `{"owner","repo"}` (Decided 2026-11-03: the repository is given per request, see below) | `{"ok": bool, "checks": [{"name","ok","detail","warning"?}]}` | 200, 404, 502 `upstream_unreachable` |
+| POST | `/api/v1/credentials/:id/test` | session (owner only) | Harbor: none. GitHub: none (empty) (Decided 2026-11-06, user, #178: the test picks the repository itself, see below) | `{"ok": bool, "checks": [{"name","ok","detail","warning"?}]}`, and for GitHub the response names the repository checked | 200, 404, 502 `upstream_unreachable` |
 
 - Decided (2026-11-03, user, #35): items of `GET /credentials` add `"mapping_count"`, the number of mappings that use the credential as their Harbor or GitHub credential. The Account page shows it as "Used by". Other credential responses do not carry it.
 - `base_url` and `username` apply to Harbor credentials. `base_url` must be HTTPS and must pass the address check in [security.md](security.md) (Outbound HTTP).
@@ -91,7 +91,13 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 - Test button (Decided 2026-11-03, delegated):
   - Harbor: the robot test in [integrations.md](integrations.md), "Test button" (`GET /api/v2.0/users/current`, where `412` means the robot credential works).
   - GitHub: the endpoint probes in [security.md](security.md), "GitHub token scope".
-  - Decided (2026-11-03): the GitHub test takes `owner` and `repo` in the request body, because a credential row has no repository. The probe checks code-scanning access on that repository and returns the same error codes as the spec. A GitHub credential with a missing or invalid `owner` or `repo` returns `422 validation_failed`.
+  - Decided (2026-11-06, user, #178): the test picks the repository itself.
+    1. The test takes no body and ignores any body.
+    2. It calls `GET /user/repos` and takes the first repository returned for the token, in GitHub's default order.
+    3. It runs the three existing probes (repo metadata, code scanning alerts, issues) on that repository.
+    4. The result names the repository checked.
+    5. If the token sees no repository, the response is `200` with `{"ok": false, "checks": [{"name": "github_repository_visible", "ok": false, "detail": "<catalog key credentials.test.noRepository>"}]}`. The fixed text is "The token cannot see any repository. Grant the token access to at least one repository." No raw GitHub message is added.
+    6. The `422` rules for an empty body and an invalid `owner` or `repo` are removed, because the body is no longer read.
   - The test sends the request from the server, so it passes through the same SSRF address check.
 
 ## Mappings
