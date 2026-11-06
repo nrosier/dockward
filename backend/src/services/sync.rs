@@ -33,7 +33,7 @@ use crate::services::github_scanning::{
 };
 use crate::services::harbor_client::{
     HarborGet, HarborReply, ReportState, TRIVY_REPORT_MIME, artifact_url, branch_for, check_source,
-    parse_labels, parse_report, require_revision, vulnerabilities_url,
+    index_image_child, parse_labels, parse_report, require_revision, vulnerabilities_url,
 };
 use crate::services::issue_lifecycle::{self, IssueApi};
 use crate::services::resolve::{self, JobKind};
@@ -464,8 +464,25 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
         let body = self
             .harbor_body(context, &artifact, &[], "the Harbor artifact")
             .await?;
-        let labels = parse_labels(&body)
+        let mut labels = parse_labels(&body)
             .map_err(|_| failed("Harbor returned an artifact that could not be read"))?;
+        // An image index carries no image config, so its labels are on its image child.
+        if labels.revision.is_none()
+            && let Some(child) = index_image_child(&body)
+        {
+            let child_url = artifact_url(
+                &base,
+                &mapping.harbor_project,
+                &mapping.harbor_repository,
+                &child,
+            )
+            .map_err(|e| validation_message(e, "the Harbor names are not valid"))?;
+            let child_body = self
+                .harbor_body(context, &child_url, &[], "the Harbor image")
+                .await?;
+            labels = parse_labels(&child_body)
+                .map_err(|_| failed("Harbor returned an artifact that could not be read"))?;
+        }
         let revision = require_revision(&labels)
             .map_err(|e| permanent_validation(e, "the image has no revision label"))?
             .to_owned();
@@ -724,6 +741,8 @@ mod tests {
     /// Answers the artifact URL and the report URL with recorded answers.
     struct FakeHarbor {
         artifact: (u16, Vec<u8>),
+        /// Answers for artifact paths ending in a given digest, ahead of `artifact`.
+        by_digest: Vec<(String, Vec<u8>)>,
         report: (u16, Vec<u8>),
         urls: Mutex<Vec<String>>,
         report_headers: Mutex<Vec<(String, String)>>,
@@ -733,6 +752,7 @@ mod tests {
         fn new(artifact: &str, report: (u16, &str)) -> Self {
             Self {
                 artifact: (200, artifact.as_bytes().to_vec()),
+                by_digest: Vec::new(),
                 report: (report.0, report.1.as_bytes().to_vec()),
                 urls: Mutex::new(Vec::new()),
                 report_headers: Mutex::new(Vec::new()),
@@ -758,6 +778,12 @@ mod tests {
                     lock(&self.report_headers).push(((*name).to_owned(), (*value).to_owned()));
                 }
                 Ok(HarborReply::new(self.report.0, self.report.1.clone()))
+            } else if let Some((_, body)) = self
+                .by_digest
+                .iter()
+                .find(|(digest, _)| url.path().ends_with(digest.as_str()))
+            {
+                Ok(HarborReply::new(200, body.clone()))
             } else {
                 Ok(HarborReply::new(self.artifact.0, self.artifact.1.clone()))
             }
@@ -1140,6 +1166,52 @@ mod tests {
         assert!(matches!(outcome, JobOutcome::Permanent(ref m) if m.contains("revision")));
         assert_eq!(scanner.uploads(), 0);
         assert!(fx.report().await.is_none());
+    }
+
+    /// A `docker buildx` push is an image index with no image config; the labels are on its
+    /// image child, in `extra_attrs.config.Labels` (the live Harbor shape, 2026-11-06). The
+    /// sync reads them there, skips the attestation child, and reads the report on the
+    /// event digest.
+    #[tokio::test]
+    async fn an_image_index_reads_labels_from_its_image_child() {
+        let fx = Fixture::new("index").await;
+        let image_hex = "a".repeat(64);
+        let attestation_hex = "b".repeat(64);
+        let index = format!(
+            r#"{{"digest": "sha256:aaaa", "labels": null, "tags": [{{"name": "v1"}}],
+            "media_type": "application/vnd.oci.image.index.v1+json",
+            "references": [
+                {{"child_digest": "sha256:{attestation_hex}", "platform": {{"os": "unknown", "architecture": "unknown"}},
+                  "annotations": {{"vnd.docker.reference.type": "attestation-manifest"}}}},
+                {{"child_digest": "sha256:{image_hex}", "platform": {{"os": "linux", "architecture": "amd64"}}}}
+            ]}}"#
+        );
+        let image = format!(
+            r#"{{"digest": "sha256:{image_hex}", "labels": null, "tags": null,
+            "extra_attrs": {{"os": "linux", "config": {{"Labels": {{
+                "org.opencontainers.image.revision": "{REVISION}",
+                "org.opencontainers.image.source": "https://github.com/octo/app"}}}}}}}}"#
+        );
+        let mut fake = FakeHarbor::new(&index, (200, &report_body()));
+        fake.by_digest = vec![
+            (image_hex.clone(), image.into_bytes()),
+            (attestation_hex.clone(), b"{}".to_vec()),
+        ];
+        let harbor = Arc::new(fake);
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+
+        let outcome = fx.handler(&harbor, &scanner).run(fx.job()).await;
+
+        assert_eq!(outcome, JobOutcome::Done);
+        assert_eq!(scanner.uploads(), 1);
+        assert_eq!(lock(&scanner.sent)[0].1, REVISION);
+        let urls = lock(&harbor.urls).clone();
+        assert_eq!(urls.len(), 3, "index, image child, report: {urls:?}");
+        assert!(urls[1].ends_with(&image_hex));
+        assert!(!urls.iter().any(|u| u.contains(&attestation_hex)));
+        // The report is the event digest's, not the child's.
+        assert!(urls[2].contains("sha256") && urls[2].ends_with("/additions/vulnerabilities"));
+        assert!(!urls[2].contains(&image_hex));
     }
 
     #[tokio::test]
