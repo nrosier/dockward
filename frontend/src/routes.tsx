@@ -15,6 +15,7 @@ import AdminFailedPage from "./pages/AdminFailedPage";
 import AdminHealthPage from "./pages/AdminHealthPage";
 import AdminLogPage from "./pages/AdminLogPage";
 import AdminJobsPage from "./pages/AdminJobsPage";
+import AdminGithubPage from "./pages/AdminGithubPage";
 import AdminOidcPage from "./pages/AdminOidcPage";
 import AdminUsersPage from "./pages/AdminUsersPage";
 import CredentialFormPage from "./pages/CredentialFormPage";
@@ -77,6 +78,7 @@ export const routes: RouteObject[] = [
                   { path: "settings/oidc", element: <AdminOidcPage /> },
                   { path: "settings/users", element: <AdminUsersPage /> },
                   { path: "settings/alerts", element: <AdminAlertsPage /> },
+                  { path: "settings/github", element: <AdminGithubPage /> },
                   { path: "settings/backup", element: <AdminBackupPage /> },
                 ],
               },

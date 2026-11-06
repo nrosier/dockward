@@ -308,7 +308,7 @@ mod tests {
             data_dir: dir.clone(),
             backup_dir: dir.join("backups"),
             issues_client: std::sync::Arc::new(
-                crate::services::github_issues::GithubIssues::new().unwrap(),
+                crate::services::github_issues::GithubIssues::new(Default::default()).unwrap(),
             ),
             harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
             app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
@@ -316,7 +316,9 @@ mod tests {
             )),
             harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
             pull_limiter: crate::api::mappings::new_pull_limiter(),
-            pickers: crate::services::pickers::PickerState::outbound(false).unwrap(),
+            pickers: crate::services::pickers::PickerState::outbound(false, Default::default())
+                .unwrap(),
+            github: Default::default(),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }

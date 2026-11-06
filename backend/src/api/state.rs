@@ -216,4 +216,7 @@ pub struct AppState {
     /// The mapping picker transport, per-user limit, list cache and upstream rate-limit
     /// blocks (`specs/api.md`, Pickers). Router tests inject a fake transport.
     pub pickers: crate::services::pickers::PickerState,
+    /// The live GitHub API base URL and web URL (`specs/integrations.md`, "GitHub base URL").
+    /// Every GitHub client holds a clone, so an admin change applies without a restart.
+    pub github: crate::services::github_url::GithubTarget,
 }

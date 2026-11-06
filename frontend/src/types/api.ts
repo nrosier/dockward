@@ -214,6 +214,11 @@ export interface OidcSettings {
   oidc_only_users: boolean;
 }
 
+export interface GithubUrlSettings {
+  api_base_url: string;
+  web_url: string;
+}
+
 export interface AlertChannel {
   id: string;
   kind: "smtp" | "webhook";

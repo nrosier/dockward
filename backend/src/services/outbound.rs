@@ -14,6 +14,8 @@ use std::time::Duration;
 
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
+use crate::services::github_url::GithubTarget;
+
 /// Outbound target classes. Each has its own opt-out variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetClass {
@@ -23,7 +25,9 @@ pub enum TargetClass {
     Oidc,
     #[allow(dead_code)]
     Alerts,
-    /// Fixed host `api.github.com`. Private ranges are never allowed for it.
+    /// The GitHub API host. The default `api.github.com` and any other host get the private-range
+    /// check, and the opt-out never applies. Only the admin-configured host is exempt, and only
+    /// through [`github_client`] (`specs/security.md`, "GitHub base URL").
     GitHub,
 }
 
@@ -185,24 +189,38 @@ pub struct OutboundClient {
     inner: reqwest::Client,
     class: TargetClass,
     allow_private: bool,
+    /// Set for the GitHub client: the live configured GitHub URLs.
+    github: Option<GithubTarget>,
 }
 
 impl OutboundClient {
+    /// The target check. For the GitHub client the configured API host is trusted (the admin
+    /// entered it), so only the HTTPS rule applies to it. Any other host gets the full check.
+    fn check(&self, url: &reqwest::Url) -> Result<(), OutboundError> {
+        if let Some(target) = &self.github
+            && let Some(host) = url.host_str()
+            && target.current().trusted_host() == Some(host)
+        {
+            return require_https(url);
+        }
+        check_target(url, self.class, self.allow_private)
+    }
+
     /// A GET request builder for `url`, after the target check.
     pub fn get(&self, url: &reqwest::Url) -> Result<reqwest::RequestBuilder, OutboundError> {
-        check_target(url, self.class, self.allow_private)?;
+        self.check(url)?;
         Ok(self.inner.get(url.as_str()))
     }
 
     /// A POST request builder for `url`, after the target check.
     pub fn post(&self, url: &reqwest::Url) -> Result<reqwest::RequestBuilder, OutboundError> {
-        check_target(url, self.class, self.allow_private)?;
+        self.check(url)?;
         Ok(self.inner.post(url.as_str()))
     }
 
     /// A PATCH request builder for `url`, after the target check.
     pub fn patch(&self, url: &reqwest::Url) -> Result<reqwest::RequestBuilder, OutboundError> {
-        check_target(url, self.class, self.allow_private)?;
+        self.check(url)?;
         Ok(self.inner.patch(url.as_str()))
     }
 }
@@ -210,24 +228,73 @@ impl OutboundClient {
 /// Builds the guarded client for one target class.
 ///
 /// `allow_private` is the class opt-out (`HARBORGATE_ALLOW_PRIVATE_*`). It is false by
-/// default. GitHub ignores it, because `api.github.com` is a fixed public host.
+/// default. GitHub ignores it and uses [`github_client`].
 pub fn client(class: TargetClass, allow_private: bool) -> Result<OutboundClient, OutboundError> {
     Ok(OutboundClient {
-        inner: build(class, allow_private, None)?,
+        inner: build(
+            Arc::new(GuardedResolver {
+                class,
+                allow_private,
+            }),
+            None,
+        )?,
         class,
         allow_private,
+        github: None,
+    })
+}
+
+/// Resolves like [`GuardedResolver`] for the GitHub class, except that the configured GitHub
+/// API host is trusted: its resolved addresses are not checked against the private ranges
+/// (`specs/security.md`, "GitHub base URL", Decided 2026-11-06, user, #184). Any other host
+/// name gets the full check.
+struct GithubResolver {
+    target: GithubTarget,
+}
+
+impl Resolve for GithubResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let trusted = self
+            .target
+            .current()
+            .trusted_host()
+            .is_some_and(|host| name.as_str().eq_ignore_ascii_case(host));
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let found = tokio::net::lookup_host((host.as_str(), 0)).await?;
+            let addresses: Vec<SocketAddr> = found.collect();
+            let allowed = if trusted {
+                addresses
+            } else {
+                filter_addresses(addresses, TargetClass::GitHub, false)?
+            };
+            let iter: Addrs = Box::new(allowed.into_iter());
+            Ok(iter)
+        })
+    }
+}
+
+/// The GitHub client. The host in `target` is trusted; every other host is refused private
+/// ranges. The token must still be sent only to a URL that passes
+/// [`GithubUrls::is_api_url`], which the callers check before they build a request.
+pub fn github_client(target: GithubTarget) -> Result<OutboundClient, OutboundError> {
+    Ok(OutboundClient {
+        inner: build(
+            Arc::new(GithubResolver {
+                target: target.clone(),
+            }),
+            None,
+        )?,
+        class: TargetClass::GitHub,
+        allow_private: false,
+        github: Some(target),
     })
 }
 
 fn build(
-    class: TargetClass,
-    allow_private: bool,
+    resolver: Arc<dyn Resolve>,
     extra_root: Option<reqwest::Certificate>,
 ) -> Result<reqwest::Client, OutboundError> {
-    let resolver = GuardedResolver {
-        class,
-        allow_private,
-    };
     // `no_proxy()` stops reqwest from reading HTTP_PROXY, HTTPS_PROXY and ALL_PROXY. A proxy
     // would resolve the target host itself, and the guarded resolver would check only the
     // proxy's address.
@@ -235,7 +302,7 @@ fn build(
         .no_proxy()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
-        .dns_resolver(Arc::new(resolver))
+        .dns_resolver(resolver)
         .timeout(Duration::from_secs(30));
     if let Some(root) = extra_root {
         builder = builder.add_root_certificate(root);
@@ -252,9 +319,16 @@ pub fn client_trusting(
     root: reqwest::Certificate,
 ) -> Result<OutboundClient, OutboundError> {
     Ok(OutboundClient {
-        inner: build(class, allow_private, Some(root))?,
+        inner: build(
+            Arc::new(GuardedResolver {
+                class,
+                allow_private,
+            }),
+            Some(root),
+        )?,
         class,
         allow_private,
+        github: None,
     })
 }
 
@@ -739,6 +813,41 @@ pub(crate) mod socket_tests {
         };
         // A followed redirect would target 127.0.0.1:1 and fail. The 302 itself is returned.
         assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+    }
+
+    #[test]
+    fn only_the_admin_set_github_host_skips_the_private_range_check() {
+        use crate::services::github_url::{GithubTarget, GithubUrls};
+        let literal = |text: &str| reqwest::Url::parse(text).unwrap();
+        // A custom host that is a private IP literal: trusted, so the check is skipped for it.
+        let custom =
+            GithubTarget::new(GithubUrls::from_stored("https://10.1.2.3/api/v3", "").unwrap());
+        let client = github_client(custom).unwrap();
+        assert!(
+            client
+                .get(&literal("https://10.1.2.3/api/v3/user/repos"))
+                .is_ok()
+        );
+        // Any other private host is still refused, and plain http is still refused.
+        assert_eq!(
+            client.get(&literal("https://10.9.9.9/x")).err(),
+            Some(OutboundError::BlockedAddress)
+        );
+        assert_eq!(
+            client.get(&literal("http://10.1.2.3/x")).err(),
+            Some(OutboundError::NotHttps)
+        );
+        // The default host keeps the check: a private literal is never exempt.
+        let default = github_client(GithubTarget::default()).unwrap();
+        assert_eq!(
+            default.get(&literal("https://10.1.2.3/x")).err(),
+            Some(OutboundError::BlockedAddress)
+        );
+        assert!(
+            default
+                .get(&literal("https://api.github.com/user/repos"))
+                .is_ok()
+        );
     }
 
     #[test]

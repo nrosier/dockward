@@ -20,6 +20,7 @@ pub mod findings;
 pub mod github_issues;
 #[allow(dead_code)] // Used by the SARIF upload worker (#53).
 pub mod github_scanning;
+pub mod github_url;
 #[allow(dead_code)] // Used by the sync pipeline.
 pub mod harbor_client;
 #[allow(dead_code)] // Used by the webhook route.

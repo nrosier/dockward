@@ -406,12 +406,17 @@ pub fn require_revision(labels: &ArtifactLabels) -> Result<&str, AppError> {
 
 /// Compares the `source` label with the mapping's GitHub target, case-insensitively and
 /// ignoring a trailing `/` or `.git` (`specs/integrations.md`). Absent means proceed.
-pub fn check_source(labels: &ArtifactLabels, owner: &str, repo: &str) -> Result<(), AppError> {
+pub fn check_source(
+    labels: &ArtifactLabels,
+    web_url: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<(), AppError> {
     let Some(source) = labels.source.as_deref() else {
         return Ok(());
     };
     let normalized = normalize_source(source);
-    let expected = normalize_source(&format!("https://github.com/{owner}/{repo}"));
+    let expected = normalize_source(&format!("{web_url}/{owner}/{repo}"));
     if normalized == expected {
         Ok(())
     } else {
@@ -553,17 +558,25 @@ mod tests {
             source: Some("HTTPS://github.com/Octo/App.git/".to_owned()),
             ..Default::default()
         };
-        assert!(check_source(&labels, "octo", "app").is_ok());
+        assert!(check_source(&labels, "https://github.com", "octo", "app").is_ok());
         let other = ArtifactLabels {
             source: Some("https://github.com/octo/other".to_owned()),
             ..Default::default()
         };
-        assert!(check_source(&other, "octo", "app").is_err());
+        assert!(check_source(&other, "https://github.com", "octo", "app").is_err());
     }
 
     #[test]
     fn absent_source_label_proceeds() {
-        assert!(check_source(&ArtifactLabels::default(), "octo", "app").is_ok());
+        assert!(
+            check_source(
+                &ArtifactLabels::default(),
+                "https://github.com",
+                "octo",
+                "app"
+            )
+            .is_ok()
+        );
     }
 
     #[test]

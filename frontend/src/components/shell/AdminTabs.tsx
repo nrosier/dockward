@@ -21,6 +21,7 @@ const SETTINGS: Tab[] = [
   { to: "/admin/settings/oidc", label: "admin.settings.oidc" },
   { to: "/admin/settings/users", label: "admin.settings.users" },
   { to: "/admin/settings/alerts", label: "admin.settings.alerts" },
+  { to: "/admin/settings/github", label: "admin.settings.github" },
   { to: "/admin/settings/backup", label: "admin.settings.backup" },
 ];
 

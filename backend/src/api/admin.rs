@@ -419,7 +419,7 @@ pub async fn health(
     Extension(source): Extension<ClientIpSource>,
 ) -> Result<Json<HealthBody>, AppError> {
     let harbor = OutboundHarborProbe::new(state.allow_private_harbor)?;
-    let github = OutboundGithubProbe::new()?;
+    let github = OutboundGithubProbe::new(state.github.clone())?;
     Ok(Json(
         health_body(&state, &harbor, &github, client_ip, source).await?,
     ))
@@ -643,7 +643,7 @@ pub(crate) mod test_support {
             data_dir: dir.clone(),
             backup_dir: dir.join("backups"),
             issues_client: std::sync::Arc::new(
-                crate::services::github_issues::GithubIssues::new().unwrap(),
+                crate::services::github_issues::GithubIssues::new(Default::default()).unwrap(),
             ),
             harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
             app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
@@ -651,7 +651,9 @@ pub(crate) mod test_support {
             )),
             harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
             pull_limiter: crate::api::mappings::new_pull_limiter(),
-            pickers: crate::services::pickers::PickerState::outbound(false).unwrap(),
+            pickers: crate::services::pickers::PickerState::outbound(false, Default::default())
+                .unwrap(),
+            github: Default::default(),
         };
         (state, dir)
     }
@@ -904,7 +906,7 @@ mod tests {
             data_dir: dir.clone(),
             backup_dir: dir.join("backups"),
             issues_client: std::sync::Arc::new(
-                crate::services::github_issues::GithubIssues::new().unwrap(),
+                crate::services::github_issues::GithubIssues::new(Default::default()).unwrap(),
             ),
             harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
             app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
@@ -912,7 +914,9 @@ mod tests {
             )),
             harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
             pull_limiter: crate::api::mappings::new_pull_limiter(),
-            pickers: crate::services::pickers::PickerState::outbound(false).unwrap(),
+            pickers: crate::services::pickers::PickerState::outbound(false, Default::default())
+                .unwrap(),
+            github: Default::default(),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }

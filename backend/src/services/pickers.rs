@@ -25,12 +25,13 @@ use crate::error::{AppError, ErrorDetail};
 use crate::services::credential_probe::{encode_segment, valid_github_name, valid_harbor_name};
 use crate::services::credentials::{self, SERVICE_GITHUB, SERVICE_HARBOR};
 use crate::services::github_scanning::DEFAULT_WAIT_SECS;
+use crate::services::github_url::GithubTarget;
 use crate::services::harbor_client::{
     artifact_url, artifacts_list_url, parse_artifact_list, valid_digest,
 };
 use crate::services::pagination::Pagination;
 use crate::services::picker_upstream::{
-    OutboundPickerHttp, PickerHttp, UpstreamAuth, UpstreamResponse, is_github_api_url,
+    OutboundPickerHttp, PickerHttp, UpstreamAuth, UpstreamResponse,
 };
 use crate::services::time;
 use crate::worker::now_secs;
@@ -320,6 +321,9 @@ impl PickerCache {
 #[derive(Clone)]
 pub struct PickerState {
     http: Arc<dyn PickerHttp>,
+    /// The configured GitHub URLs: the API base for the repository list, the web host for the
+    /// source label.
+    github: GithubTarget,
     /// 60 requests per minute per user across the three lists and the suggestion.
     pub limiter: RateLimiter,
     cache: Arc<PickerCache>,
@@ -329,20 +333,42 @@ pub struct PickerState {
 
 impl PickerState {
     /// The production state. `allow_private_harbor` is `HARBORGATE_ALLOW_PRIVATE_HARBOR`.
-    pub fn outbound(allow_private_harbor: bool) -> Result<Self, AppError> {
-        Ok(Self::new(Arc::new(OutboundPickerHttp::new(
-            allow_private_harbor,
-        )?)))
+    pub fn outbound(allow_private_harbor: bool, github: GithubTarget) -> Result<Self, AppError> {
+        Ok(Self::with_target(
+            Arc::new(OutboundPickerHttp::new(
+                allow_private_harbor,
+                github.clone(),
+            )?),
+            github,
+        ))
     }
 
-    /// State over any transport, such as a test fake.
+    /// State over any transport, such as a test fake, with the default GitHub URLs.
+    #[cfg(test)]
     pub fn new(http: Arc<dyn PickerHttp>) -> Self {
-        Self::with_cache(http, CACHE_TTL, MAX_ENTRIES)
+        Self::with_target(http, GithubTarget::default())
     }
 
-    fn with_cache(http: Arc<dyn PickerHttp>, ttl: Duration, max_entries: usize) -> Self {
+    /// The shared GitHub URLs. A router test uses it so the admin route and the picker see one value.
+    #[cfg(test)]
+    pub(crate) fn github_target(&self) -> GithubTarget {
+        self.github.clone()
+    }
+
+    /// State over any transport and the given GitHub URLs.
+    pub fn with_target(http: Arc<dyn PickerHttp>, github: GithubTarget) -> Self {
+        Self::with_cache(http, github, CACHE_TTL, MAX_ENTRIES)
+    }
+
+    fn with_cache(
+        http: Arc<dyn PickerHttp>,
+        github: GithubTarget,
+        ttl: Duration,
+        max_entries: usize,
+    ) -> Self {
         Self {
             http,
+            github,
             limiter: RateLimiter::new(USER_LIMIT, Duration::from_secs(60)),
             cache: Arc::new(PickerCache::new(ttl, max_entries)),
             blocks: Arc::new(Mutex::new(HashMap::new())),
@@ -946,17 +972,18 @@ impl PickerState {
         &self,
         ctx: &GithubCtx,
     ) -> Result<Arc<Listing<GitHubRepository>>, PickerFail> {
+        // The list belongs to one API base, so a changed base URL does not serve the old list.
         let cache_key = CacheKey {
             credential: ctx.id.clone(),
             list: "github_repositories",
-            project: String::new(),
+            project: self.github.current().api_base().to_owned(),
             search: String::new(),
         };
         let cached = self
             .cache
             .get_or_fill(cache_key, ctx.generation, async {
-                let mut url = Url::parse("https://api.github.com/user/repos")
-                    .map_err(|_| AppError::InternalError)?;
+                let urls = self.github.current();
+                let mut url = urls.api_url("user/repos").ok_or(AppError::InternalError)?;
                 url.query_pairs_mut()
                     .append_pair("per_page", &UPSTREAM_PAGE_SIZE.to_string())
                     .append_pair("page", "1")
@@ -1000,8 +1027,9 @@ impl PickerState {
                         break;
                     }
                     url = Url::parse(&next).map_err(|_| upstream())?;
-                    // The token goes only to the API host, whatever the `Link` header says.
-                    if !is_github_api_url(&url) {
+                    // The token goes only to the configured API host and base path, whatever
+                    // the `Link` header says.
+                    if !urls.is_api_url(&url) {
                         return Err(upstream());
                     }
                 }
@@ -1063,21 +1091,24 @@ pub enum LabelParse {
 }
 
 /// Parses the source label strictly (`specs/integrations.md`, "Source suggestion"): an
-/// `https://github.com/<owner>/<repo>` URL, host compared case-insensitively, one trailing
+/// `https://<web host>/<owner>/<repo>` URL (`github.com` unless the admin set a GitHub web
+/// URL), host compared case-insensitively, one trailing
 /// `/` or `.git` ignored. Userinfo, a port, a query, a fragment, a deeper path or a name
 /// that fails the GitHub name check give `Invalid`. The label text is never kept.
-pub fn parse_source_label(label: &str) -> LabelParse {
+pub fn parse_source_label(label: &str, web_host: &str) -> LabelParse {
     let Ok(url) = Url::parse(label.trim()) else {
         return LabelParse::Invalid;
     };
     let Some(host) = url.host_str() else {
         return LabelParse::Invalid;
     };
-    if !host.eq_ignore_ascii_case("github.com") {
+    if !host.eq_ignore_ascii_case(web_host) {
         return LabelParse::NotGithub;
     }
     // `Url` drops a default port, so an explicit `:443` is caught on the text.
-    let explicit_port = label.to_ascii_lowercase().contains("github.com:");
+    let explicit_port = label
+        .to_ascii_lowercase()
+        .contains(&format!("{}:", web_host.to_ascii_lowercase()));
     if url.scheme() != "https"
         || !url.username().is_empty()
         || url.password().is_some()
@@ -1297,15 +1328,17 @@ impl PickerState {
         let Some(label) = label else {
             return Ok(SuggestionOutcome::None("no_label"));
         };
-        Ok(match parse_source_label(&label) {
-            LabelParse::Github { owner, repo } => SuggestionOutcome::Found {
-                owner,
-                repo,
-                image_tag,
+        Ok(
+            match parse_source_label(&label, self.github.current().web_host()) {
+                LabelParse::Github { owner, repo } => SuggestionOutcome::Found {
+                    owner,
+                    repo,
+                    image_tag,
+                },
+                LabelParse::NotGithub => SuggestionOutcome::None("not_github"),
+                LabelParse::Invalid => SuggestionOutcome::None("invalid_label"),
             },
-            LabelParse::NotGithub => SuggestionOutcome::None("not_github"),
-            LabelParse::Invalid => SuggestionOutcome::None("invalid_label"),
-        })
+        )
     }
 }
 

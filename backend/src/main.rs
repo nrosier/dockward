@@ -178,6 +178,10 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             get(api::oidc::get_settings).put(api::oidc::put_settings),
         )
         .route(
+            "/api/v1/admin/github-url",
+            get(api::github_url::get_settings).put(api::github_url::put_settings),
+        )
+        .route(
             "/api/v1/admin/users",
             get(api::admin::list_users).post(api::admin::create_user),
         )
@@ -582,6 +586,9 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
     let backup_key = Arc::new(
         auth::crypto::backup_key(&encryption_key).map_err(|_| "could not derive the backup key")?,
     );
+    let github = services::github_url::load_target(&pool)
+        .await
+        .map_err(|_| "could not read the GitHub base URL settings")?;
     let state = api::state::AppState {
         pool,
         session_key,
@@ -600,7 +607,7 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         data_dir: settings.data_dir.clone(),
         backup_dir: settings.backup_dir.clone(),
         issues_client: Arc::new(
-            services::github_issues::GithubIssues::new()
+            services::github_issues::GithubIssues::new(github.clone())
                 .map_err(|_| "could not build the GitHub issues client")?,
         ),
         harbor_probe: api::state::HarborProbeHandle::outbound(settings.allow_private_harbor)
@@ -609,8 +616,12 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         harbor_fetch: api::state::HarborFetchHandle::outbound(settings.allow_private_harbor)
             .map_err(|_| "could not build the Harbor client")?,
         pull_limiter: api::mappings::new_pull_limiter(),
-        pickers: services::pickers::PickerState::outbound(settings.allow_private_harbor)
-            .map_err(|_| "could not build the picker client")?,
+        pickers: services::pickers::PickerState::outbound(
+            settings.allow_private_harbor,
+            github.clone(),
+        )
+        .map_err(|_| "could not build the picker client")?,
+        github,
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -658,6 +669,7 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         state.credentials_key.clone(),
         state.allow_private_harbor,
         state.allow_private_alerts,
+        state.github.clone(),
     )
     .map_err(|_| "could not build the sync job handler")?;
     let worker_task = tokio::spawn(async move {
@@ -851,7 +863,7 @@ mod tests {
             data_dir: dir.clone(),
             backup_dir: dir.join("backups"),
             issues_client: std::sync::Arc::new(
-                crate::services::github_issues::GithubIssues::new().unwrap(),
+                crate::services::github_issues::GithubIssues::new(Default::default()).unwrap(),
             ),
             harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
             app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
@@ -859,7 +871,9 @@ mod tests {
             )),
             harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
             pull_limiter: crate::api::mappings::new_pull_limiter(),
-            pickers: crate::services::pickers::PickerState::outbound(false).unwrap(),
+            pickers: crate::services::pickers::PickerState::outbound(false, Default::default())
+                .unwrap(),
+            github: Default::default(),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -1906,7 +1920,7 @@ mod tests {
             webhook_token_limiter,
             harbor_probe,
             harbor_fetch,
-            services::pickers::PickerState::outbound(false).unwrap(),
+            services::pickers::PickerState::outbound(false, Default::default()).unwrap(),
         )
         .await
     }
@@ -1951,7 +1965,7 @@ mod tests {
             data_dir: dir.clone(),
             backup_dir: dir.join("backups"),
             issues_client: std::sync::Arc::new(
-                crate::services::github_issues::GithubIssues::new().unwrap(),
+                crate::services::github_issues::GithubIssues::new(Default::default()).unwrap(),
             ),
             harbor_probe,
             app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
@@ -1959,6 +1973,7 @@ mod tests {
             )),
             harbor_fetch,
             pull_limiter: api::mappings::new_pull_limiter(),
+            github: pickers.github_target(),
             pickers,
         };
         (app(Vec::new(), state), pool, dir, handle)
@@ -4723,5 +4738,296 @@ mod tests {
         let details: serde_json::Value =
             serde_json::from_str(audit[0].3.as_deref().unwrap()).unwrap();
         assert_eq!(details, serde_json::json!({"old": "info", "new": "debug"}));
+    }
+    /// A `MakeWriter` into a shared buffer, to read what the log layer wrote.
+    #[derive(Clone, Default)]
+    struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The admin GitHub URL routes (#184). Covers: (1) an empty value stores the default and
+    /// reads back as `""`; (2) an https URL with a path `/api/v3` is accepted and used as the
+    /// prefix of a repository call; (3) every invalid shape is `422 validation_failed` with
+    /// `settings.github_url_invalid`; (4) a non-admin gets `403` and an anonymous caller `401`;
+    /// (5) a token-like sentinel in the request is absent from every error body and log line;
+    /// (6) a path in `web_url` is `422`.
+    #[tokio::test]
+    async fn admin_github_url_routes() {
+        use axum::http::StatusCode;
+        let (router, pool, dir) = test_router("github-url-routes").await;
+        let mut conn = pool.acquire().await.unwrap();
+        for (id, role) in [("ga", "admin"), ("gu", "user")] {
+            db::users::insert_local(&mut conn, id, id, None, "h", role)
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let csrf = auth::csrf::issue(&auth::crypto::csrf_key(&root).unwrap()).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let admin = format!("{}; {csrf_cookie}", session_cookie("ga", "admin", 0));
+        let user = format!("{}; {csrf_cookie}", session_cookie("gu", "user", 0));
+        let uri = "/api/v1/admin/github-url";
+        const TOKEN: &str = "ghp_SENTINEL-github-token-9c1d";
+
+        let sink = LogSink::default();
+        let writer = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // (4) access control.
+        let (anon, _) = get_json(&router, uri, &csrf_cookie).await;
+        let (forbidden_get, _) = get_json(&router, uri, &user).await;
+        let (forbidden_put, _) = send_json(
+            &router,
+            "PUT",
+            uri,
+            Some(&user),
+            Some(&csrf),
+            r#"{"api_base_url":"","web_url":""}"#,
+        )
+        .await;
+        assert_eq!(anon, StatusCode::UNAUTHORIZED);
+        assert_eq!(forbidden_get, StatusCode::FORBIDDEN);
+        assert_eq!(forbidden_put, StatusCode::FORBIDDEN);
+
+        // (1) empty means the default.
+        let (status, body) = get_json(&router, uri, &admin).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"api_base_url": "", "web_url": ""}));
+        let (status, body) = send_json(
+            &router,
+            "PUT",
+            uri,
+            Some(&admin),
+            Some(&csrf),
+            r#"{"api_base_url":"","web_url":""}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"api_base_url": "", "web_url": ""}));
+
+        // (3) and (6) invalid values are 422 with the fixed message and are not stored.
+        let invalid_api = [
+            "http://ghes.example.com/api/v3",
+            "https://user:pw@ghes.example.com/api/v3",
+            "https://ghes.example.com:8443/api/v3",
+            "https://ghes.example.com/api/v3?x=1",
+            "https://ghes.example.com/api/v3#f",
+            "https://ghes.example.com/api/../v3",
+            "https://ghes.example.com/api//v3",
+            "https://ghes.example.com/api%2Fv3",
+            "https://ghes.example.com/api%2fv3",
+        ];
+        for bad in invalid_api {
+            let payload = serde_json::json!({"api_base_url": bad, "web_url": ""}).to_string();
+            let (status, body) =
+                send_json(&router, "PUT", uri, Some(&admin), Some(&csrf), &payload).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+            assert_eq!(body["error"]["code"], "validation_failed", "{bad}");
+            assert_eq!(
+                body["error"]["message"], "settings.github_url_invalid",
+                "{bad}"
+            );
+        }
+        // (6) a path in web_url.
+        let payload =
+            serde_json::json!({"api_base_url": "", "web_url": "https://ghes.example.com/x"})
+                .to_string();
+        let (status, body) =
+            send_json(&router, "PUT", uri, Some(&admin), Some(&csrf), &payload).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["message"], "settings.github_url_invalid");
+        // (5) a token in userinfo is refused and never echoed or logged.
+        let payload = serde_json::json!({
+            "api_base_url": format!("https://{TOKEN}@ghes.example.com/api/v3"),
+            "web_url": ""
+        })
+        .to_string();
+        let (status, body) =
+            send_json(&router, "PUT", uri, Some(&admin), Some(&csrf), &payload).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!body.to_string().contains(TOKEN), "{body}");
+        let (_, unchanged) = get_json(&router, uri, &admin).await;
+        assert_eq!(
+            unchanged,
+            serde_json::json!({"api_base_url": "", "web_url": ""})
+        );
+
+        // (2) a path is accepted, stored, and read back.
+        let payload = serde_json::json!({
+            "api_base_url": "https://ghes.example.com/api/v3",
+            "web_url": "https://ghes.example.com"
+        })
+        .to_string();
+        let (status, body) =
+            send_json(&router, "PUT", uri, Some(&admin), Some(&csrf), &payload).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "api_base_url": "https://ghes.example.com/api/v3",
+                "web_url": "https://ghes.example.com"
+            })
+        );
+        let (_, read) = get_json(&router, uri, &admin).await;
+        assert_eq!(read, body);
+
+        // The router is a clone of the one that holds the target, so the request path of a
+        // repository call under the saved base is the prefix plus the REST path.
+        let stored = services::github_url::load_stored(&pool).await.unwrap();
+        let urls =
+            services::github_url::GithubUrls::from_stored(&stored.api_base_url, &stored.web_url)
+                .unwrap();
+        let call = urls
+            .api_url(&services::credential_probe::github_repo_path("octo", "app"))
+            .unwrap();
+        assert_eq!(call.host_str(), Some("ghes.example.com"));
+        assert_eq!(call.path(), "/api/v3/repos/octo/app");
+
+        // Clearing returns to the default.
+        let (status, _) = send_json(
+            &router,
+            "PUT",
+            uri,
+            Some(&admin),
+            Some(&csrf),
+            r#"{"api_base_url":"","web_url":""}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let audit: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action LIKE 'github%'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            audit, 0,
+            "no audit row is written for the GitHub URL change"
+        );
+
+        let logged = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            !logged.contains(TOKEN),
+            "the token reached the log: {logged}"
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// Test (2) of #184 end to end: after the admin saves `https://ghes.example.com/api/v3`, the
+    /// repository list request goes to that host with `/api/v3` as the path prefix, and the
+    /// default `https://api.github.com/user/repos` is used before and (from cache) after.
+    #[tokio::test]
+    async fn github_base_url_with_a_path_prefixes_the_repository_call() {
+        use axum::http::StatusCode;
+        use services::pickers::tests::{Recorded, SENTINEL, ok};
+        let fake = Arc::new(Recorded::default());
+        fake.on(|_: &reqwest::Url| true, ok(r#"[]"#));
+        let (router, pool, dir, _) = test_router_full(
+            "github-base-prefix",
+            services::throttle::LoginThrottle::new(),
+            api::webhooks::new_token_limiter(),
+            api::state::HarborProbeHandle::new(Arc::new(ReadableHarbor)),
+            api::state::HarborFetchHandle::outbound(false).unwrap(),
+            services::pickers::PickerState::new(fake.clone()),
+        )
+        .await;
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        for (id, role) in [("owner-1", "admin")] {
+            db::users::insert_local(&mut conn, id, id, None, "h", role)
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        let created = services::credentials::create(
+            &pool,
+            &auth::crypto::credentials_key(&root).unwrap(),
+            &services::audit::Actor {
+                user_id: Some("owner-1".to_owned()),
+                username: "owner-1".to_owned(),
+            },
+            "owner-1",
+            services::credentials::NewCredential {
+                service_type: services::credentials::SERVICE_GITHUB.to_owned(),
+                label: "gh".to_owned(),
+                base_url: None,
+                username: None,
+                token: SENTINEL.to_owned(),
+                expires_at: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let csrf = auth::csrf::issue(&auth::crypto::csrf_key(&root).unwrap()).unwrap();
+        let cookie = format!(
+            "{}; {}={csrf}",
+            session_cookie("owner-1", "admin", 0),
+            auth::csrf::CSRF_COOKIE
+        );
+        let list = format!("/api/v1/credentials/{}/github-repositories", created.id);
+        let put = |body: &'static str| {
+            let router = router.clone();
+            let cookie = cookie.clone();
+            let csrf = csrf.clone();
+            async move {
+                send_json(
+                    &router,
+                    "PUT",
+                    "/api/v1/admin/github-url",
+                    Some(&cookie),
+                    Some(&csrf),
+                    body,
+                )
+                .await
+                .0
+            }
+        };
+
+        let (status, _) = get_json(&router, &list, &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            put(r#"{"api_base_url":"https://ghes.example.com/api/v3","web_url":""}"#).await,
+            StatusCode::OK
+        );
+        let (status, _) = get_json(&router, &list, &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            put(r#"{"api_base_url":"","web_url":""}"#).await,
+            StatusCode::OK
+        );
+        let (status, _) = get_json(&router, &list, &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let urls = fake.urls.lock().unwrap().clone();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        // The third call returns to the default base and is served from the cache entry of
+        // the first call, which is keyed by the base URL, so no third request is sent.
+        assert_eq!(urls.len(), 2, "{urls:?}");
+        assert!(
+            urls[0].starts_with("https://api.github.com/user/repos?"),
+            "{}",
+            urls[0]
+        );
+        assert!(
+            urls[1].starts_with("https://ghes.example.com/api/v3/user/repos?"),
+            "{}",
+            urls[1]
+        );
     }
 }

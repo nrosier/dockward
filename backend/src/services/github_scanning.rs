@@ -16,8 +16,11 @@ use reqwest::Url;
 use serde_json::Value;
 
 use crate::error::AppError;
+use std::sync::Arc;
+
 use crate::services::credential_probe::valid_github_name;
-use crate::services::outbound::{self, OutboundClient, TargetClass};
+use crate::services::github_url::{GithubTarget, GithubUrls};
+use crate::services::outbound::{self, OutboundClient};
 
 /// Largest gzip-compressed SARIF that GitHub accepts in one upload.
 pub const MAX_COMPRESSED_BYTES: usize = 10 * 1024 * 1024;
@@ -31,12 +34,6 @@ pub const DEFAULT_WAIT_SECS: i64 = 60;
 /// 6.5 MB. A 64 KiB cap turned such a page into `null`, so the cap is 8 MiB. Only one
 /// response is held at a time.
 const MAX_BODY: usize = 8 * 1024 * 1024;
-
-/// GitHub's REST API root. The host is fixed (`specs/security.md`, "GitHub token scope").
-pub(crate) const GITHUB_API: &str = "https://api.github.com/";
-
-/// The one host a request may reach.
-pub(crate) const API_HOST: &str = "api.github.com";
 
 /// The `tool_name` sent with each upload.
 const TOOL_NAME: &str = "HarborGate";
@@ -123,31 +120,38 @@ pub struct ScanResponse {
 /// Sends one authenticated request to the GitHub API. The production impl uses the guarded
 /// client. Tests use recorded responses and never open a socket.
 pub trait ScanHttp {
-    /// POSTs `body` as JSON to `path`, which is relative to `https://api.github.com/`.
+    /// POSTs `body` as JSON to `path`, which is relative to the configured API base URL.
     fn post(
         &self,
         path: &str,
         token: &[u8],
         body: &Value,
     ) -> impl Future<Output = Result<ScanResponse, ScanError>> + Send;
-    /// PATCHes `body` as JSON to `path`, which is relative to `https://api.github.com/`.
+    /// PATCHes `body` as JSON to `path`, which is relative to the configured API base URL.
     fn patch(
         &self,
         path: &str,
         token: &[u8],
         body: &Value,
     ) -> impl Future<Output = Result<ScanResponse, ScanError>> + Send;
-    /// GETs `path`, which is relative to `https://api.github.com/`.
+    /// GETs `path`, which is relative to the configured API base URL.
     fn get(
         &self,
         path: &str,
         token: &[u8],
     ) -> impl Future<Output = Result<ScanResponse, ScanError>> + Send;
+    /// The GitHub URLs the requests go to. A `Link` next URL is checked against them. Test
+    /// fakes keep the default, `https://api.github.com`.
+    fn urls(&self) -> Arc<GithubUrls> {
+        Arc::new(GithubUrls::default())
+    }
 }
 
 /// Production HTTP: the guarded client borrowed from [`GithubScanning`].
 pub(crate) struct LiveHttp<'a> {
     pub(crate) client: &'a OutboundClient,
+    /// The configured URLs, read once per call so one call uses one consistent base.
+    pub(crate) urls: Arc<GithubUrls>,
 }
 
 impl ScanHttp for LiveHttp<'_> {
@@ -157,7 +161,7 @@ impl ScanHttp for LiveHttp<'_> {
         token: &[u8],
         body: &Value,
     ) -> Result<ScanResponse, ScanError> {
-        let url = api_url(path)?;
+        let url = api_url(&self.urls, path)?;
         let builder = self.client.post(&url).map_err(|_| transport())?;
         let sent = authorized(builder, token)?.json(body).send().await;
         logged_response("POST", &url, sent).await
@@ -169,17 +173,21 @@ impl ScanHttp for LiveHttp<'_> {
         token: &[u8],
         body: &Value,
     ) -> Result<ScanResponse, ScanError> {
-        let url = api_url(path)?;
+        let url = api_url(&self.urls, path)?;
         let builder = self.client.patch(&url).map_err(|_| transport())?;
         let sent = authorized(builder, token)?.json(body).send().await;
         logged_response("PATCH", &url, sent).await
     }
 
     async fn get(&self, path: &str, token: &[u8]) -> Result<ScanResponse, ScanError> {
-        let url = api_url(path)?;
+        let url = api_url(&self.urls, path)?;
         let builder = self.client.get(&url).map_err(|_| transport())?;
         let sent = authorized(builder, token)?.send().await;
         logged_response("GET", &url, sent).await
+    }
+
+    fn urls(&self) -> Arc<GithubUrls> {
+        Arc::clone(&self.urls)
     }
 }
 
@@ -198,21 +206,10 @@ async fn logged_response(
     read_response(sent.map_err(|_| transport())?).await
 }
 
-fn api_url(path: &str) -> Result<Url, ScanError> {
-    let base = Url::parse(GITHUB_API).map_err(|_| transport())?;
-    let url = base.join(path).map_err(|_| transport())?;
-    // `join` lets a path such as `//host/x` or `https://host/` replace the host. The token
-    // is sent with every request, so the result must still be the API host.
-    let on_api_host = url.scheme() == "https"
-        && url.host_str() == Some(API_HOST)
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.port().is_none();
-    if on_api_host {
-        Ok(url)
-    } else {
-        Err(transport())
-    }
+/// The request URL: the configured API base plus `path`. The token is sent with every
+/// request, so a path that would leave the API host or the base path is refused.
+fn api_url(urls: &GithubUrls, path: &str) -> Result<Url, ScanError> {
+    urls.api_url(path).ok_or_else(transport)
 }
 
 /// Adds the bearer token and the headers the credential probes use.
@@ -432,17 +429,25 @@ pub async fn status_with<H: ScanHttp>(
     }
 }
 
-/// The GitHub code scanning client. Built on the guarded outbound client for
-/// `api.github.com`.
+/// The GitHub code scanning client. Built on the guarded outbound client for the configured
+/// GitHub API base URL.
 pub struct GithubScanning {
     client: OutboundClient,
+    target: GithubTarget,
 }
 
 impl GithubScanning {
-    pub fn new() -> Result<Self, AppError> {
+    pub fn new(target: GithubTarget) -> Result<Self, AppError> {
         let client =
-            outbound::client(TargetClass::GitHub, false).map_err(|_| AppError::InternalError)?;
-        Ok(Self { client })
+            outbound::github_client(target.clone()).map_err(|_| AppError::InternalError)?;
+        Ok(Self { client, target })
+    }
+
+    fn http(&self) -> LiveHttp<'_> {
+        LiveHttp {
+            client: &self.client,
+            urls: self.target.current(),
+        }
     }
 
     /// Uploads an encoded SARIF and returns GitHub's SARIF id. See [`upload_with`].
@@ -452,10 +457,7 @@ impl GithubScanning {
         fields: &Upload<'_>,
         now: i64,
     ) -> Result<String, ScanError> {
-        let http = LiveHttp {
-            client: &self.client,
-        };
-        upload_with(&http, token, fields, now).await
+        upload_with(&self.http(), token, fields, now).await
     }
 
     /// Reads the processing status of an upload. See [`status_with`].
@@ -467,10 +469,7 @@ impl GithubScanning {
         sarif_id: &str,
         now: i64,
     ) -> Result<Processing, ScanError> {
-        let http = LiveHttp {
-            client: &self.client,
-        };
-        status_with(&http, token, owner, repo, sarif_id, now).await
+        status_with(&self.http(), token, owner, repo, sarif_id, now).await
     }
 }
 
@@ -567,8 +566,9 @@ mod tests {
 
     #[test]
     fn api_url_never_leaves_the_api_host() {
+        let urls = GithubUrls::default();
         assert_eq!(
-            api_url("repos/octo/app/issues?page=2").map(String::from),
+            api_url(&urls, "repos/octo/app/issues?page=2").map(String::from),
             Ok("https://api.github.com/repos/octo/app/issues?page=2".to_owned())
         );
         for path in [
@@ -579,7 +579,7 @@ mod tests {
             "https://api.github.com@evil.example/x",
             "https://api.github.com:8443/x",
         ] {
-            assert!(api_url(path).is_err(), "{path} should be refused");
+            assert!(api_url(&urls, path).is_err(), "{path} should be refused");
         }
     }
 

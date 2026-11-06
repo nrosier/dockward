@@ -9,6 +9,7 @@
 use reqwest::Url;
 
 use crate::error::AppError;
+use crate::services::github_url::GithubTarget;
 use crate::services::outbound::{self, OutboundClient, TargetClass};
 
 /// One check in the test response: `{"name","ok","detail","warning"?}`. `warning` is
@@ -201,10 +202,6 @@ pub fn harbor_check(status: u16) -> Check {
     }
 }
 
-/// GitHub's REST API root. The host is fixed, so the outbound check is about the
-/// address only (`specs/security.md`, "GitHub token scope").
-const GITHUB_API: &str = "https://api.github.com/";
-
 /// What GitHub answered: the status, the error `message` (used to classify `403` and
 /// `404`), and the `X-Accepted-GitHub-Permissions` header naming the permission the
 /// endpoint needs. None of these hold the token.
@@ -218,20 +215,21 @@ pub struct GithubResponse {
 /// Sends one authenticated GET to the GitHub API and returns the answer.
 #[allow(async_fn_in_trait)]
 pub trait GithubProbe {
-    /// `path` is relative to `https://api.github.com/`. `token` is the PAT bytes.
+    /// `path` is relative to the configured GitHub API base URL. `token` is the PAT bytes.
     async fn get(&self, path: &str, token: &[u8]) -> Result<GithubResponse, AppError>;
 }
 
 /// Production GitHub probe: the guarded client with a bearer token.
 pub struct OutboundGithubProbe {
     client: OutboundClient,
+    target: GithubTarget,
 }
 
 impl OutboundGithubProbe {
-    pub fn new() -> Result<Self, AppError> {
+    pub fn new(target: GithubTarget) -> Result<Self, AppError> {
         let client =
-            outbound::client(TargetClass::GitHub, false).map_err(|_| AppError::InternalError)?;
-        Ok(Self { client })
+            outbound::github_client(target.clone()).map_err(|_| AppError::InternalError)?;
+        Ok(Self { client, target })
     }
 }
 
@@ -247,8 +245,11 @@ struct RawGithub {
 
 impl OutboundGithubProbe {
     async fn send(&self, path: &str, token: &[u8]) -> Result<RawGithub, AppError> {
-        let base = Url::parse(GITHUB_API).map_err(|_| AppError::InternalError)?;
-        let url = base.join(path).map_err(|_| AppError::InternalError)?;
+        let url = self
+            .target
+            .current()
+            .api_url(path)
+            .ok_or(AppError::InternalError)?;
         let token = std::str::from_utf8(token).map_err(|_| AppError::InternalError)?;
         let sent = self
             .client
