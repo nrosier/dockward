@@ -49,12 +49,14 @@ const MSG_BAD_DIGEST: &str = "the digest is not valid";
 const MSG_BAD_NAMES: &str = "the Harbor names are not valid";
 const MSG_UNREACHABLE: &str = "Harbor could not be reached";
 const MSG_REJECTED: &str = "Harbor rejected the robot account credentials";
-const MSG_NOT_FOUND: &str = "digest not found in Harbor";
 const MSG_UNREADABLE: &str = "Harbor returned an artifact that could not be read";
 const MSG_NO_TAGS: &str = "digest has no tags to sync";
 /// The note kept on a child digest that a tagged index covers. Catalog key
 /// `sync.note.coveredByParent`.
 pub const NOTE_COVERED_BY_PARENT: &str = "covered by parent index";
+/// The note kept on a job whose image was deleted from Harbor after the job was queued. Catalog
+/// key `sync.note.artifactGone`.
+pub const NOTE_ARTIFACT_GONE: &str = "artifact no longer in Harbor";
 const MSG_RATE_LIMITED: &str = "Harbor rate limit reached";
 
 /// What kind of work a job's payload describes.
@@ -161,7 +163,6 @@ fn body_or_outcome(reply: HarborReply, now: i64) -> Result<Vec<u8>, JobOutcome> 
             })
         }
         401 | 403 => Err(failed(MSG_REJECTED)),
-        404 => Err(failed(MSG_NOT_FOUND)),
         other => Err(JobOutcome::Failed(format!(
             "Harbor returned status {other}"
         ))),
@@ -273,6 +274,10 @@ async fn resolve<H: HarborFetch, C: Clock>(
         .fetch(&url, &username, &secret, &[])
         .await
         .map_err(|_| failed(MSG_UNREACHABLE))?;
+    // A 404 on the digest itself means the image was deleted after the job was queued: final.
+    if reply.status == 404 {
+        return Ok(JobOutcome::DoneWithNote(NOTE_ARTIFACT_GONE.to_owned()));
+    }
     let body = body_or_outcome(reply, clock.now())?;
 
     // (f) to (h) The tags.

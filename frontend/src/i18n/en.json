@@ -701,5 +701,6 @@
   "mapping.errors.detail.robotScope": "The Harbor robot lacks a permission. Grant it Repository List and Repository Read, and Artifact List and Artifact Read.",
   "mapping.errors.detail.githubToken": "The GitHub token is not valid or cannot list repositories. Test it on the Account page.",
   "mapping.errors.detail.wrongCredentialType": "This credential is the wrong type for this list. Pick a credential of the right service.",
-  "sync.note.coveredByParent": "Covered by parent index"
+  "sync.note.coveredByParent": "Covered by parent index",
+  "sync.note.artifactGone": "The image is no longer in Harbor."
 }

@@ -785,9 +785,8 @@ async fn a_fetch_error_fails_with_its_fixed_text_and_the_eighth_failure_gives_up
 }
 
 #[tokio::test]
-async fn a_404_a_401_a_403_and_an_unreadable_200_each_fail_with_their_fixed_text() {
-    let cases: [(u16, &str, &str); 5] = [
-        (404, SENTINEL, "digest not found in Harbor"),
+async fn a_401_a_403_and_an_unreadable_200_each_fail_with_their_fixed_text() {
+    let cases: [(u16, &str, &str); 4] = [
         (
             401,
             SENTINEL,
@@ -978,6 +977,21 @@ async fn the_covered_note_is_stored_in_last_error_by_the_worker() {
     assert_eq!(
         last_error(&fx, "r1").await.as_deref(),
         Some("covered by parent index")
+    );
+    assert!(fx.children().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_404_on_the_digest_is_done_with_the_gone_note_and_not_retried() {
+    let fx = Fixture::new("gone").await;
+    let harbor = FakeHarbor::answering(404, SENTINEL);
+    let handler = fx.handler(&harbor);
+    queued_resolve(&fx).await;
+    assert_eq!(step_once(&fx, &handler, 1_000).await, Step::Done);
+    assert_eq!(fx.status("r1").await, "done");
+    assert_eq!(
+        last_error(&fx, "r1").await.as_deref(),
+        Some("artifact no longer in Harbor")
     );
     assert!(fx.children().await.is_empty());
 }

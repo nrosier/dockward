@@ -465,9 +465,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
             digest,
         )
         .map_err(|e| validation_message(e, "the Harbor names are not valid"))?;
-        let body = self
-            .harbor_body(context, &artifact, &[], "the Harbor artifact")
-            .await?;
+        let body = self.harbor_body(context, &artifact, &[]).await?;
         // The tag's push time on this digest, for the newest-digest issue rule (#196). A body
         // that cannot be read as tags, or a tag Harbor gave no time, leaves it `None`.
         let push_time = parse_artifact_tags(&body).ok().and_then(|tags| {
@@ -488,9 +486,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
                 &child,
             )
             .map_err(|e| validation_message(e, "the Harbor names are not valid"))?;
-            let child_body = self
-                .harbor_body(context, &child_url, &[], "the Harbor image")
-                .await?;
+            let child_body = self.harbor_body(context, &child_url, &[]).await?;
             labels = parse_labels(&child_body)
                 .map_err(|_| failed("Harbor returned an artifact that could not be read"))?;
         }
@@ -531,7 +527,6 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
                 context,
                 &report_url,
                 &[("X-Accept-Vulnerabilities", TRIVY_REPORT_MIME)],
-                "the Harbor report",
             )
             .await?;
         match parse_report(&body)
@@ -542,13 +537,12 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
         }
     }
 
-    /// One Harbor GET. `404` on the report is the backoff case; any other non-200 fails.
+    /// One Harbor GET. `404` on the report is the backoff case, a `404` on an artifact is final; any other non-200 fails.
     async fn harbor_body(
         &self,
         context: &Context,
         url: &Url,
         headers: &[(&str, &str)],
-        what: &str,
     ) -> Flow<Vec<u8>> {
         let HarborReply { status, body, .. } = self
             .harbor
@@ -564,7 +558,10 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
             200 => Ok(body),
             404 if !headers.is_empty() => Err(failed(MSG_NOT_YET)),
             401 | 403 => Err(failed("Harbor rejected the robot account credentials")),
-            404 => Err(failed(&format!("{what} was not found in Harbor"))),
+            // The artifact is gone: the image was deleted after the job was queued. Final.
+            404 => Err(JobOutcome::DoneWithNote(
+                resolve::NOTE_ARTIFACT_GONE.to_owned(),
+            )),
             other => Err(failed(&format!("Harbor returned status {other}"))),
         }
     }
@@ -1250,12 +1247,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn harbor_404_fails_for_backoff() {
+    async fn report_404_fails_for_backoff() {
         let fx = Fixture::new("h404").await;
         let harbor = Arc::new(FakeHarbor::new(&good_artifact(), (404, "{}")));
         let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![]);
         let outcome = fx.handler(&harbor, &scanner).run(fx.job()).await;
         assert_eq!(outcome, JobOutcome::Failed(MSG_NOT_YET.to_owned()));
+        assert_eq!(scanner.uploads(), 0);
+    }
+
+    #[tokio::test]
+    async fn artifact_404_is_done_with_the_gone_note_and_not_retried() {
+        let fx = Fixture::new("a404").await;
+        let mut fake = FakeHarbor::new(&good_artifact(), (200, "{}"));
+        fake.artifact = (404, b"{}".to_vec());
+        let harbor = Arc::new(fake);
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![]);
+        let outcome = fx.handler(&harbor, &scanner).run(fx.job()).await;
+        assert_eq!(
+            outcome,
+            JobOutcome::DoneWithNote("artifact no longer in Harbor".to_owned())
+        );
+        assert_eq!(scanner.uploads(), 0);
+    }
+
+    #[tokio::test]
+    async fn artifact_500_still_fails_for_retry() {
+        let fx = Fixture::new("a500").await;
+        let mut fake = FakeHarbor::new(&good_artifact(), (200, "{}"));
+        fake.artifact = (500, b"{}".to_vec());
+        let harbor = Arc::new(fake);
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![]);
+        let outcome = fx.handler(&harbor, &scanner).run(fx.job()).await;
+        assert_eq!(
+            outcome,
+            JobOutcome::Failed("Harbor returned status 500".to_owned())
+        );
         assert_eq!(scanner.uploads(), 0);
     }
 
