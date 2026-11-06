@@ -12,6 +12,7 @@ Purpose: the single home for alert rules. Covers admin-configured email (SMTP) a
 ## Triggers
 
 - A sync fails.
+  - Decided (2026-11-06, user, #197): a sync or resolve job that ends `done` with `artifact no longer in Harbor` (the image was deleted) is final, not failed, and does not raise this alert.
 - A new CRITICAL CVE appears.
 
 ## Storage
