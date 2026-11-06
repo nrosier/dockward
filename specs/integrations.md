@@ -192,9 +192,10 @@ Read these from the Harbor artifact (`GET .../artifacts/{reference}` or the arti
 
 - Decided (2026-11-06, user, #184): the GitHub API base URL and the GitHub web URL are instance settings, set by the admin. There is one pair for the whole HarborGate instance, not one per user or per credential.
 - An empty value means the default: `https://api.github.com` for the API and `https://github.com` for the web URL. The default is used unless a custom value is entered.
-- A custom value must be an `https` URL with a host. Any other value is rejected with the fixed validation message `settings.github_url_invalid` (catalog key, English text: "Enter an https address with a host, for example https://ghes.example.com."). The host-only rules (no credentials, no path, no traversal) are in [security.md](security.md), "GitHub base URL".
+- The API base URL is used as a prefix for every GitHub REST path. For example, `https://ghes.example.com/api/v3` plus `/repos/...` gives `https://ghes.example.com/api/v3/repos/...`. GHE.com is `https://api.SUBDOMAIN.ghe.com` (no path).
+- A custom API base URL must be an `https` URL with a host; it may include a path. A custom web URL must be an `https` URL with a host only. Any other value is rejected with the fixed validation message `settings.github_url_invalid` (catalog key, English text: "Enter an https address with a host, for example https://ghes.example.com."). The rules (no credentials, no port, no query or fragment, no traversal in the API path; web URL host-only) are in [security.md](security.md), "GitHub base URL".
 - The values are stored in the `system_config` table (keys `github.api_base_url` and `github.web_url`, see [database.md](database.md)), not in a secret, and are shown in the Admin view (Settings tab, see [frontend.md](frontend.md)).
-- Setting a custom host is for GitHub Enterprise Server. Every GitHub request in this file uses the configured API base URL, not a fixed host.
+- A custom API base URL is for GitHub Enterprise Server (for example `https://ghes.example.com/api/v3`) and GHE.com (`https://api.SUBDOMAIN.ghe.com`). Every GitHub request in this file uses the configured API base URL, not a fixed host.
 
 ## GitHub issues
 
