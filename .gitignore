@@ -17,3 +17,4 @@ frontend/tsconfig.tsbuildinfo
 *.tsbuildinfo
 .playwright-mcp/
 .lavish/
+.hg-local/
