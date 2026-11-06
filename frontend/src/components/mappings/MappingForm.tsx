@@ -251,7 +251,7 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
   return (
     <form onSubmit={submit} className="flex flex-col gap-5" noValidate>
       <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-5 border-0 p-0">
-        <Card className="m-0 grid min-w-0 grid-cols-1 overflow-hidden md:grid-cols-2">
+        <Card className="m-0 grid min-w-0 grid-cols-1 md:grid-cols-2">
         <Column id="harbor-section" title={t("mappings.form.harborSection")} rows={showSuggestion ? 5 : 4}>
           <CredentialSelect
             id="harbor-cred"

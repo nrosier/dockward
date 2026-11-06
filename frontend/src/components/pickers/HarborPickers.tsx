@@ -131,6 +131,7 @@ export function HarborPickers({
         credentialId={credentialId}
         baseUrl={baseUrl}
         project={project}
+        disabled={projectValue.trim() === ""}
         value={repositoryValue}
         error={repositoryError}
         onText={onRepositoryText}
@@ -144,13 +145,15 @@ interface RepositoryFieldProps {
   credentialId: string | undefined;
   baseUrl: string | null;
   project: string | null;
+  // True until a Harbor project has a value (#167 decision).
+  disabled: boolean;
   value: string;
   error: string | undefined;
   onText: (text: string) => void;
   onPick: (fullName: string) => void;
 }
 
-function RepositoryField({ credentialId, baseUrl, project, value, error, onText, onPick }: RepositoryFieldProps) {
+function RepositoryField({ credentialId, baseUrl, project, disabled, value, error, onText, onPick }: RepositoryFieldProps) {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -199,6 +202,7 @@ function RepositoryField({ credentialId, baseUrl, project, value, error, onText,
         id="harbor-repository"
         value={value}
         listEnabled={listed}
+        disabled={disabled}
         placeholder={listed ? t("mapping.picker.searchPlaceholder") : undefined}
         listLabel={t("mapping.picker.repositoryList")}
         options={options}

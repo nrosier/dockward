@@ -88,6 +88,20 @@ describe("Mapping screen layout (#167)", () => {
     expect(harbor?.children.length).toBe(github?.children.length);
   });
 
+  it("the form card does not clip its popups (#167)", async () => {
+    stub();
+    renderWithRoutes(routes, "/mappings/new");
+    const input = await screen.findByLabelText(t("mappings.form.harborProject"));
+    const card = screen.getByText(t("mappings.form.harborSection")).closest("[role=group]")?.parentElement as HTMLElement;
+    expect(card.className.split(" ")).not.toContain("overflow-hidden");
+    await userEvent.click(input);
+    const listbox = await screen.findByRole("listbox", { name: t("mapping.picker.projectList") });
+    // No ancestor of the open popup clips it.
+    for (let node: HTMLElement | null = listbox; node !== null; node = node.parentElement) {
+      expect(node.className.split(" ")).not.toContain("overflow-hidden");
+    }
+  });
+
   it("the GitHub org note is a tooltip on the repository label, not a banner", async () => {
     stub();
     renderWithRoutes(routes, "/mappings/new");
