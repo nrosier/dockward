@@ -106,12 +106,13 @@ describe("MappingFormPage", () => {
     expect(screen.getByRole("button", { name: t("mappings.form.save") })).toBeDisabled();
   });
 
-  it("shows the server message for a 409 the client did not predict", async () => {
-    stub({ create: () => json({ error: { code: "conflict", message: "That GitHub repository is already in use." } }, 409) });
+  it.each([409, 422])("shows fixed catalog text, not the raw server message, for a %i save error", async (status) => {
+    stub({ create: () => json({ error: { code: "conflict", message: "RAW 409 detail" } }, status) });
     renderWithRoutes(routes, "/mappings/new");
     await fillNew("other-repo");
     await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
-    expect(await screen.findByText("That GitHub repository is already in use.")).toBeInTheDocument();
+    expect(await screen.findByText(t("errors.generic"))).toBeInTheDocument();
+    expect(screen.queryByText("RAW 409 detail")).not.toBeInTheDocument();
   });
 
   it("shows the webhook URL and auth secret once after create", async () => {
