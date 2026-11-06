@@ -31,6 +31,7 @@ use crate::services::github_issues::GithubIssues;
 use crate::services::github_scanning::{
     GithubScanning, Processing, ScanError, Upload, encode_sarif,
 };
+use crate::services::github_url::GithubTarget;
 use crate::services::harbor_client::{
     HarborGet, HarborReply, ReportState, TRIVY_REPORT_MIME, artifact_url, branch_for, check_source,
     index_image_child, parse_artifact_tags, parse_labels, parse_report, require_revision,
@@ -163,6 +164,8 @@ pub struct SyncHandler<H = HarborGet, G = GithubScanning, C = SystemClock, I = G
     clock: C,
     issues: I,
     alerts: Notifier,
+    /// The configured GitHub URLs. The web URL is the host the source label must name.
+    github_target: GithubTarget,
 }
 
 impl SyncHandler {
@@ -173,16 +176,18 @@ impl SyncHandler {
         credentials_key: Arc<DerivedKey>,
         allow_private_harbor: bool,
         allow_private_alerts: bool,
+        github_target: GithubTarget,
     ) -> Result<Self, AppError> {
         let alerts = Notifier::new(pool.clone(), credentials_key.clone(), allow_private_alerts);
         Ok(Self {
             pool,
             credentials_key,
             harbor: HarborGet::new(allow_private_harbor)?,
-            github: GithubScanning::new()?,
+            github: GithubScanning::new(github_target.clone())?,
             clock: SystemClock,
-            issues: GithubIssues::new()?,
+            issues: GithubIssues::new(github_target.clone())?,
             alerts,
+            github_target,
         })
     }
 }
@@ -207,6 +212,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
             clock,
             issues,
             alerts,
+            github_target: GithubTarget::default(),
         }
     }
 
@@ -493,8 +499,13 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
         let revision = require_revision(&labels)
             .map_err(|e| permanent_validation(e, "the image has no revision label"))?
             .to_owned();
-        check_source(&labels, &mapping.github_owner, &mapping.github_repo)
-            .map_err(|e| permanent_validation(e, "the image source label does not match"))?;
+        check_source(
+            &labels,
+            self.github_target.current().web_url(),
+            &mapping.github_owner,
+            &mapping.github_repo,
+        )
+        .map_err(|e| permanent_validation(e, "the image source label does not match"))?;
         let branch = branch_for(&labels, &mapping.default_branch);
 
         let report = self.fetch_report(context).await?;

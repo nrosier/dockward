@@ -95,6 +95,11 @@ pub(crate) fn status(code: u16) -> UpstreamResponse {
     }
 }
 
+/// The source label parse with the default web host.
+fn parse_default(label: &str) -> LabelParse {
+    parse_source_label(label, "github.com")
+}
+
 fn path_is(path: &'static str) -> impl Fn(&Url) -> bool + Send + Sync {
     move |url: &Url| url.path() == path
 }
@@ -837,19 +842,19 @@ fn source_label_parsing_is_strict() {
         repo: r.to_owned(),
     };
     assert_eq!(
-        parse_source_label("https://github.com/octo/app"),
+        parse_default("https://github.com/octo/app"),
         github("octo", "app")
     );
     assert_eq!(
-        parse_source_label("https://GitHub.com/Octo/App.git"),
+        parse_default("https://GitHub.com/Octo/App.git"),
         github("Octo", "App")
     );
     assert_eq!(
-        parse_source_label("https://github.com/octo/app/"),
+        parse_default("https://github.com/octo/app/"),
         github("octo", "app")
     );
     assert_eq!(
-        parse_source_label("https://gitlab.com/octo/app"),
+        parse_default("https://gitlab.com/octo/app"),
         LabelParse::NotGithub
     );
     for bad in [
@@ -867,7 +872,7 @@ fn source_label_parsing_is_strict() {
         "not a url",
         "",
     ] {
-        assert_eq!(parse_source_label(bad), LabelParse::Invalid, "{bad}");
+        assert_eq!(parse_default(bad), LabelParse::Invalid, "{bad}");
     }
 }
 

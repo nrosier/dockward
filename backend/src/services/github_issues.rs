@@ -7,14 +7,14 @@
 //! so the address check applies and errors are the shared [`ScanError`]. The token is sent
 //! only as a bearer header and never appears in an error message or an issue body.
 
-use reqwest::Url;
 use serde_json::{Value, json};
 
 use crate::error::AppError;
 use crate::services::github_scanning::{
-    API_HOST, LiveHttp, ScanError, ScanHttp, ScanResponse, check_names, classify,
+    LiveHttp, ScanError, ScanHttp, ScanResponse, check_names, classify,
 };
-use crate::services::outbound::{self, OutboundClient, TargetClass};
+use crate::services::github_url::{GithubTarget, GithubUrls};
+use crate::services::outbound::{self, OutboundClient};
 
 /// The label on every issue HarborGate creates.
 pub const LABEL: &str = "harborgate";
@@ -101,36 +101,17 @@ fn parse_issue(item: &Value) -> Result<IssueRef, ScanError> {
     })
 }
 
-/// The path (with query) of a `next` link, relative to the API root. The link must be an
-/// `https://api.github.com/` URL with no user info and no port other than the default, and
-/// its path must have no empty segment. Anything else is an error and is never fetched.
+/// The path (with query) of a `next` link, relative to the configured API base URL. The link
+/// must be an `https` URL on the configured API host, under its base path, with no user info
+/// and no port other than the default, and its path must have no empty segment. Anything else
+/// is an error and is never fetched.
 ///
-/// The empty-segment rule matters because the result is joined to the API root: a path
+/// The empty-segment rule matters because the result is appended to the API base: a path
 /// such as `//evil.example/x` would otherwise replace the host, and the bearer token would
 /// be sent there.
-fn next_path(link: &str) -> Result<String, ScanError> {
-    let refused = || ScanError::Upstream("GitHub sent a next link to another host".to_owned());
-    let url = Url::parse(link).map_err(|_| refused())?;
-    let on_api_host = url.scheme() == "https"
-        && url.host_str() == Some(API_HOST)
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.port().is_none();
-    if !on_api_host {
-        return Err(refused());
-    }
-    let full = url.path();
-    if full.contains("//") || full.contains("://") {
-        return Err(refused());
-    }
-    let path = full.strip_prefix('/').unwrap_or(full);
-    if path.is_empty() {
-        return Err(refused());
-    }
-    Ok(match url.query() {
-        Some(query) => format!("{path}?{query}"),
-        None => path.to_owned(),
-    })
+fn next_path(urls: &GithubUrls, link: &str) -> Result<String, ScanError> {
+    urls.relative_path(link)
+        .ok_or_else(|| ScanError::Upstream("GitHub sent a next link to another host".to_owned()))
 }
 
 /// Lists every open issue with the `harborgate` label, following `link: rel="next"`.
@@ -158,7 +139,7 @@ pub async fn list_open_labelled_with<H: ScanHttp>(
             found.push(parse_issue(item)?);
         }
         match response.link_next.as_deref() {
-            Some(link) => path = next_path(link)?,
+            Some(link) => path = next_path(&http.urls(), link)?,
             None => return Ok(found),
         }
     }
@@ -253,21 +234,24 @@ pub async fn is_open_with<H: ScanHttp>(
     }
 }
 
-/// The GitHub Issues client. Built on the guarded outbound client for `api.github.com`.
+/// The GitHub Issues client. Built on the guarded outbound client for the configured GitHub
+/// API base URL.
 pub struct GithubIssues {
     client: OutboundClient,
+    target: GithubTarget,
 }
 
 impl GithubIssues {
-    pub fn new() -> Result<Self, AppError> {
+    pub fn new(target: GithubTarget) -> Result<Self, AppError> {
         let client =
-            outbound::client(TargetClass::GitHub, false).map_err(|_| AppError::InternalError)?;
-        Ok(Self { client })
+            outbound::github_client(target.clone()).map_err(|_| AppError::InternalError)?;
+        Ok(Self { client, target })
     }
 
     fn http(&self) -> LiveHttp<'_> {
         LiveHttp {
             client: &self.client,
+            urls: self.target.current(),
         }
     }
 
@@ -526,12 +510,18 @@ mod tests {
     #[test]
     fn next_path_keeps_only_path_and_query() {
         assert_eq!(
-            next_path("https://api.github.com/repositories/42/issues?page=2&per_page=100"),
+            next_path(
+                &GithubUrls::default(),
+                "https://api.github.com/repositories/42/issues?page=2&per_page=100"
+            ),
             Ok("repositories/42/issues?page=2&per_page=100".to_owned())
         );
         // The default port written out is the same host and port.
         assert_eq!(
-            next_path("https://api.github.com:443/repositories/42/issues"),
+            next_path(
+                &GithubUrls::default(),
+                "https://api.github.com:443/repositories/42/issues"
+            ),
             Ok("repositories/42/issues".to_owned())
         );
     }

@@ -131,7 +131,7 @@ pub async fn create(
 ) -> Result<Response, AppError> {
     let input: NewMapping = parse_body(&body)?;
     let actor = actor_of(&user);
-    let github_probe = OutboundGithubProbe::new()?;
+    let github_probe = OutboundGithubProbe::new(state.github.clone())?;
     let created: Created = mappings::create(
         &state.pool,
         &state.credentials_key,
@@ -156,7 +156,7 @@ pub async fn update(
 ) -> Result<Json<Mapping>, AppError> {
     let patch: MappingPatch = parse_body(&body)?;
     let actor = actor_of(&user);
-    let github_probe = OutboundGithubProbe::new()?;
+    let github_probe = OutboundGithubProbe::new(state.github.clone())?;
     let probes = mappings::Probes {
         harbor: &state.harbor_probe,
         github: &github_probe,

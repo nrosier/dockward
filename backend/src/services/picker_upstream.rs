@@ -12,7 +12,8 @@ use std::pin::Pin;
 use reqwest::Url;
 
 use crate::error::AppError;
-use crate::services::github_scanning::{API_HOST, parse_link_next};
+use crate::services::github_scanning::parse_link_next;
+use crate::services::github_url::GithubTarget;
 use crate::services::outbound::{self, OutboundClient, TargetClass};
 
 /// Largest body that is kept. A page of 100 GitHub repositories is far below this.
@@ -92,30 +93,25 @@ pub trait PickerHttp: Send + Sync {
     fn get<'a>(&'a self, url: &'a Url, auth: UpstreamAuth<'a>) -> UpstreamFuture<'a>;
 }
 
-/// True when `url` is on the GitHub API host, over HTTPS, with no userinfo or port. The
-/// token is sent only to such a URL, including `Link` next URLs taken from a response.
-pub fn is_github_api_url(url: &Url) -> bool {
-    url.scheme() == "https"
-        && url.host_str() == Some(API_HOST)
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.port().is_none()
-}
-
 /// The production transport: one guarded client per service.
 pub struct OutboundPickerHttp {
     harbor: OutboundClient,
     github: OutboundClient,
+    target: GithubTarget,
 }
 
 impl OutboundPickerHttp {
     /// `allow_private_harbor` is `HARBORGATE_ALLOW_PRIVATE_HARBOR`.
-    pub fn new(allow_private_harbor: bool) -> Result<Self, AppError> {
+    pub fn new(allow_private_harbor: bool, target: GithubTarget) -> Result<Self, AppError> {
         let harbor = outbound::client(TargetClass::Harbor, allow_private_harbor)
             .map_err(|_| AppError::InternalError)?;
         let github =
-            outbound::client(TargetClass::GitHub, false).map_err(|_| AppError::InternalError)?;
-        Ok(Self { harbor, github })
+            outbound::github_client(target.clone()).map_err(|_| AppError::InternalError)?;
+        Ok(Self {
+            harbor,
+            github,
+            target,
+        })
     }
 
     async fn send(&self, url: &Url, auth: UpstreamAuth<'_>) -> Result<UpstreamResponse, AppError> {
@@ -128,7 +124,8 @@ impl OutboundPickerHttp {
                     .basic_auth(username, Some(secret))
             }
             UpstreamAuth::Github { token } => {
-                if !is_github_api_url(url) {
+                // The token goes only to the configured API host and base path.
+                if !self.target.current().is_api_url(url) {
                     return Err(AppError::UpstreamUnreachable);
                 }
                 let token = std::str::from_utf8(token).map_err(|_| AppError::InternalError)?;
@@ -192,15 +189,16 @@ mod tests {
 
     #[test]
     fn only_the_github_api_host_gets_the_token() {
+        let urls = crate::services::github_url::GithubUrls::default();
         let ok = Url::parse("https://api.github.com/user/repos?page=2").unwrap();
-        assert!(is_github_api_url(&ok));
+        assert!(urls.is_api_url(&ok));
         for bad in [
             "http://api.github.com/user/repos",
             "https://evil.example.com/user/repos",
             "https://user:pw@api.github.com/user/repos",
             "https://api.github.com:8443/user/repos",
         ] {
-            assert!(!is_github_api_url(&Url::parse(bad).unwrap()), "{bad}");
+            assert!(!urls.is_api_url(&Url::parse(bad).unwrap()), "{bad}");
         }
     }
 
