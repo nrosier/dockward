@@ -50,6 +50,25 @@ Set these in the same `.env` file. Both are described in [specs/deployment.md](.
 
 The addresses differ per host, so follow [specs/deployment.md](../specs/deployment.md), "Client IP behind Cloudflare and Traefik", to find them and to set Traefik's `forwardedHeaders.trustedIPs`. Use the narrowest ranges that work. Trusting the whole `proxy` subnet lets any container on that network send its own `X-Forwarded-For`. After you start HarborGate, check Admin > Health: it must show your public IP as the client IP, with source `x-forwarded-for`.
 
+### Verify the image signature
+
+Every published image is signed by the release workflow with keyless cosign. No key is needed: the signature is tied to the GitHub Actions identity of the workflow that built the image. Verifying checks the digest that the release workflow signed. Install [cosign](https://docs.sigstore.dev/cosign/system_config/installation/), then run this for the tag you pull (replace `<TAG>`):
+
+```bash
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/nrosier/harborgate/\.github/workflows/docker\.yml@refs/(heads/main|tags/v[0-9].*)$' \
+  ghcr.io/nrosier/harborgate:<TAG>
+```
+
+A successful run prints the checks it made and a JSON record for the signature. Look for:
+
+- **Issuer:** `https://token.actions.githubusercontent.com`, the GitHub Actions OIDC issuer.
+- **Subject:** the signing identity, `https://github.com/nrosier/harborgate/.github/workflows/docker.yml@refs/...`. It names the repository, the workflow path, and the ref (`refs/heads/main` or `refs/tags/v<version>`).
+- **Rekor record:** the signature is recorded in the Rekor transparency log, and cosign confirms that record.
+
+If the command fails, do not run the image.
+
 ## 3. Harbor Setup
 
 Do these steps for each Harbor project that HarborGate will map. Use a project administrator account in Harbor.

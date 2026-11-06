@@ -86,6 +86,7 @@ Use the narrowest ranges that work. Trusting the whole `proxy` subnet lets any c
 - Update `CHANGELOG.md` with a version heading that matches the tag.
 - Image publish is to `ghcr.io/<owner>/harborgate`. The `:latest` tag is applied only from `main`.
 - Tags: Decided (2026-11-03): `sha-<7 hex>` on every published build; `<major>.<minor>.<patch>` and `<major>.<minor>` on `v*` tags; `latest` only from `main`. A `v*` tag never moves `latest`. The publish flow is in [testing-and-ci.md](testing-and-ci.md).
+- Image signing: Decided (2026-11-06, user, #171). Images are signed keyless with cosign by the publish job, on the digest. The expected signing identity is the OIDC issuer `https://token.actions.githubusercontent.com` and a certificate identity matching `^https://github.com/nrosier/harborgate/\.github/workflows/docker\.yml@refs/(heads/main|tags/v[0-9].*)$` (this repository's `docker.yml` on `main` or a `v*` tag). After signing, the publish job runs `cosign verify` on the same digest with the same issuer and identity pattern, and a failed verification fails the job. Operators verify with the command in [docs/SETUP.md](../docs/SETUP.md). Kubernetes admission enforcement is out of scope for now.
 
 ## Backup and restore
 
