@@ -188,6 +188,14 @@ Read these from the Harbor artifact (`GET .../artifacts/{reference}` or the arti
   - `security-severity`: the CVSS v3 score from `preferred_cvss.score_v3` when present, otherwise `9.5` (CRITICAL), `8.0` (HIGH), `5.5` (MEDIUM), `2.0` (LOW), or `0.0` (UNKNOWN). This is Trivy's own fallback (verified (2026-11-03), `severityToScore` in `pkg/report/sarif.go`).
 - Validate output against SARIF 2.1.0 (see [testing-and-ci.md](testing-and-ci.md)).
 
+## GitHub base URL
+
+- Decided (2026-11-06, user, #184): the GitHub API base URL and the GitHub web URL are instance settings, set by the admin. There is one pair for the whole HarborGate instance, not one per user or per credential.
+- An empty value means the default: `https://api.github.com` for the API and `https://github.com` for the web URL. The default is used unless a custom value is entered.
+- A custom value must be an `https` URL with a host. Any other value is rejected with the fixed validation message `settings.github_url_invalid` (catalog key, English text: "Enter an https address with a host, for example https://ghes.example.com."). The host-only rules (no credentials, no path, no traversal) are in [security.md](security.md), "GitHub base URL".
+- The values are stored in the `system_config` table (keys `github.api_base_url` and `github.web_url`, see [database.md](database.md)), not in a secret, and are shown in the Admin view (Settings tab, see [frontend.md](frontend.md)).
+- Setting a custom host is for GitHub Enterprise Server. Every GitHub request in this file uses the configured API base URL, not a fixed host.
+
 ## GitHub issues
 
 - Auto-create issues for CRITICAL and HIGH findings. The `min_issue_severity` setting defaults to CRITICAL and may be lowered to HIGH (user decision).
@@ -240,7 +248,7 @@ Status: built (backend, #126): the Harbor and GitHub list methods, the in-memory
 
 ### GitHub repository list
 
-- `GET https://api.github.com/user/repos?per_page=100&page=<n>&sort=full_name&direction=asc`, with the token of the picked GitHub credential and the same request headers as the existing probes. Verified (2026-11-05) in GitHub's OpenAPI description (`github/rest-api-description`, `/user/repos`): parameters `visibility`, `affiliation` (default `owner,collaborator,organization_member`), `type`, `sort` (`full_name` default), `direction`, `per_page` (maximum 100), `page`, `since`, `before`; responses `200`, `304`, `401`, `403`, `422`. HarborGate sends neither `type` nor `visibility` nor `affiliation`, so GitHub's defaults apply. Pages are followed through the `Link` header `rel="next"`.
+- `GET <github_api_base_url>/user/repos?per_page=100&page=<n>&sort=full_name&direction=asc`, with the token of the picked GitHub credential and the same request headers as the existing probes. Verified (2026-11-05) in GitHub's OpenAPI description (`github/rest-api-description`, `/user/repos`): parameters `visibility`, `affiliation` (default `owner,collaborator,organization_member`), `type`, `sort` (`full_name` default), `direction`, `per_page` (maximum 100), `page`, `since`, `before`; responses `200`, `304`, `401`, `403`, `422`. HarborGate sends neither `type` nor `visibility` nor `affiliation`, so GitHub's defaults apply. Pages are followed through the `Link` header `rel="next"`.
 - HarborGate reads `full_name`, `owner.login`, `name`, `private`, and `archived` from each item (all present in the OpenAPI `repository` schema, verified 2026-11-05). `owner` and `repo` must pass the GitHub name check below; an item that does not is skipped.
 - Decided (2026-11-05, user, #126): the list relies on the Metadata read permission the token already requires ([security.md](security.md), GitHub token scope). Contents read is not added.
 - Decided (2026-11-05, user, #126): repositories of an organisation the token cannot see do not appear, and the picker says so. HarborGate cannot detect an organisation it cannot see, so the note is a fixed catalog string shown under the GitHub picker every time, and a specific note is shown when a source suggestion names a repository that is not in the token's list (see "Source suggestion").

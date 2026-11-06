@@ -257,6 +257,8 @@ Decided (2026-11-03, delegated). Each key is a row in `system_config`. Values ar
 - `oidc.role_claim`: name of the claim that carries groups (for example `groups`). `is_encrypted = 0`.
 - `oidc.admin_group`: group value that grants `admin`. `is_encrypted = 0`.
 - `oidc.user_group`: group value that grants `user`. `is_encrypted = 0`.
+- `github.api_base_url`: custom GitHub API base URL (Decided 2026-11-06, user, #184). Empty or missing means `https://api.github.com`. `is_encrypted = 0`. Rules in [integrations.md](integrations.md), "GitHub base URL".
+- `github.web_url`: custom GitHub web URL (Decided 2026-11-06, user, #184). Empty or missing means `https://github.com`. `is_encrypted = 0`.
 - `auth.oidc_only_users`: `true` or `false`; a missing row means `false`. `is_encrypted = 0`. The rule is in [security.md](security.md), "Local login" (Decided (2026-11-03)).
 
 Source for the OIDC claim model: OpenID Connect Core 1.0 (https://openid.net/specs/openid-connect-core-1_0.html). The group claim name is operator-defined; OIDC Core does not define one.

@@ -202,7 +202,14 @@ Decided (2026-11-05, user, #136). The application log is the `tracing` output us
   - the OIDC issuer URL and every endpoint taken from its discovery document (authorization, token, JWKS, userinfo);
   - alert webhook URLs. The SMTP host gets the same address check.
   - Each class has its own environment-only opt-out, default `false`: `HARBORGATE_ALLOW_PRIVATE_HARBOR`, `HARBORGATE_ALLOW_PRIVATE_OIDC`, and `HARBORGATE_ALLOW_PRIVATE_ALERTS`. The last two names are Decided (2026-11-03, delegated).
-  - GitHub requests go only to the fixed host `api.github.com`, which is not user-entered.
+  - GitHub requests go only to the configured API base URL. The default is the fixed host `api.github.com`. An admin may set a custom one (GitHub Enterprise Server); see "GitHub base URL" below.
+
+## GitHub base URL
+
+- Decided (2026-11-06, user, #184): the custom GitHub base URL is an instance setting, one value for the whole instance, set by the admin. Empty means `https://api.github.com` (API) and `https://github.com` (web). See [integrations.md](integrations.md), "GitHub base URL".
+- Validation: a custom value must be `https`, have a host, and contain no userinfo (`user:pass@`), no port, no query, no fragment, and no path other than `/` (no `..` or encoded traversal). A value that fails is rejected with `422` and the fixed message `settings.github_url_invalid`.
+- Token scope: the GitHub token is sent only to the configured API base URL. It is never sent to any other host, and never on a redirect (redirects are not followed).
+- Interaction with the SSRF rules: the configured host is trusted, because the admin entered it. The HTTPS rule applies to it. The resolved-address check and its opt-out are not applied to the GitHub host, and no other host is contacted for GitHub. Source: the same as the Harbor rules above, for the scope and redirect rules; this is a Decided (2026-11-06, user, #184) exception for the admin-set host.
 
 ## GitHub token scope
 
