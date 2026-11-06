@@ -42,6 +42,9 @@ pub trait JobHandler: Send + Sync + 'static {
 pub enum JobOutcome {
     /// The job is complete. It becomes `done`.
     Done,
+    /// The job is complete, with a fixed note kept in `last_error` (for example
+    /// `covered by parent index`). It becomes `done`.
+    DoneWithNote(String),
     /// The attempt failed and may succeed later. Its text is stored in `last_error`, and the
     /// job retries with backoff.
     Failed(String),
@@ -129,6 +132,10 @@ pub async fn step<H: JobHandler>(
     match outcome {
         JobOutcome::Done => {
             with_write_retries(|| sync_jobs::mark_done(pool, id, now)).await?;
+            Ok(Step::Done)
+        }
+        JobOutcome::DoneWithNote(note) => {
+            with_write_retries(|| sync_jobs::mark_done_with_note(pool, id, &note, now)).await?;
             Ok(Step::Done)
         }
         JobOutcome::Failed(message) => {
