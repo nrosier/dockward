@@ -4,6 +4,11 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.12.2
+
+### Fixed
+- Read OCI labels from Harbor's config and from index children, so multi-arch images sync (#132, PR #182).
+
 ## 0.12.1
 
 ### Changed
