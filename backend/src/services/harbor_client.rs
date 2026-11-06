@@ -334,6 +334,29 @@ pub fn parse_artifact_list_dated(body: &[u8]) -> Result<Vec<(String, Vec<Artifac
         .collect())
 }
 
+/// True when an artifact list page holds a tagged artifact (an image index) whose `references`
+/// name `digest` as a `child_digest`. An untagged parent does not count: its own tags are what
+/// the parent's scan event syncs (#132, `specs/integrations.md`, "Covered by a parent index").
+pub fn page_has_tagged_parent(body: &[u8], digest: &str) -> Result<bool, AppError> {
+    let listed: Vec<Value> =
+        serde_json::from_slice(body).map_err(|_| AppError::UpstreamUnreachable)?;
+    Ok(listed.iter().any(|artifact| {
+        let tagged = artifact
+            .get("tags")
+            .and_then(Value::as_array)
+            .is_some_and(|tags| !tags.is_empty());
+        tagged
+            && artifact
+                .get("references")
+                .and_then(Value::as_array)
+                .is_some_and(|references| {
+                    references.iter().any(|reference| {
+                        reference.get("child_digest").and_then(Value::as_str) == Some(digest)
+                    })
+                })
+    }))
+}
+
 /// True for `sha256:` followed by exactly 64 lowercase hex digits: the form Harbor returns,
 /// and a strict check that keeps a digest safe as a URL path segment (#132).
 pub fn valid_digest(digest: &str) -> bool {

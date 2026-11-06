@@ -40,9 +40,9 @@ const FIRST_POLL_DELAY: Duration = Duration::from_secs(60);
 /// Time between polls.
 const POLL_INTERVAL: Duration = Duration::from_secs(900);
 /// Artifacts requested per page.
-const PAGE_SIZE: u32 = 100;
+pub(crate) const PAGE_SIZE: u32 = 100;
 /// Pages read per mapping in one poll.
-const MAX_PAGES: u32 = 10;
+pub(crate) const MAX_PAGES: u32 = 10;
 
 /// Runs one poll over every mapping. Returns how many jobs were queued. A Harbor or
 /// credential problem on one mapping is counted and does not stop the others. The run is

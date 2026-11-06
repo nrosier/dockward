@@ -92,6 +92,14 @@ impl HarborFetch for Arc<FakeHarbor> {
         if let Some((pool, sql)) = hook {
             sqlx::query(sql).execute(&pool).await.unwrap();
         }
+        // The parent lookup lists the repository. No parent exists unless a test says so.
+        if url.path().ends_with("/artifacts") {
+            return Ok(HarborReply {
+                status: 200,
+                body: b"[]".to_vec(),
+                retry_after: None,
+            });
+        }
         match lock(&self.answer).clone() {
             Answer::Unreachable => Err(AppError::UpstreamUnreachable),
             Answer::Reply {
@@ -857,6 +865,153 @@ async fn a_digest_with_no_tags_fails_after_the_attempts_with_the_zero_tags_messa
             Some("digest has no tags to sync")
         );
         assert_eq!(handler.gave_up.load(Ordering::SeqCst), 1);
+        assert!(fx.children().await.is_empty());
+    }
+}
+
+/// A fake that answers the artifact read with no tags and the list read with `list`.
+struct ParentFake {
+    list: Answer,
+    calls: Mutex<Vec<String>>,
+}
+
+impl HarborFetch for Arc<ParentFake> {
+    async fn fetch(
+        &self,
+        url: &Url,
+        _username: &str,
+        _secret: &[u8],
+        _extra_headers: &[(&str, &str)],
+    ) -> Result<HarborReply, AppError> {
+        lock(&self.calls).push(url.path().to_owned());
+        let answer = if url.path().ends_with("/artifacts") {
+            self.list.clone()
+        } else {
+            Answer::Reply {
+                status: 200,
+                body: r#"{"digest":"x","tags":null}"#.to_owned(),
+                retry_after: None,
+            }
+        };
+        match answer {
+            Answer::Unreachable => Err(AppError::UpstreamUnreachable),
+            Answer::Reply {
+                status,
+                body,
+                retry_after,
+            } => Ok(HarborReply {
+                status,
+                body: body.into_bytes(),
+                retry_after,
+            }),
+        }
+    }
+}
+
+fn list_reply(status: u16, body: String) -> Answer {
+    Answer::Reply {
+        status,
+        body,
+        retry_after: None,
+    }
+}
+
+async fn run_with_parent(name: &str, list: Answer) -> (JobOutcome, Fixture, Arc<ParentFake>) {
+    let fx = Fixture::new(name).await;
+    let fake = Arc::new(ParentFake {
+        list,
+        calls: Mutex::new(Vec::new()),
+    });
+    let job = fx.resolve_job("r1", "m1", "running").await;
+    let outcome = run(&fx.pool, &key(), &fake, &clock(), &job).await;
+    (outcome, fx, fake)
+}
+
+#[tokio::test]
+async fn a_child_of_a_tagged_index_is_done_with_the_covered_note_and_queues_nothing() {
+    let body = serde_json::json!([
+        {"digest": "sha256:bbbb", "tags": null, "references": null},
+        {"digest": "sha256:cccc", "tags": [{"name": "latest"}],
+         "references": [{"child_digest": DIGEST}]},
+    ])
+    .to_string();
+    let fx = Fixture::new("parent-done").await;
+    let fake = Arc::new(ParentFake {
+        list: list_reply(200, body),
+        calls: Mutex::new(Vec::new()),
+    });
+    let job = fx.resolve_job("r1", "m1", "running").await;
+    let outcome = run(&fx.pool, &key(), &fake, &clock(), &job).await;
+    assert_eq!(
+        outcome,
+        JobOutcome::DoneWithNote("covered by parent index".to_owned())
+    );
+    assert!(fx.children().await.is_empty());
+    assert!(lock(&fake.calls).iter().any(|p| p.ends_with("/artifacts")));
+}
+
+#[tokio::test]
+async fn the_covered_note_is_stored_in_last_error_by_the_worker() {
+    let body = serde_json::json!([
+        {"digest": "sha256:cccc", "tags": [{"name": "latest"}],
+         "references": [{"child_digest": DIGEST}]},
+    ])
+    .to_string();
+    let fx = Fixture::new("parent-note").await;
+    let fake = Arc::new(ParentFake {
+        list: list_reply(200, body),
+        calls: Mutex::new(Vec::new()),
+    });
+    fx.resolve_job("r1", "m1", "queued").await;
+    struct H(SqlitePool, Arc<ParentFake>);
+    impl JobHandler for H {
+        async fn run(&self, job: ClaimedJob) -> JobOutcome {
+            run(&self.0, &key(), &self.1, &clock(), &job).await
+        }
+    }
+    let handler = Arc::new(H(fx.pool.clone(), fake));
+    assert_eq!(
+        worker::step(&fx.pool, &handler, 1_000).await.unwrap(),
+        Step::Done
+    );
+    assert_eq!(fx.status("r1").await, "done");
+    assert_eq!(
+        last_error(&fx, "r1").await.as_deref(),
+        Some("covered by parent index")
+    );
+    assert!(fx.children().await.is_empty());
+}
+
+#[tokio::test]
+async fn no_tags_and_no_parent_index_still_fails_with_the_zero_tags_message() {
+    // An untagged index that references the digest does not cover it.
+    let body = serde_json::json!([
+        {"digest": "sha256:cccc", "tags": null, "references": [{"child_digest": DIGEST}]},
+        {"digest": "sha256:dddd", "tags": [{"name": "v1"}], "references": null},
+    ])
+    .to_string();
+    let (outcome, fx, _) = run_with_parent("parent-none", list_reply(200, body)).await;
+    assert_eq!(
+        outcome,
+        JobOutcome::Failed("digest has no tags to sync".to_owned())
+    );
+    assert!(fx.children().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_parent_lookup_fails_for_retry_and_is_not_done() {
+    for list in [
+        list_reply(500, SENTINEL.to_owned()),
+        list_reply(404, SENTINEL.to_owned()),
+        list_reply(200, SENTINEL.to_owned()),
+        Answer::Unreachable,
+    ] {
+        let (outcome, fx, _) = run_with_parent("parent-err", list).await;
+        assert!(matches!(outcome, JobOutcome::Failed(_)), "{outcome:?}");
+        if let JobOutcome::Failed(message) = &outcome {
+            assert!(!message.contains(SENTINEL));
+            assert_ne!(message, "covered by parent index");
+        }
         assert!(fx.children().await.is_empty());
     }
 }

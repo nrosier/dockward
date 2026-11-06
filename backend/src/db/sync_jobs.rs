@@ -181,6 +181,26 @@ pub async fn mark_done(pool: &SqlitePool, id: &str, now: i64) -> Result<(), AppE
     .map_err(|_| AppError::InternalError)
 }
 
+/// Marks a job `done` and stores a fixed note in `last_error`, so the Sync jobs view can say why
+/// nothing was queued.
+pub async fn mark_done_with_note(
+    pool: &SqlitePool,
+    id: &str,
+    note: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "UPDATE sync_jobs SET status = 'done', last_error = ?, updated_at = ? WHERE id = ?",
+        note,
+        now,
+        id
+    )
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
 /// Records a failed attempt. `attempts` is the new total (the job's previous count plus
 /// one). `status` is `queued` with `next_attempt_at` set, or `failed` when `give_up` is set.
 pub async fn record_failure(

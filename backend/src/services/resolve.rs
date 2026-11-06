@@ -27,12 +27,13 @@ use crate::error::AppError;
 use crate::services::acceptance::parse_rfc3339;
 use crate::services::credentials::base_for_join;
 use crate::services::harbor_client::{
-    ArtifactTag, HarborReply, artifact_url, parse_artifact_tags, valid_digest,
+    ArtifactTag, HarborReply, artifact_url, artifacts_list_url, page_has_tagged_parent,
+    parse_artifact_tags, valid_digest,
 };
 use crate::services::harbor_webhook::ScanEvent;
 use crate::services::ids;
 use crate::services::pickers::valid_image_tag;
-use crate::services::poller::harbor_login;
+use crate::services::poller::{MAX_PAGES, PAGE_SIZE, harbor_login};
 use crate::services::sync::{Clock, HarborFetch, MSG_DATABASE, MSG_GONE, MSG_INTERNAL};
 use crate::worker::JobOutcome;
 
@@ -51,6 +52,9 @@ const MSG_REJECTED: &str = "Harbor rejected the robot account credentials";
 const MSG_NOT_FOUND: &str = "digest not found in Harbor";
 const MSG_UNREADABLE: &str = "Harbor returned an artifact that could not be read";
 const MSG_NO_TAGS: &str = "digest has no tags to sync";
+/// The note kept on a child digest that a tagged index covers. Catalog key
+/// `sync.note.coveredByParent`.
+pub const NOTE_COVERED_BY_PARENT: &str = "covered by parent index";
 const MSG_RATE_LIMITED: &str = "Harbor rate limit reached";
 
 /// What kind of work a job's payload describes.
@@ -155,6 +159,46 @@ fn body_or_outcome(reply: HarborReply, now: i64) -> Result<Vec<u8>, JobOutcome> 
     }
 }
 
+/// Pages through the repository's top-level artifacts and reports whether a tagged index lists
+/// `digest` as a child. A lookup that fails is an error outcome, never "not covered" and never
+/// done.
+async fn covered_by_parent<H: HarborFetch, C: Clock>(
+    harbor: &H,
+    base: &reqwest::Url,
+    mapping: &mapping_db::MappingRow,
+    username: &str,
+    secret: &[u8],
+    digest: &str,
+    clock: &C,
+) -> Result<bool, JobOutcome> {
+    for page in 1..=MAX_PAGES {
+        let url = artifacts_list_url(
+            base,
+            &mapping.harbor_project,
+            &mapping.harbor_repository,
+            page,
+            PAGE_SIZE,
+        )
+        .map_err(|_| failed(MSG_BAD_NAMES))?;
+        let reply = harbor
+            .fetch(&url, username, secret, &[])
+            .await
+            .map_err(|_| failed(MSG_UNREACHABLE))?;
+        let body = body_or_outcome(reply, clock.now())?;
+        if page_has_tagged_parent(&body, digest).map_err(|_| failed(MSG_UNREADABLE))? {
+            return Ok(true);
+        }
+        // A short page is the last one.
+        let count = serde_json::from_slice::<Vec<Value>>(&body)
+            .map(|items| items.len())
+            .unwrap_or(0);
+        if count < PAGE_SIZE as usize {
+            break;
+        }
+    }
+    Ok(false)
+}
+
 /// Runs one claimed resolve job and returns the outcome for the worker.
 pub async fn run<H: HarborFetch, C: Clock>(
     pool: &SqlitePool,
@@ -226,6 +270,11 @@ async fn resolve<H: HarborFetch, C: Clock>(
     let tags = parse_artifact_tags(&body).map_err(|_| failed(MSG_UNREADABLE))?;
     let kept = newest_tags(tags, MAX_TAGS_PER_DIGEST);
     if kept.is_empty() {
+        // A child digest of a tagged index has no tag of its own. The parent's scan event
+        // syncs the parent's tags, so this job is done. Any lookup error keeps the retry.
+        if covered_by_parent(harbor, &base, &mapping, &username, &secret, &digest, clock).await? {
+            return Ok(JobOutcome::DoneWithNote(NOTE_COVERED_BY_PARENT.to_owned()));
+        }
         return Err(failed(MSG_NO_TAGS));
     }
 
