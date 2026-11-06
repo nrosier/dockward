@@ -213,8 +213,6 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
     onError: (failure) => {
       if (failure instanceof ApiError && failure.code === "code_scanning_unavailable") {
         setServerError(t("mappings.form.codeScanningUnavailable"));
-      } else if (failure instanceof ApiError && (failure.status === 409 || failure.status === 422)) {
-        setServerError(failure.message);
       } else {
         setServerError(t("errors.generic"));
       }
