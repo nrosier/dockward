@@ -128,20 +128,13 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Body of `POST /api/v1/credentials/:id/test` for GitHub credentials (`specs/api.md`).
-#[derive(Debug, Deserialize)]
-pub struct GithubTestBody {
-    pub owner: String,
-    pub repo: String,
-}
-
 /// `POST /api/v1/credentials/:id/test`. Owner only. Harbor runs the robot check.
-/// GitHub takes `{"owner","repo"}` and runs the repository and code scanning probes.
+/// GitHub ignores any body: it lists the token's first visible repository and runs the
+/// repository, code scanning, and issues probes on it (`specs/api.md`, Test button).
 pub async fn test(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
-    body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let row = credentials::load_owned(&state.pool, &user.id, &id).await?;
     if row.service_type == credentials::SERVICE_HARBOR {
@@ -150,46 +143,82 @@ pub async fn test(
         let ok = check.ok;
         return Ok(Json(serde_json::json!({ "ok": ok, "checks": [check] })));
     }
-    if body.is_empty() {
-        return Err(AppError::ValidationFailed(
-            "owner and repo are required for a GitHub credential.".to_owned(),
-        ));
-    }
-    let input: GithubTestBody = parse_body(&body)?;
-    if !credential_probe::valid_github_name(&input.owner)
-        || !credential_probe::valid_github_name(&input.repo)
-    {
-        return Err(AppError::ValidationFailed(
-            "owner and repo must be valid GitHub names.".to_owned(),
-        ));
-    }
     let probe = credential_probe::OutboundGithubProbe::new()?;
-    let checks = run_github_probes(&state, &probe, &row, &input.owner, &input.repo).await?;
-    let ok = checks.iter().all(|check| check.ok);
-    Ok(Json(serde_json::json!({ "ok": ok, "checks": checks })))
+    let result = run_github_test(&state, &probe, &row).await?;
+    Ok(Json(serde_json::json!({
+        "ok": result.checks.iter().all(|check| check.ok),
+        "repository": result.repository,
+        "checks": result.checks,
+    })))
 }
 
-/// Runs the repository and code scanning probes for one stored GitHub credential.
-/// The decrypted token lives only in the local buffer and is never logged or returned.
-pub async fn run_github_probes<P: credential_probe::GithubProbe>(
+/// The outcome of a GitHub credential test: the repository checked as `owner/repo`
+/// (`None` when none was found) and the checks.
+pub struct GithubTestResult {
+    pub repository: Option<String>,
+    pub checks: Vec<credential_probe::Check>,
+}
+
+/// Lists the first repository, then runs the three probes on it. The decrypted token
+/// lives only in the local buffer and is never logged or returned.
+pub async fn run_github_test<P>(
     state: &AppState,
     probe: &P,
     row: &crate::db::credentials::CredentialRow,
+) -> Result<GithubTestResult, AppError>
+where
+    P: credential_probe::GithubProbe + credential_probe::GithubRepoLister,
+{
+    let token = credentials::decrypt_token(&state.credentials_key, row)?;
+    let listed = probe.first_repository(&token).await?;
+    if listed.response.status != 200 {
+        return Ok(GithubTestResult {
+            repository: None,
+            checks: vec![credential_probe::github_repo_check(&listed.response)],
+        });
+    }
+    let Some((owner, repo)) = listed.repository else {
+        return Ok(GithubTestResult {
+            repository: None,
+            checks: vec![credential_probe::github_no_repository_check()],
+        });
+    };
+    if !credential_probe::valid_github_name(&owner) || !credential_probe::valid_github_name(&repo) {
+        return Ok(GithubTestResult {
+            repository: None,
+            checks: vec![credential_probe::Check {
+                name: "github_repo",
+                ok: false,
+                detail: "unexpected repository name from GitHub".to_owned(),
+                warning: None,
+            }],
+        });
+    }
+    let checks = run_github_probes(probe, &token, &owner, &repo).await?;
+    Ok(GithubTestResult {
+        repository: Some(format!("{owner}/{repo}")),
+        checks,
+    })
+}
+
+/// Runs the repository, code scanning, and issues probes for one repository.
+pub async fn run_github_probes<P: credential_probe::GithubProbe>(
+    probe: &P,
+    token: &[u8],
     owner: &str,
     repo: &str,
 ) -> Result<Vec<credential_probe::Check>, AppError> {
-    let token = credentials::decrypt_token(&state.credentials_key, row)?;
     let repo_response = probe
-        .get(&credential_probe::github_repo_path(owner, repo), &token)
+        .get(&credential_probe::github_repo_path(owner, repo), token)
         .await?;
     let scanning_response = probe
         .get(
             &credential_probe::github_code_scanning_path(owner, repo),
-            &token,
+            token,
         )
         .await?;
     let issues_response = probe
-        .get(&credential_probe::github_issues_path(owner, repo), &token)
+        .get(&credential_probe::github_issues_path(owner, repo), token)
         .await?;
     Ok(vec![
         credential_probe::github_repo_check(&repo_response),
@@ -291,6 +320,9 @@ mod tests {
     /// A GitHub probe that records each requested path. No socket is opened.
     struct RecordingGithub {
         calls: std::sync::Mutex<Vec<String>>,
+        tokens: std::sync::Mutex<Vec<Vec<u8>>>,
+        first: Option<(String, String)>,
+        list_status: u16,
     }
 
     impl credential_probe::GithubProbe for RecordingGithub {
@@ -317,36 +349,124 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn github_test_runs_three_probes() {
-        let state = test_state("github").await;
+    impl credential_probe::GithubRepoLister for RecordingGithub {
+        async fn first_repository(
+            &self,
+            token: &[u8],
+        ) -> Result<credential_probe::FirstRepository, AppError> {
+            self.calls.lock().unwrap().push("user/repos".to_owned());
+            self.tokens.lock().unwrap().push(token.to_vec());
+            Ok(credential_probe::FirstRepository {
+                response: credential_probe::GithubResponse {
+                    status: self.list_status,
+                    message: String::new(),
+                    accepted_permissions: None,
+                },
+                repository: self.first.clone(),
+            })
+        }
+    }
+
+    fn recording(first: Option<(&str, &str)>) -> RecordingGithub {
+        RecordingGithub {
+            calls: std::sync::Mutex::new(Vec::new()),
+            tokens: std::sync::Mutex::new(Vec::new()),
+            first: first.map(|(o, r)| (o.to_owned(), r.to_owned())),
+            list_status: 200,
+        }
+    }
+
+    async fn github_row(state: &AppState) -> crate::db::credentials::CredentialRow {
         let mut row = row_with_token(&state.credentials_key);
         row.service_type = "github".to_owned();
         row.base_url = None;
         row.username = None;
-        // Issues answers 403, which is a warning: the test still passes.
-        let probe = RecordingGithub {
-            calls: std::sync::Mutex::new(Vec::new()),
-        };
-        let checks = run_github_probes(&state, &probe, &row, "octo", "app")
-            .await
-            .unwrap();
+        row
+    }
+
+    #[tokio::test]
+    async fn github_test_checks_the_first_repository() {
+        let state = test_state("gh-first").await;
+        let row = github_row(&state).await;
+        let probe = recording(Some(("octo", "app")));
+        let result = run_github_test(&state, &probe, &row).await.unwrap();
         let calls = probe.calls.lock().unwrap().clone();
         assert_eq!(
             calls,
             vec![
+                "user/repos".to_owned(),
                 "repos/octo/app".to_owned(),
                 "repos/octo/app/code-scanning/alerts?per_page=1".to_owned(),
                 "repos/octo/app/issues?per_page=1".to_owned(),
             ]
         );
-        let names: Vec<&str> = checks.iter().map(|check| check.name).collect();
+        assert_eq!(result.repository.as_deref(), Some("octo/app"));
+        let names: Vec<&str> = result.checks.iter().map(|check| check.name).collect();
         assert_eq!(
             names,
             vec!["github_repo", "github_code_scanning", "github_issues"]
         );
-        assert!(checks.iter().all(|check| check.ok));
-        assert_eq!(checks[2].warning, Some("issues_permission_missing"));
+        assert!(result.checks.iter().all(|check| check.ok));
+        assert_eq!(result.checks[2].warning, Some("issues_permission_missing"));
+    }
+
+    #[tokio::test]
+    async fn github_test_with_no_repository_reports_the_catalog_key() {
+        let state = test_state("gh-empty").await;
+        let row = github_row(&state).await;
+        let probe = recording(None);
+        let result = run_github_test(&state, &probe, &row).await.unwrap();
+        assert_eq!(probe.calls.lock().unwrap().clone(), vec!["user/repos"]);
+        assert_eq!(result.repository, None);
+        assert_eq!(result.checks.len(), 1);
+        assert_eq!(result.checks[0].name, "github_repository_visible");
+        assert!(!result.checks[0].ok);
+        assert_eq!(result.checks[0].detail, "credentials.test.noRepository");
+    }
+
+    #[tokio::test]
+    async fn github_test_maps_401_on_the_list_call() {
+        let state = test_state("gh-401").await;
+        let row = github_row(&state).await;
+        let mut probe = recording(None);
+        probe.list_status = 401;
+        let result = run_github_test(&state, &probe, &row).await.unwrap();
+        assert_eq!(result.checks.len(), 1);
+        assert_eq!(result.checks[0].name, "github_repo");
+        assert!(!result.checks[0].ok);
+        assert_eq!(probe.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn first_repository_is_read_from_the_list_body() {
+        let body =
+            br#"[{"name":"app","owner":{"login":"octo"}},{"name":"b","owner":{"login":"x"}}]"#;
+        assert_eq!(
+            credential_probe::first_repository_of(body),
+            Some(("octo".to_owned(), "app".to_owned()))
+        );
+        assert_eq!(credential_probe::first_repository_of(b"[]"), None);
+    }
+
+    #[tokio::test]
+    async fn github_test_never_returns_the_token() {
+        let state = test_state("gh-token").await;
+        let row = github_row(&state).await;
+        let token = String::from_utf8(
+            credentials::decrypt_token(&state.credentials_key, &row)
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let probe = recording(Some(("octo", "app")));
+        let result = run_github_test(&state, &probe, &row).await.unwrap();
+        let rendered = serde_json::json!({
+            "repository": result.repository,
+            "checks": result.checks,
+        })
+        .to_string();
+        assert!(!token.is_empty());
+        assert!(!rendered.contains(&token));
     }
 
     /// Creates an owner and one Harbor credential through the service, then returns

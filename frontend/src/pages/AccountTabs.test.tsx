@@ -133,4 +133,28 @@ describe("Account tabs", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: t("account.credentials.delete") }));
     expect(await within(dialog).findByText(t("account.credentials.inUse"))).toBeInTheDocument();
   });
+
+  it("tests a GitHub credential with one click and names the repository", async () => {
+    let posted: RequestInit | undefined;
+    stub([credential({ id: "g1", service_type: "github", label: "gh-pat", base_url: null, username: null })], (path, init) => {
+      if (path === "/api/v1/credentials/g1/test" && init?.method === "POST") {
+        posted = init;
+        return json({
+          ok: true,
+          repository: "octo/app",
+          checks: [{ name: "github_repo", ok: true, detail: "the token can read the repository" }],
+        });
+      }
+      return undefined;
+    });
+    render("admin", "local", "credentials");
+    await userEvent.click(
+      await screen.findByRole("button", { name: t("account.credentials.testAria", { label: "gh-pat" }) }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByRole("textbox")).toBeNull();
+    await userEvent.click(within(dialog).getByRole("button", { name: t("account.credentials.test") }));
+    expect(await within(dialog).findByText(t("credentials.test.repository", { name: "octo/app" }))).toBeInTheDocument();
+    expect(posted?.body).toBeUndefined();
+  });
 });

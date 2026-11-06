@@ -238,8 +238,15 @@ impl OutboundGithubProbe {
 /// Largest error body read for classification. GitHub's error bodies are small.
 const MAX_GITHUB_BODY: usize = 64 * 1024;
 
-impl GithubProbe for OutboundGithubProbe {
-    async fn get(&self, path: &str, token: &[u8]) -> Result<GithubResponse, AppError> {
+/// Raw answer of one GitHub GET: the classified response and the body bytes (empty when
+/// the body is over [`MAX_GITHUB_BODY`]).
+struct RawGithub {
+    response: GithubResponse,
+    body: Vec<u8>,
+}
+
+impl OutboundGithubProbe {
+    async fn send(&self, path: &str, token: &[u8]) -> Result<RawGithub, AppError> {
         let base = Url::parse(GITHUB_API).map_err(|_| AppError::InternalError)?;
         let url = base.join(path).map_err(|_| AppError::InternalError)?;
         let token = std::str::from_utf8(token).map_err(|_| AppError::InternalError)?;
@@ -269,24 +276,96 @@ impl GithubProbe for OutboundGithubProbe {
             .bytes()
             .await
             .map_err(|_| AppError::UpstreamUnreachable)?;
-        let message = if body.len() <= MAX_GITHUB_BODY {
-            serde_json::from_slice::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .map(str::to_owned)
-                })
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        Ok(GithubResponse {
-            status,
-            message,
-            accepted_permissions,
+        if body.len() > MAX_GITHUB_BODY {
+            return Ok(RawGithub {
+                response: GithubResponse {
+                    status,
+                    message: String::new(),
+                    accepted_permissions,
+                },
+                body: Vec::new(),
+            });
+        }
+        let message = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_default();
+        Ok(RawGithub {
+            response: GithubResponse {
+                status,
+                message,
+                accepted_permissions,
+            },
+            body: body.to_vec(),
         })
+    }
+}
+
+impl GithubProbe for OutboundGithubProbe {
+    async fn get(&self, path: &str, token: &[u8]) -> Result<GithubResponse, AppError> {
+        Ok(self.send(path, token).await?.response)
+    }
+}
+
+/// Path of the repository list call, `GET /user/repos?per_page=1`. GitHub's default
+/// order applies, so the single item is the first repository the token can see.
+pub const GITHUB_FIRST_REPO_PATH: &str = "user/repos?per_page=1";
+
+/// The answer of the repository list call: the status classification and, on `200`,
+/// the first repository as `(owner, repo)` (`None` when the list is empty).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstRepository {
+    pub response: GithubResponse,
+    pub repository: Option<(String, String)>,
+}
+
+/// Lists the first repository the token can see (`specs/api.md`, Test button).
+#[allow(async_fn_in_trait)]
+pub trait GithubRepoLister {
+    async fn first_repository(&self, token: &[u8]) -> Result<FirstRepository, AppError>;
+}
+
+impl GithubRepoLister for OutboundGithubProbe {
+    async fn first_repository(&self, token: &[u8]) -> Result<FirstRepository, AppError> {
+        let raw = self.send(GITHUB_FIRST_REPO_PATH, token).await?;
+        let repository = if raw.response.status == 200 {
+            first_repository_of(&raw.body)
+        } else {
+            None
+        };
+        Ok(FirstRepository {
+            response: raw.response,
+            repository,
+        })
+    }
+}
+
+/// Reads `[{"name","owner":{"login"}}, ...]` and returns the first `(owner, repo)`.
+/// Only these two fields are read.
+pub fn first_repository_of(body: &[u8]) -> Option<(String, String)> {
+    let value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let first = value.as_array()?.first()?;
+    let owner = first.get("owner")?.get("login")?.as_str()?;
+    let name = first.get("name")?.as_str()?;
+    Some((owner.to_owned(), name.to_owned()))
+}
+
+/// Catalog key of the detail for a token that sees no repository. The frontend shows
+/// the text (`specs/api.md`, Test button).
+pub const NO_REPOSITORY_KEY: &str = "credentials.test.noRepository";
+
+/// The check for a token that sees no repository.
+pub fn github_no_repository_check() -> Check {
+    Check {
+        name: "github_repository_visible",
+        ok: false,
+        detail: NO_REPOSITORY_KEY.to_owned(),
+        warning: None,
     }
 }
 

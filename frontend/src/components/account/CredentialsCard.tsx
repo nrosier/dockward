@@ -4,11 +4,10 @@ import { Link } from "react-router";
 import { t } from "../../i18n";
 import { api } from "../../lib/api";
 import type { Credential, Page, TestResult } from "../../types/api";
-import { Badge, CardHeading, daysLeft, formatDate, messageOf, statusOf, Tag, TD, TH, ROW, INPUT, ConfirmDialog, FormError } from "../admin/parts";
+import { Badge, CardHeading, daysLeft, formatDate, messageOf, statusOf, Tag, TD, TH, ROW, ConfirmDialog, FormError } from "../admin/parts";
 import { Button, buttonClass } from "../ui/Button";
 import { Card } from "../ui/Card";
 import { Dialog } from "../ui/Dialog";
-import { Field } from "../ui/Field";
 import { ChecksList } from "./ChecksList";
 
 const WARNING_DAYS = 14;
@@ -32,41 +31,25 @@ function ExpiryCell({ credential }: { credential: Credential }) {
 }
 
 function TestDialog({ credential, onClose }: { credential: Credential; onClose: () => void }) {
-  const isGithub = credential.service_type === "github";
-  const [owner, setOwner] = useState("");
-  const [repo, setRepo] = useState("");
   const test = useMutation({
-    mutationFn: () =>
-      api<TestResult>(
-        "POST",
-        `/credentials/${credential.id}/test`,
-        isGithub ? { owner: owner.trim(), repo: repo.trim() } : undefined,
-      ),
+    mutationFn: () => api<TestResult>("POST", `/credentials/${credential.id}/test`),
   });
-  const canRun = !isGithub || (owner.trim() !== "" && repo.trim() !== "");
   return (
     <Dialog
       open
       onOpenChange={(open) => (open ? undefined : onClose())}
       title={t("account.credentials.testTitle", { label: credential.label })}
     >
-      {isGithub ? (
-        <div className="flex flex-col gap-3">
-          <Field id="test-owner" label={t("credentials.form.owner")}>
-            <input id="test-owner" className={INPUT} value={owner} onChange={(event) => setOwner(event.target.value)} />
-          </Field>
-          <Field id="test-repo" label={t("credentials.form.repo")}>
-            <input id="test-repo" className={INPUT} value={repo} onChange={(event) => setRepo(event.target.value)} />
-          </Field>
-        </div>
-      ) : null}
       {test.isError ? (
         <FormError message={statusOf(test.error) === 502 ? t("credentials.test.unreachable") : messageOf(test.error)} />
+      ) : null}
+      {test.data?.repository ? (
+        <p className="m-0 text-[13px]">{t("credentials.test.repository", { name: test.data.repository })}</p>
       ) : null}
       {test.data ? <ChecksList checks={test.data.checks} /> : null}
       <div className="flex justify-end gap-2.5">
         <Button onClick={onClose}>{t("common.close")}</Button>
-        <Button variant="primary" disabled={!canRun || test.isPending} onClick={() => test.mutate()}>
+        <Button variant="primary" disabled={test.isPending} onClick={() => test.mutate()}>
           {test.data || test.isError ? t("credentials.test.again") : t("account.credentials.test")}
         </Button>
       </div>

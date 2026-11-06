@@ -155,6 +155,7 @@ export interface CheckResult {
 
 export interface TestResult {
   ok: boolean;
+  repository?: string | null;
   checks: CheckResult[];
 }
 

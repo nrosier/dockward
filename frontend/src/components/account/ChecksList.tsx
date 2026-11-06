@@ -6,7 +6,13 @@ const NAMES: Record<string, MessageKey> = {
   github_repo: "credentials.check.github_repo",
   github_code_scanning: "credentials.check.github_code_scanning",
   github_issues: "credentials.check.github_issues",
+  github_repository_visible: "credentials.check.github_repository_visible",
 };
+
+// The server sends a catalog key as the detail when the text is fixed.
+function detailOf(check: CheckResult): string {
+  return check.detail === "credentials.test.noRepository" ? t("credentials.test.noRepository") : check.detail;
+}
 
 function nameOf(check: CheckResult): string {
   const key = NAMES[check.name];
@@ -30,7 +36,7 @@ export function ChecksList({ checks }: { checks: CheckResult[] }) {
                 {t(`credentials.state.${state}`)}
               </span>
             </div>
-            <div className="text-[12.5px] text-muted">{check.detail}</div>
+            <div className="text-[12.5px] text-muted">{detailOf(check)}</div>
           </li>
         );
       })}
