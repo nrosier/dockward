@@ -59,14 +59,14 @@ function changedFields(initial: FormValues, now: FormValues): Record<string, str
   return body;
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+// One column of the two-column card: a heading and its fields. The columns
+// share one bordered card with a divider; narrow screens stack them (#167).
+function Column({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <Card className="m-0 flex min-w-0 flex-col gap-[18px] px-[22px] py-5">
-      <fieldset className="m-0 flex min-w-0 flex-col gap-[18px] border-0 p-0">
-        <legend className="float-left mb-0.5 text-[15px] font-semibold">{title}</legend>
-        <div className="clear-both flex flex-col gap-[18px]">{children}</div>
-      </fieldset>
-    </Card>
+    <fieldset className="m-0 flex min-w-0 flex-col gap-[18px] border-0 p-5 max-md:border-t max-md:border-border max-md:first:border-t-0 md:border-l md:border-border md:first:border-l-0">
+      <legend className="float-left mb-0.5 text-[15px] font-semibold">{title}</legend>
+      <div className="clear-both flex min-w-0 flex-col gap-[18px]">{children}</div>
+    </fieldset>
   );
 }
 
@@ -234,7 +234,8 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
   return (
     <form onSubmit={submit} className="flex flex-col gap-5" noValidate>
       <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-5 border-0 p-0">
-        <Section title={t("mappings.form.harborSection")}>
+        <Card className="m-0 grid min-w-0 grid-cols-1 overflow-hidden md:grid-cols-2">
+        <Column title={t("mappings.form.harborSection")}>
           <CredentialSelect
             id="harbor-cred"
             label={t("mappings.form.harborCredential")}
@@ -259,16 +260,27 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
             }
           />
           <HarborPickers
-            key={values.harborCredId}
             credential={harborCredential}
             project={picked?.project ?? null}
-            repository={picked?.repository ?? ""}
-            savedProject={values.harborProject}
-            savedRepository={values.harborRepository}
+            projectValue={values.harborProject}
+            repositoryValue={values.harborRepository}
+            repositoryError={
+              harborClash === undefined
+                ? undefined
+                : t("mappings.form.duplicate", { name: mappingName(harborClash) })
+            }
+            onProjectText={(text) => {
+              setPicked(null);
+              set("harborProject", text);
+            }}
             onProject={(name) => {
               setPicked({ project: name, repository: null });
               setValues((current) => ({ ...current, harborProject: name, harborRepository: "" }));
               setServerError(null);
+            }}
+            onRepositoryText={(text) => {
+              setPicked((current) => (current === null ? null : { ...current, repository: null }));
+              set("harborRepository", text);
             }}
             onRepository={(fullName) => {
               const slash = fullName.indexOf("/");
@@ -276,41 +288,6 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
               set("harborRepository", fullName.slice(slash + 1));
             }}
           />
-          <Field id="harbor-project" label={t("mappings.form.harborProject")}>
-            <input
-              id="harbor-project"
-              value={values.harborProject}
-              onChange={(event) => {
-                setPicked(null);
-                set("harborProject", event.target.value);
-              }}
-              className={INPUT}
-            />
-          </Field>
-          <Field
-            id="harbor-repository"
-            label={t("mappings.form.harborRepository")}
-            help={t("mappings.form.harborRepositoryHelp")}
-            error={
-              harborClash === undefined
-                ? undefined
-                : t("mappings.form.duplicate", { name: mappingName(harborClash) })
-            }
-          >
-            <input
-              id="harbor-repository"
-              value={values.harborRepository}
-              onChange={(event) => {
-                setPicked((current) => (current === null ? null : { ...current, repository: null }));
-                set("harborRepository", event.target.value);
-              }}
-              aria-invalid={harborClash !== undefined}
-              aria-describedby={
-                harborClash === undefined ? "harbor-repository-help" : "harbor-repository-help harbor-repository-error"
-              }
-              className={`${INPUT} ${harborClash === undefined ? "" : INPUT_INVALID}`}
-            />
-          </Field>
           {suggestKey === null || values.harborCredId === "" || picked === null || picked.repository === null ? null : (
             <SourceSuggestion
               key={suggestKey}
@@ -322,9 +299,9 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
               onDismiss={() => setDismissed((current) => [...current, suggestKey])}
             />
           )}
-        </Section>
+        </Column>
 
-        <Section title={t("mappings.form.githubSection")}>
+        <Column title={t("mappings.form.githubSection")}>
           <CredentialSelect
             id="github-cred"
             label={t("mappings.form.githubCredential")}
@@ -377,9 +354,11 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
               className={INPUT}
             />
           </Field>
-        </Section>
+        </Column>
+        </Card>
 
-        <Section title={t("mappings.form.issuesSection")}>
+        <Card className="m-0 flex min-w-0 flex-col gap-[18px] px-[22px] py-5">
+          <h2 className="text-[15px] font-semibold">{t("mappings.form.issuesSection")}</h2>
           <div className="flex items-start justify-between gap-4">
             <div className="flex flex-col gap-1.5">
               <label htmlFor="auto-issues" className="text-[13px] font-semibold">
@@ -406,7 +385,7 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
               ]}
             />
           </div>
-        </Section>
+        </Card>
       </fieldset>
 
       {serverError === null ? null : (
@@ -415,9 +394,7 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
         </p>
       )}
 
-      {readOnly ? (
-        <p className="text-[13px] text-muted">{t("mappings.form.readOnly")}</p>
-      ) : (
+      {readOnly ? null : (
         <div className="flex flex-wrap justify-end gap-2.5">
           <Link to="/mappings" className={buttonClass("default")}>
             {t("mappings.cancel")}

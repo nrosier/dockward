@@ -73,9 +73,20 @@ class NoopResizeObserver { observe() {} unobserve() {} disconnect() {} }
 const calls = (fetchMock: ReturnType<typeof stub>, fragment: string) =>
   fetchMock.mock.calls.map((c) => String(c[0])).filter((u) => u.includes(fragment));
 
+// The Harbor fields are comboboxes: focusing the input opens the list.
+async function openProjects() {
+  await userEvent.click(await screen.findByLabelText(t("mappings.form.harborProject")));
+  return screen.findByRole("listbox", { name: t("mapping.picker.projectList") });
+}
+
+async function openRepositories() {
+  await userEvent.click(screen.getByLabelText(t("mappings.form.harborRepository")));
+  return screen.findByRole("listbox", { name: t("mapping.picker.repositoryList") });
+}
+
 async function pickProject(name: string) {
-  const list = await screen.findByRole("list", { name: t("mapping.picker.projectList") });
-  await userEvent.click(await within(list).findByRole("button", { name }));
+  const list = await openProjects();
+  await userEvent.click(await within(list).findByRole("option", { name }));
 }
 
 describe("Mapping form pickers", () => {
@@ -86,30 +97,30 @@ describe("Mapping form pickers", () => {
     const fetchMock = stub();
     renderWithRoutes(routes, "/mappings/new");
     await pickProject("nrosier");
-    const repos = await screen.findByRole("list", { name: t("mapping.picker.repositoryList") });
+    const repos = await openRepositories();
     // The repository is shown without the project prefix.
-    expect(within(repos).getByRole("button", { name: "walley" })).toBeInTheDocument();
+    expect(within(repos).getByRole("option", { name: "walley" })).toBeInTheDocument();
     expect(calls(fetchMock, "/credentials/hc1/harbor-projects?")[0]).toContain("page_size=50");
-    await userEvent.click(within(repos).getByRole("button", { name: "walley" }));
+    await userEvent.click(within(repos).getByRole("option", { name: "walley" }));
     // The saved value keeps project/repository.
     expect(screen.getByLabelText(t("mappings.form.harborProject"))).toHaveValue("nrosier");
     expect(screen.getByLabelText(t("mappings.form.harborRepository"))).toHaveValue("walley");
-    expect(screen.getAllByText(t("mapping.picker.saved", { value: "nrosier/walley" })).length).toBeGreaterThan(0);
   });
 
   it("opens the repository list only from a picked project", async () => {
     const fetchMock = stub();
     renderWithRoutes(routes, "/mappings/new");
-    await screen.findByRole("list", { name: t("mapping.picker.projectList") });
-    expect(screen.queryByRole("list", { name: t("mapping.picker.repositoryList") })).not.toBeInTheDocument();
+    await openProjects();
+    await userEvent.click(screen.getByLabelText(t("mappings.form.harborRepository")));
+    expect(screen.queryByRole("listbox", { name: t("mapping.picker.repositoryList") })).not.toBeInTheDocument();
     expect(calls(fetchMock, "/repositories")).toEqual([]);
   });
 
   it("sends q after the debounce, one request for a burst of typing", async () => {
     const fetchMock = stub();
     renderWithRoutes(routes, "/mappings/new");
-    await screen.findByRole("list", { name: t("mapping.picker.projectList") });
-    await userEvent.type(screen.getByLabelText(t("mapping.picker.searchProjects")), "lib");
+    await openProjects();
+    await userEvent.type(screen.getByLabelText(t("mappings.form.harborProject")), "lib");
     await waitFor(() => expect(calls(fetchMock, "q=lib")).toHaveLength(1));
     expect(calls(fetchMock, "q=l&")).toEqual([]);
     expect(calls(fetchMock, "q=li&")).toEqual([]);
@@ -118,6 +129,7 @@ describe("Mapping form pickers", () => {
   it("changes the request when paging", async () => {
     const fetchMock = stub({ projects: () => json(page([{ name: "a" }], { total: 120 })) });
     renderWithRoutes(routes, "/mappings/new");
+    await openProjects();
     const nav = (await screen.findAllByRole("navigation", { name: t("pagination.label") }))[0];
     await userEvent.click(within(nav).getByRole("button", { name: t("pagination.next") }));
     await waitFor(() => expect(calls(fetchMock, "harbor-projects?").some((u) => u.includes("page=2"))).toBe(true));
@@ -126,13 +138,14 @@ describe("Mapping form pickers", () => {
   it("shows the cut note only when truncated is true", async () => {
     stub({ projects: () => json(page([{ name: "a" }], { truncated: true })) });
     renderWithRoutes(routes, "/mappings/new");
+    await openProjects();
     expect(await screen.findByText(t("mapping.picker.cut"))).toBeInTheDocument();
   });
 
   it("shows no cut note when the list is not truncated", async () => {
     stub();
     renderWithRoutes(routes, "/mappings/new");
-    await screen.findByRole("list", { name: t("mapping.picker.projectList") });
+    await openProjects();
     expect(screen.queryByText(t("mapping.picker.cut"))).not.toBeInTheDocument();
   });
 
@@ -140,8 +153,8 @@ describe("Mapping form pickers", () => {
     stub();
     renderWithRoutes(routes, "/mappings/new");
     await pickProject("nrosier");
-    const repos = await screen.findByRole("list", { name: t("mapping.picker.repositoryList") });
-    await userEvent.click(within(repos).getByRole("button", { name: "walley" }));
+    const repos = await openRepositories();
+    await userEvent.click(within(repos).getByRole("option", { name: "walley" }));
     expect(screen.getByLabelText(t("mappings.form.harborRepository"))).toHaveValue("walley");
     await pickProject("library");
     expect(screen.getByLabelText(t("mappings.form.harborRepository"))).toHaveValue("");
@@ -156,7 +169,8 @@ describe("Mapping form pickers", () => {
     await userEvent.selectOptions(screen.getByLabelText(t("mappings.form.harborCredential")), "hc2");
     expect(screen.getByLabelText(t("mappings.form.harborProject"))).toHaveValue("");
     await waitFor(() => expect(calls(fetchMock, "/credentials/hc2/harbor-projects?").length).toBeGreaterThan(0));
-    expect(screen.queryByRole("list", { name: t("mapping.picker.repositoryList") })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText(t("mappings.form.harborRepository")));
+    expect(screen.queryByRole("listbox", { name: t("mapping.picker.repositoryList") })).not.toBeInTheDocument();
   });
 
   it("still accepts typed entry", async () => {
@@ -174,14 +188,13 @@ describe("Mapping form pickers", () => {
     expect(await screen.findByLabelText(t("mappings.form.harborProject"))).toHaveValue("gone-project");
     expect(screen.getByLabelText(t("mappings.form.harborRepository"))).toHaveValue("gone-repo");
     expect(screen.getByLabelText(t("mappings.form.githubOwner"))).toHaveValue("old-org");
-    expect(screen.getAllByText(t("mapping.picker.saved", { value: "gone-project/gone-repo" })).length).toBeGreaterThan(0);
   });
 
   it("hides a Harbor project with the picked credential's base URL, then refreshes", async () => {
     const hide = vi.fn(() => json({ id: "h1", source: "harbor", full_name: "library", harbor_base_url: HARBOR_A.base_url, created_at: "2026-11-05T10:00:00Z" }, 201));
     const fetchMock = stub({ hide });
     renderWithRoutes(routes, "/mappings/new");
-    const list = await screen.findByRole("list", { name: t("mapping.picker.projectList") });
+    const list = await openProjects();
     await waitFor(() => expect(screen.getByLabelText(t("mappings.form.harborCredential"))).toHaveValue("hc1"));
     const before = calls(fetchMock, "harbor-projects?").length;
     await userEvent.click(within(list).getByRole("button", { name: `${t("mapping.hide.action")}library` }));
@@ -245,8 +258,8 @@ const suggestion = (listed: boolean | null) =>
 
 async function pickRepository() {
   await pickProject("nrosier");
-  const repos = await screen.findByRole("list", { name: t("mapping.picker.repositoryList") });
-  await userEvent.click(within(repos).getByRole("button", { name: "walley" }));
+  const repos = await openRepositories();
+  await userEvent.click(within(repos).getByRole("option", { name: "walley" }));
 }
 
 describe("Source suggestion", () => {
@@ -315,6 +328,7 @@ describe("Picker errors", () => {
         }),
     });
     renderWithRoutes(routes, "/mappings/new");
+    await openProjects();
     expect(await screen.findByText(t("mapping.errors.rateLimit.message"))).toBeInTheDocument();
     expect(screen.getByRole("button", { name: t("mapping.errors.rateLimit.wait", { time: "15:00" }) })).toBeDisabled();
     await new Promise((resolve) => setTimeout(resolve, 600));
@@ -328,10 +342,11 @@ describe("Picker errors", () => {
       projects: () => (n++ === 0 ? json({ error: { code: "upstream_unreachable", message: "RAW 502 TEXT" } }, 502) : json(page([{ name: "back" }]))),
     });
     renderWithRoutes(routes, "/mappings/new");
+    await openProjects();
     expect(await screen.findByText(t("mapping.errors.upstream.message"))).toBeInTheDocument();
     expect(calls(fetchMock, "harbor-projects?")).toHaveLength(1);
     await userEvent.click(screen.getByRole("button", { name: t("mapping.errors.tryAgain") }));
-    expect(await screen.findByRole("button", { name: "back" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "back" })).toBeInTheDocument();
     expect(calls(fetchMock, "harbor-projects?")).toHaveLength(2);
   });
 
@@ -345,6 +360,7 @@ describe("Picker errors", () => {
       projects: () => json({ error: { code: "validation_failed", message: "RAW SERVER TEXT", detail } }, 422),
     });
     renderWithRoutes(routes, "/mappings/new");
+    await openProjects();
     const alert = await screen.findByText(t(key));
     expect(alert.closest("[role=alert]")).not.toBeNull();
     expect(screen.queryByText("RAW SERVER TEXT")).not.toBeInTheDocument();
