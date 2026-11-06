@@ -269,6 +269,18 @@ jobs:
           DIGEST: ${{ needs.publish-digest.outputs.digest }}
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
 
+      # Verifies the signature just made, on the same digest, pinned to this repository's publish workflow on main or a v* tag.
+      # A failed verification fails the job. Output goes to /dev/null to keep the Rekor and certificate detail out of the log.
+      - name: Verify image signature
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/harborgate
+          DIGEST: ${{ needs.publish-digest.outputs.digest }}
+        run: |
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github.com/nrosier/harborgate/\.github/workflows/docker\.yml@refs/(heads/main|tags/v[0-9].*)$' \
+            "${IMAGE}@${DIGEST}" > /dev/null
+
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
