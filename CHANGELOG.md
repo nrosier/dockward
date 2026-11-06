@@ -4,6 +4,32 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.12.0
+
+### Added
+- Untagged scan events are resolved by the worker: an untagged `SCANNING_COMPLETED` vulnerability event with a valid digest stores one resolve job and returns 202, and the worker reads the digest's tags from Harbor (Artifact Read), keeps the newest 10 by push time, and queues one sync per tag (#132).
+- A resolve rate limit (429) defers the job by `Retry-After`, or 5 minutes without it, capped at 1 hour, without using an attempt (#132).
+- The job API reports each job's kind, `sync` or `resolve` (#132).
+- Operators can verify the published image with cosign, documented in `docs/SETUP.md` (#171, #172).
+
+### Changed
+- The Harbor poller caps each digest to its newest 10 tags, the same cut as the resolve job (#132).
+- A vulnerability event with a missing or invalid digest returns 400 (#132).
+- Project webhook routing is scoped to the webhook's own Harbor project; events for other projects return 202 with nothing stored (#145).
+- Unmatched repository names must pass Harbor's name rule and be at most 255 characters (#145).
+- Project webhook create checks the secret before reading the body and the mapping budget (#145).
+- `project_webhooks.rotated_at` no longer has an insert-time default (migration 0005) (#145).
+- Every Docker build requires a `REVISION` build argument and sets the `org.opencontainers.image.revision` label, in both CI build steps (#169).
+- `.hg-local` is git-ignored (#170).
+
+### Fixed
+- `docs/SETUP.md` no longer says untagged pushes are ignored (#132).
+- Project webhook transfer, unmatched visibility and rotate-secret guards are covered by tests (#145).
+
+### Security
+- The publish job signs the image digest keyless with cosign and verifies the signature on the same digest, failing the job if verification fails (#171).
+- `secret_hash` is redacted in the `ProjectWebhook` Debug output (#145).
+
 ## 0.11.0
 
 ### Added
