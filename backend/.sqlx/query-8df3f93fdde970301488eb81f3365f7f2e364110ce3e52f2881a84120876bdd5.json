@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!\", github_owner AS \"github_owner!\", github_repo AS \"github_repo!\",\n                  cve_id AS \"cve_id!\", github_issue_number AS \"github_issue_number!: i64\",\n                  github_issue_url AS \"github_issue_url!\", status AS \"status!\"\n           FROM github_issues\n           WHERE github_owner = ? AND github_repo = ? AND cve_id = ?",
+  "query": "SELECT id AS \"id!\", github_owner AS \"github_owner!\", github_repo AS \"github_repo!\",\n                  cve_id AS \"cve_id!\", github_issue_number AS \"github_issue_number!: i64\",\n                  github_issue_url AS \"github_issue_url!\", status AS \"status!\",\n                  closed_manually AS \"closed_manually!: bool\"\n           FROM github_issues\n           WHERE github_owner = ? AND github_repo = ? AND cve_id = ?",
   "describe": {
     "columns": [
       {
@@ -79,6 +79,17 @@
             "name": "status"
           }
         }
+      },
+      {
+        "name": "closed_manually!: bool",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "github_issues",
+            "name": "closed_manually"
+          }
+        }
       }
     ],
     "parameters": {
@@ -91,8 +102,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "908ab3d735af795a80810339128c06c14f05ca8c2bb0c665fc375ff7f2f282ab"
+  "hash": "8df3f93fdde970301488eb81f3365f7f2e364110ce3e52f2881a84120876bdd5"
 }

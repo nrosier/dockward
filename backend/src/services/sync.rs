@@ -33,7 +33,8 @@ use crate::services::github_scanning::{
 };
 use crate::services::harbor_client::{
     HarborGet, HarborReply, ReportState, TRIVY_REPORT_MIME, artifact_url, branch_for, check_source,
-    index_image_child, parse_labels, parse_report, require_revision, vulnerabilities_url,
+    index_image_child, parse_artifact_tags, parse_labels, parse_report, require_revision,
+    vulnerabilities_url,
 };
 use crate::services::issue_lifecycle::{self, IssueApi};
 use crate::services::resolve::{self, JobKind};
@@ -63,6 +64,11 @@ struct Payload {
     digest: String,
     tag: String,
 }
+
+/// What [`SyncHandler::read_and_convert`] returns: the encoded SARIF (`None` when over the
+/// size limit), the severity summary, the commit SHA, the branch, the parsed Harbor report and
+/// the tag's push time in Unix milliseconds.
+type Converted = (Option<String>, String, String, String, Value, Option<i64>);
 
 /// Reads from Harbor. The production impl is [`HarborGet`]; tests use recorded answers.
 pub trait HarborFetch: Send + Sync + 'static {
@@ -338,7 +344,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
                 .await;
         }
 
-        let (sarif_b64, summary, revision, branch, vuln_report) =
+        let (sarif_b64, summary, revision, branch, vuln_report, push_time) =
             self.read_and_convert(&context).await?;
 
         // A pending report left by an earlier attempt that never uploaded is reused.
@@ -356,6 +362,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
                     image_digest: &context.payload.digest,
                     commit_sha: Some(&revision),
                     vulnerability_summary: &summary,
+                    image_push_time: push_time,
                 };
                 let mut conn = self
                     .pool
@@ -446,10 +453,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
     /// Reads the labels and the report from Harbor and converts the report. Returns the
     /// encoded SARIF (`None` when it is over 10 MB compressed), the severity summary, the
     /// commit SHA, the branch and the parsed Harbor report.
-    async fn read_and_convert(
-        &self,
-        context: &Context,
-    ) -> Flow<(Option<String>, String, String, String, Value)> {
+    async fn read_and_convert(&self, context: &Context) -> Flow<Converted> {
         let mapping = &context.mapping;
         let base = base_for_join(&mapping.harbor_base_url).map_err(database)?;
         let digest = context.payload.digest.as_str();
@@ -464,6 +468,13 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
         let body = self
             .harbor_body(context, &artifact, &[], "the Harbor artifact")
             .await?;
+        // The tag's push time on this digest, for the newest-digest issue rule (#196). A body
+        // that cannot be read as tags, or a tag Harbor gave no time, leaves it `None`.
+        let push_time = parse_artifact_tags(&body).ok().and_then(|tags| {
+            tags.iter()
+                .find(|tag| tag.name == context.payload.tag)
+                .and_then(|tag| resolve::push_millis(tag.push_time.as_deref()))
+        });
         let mut labels = parse_labels(&body)
             .map_err(|_| failed("Harbor returned an artifact that could not be read"))?;
         // An image index carries no image config, so its labels are on its image child.
@@ -500,7 +511,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
             Err(ScanError::TooLarge) => None,
             Err(other) => return Err(scan_outcome(other)),
         };
-        Ok((encoded, summary, revision, branch, report))
+        Ok((encoded, summary, revision, branch, report, push_time))
     }
 
     /// Reads and parses the Trivy report from Harbor. `NotYet` and a `404` fail the job for
@@ -1307,6 +1318,7 @@ mod tests {
             image_digest: "sha256:aaaa",
             commit_sha: Some(REVISION),
             vulnerability_summary: "{}",
+            image_push_time: None,
         };
         let mut conn = fx.pool.acquire().await.unwrap();
         report_db::insert_pending(&mut conn, &new).await.unwrap();
@@ -1349,6 +1361,7 @@ mod tests {
             image_digest: "sha256:aaaa",
             commit_sha: Some(REVISION),
             vulnerability_summary: "{}",
+            image_push_time: None,
         };
         let mut conn = fx.pool.acquire().await.unwrap();
         report_db::insert_pending(&mut conn, &new).await.unwrap();

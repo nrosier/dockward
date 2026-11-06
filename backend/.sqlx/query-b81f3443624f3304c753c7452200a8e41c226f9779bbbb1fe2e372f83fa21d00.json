@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE github_issues SET status = 'closed', closed_manually = 1 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b81f3443624f3304c753c7452200a8e41c226f9779bbbb1fe2e372f83fa21d00"
+}

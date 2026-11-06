@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT image_digest AS \"image_digest!\" FROM sync_reports\n           WHERE mapping_id = ? AND harbor_repository = ? AND sarif_status = 'success'\n           ORDER BY image_push_time IS NULL, image_push_time DESC, synced_at DESC, rowid DESC\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "image_digest!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "image_digest"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "525937da84693bc025d2713eeef6aac631e9237845ef55b1ae0d3c2d196c41ea"
+}

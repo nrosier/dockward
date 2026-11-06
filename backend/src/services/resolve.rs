@@ -111,6 +111,15 @@ fn push_key(push_time: Option<&str>) -> Option<(i64, u32)> {
     Some((seconds, nanos))
 }
 
+/// A tag's `push_time` in Unix milliseconds, or `None` when it is missing or not RFC 3339.
+/// The sync stores it on the report so the issue lifecycle can find the newest digest.
+pub(crate) fn push_millis(push_time: Option<&str>) -> Option<i64> {
+    let (seconds, nanos) = push_key(push_time)?;
+    seconds
+        .checked_mul(1_000)?
+        .checked_add(i64::from(nanos / 1_000_000))
+}
+
 /// The tags to sync for one digest: names that are valid OCI tags, de-duplicated, ordered by
 /// `push_time` newest first (a missing time last, equal times by name ascending), cut to the
 /// newest `max`. The resolve job and the poller both use it, so the two paths agree.

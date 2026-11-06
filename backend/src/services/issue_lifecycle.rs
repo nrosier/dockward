@@ -3,8 +3,9 @@
 //!
 //! After each applied scan, [`reconcile`] makes the GitHub issues of one mapping follow its
 //! `cve_findings`: create or adopt an issue for an eligible CVE, reuse it while it is open,
-//! close it with a comment when no tracked tag reports the CVE, and reopen it when the CVE
-//! returns. [`create_manual`] is the same create-or-adopt step for the manual route.
+//! close it with a comment when the newest scanned digest no longer reports the CVE
+//! (#196), and reopen it when a later scan of the newest digest reports the CVE again. Each
+//! scan reads the GitHub state of the tracked issues, and an issue closed by hand is honoured. [`create_manual`] is the same create-or-adopt step for the manual route.
 //!
 //! The token is only passed on to the GitHub client. Nothing here logs it, an error value,
 //! or a response body: every log line and error message is fixed text.
@@ -83,6 +84,16 @@ pub trait IssueApi: Send + Sync + 'static {
         open: bool,
         now: i64,
     ) -> impl Future<Output = Result<(), ScanError>> + Send;
+
+    /// True when the issue is open on GitHub.
+    fn is_open(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        now: i64,
+    ) -> impl Future<Output = Result<bool, ScanError>> + Send;
 }
 
 impl IssueApi for GithubIssues {
@@ -130,6 +141,17 @@ impl IssueApi for GithubIssues {
         now: i64,
     ) -> Result<(), ScanError> {
         GithubIssues::set_state(self, token, owner, repo, number, open, now).await
+    }
+
+    async fn is_open(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        now: i64,
+    ) -> Result<bool, ScanError> {
+        GithubIssues::is_open(self, token, owner, repo, number, now).await
     }
 }
 
@@ -425,6 +447,7 @@ impl<G: IssueApi> Ctx<'_, G> {
             github_issue_number: number,
             github_issue_url: issue.html_url,
             status: "open".to_owned(),
+            closed_manually: false,
         }))
     }
 
@@ -502,7 +525,29 @@ impl<G: IssueApi> Ctx<'_, G> {
         Ok(())
     }
 
-    /// Applies the issue rules to one CVE of the mapping, given its rows.
+    /// Reads whether the issue of `row` is open on GitHub.
+    async fn github_is_open(&self, row: &IssueRow) -> Result<bool, Failure> {
+        let number = to_number(row.github_issue_number)?;
+        Ok(self
+            .gh
+            .is_open(self.token, self.owner(), self.repo(), number, self.now)
+            .await?)
+    }
+
+    /// Stores a status without any GitHub call (the issue already has that state there).
+    async fn store_status(&self, row: &IssueRow, status: &str) -> Result<(), Failure> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        issue_db::set_status(&mut conn, &row.id, status).await?;
+        Ok(())
+    }
+
+    /// Applies the issue rules to one CVE of the mapping, given its rows. The CVE counts as
+    /// reported only when a tag of the newest scanned digest has it `open`
+    /// (`rules.newest_tags`); older tags never keep an issue open.
     async fn step(
         &self,
         cve_id: &str,
@@ -510,7 +555,17 @@ impl<G: IssueApi> Ctx<'_, G> {
         rules: &Rules<'_>,
         listed: &mut Option<Vec<IssueRef>>,
     ) -> Result<(), Failure> {
-        let view = summarize(cve_id, rows);
+        let view = match &rules.newest_tags {
+            Some(tags) => {
+                let scoped: Vec<FindingRow> = rows
+                    .iter()
+                    .filter(|row| tags.contains(&row.image_tag))
+                    .cloned()
+                    .collect();
+                summarize(cve_id, &scoped)
+            }
+            None => summarize(cve_id, rows),
+        };
         let existing = {
             let mut conn = self
                 .pool
@@ -523,6 +578,7 @@ impl<G: IssueApi> Ctx<'_, G> {
             }
             row
         };
+        let reported = view.is_some();
         match (existing, view) {
             // (a) Reported, eligible, and no issue yet: adopt or create. Skipped when
             // `auto_create_issues` is off.
@@ -535,18 +591,44 @@ impl<G: IssueApi> Ctx<'_, G> {
                     self.create_or_adopt(&view, listed).await?;
                 }
             }
-            // (b) The CVE is back: reopen the same issue.
+            (None, None) => {}
+            // (b) A row HarborGate closed, and the newest digest reports the CVE again: reopen
+            // the same issue. A row closed by hand is only reopened if someone reopened the
+            // issue on GitHub (then only the row is updated).
             (Some(row), Some(_)) if row.status == "closed" => {
-                let comment = format!("CVE is back in scan {}", rules.scan_label);
-                self.reopen(&row, &comment).await?;
+                if row.closed_manually {
+                    if self.github_is_open(&row).await? {
+                        self.store_status(&row, "open").await?;
+                    }
+                } else {
+                    let comment = format!("CVE is back in scan {}", rules.scan_label);
+                    self.reopen(&row, &comment).await?;
+                }
             }
-            // (c) No tracked tag reports it any more: comment, then close.
-            (Some(row), None) if row.status == "open" => {
-                let comment = format!(
-                    "No tracked tag reports this CVE since scan {}.",
-                    rules.scan_label
-                );
-                self.close(&row, &comment).await?;
+            // (c) The row is open: read the GitHub state first.
+            (Some(row), _) if row.status == "open" => {
+                if self.github_is_open(&row).await? {
+                    // Open on both sides. When the newest digest no longer reports the CVE:
+                    // comment, then close.
+                    if !reported {
+                        let comment = format!(
+                            "No tracked tag reports this CVE since scan {}.",
+                            rules.scan_label
+                        );
+                        self.close(&row, &comment).await?;
+                    }
+                } else if reported {
+                    // Closed by hand while the CVE is still reported: honour it.
+                    let mut conn = self
+                        .pool
+                        .acquire()
+                        .await
+                        .map_err(|_| AppError::InternalError)?;
+                    issue_db::mark_closed_manually(&mut conn, &row.id).await?;
+                } else {
+                    // Closed on GitHub and the CVE is gone: no comment, only the row.
+                    self.store_status(&row, "closed").await?;
+                }
             }
             // (d) Nothing to do.
             _ => {}
@@ -562,6 +644,9 @@ struct Rules<'a> {
     scan_label: &'a str,
     /// CVE ids with an active acceptance.
     accepted: Vec<String>,
+    /// Image tags of the newest scanned digest, or `None` when the mapping has no successful
+    /// report (then every tracked tag counts).
+    newest_tags: Option<Vec<String>>,
 }
 
 /// Makes the GitHub issues of `mapping` follow its findings. `scan_label` names the scan in
@@ -575,11 +660,13 @@ pub async fn reconcile<G: IssueApi>(
     scan_label: &str,
     now: i64,
 ) -> Result<Outcome, AppError> {
-    let (rows, accepted) = {
+    let (rows, accepted, newest_tags) = {
         let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
         (
             issue_db::findings_for_mapping(&mut conn, &mapping.id).await?,
             issue_db::accepted_cves(&mut conn, &mapping.id, now).await?,
+            issue_db::newest_digest_tags(&mut conn, &mapping.id, &mapping.harbor_repository)
+                .await?,
         )
     };
     let mut by_cve: BTreeMap<String, Vec<FindingRow>> = BTreeMap::new();
@@ -591,6 +678,7 @@ pub async fn reconcile<G: IssueApi>(
         min_issue_severity: mapping.min_issue_severity.as_deref(),
         scan_label,
         accepted,
+        newest_tags,
     };
     let ctx = Ctx {
         pool,
@@ -882,9 +970,18 @@ pub(crate) mod test_support {
                         "number": issue.number,
                         "html_url": format!("https://github.com/octo/app/issues/{}", issue.number),
                         "body": issue.body,
+                        "state": if issue.open { "open" } else { "closed" },
                     })
                 };
                 match (method, path) {
+                    ("GET", single) if single.starts_with("repos/octo/app/issues/") => {
+                        let number: Option<u64> =
+                            single.rsplit('/').next().and_then(|last| last.parse().ok());
+                        match state.issues.iter().find(|i| Some(i.number) == number) {
+                            Some(issue) => Ok(reply(200, issue_json(issue))),
+                            None => Ok(reply(404, json!({}))),
+                        }
+                    }
                     ("GET", _) => {
                         let items: Vec<Value> = state
                             .issues
@@ -1019,6 +1116,17 @@ pub(crate) mod test_support {
         ) -> Result<(), ScanError> {
             github_issues::set_state_with(&*self.0, token, owner, repo, number, open, now).await
         }
+
+        async fn is_open(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            now: i64,
+        ) -> Result<bool, ScanError> {
+            github_issues::is_open_with(&*self.0, token, owner, repo, number, now).await
+        }
     }
 }
 
@@ -1152,6 +1260,21 @@ mod tests {
             .unwrap();
         }
 
+        /// Stores a successful report of `tag` on `digest`, pushed at `push_ms`.
+        async fn report(&self, tag: &str, digest: &str, push_ms: i64) {
+            sqlx::query(
+                "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest, vulnerability_summary, sarif_status, image_push_time, synced_at)
+                 VALUES (?, 'm1', 'app', ?, ?, '{}', 'success', ?, 1)",
+            )
+            .bind(format!("r-{tag}-{digest}"))
+            .bind(tag)
+            .bind(digest)
+            .bind(push_ms)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        }
+
         async fn reconcile(&self, label: &str) -> Outcome {
             let mapping = self.mapping("m1").await;
             reconcile(&self.pool, &self.gh, TOKEN, &mapping, label, 1_000)
@@ -1243,8 +1366,9 @@ mod tests {
 
         assert_eq!(fx.github.creates().len(), 1);
         assert_eq!(fx.issues().await.len(), 1);
-        // The second run needs no GitHub call at all: the row exists and nothing changed.
-        assert_eq!(fx.github.requests(), listed_after_first);
+        // The second run only reads the issue's state (one GET): nothing is created or changed.
+        assert_eq!(fx.github.requests(), listed_after_first + 1);
+        assert_eq!(fx.github.writes().len(), 1);
         assert_eq!(
             fx.count("SELECT COUNT(*) FROM cve_findings WHERE github_issue_id IS NOT NULL")
                 .await,
@@ -1288,23 +1412,140 @@ mod tests {
         );
     }
 
+    /// Newest digest clean, an older tag still reports the CVE: the issue closes (#196).
     #[tokio::test]
-    async fn stays_open_while_another_tag_reports() {
-        let fx = Fixture::new("stays", "CRITICAL", true).await;
+    async fn closes_when_newest_digest_is_clean_though_an_older_tag_reports() {
+        let fx = Fixture::new("newest-clean", "CRITICAL", true).await;
+        fx.report("v1", "sha256:old", 100).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 10)
+        fx.reconcile("proj/app:v1").await;
+        assert_eq!(fx.issues().await[0].2, "open");
+
+        // A newer digest is scanned and has no row for the CVE. v1 still reports it.
+        fx.report("v2", "sha256:new", 200).await;
+        fx.reconcile("proj/app:v2").await;
+
+        assert_eq!(fx.issues().await[0].2, "closed");
+        let writes = fx.github.writes();
+        // create, comment, close.
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[2].2["state"], "closed");
+        assert_eq!(
+            fx.count("SELECT COUNT(*) FROM cve_findings WHERE status = 'open'")
+                .await,
+            1,
+            "the older tag keeps its own open finding"
+        );
+    }
+
+    /// Newest digest still reports the CVE: the issue stays open.
+    #[tokio::test]
+    async fn stays_open_while_the_newest_digest_reports() {
+        let fx = Fixture::new("newest-reports", "CRITICAL", true).await;
+        fx.report("v1", "sha256:old", 100).await;
+        fx.report("v2", "sha256:new", 200).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 20)
+            .await;
+        fx.reconcile("proj/app:v2").await;
+        // The older tag is scanned clean; the newest digest still reports the CVE.
+        fx.fix("v1", "CVE-2026-0001").await;
+        fx.reconcile("proj/app:v2").await;
+
+        assert_eq!(fx.issues().await[0].2, "open");
+        assert_eq!(fx.github.writes().len(), 1, "only the create");
+    }
+
+    /// Newest digest clean, then it reports the CVE again: the same issue reopens.
+    #[tokio::test]
+    async fn reopens_the_same_issue_when_the_newest_digest_reports_again() {
+        let fx = Fixture::new("newest-back", "CRITICAL", true).await;
+        fx.report("v1", "sha256:old", 100).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.reconcile("proj/app:v1").await;
+        fx.report("v2", "sha256:new", 200).await;
+        fx.reconcile("proj/app:v2").await;
+        assert_eq!(fx.issues().await[0].2, "closed");
+
+        // A later scan of the newest digest reports the CVE again.
+        fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 40)
             .await;
         fx.reconcile("proj/app:v2").await;
 
-        // v1 is scanned clean, v2 still reports the CVE.
-        fx.fix("v1", "CVE-2026-0001").await;
+        assert_eq!(fx.github.creates().len(), 1, "no new issue");
+        let writes = fx.github.writes();
+        // create, comment, close, reopen, comment.
+        assert_eq!(writes.len(), 5);
+        assert_eq!(writes[3].2["state"], "open");
+        assert_eq!(writes[4].2["body"], "CVE is back in scan proj/app:v2");
+        assert_eq!(
+            fx.issues().await,
+            vec![("CVE-2026-0001".to_owned(), 1, "open".to_owned())]
+        );
+    }
+
+    /// An issue closed by hand on GitHub while the CVE is still reported stays closed, and
+    /// HarborGate posts nothing.
+    #[tokio::test]
+    async fn a_manual_close_is_honoured_without_reopen_or_comment() {
+        let fx = Fixture::new("manual-close", "CRITICAL", true).await;
+        fx.report("v1", "sha256:aaa", 100).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.reconcile("proj/app:v1").await;
+        assert_eq!(fx.github.writes().len(), 1);
+
+        // Someone closes the issue on GitHub.
+        fx.github.with(|state| state.issues[0].open = false);
+        fx.reconcile("proj/app:v1").await;
         fx.reconcile("proj/app:v1").await;
 
-        assert_eq!(fx.issues().await[0].2, "open");
-        // The only write is the create: no comment and no close.
+        assert_eq!(fx.issues().await[0].2, "closed");
+        assert_eq!(
+            fx.github.writes().len(),
+            1,
+            "no reopen, no comment, no close"
+        );
+        assert!(
+            !fx.github.with(|state| state.issues[0].open),
+            "the issue is still closed on GitHub"
+        );
+
+        // The CVE then leaves the newest digest: still no close comment on a closed issue.
+        fx.fix("v1", "CVE-2026-0001").await;
+        fx.reconcile("proj/app:v1").await;
         assert_eq!(fx.github.writes().len(), 1);
-        assert_eq!(fx.github.creates().len(), 1);
+    }
+
+    /// The spec has no acceptance exception for reopening: accepting stops new issues and
+    /// does not close one, but a closed issue whose CVE returns is reopened.
+    #[tokio::test]
+    async fn accepted_cve_with_a_closed_issue_follows_the_reopen_rule() {
+        let fx = Fixture::new("accepted-closed", "CRITICAL", true).await;
+        fx.report("v1", "sha256:old", 100).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.reconcile("proj/app:v1").await;
+        fx.report("v2", "sha256:new", 200).await;
+        fx.reconcile("proj/app:v2").await;
+        assert_eq!(fx.issues().await[0].2, "closed");
+        sqlx::query(
+            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username, expires_at)
+             VALUES ('a1', 'm1', 'CVE-2026-0001', 'accepted for the test', 'u1', 'u1', NULL)",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+
+        fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 40)
+            .await;
+        fx.reconcile("proj/app:v2").await;
+
+        assert_eq!(fx.github.creates().len(), 1, "accepting never creates one");
+        assert_eq!(fx.issues().await[0].2, "open");
     }
 
     #[tokio::test]
@@ -1403,6 +1644,13 @@ mod tests {
         .execute(&fx.pool)
         .await
         .unwrap();
+        fx.github.with(|state| {
+            state.issues.push(test_support::Issue {
+                number: 7,
+                body: String::new(),
+                open: true,
+            })
+        });
         fx.fix("v1", "CVE-2026-0001").await;
         fx.reconcile("proj/app:v1").await;
         assert_eq!(fx.issues().await[0].2, "closed");
@@ -1555,6 +1803,17 @@ mod tests {
             self.inner
                 .set_state(token, owner, repo, number, open, now)
                 .await
+        }
+
+        async fn is_open(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            now: i64,
+        ) -> Result<bool, ScanError> {
+            self.inner.is_open(token, owner, repo, number, now).await
         }
     }
 

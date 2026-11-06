@@ -19,6 +19,8 @@ pub struct IssueRow {
     pub github_issue_url: String,
     /// `open` or `closed`.
     pub status: String,
+    /// True when the issue was closed by hand on GitHub while the CVE was still reported.
+    pub closed_manually: bool,
 }
 
 /// A new row. It starts `open`.
@@ -42,7 +44,8 @@ pub async fn find(
         IssueRow,
         r#"SELECT id AS "id!", github_owner AS "github_owner!", github_repo AS "github_repo!",
                   cve_id AS "cve_id!", github_issue_number AS "github_issue_number!: i64",
-                  github_issue_url AS "github_issue_url!", status AS "status!"
+                  github_issue_url AS "github_issue_url!", status AS "status!",
+                  closed_manually AS "closed_manually!: bool"
            FROM github_issues
            WHERE github_owner = ? AND github_repo = ? AND cve_id = ?"#,
         owner,
@@ -76,14 +79,15 @@ pub async fn insert(conn: &mut SqliteConnection, row: &NewIssue<'_>) -> Result<b
     .map_err(|_| AppError::InternalError)
 }
 
-/// Sets the row's status to `open` or `closed`.
+/// Sets the row's status to `open` or `closed`. It clears `closed_manually`: the status is
+/// now HarborGate's own.
 pub async fn set_status(
     conn: &mut SqliteConnection,
     id: &str,
     status: &str,
 ) -> Result<(), AppError> {
     sqlx::query!(
-        "UPDATE github_issues SET status = ? WHERE id = ?",
+        "UPDATE github_issues SET status = ?, closed_manually = 0 WHERE id = ?",
         status,
         id
     )
@@ -91,6 +95,56 @@ pub async fn set_status(
     .await
     .map(|_| ())
     .map_err(|_| AppError::InternalError)
+}
+
+/// Marks the row `closed` because the issue was closed by hand on GitHub.
+pub async fn mark_closed_manually(conn: &mut SqliteConnection, id: &str) -> Result<(), AppError> {
+    sqlx::query!(
+        "UPDATE github_issues SET status = 'closed', closed_manually = 1 WHERE id = ?",
+        id
+    )
+    .execute(conn)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// The image tags of the newest scanned digest of the mapping's repository, or `None` when
+/// the mapping has no successful report. The newest digest is the one with the latest
+/// `image_push_time` among successful reports (a report without a push time ranks below any
+/// report with one, then by `synced_at`, then by insert order). Its tags are the tags of
+/// every successful report for that digest.
+pub async fn newest_digest_tags(
+    conn: &mut SqliteConnection,
+    mapping_id: &str,
+    repo: &str,
+) -> Result<Option<Vec<String>>, AppError> {
+    let newest = sqlx::query_scalar!(
+        r#"SELECT image_digest AS "image_digest!" FROM sync_reports
+           WHERE mapping_id = ? AND harbor_repository = ? AND sarif_status = 'success'
+           ORDER BY image_push_time IS NULL, image_push_time DESC, synced_at DESC, rowid DESC
+           LIMIT 1"#,
+        mapping_id,
+        repo
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    let Some(digest) = newest else {
+        return Ok(None);
+    };
+    let tags = sqlx::query_scalar!(
+        r#"SELECT DISTINCT image_tag AS "image_tag!" FROM sync_reports
+           WHERE mapping_id = ? AND harbor_repository = ? AND sarif_status = 'success'
+             AND image_digest = ?"#,
+        mapping_id,
+        repo,
+        digest
+    )
+    .fetch_all(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(Some(tags))
 }
 
 /// Points every `cve_findings` row of this CVE in the mapping at the issue row. Returns
