@@ -61,12 +61,22 @@ function changedFields(initial: FormValues, now: FormValues): Record<string, str
 
 // One column of the two-column card: a heading and its fields. The columns
 // share one bordered card with a divider; narrow screens stack them (#167).
-function Column({ title, children }: { title: string; children: ReactNode }) {
+// From md up each column is a subgrid over the same rows (the heading, then
+// one row per field), so the fields line up across the columns. A div with
+// role "group" is used because a fieldset does not take part in subgrid.
+function Column({ id, title, rows, children }: { id: string; title: string; rows: 4 | 5; children: ReactNode }) {
   return (
-    <fieldset className="m-0 flex min-w-0 flex-col gap-[18px] border-0 p-5 max-md:border-t max-md:border-border max-md:first:border-t-0 md:border-l md:border-border md:first:border-l-0">
-      <legend className="float-left mb-0.5 text-[15px] font-semibold">{title}</legend>
-      <div className="clear-both flex min-w-0 flex-col gap-[18px]">{children}</div>
-    </fieldset>
+    <div
+      // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- a fieldset does not take part in a grid subgrid
+      role="group"
+      aria-labelledby={id}
+      className={`m-0 flex min-w-0 flex-col gap-[18px] p-5 max-md:border-t max-md:border-border max-md:first:border-t-0 md:grid md:grid-rows-subgrid md:gap-y-[18px] md:border-l md:border-border md:first:border-l-0 ${rows === 5 ? "md:row-span-5" : "md:row-span-4"}`}
+    >
+      <h2 id={id} className="m-0 mb-0.5 text-[15px] font-semibold">
+        {title}
+      </h2>
+      {children}
+    </div>
   );
 }
 
@@ -214,6 +224,8 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
   const pairKey = picked === null || picked.repository === null ? null : `${picked.project}/${values.harborRepository}`;
   const suggestKey = pairKey === null || dismissed.includes(pairKey) ? null : pairKey;
 
+  const showSuggestion = !(suggestKey === null || values.harborCredId === "" || picked === null || picked.repository === null);
+
   const filled = [
     values.harborProject,
     values.harborRepository,
@@ -239,7 +251,7 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
     <form onSubmit={submit} className="flex flex-col gap-5" noValidate>
       <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-5 border-0 p-0">
         <Card className="m-0 grid min-w-0 grid-cols-1 overflow-hidden md:grid-cols-2">
-        <Column title={t("mappings.form.harborSection")}>
+        <Column id="harbor-section" title={t("mappings.form.harborSection")} rows={showSuggestion ? 5 : 4}>
           <CredentialSelect
             id="harbor-cred"
             label={t("mappings.form.harborCredential")}
@@ -292,7 +304,7 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
               set("harborRepository", fullName.slice(slash + 1));
             }}
           />
-          {suggestKey === null || values.harborCredId === "" || picked === null || picked.repository === null ? null : (
+          {!showSuggestion || suggestKey === null || picked === null ? null : (
             <SourceSuggestion
               key={suggestKey}
               harborCredId={values.harborCredId}
@@ -308,7 +320,7 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
           )}
         </Column>
 
-        <Column title={t("mappings.form.githubSection")}>
+        <Column id="github-section" title={t("mappings.form.githubSection")} rows={showSuggestion ? 5 : 4}>
           <CredentialSelect
             id="github-cred"
             label={t("mappings.form.githubCredential")}

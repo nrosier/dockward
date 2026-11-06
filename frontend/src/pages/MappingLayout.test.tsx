@@ -1,9 +1,10 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { t } from "../i18n";
 import { json, renderWithRoutes, stubApi, user } from "../test/render";
 import type { Mapping } from "../types/api";
+import { INPUT } from "../components/mappings/styles";
 import MappingFormPage from "./MappingFormPage";
 
 const cred = (id: string, type: string) => ({
@@ -52,8 +53,8 @@ describe("Mapping screen layout (#167)", () => {
   it("puts the Harbor source and the GitHub target in two columns of one grid", async () => {
     stub();
     renderWithRoutes(routes, "/mappings/new");
-    const harbor = (await screen.findByText(t("mappings.form.harborSection"))).closest("fieldset");
-    const github = screen.getByText(t("mappings.form.githubSection")).closest("fieldset");
+    const harbor = (await screen.findByText(t("mappings.form.harborSection"))).closest("[role=group]");
+    const github = screen.getByText(t("mappings.form.githubSection")).closest("[role=group]");
     expect(harbor).not.toBeNull();
     expect(github).not.toBeNull();
     expect(harbor?.parentElement).toBe(github?.parentElement);
@@ -65,6 +66,42 @@ describe("Mapping screen layout (#167)", () => {
     expect(within(github as HTMLElement).getByLabelText(t("mappings.form.githubCredential"))).toBeInTheDocument();
     expect(within(github as HTMLElement).getByLabelText(t("mappings.form.githubRepository"))).toBeInTheDocument();
     expect(within(github as HTMLElement).getByLabelText(t("mappings.form.defaultBranch"))).toBeInTheDocument();
+  });
+
+  it("gives the six controls the shared input height class and lines the columns up row by row", async () => {
+    stub();
+    renderWithRoutes(routes, "/mappings/new");
+    await screen.findByLabelText(t("mappings.form.harborProject"));
+    const height = INPUT.split(" ").find((c) => c.startsWith("min-h-"));
+    expect(height).toBe("min-h-9");
+    const labels = [
+      "mappings.form.harborCredential", "mappings.form.harborProject", "mappings.form.harborRepository",
+      "mappings.form.githubCredential", "mappings.form.githubRepository", "mappings.form.defaultBranch",
+    ] as const;
+    for (const key of labels) {
+      expect(screen.getByLabelText(t(key)).className.split(" ")).toContain(height);
+    }
+    const harbor = screen.getByText(t("mappings.form.harborSection")).closest("[role=group]");
+    const github = screen.getByText(t("mappings.form.githubSection")).closest("[role=group]");
+    expect(harbor?.className).toContain("md:grid-rows-subgrid");
+    expect(github?.className).toContain("md:grid-rows-subgrid");
+    expect(harbor?.children.length).toBe(github?.children.length);
+  });
+
+  it("the GitHub org note is a tooltip on the repository label, not a banner", async () => {
+    stub();
+    renderWithRoutes(routes, "/mappings/new");
+    const github = (await screen.findByText(t("mappings.form.githubSection"))).closest("[role=group]") as HTMLElement;
+    const note = t("mapping.github.orgNote");
+    const trigger = within(github).getByRole("button", { name: t("mapping.github.orgNoteLabel") });
+    const tip = document.getElementById(trigger.getAttribute("aria-describedby") ?? "");
+    expect(tip).toHaveTextContent(note);
+    expect(tip).not.toBeVisible();
+    expect(screen.queryByText(note, { selector: "p, div" })).not.toBeInTheDocument();
+    act(() => trigger.focus());
+    expect(tip).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+    expect(tip).not.toBeVisible();
   });
 
   it("the project combobox filters as the user types and sends the search", async () => {

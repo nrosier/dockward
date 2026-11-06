@@ -643,6 +643,7 @@
   "mapping.github.searchPlaceholder": "Search by name",
   "mapping.github.count": "{count} repositories",
   "mapping.github.orgNote": "Only repositories this token can see are listed. Repositories of an organisation the token cannot reach do not appear; type the name in the form instead.",
+  "mapping.github.orgNoteLabel": "About the repository list",
   "mapping.github.cut": "This list was cut at 1,000 repositories and search cannot reach past the cut. Type the repository name in the form.",
   "mapping.github.list": "GitHub repositories",
   "mapping.github.col.repository": "Repository",

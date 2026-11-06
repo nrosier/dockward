@@ -4,6 +4,7 @@ import type { GitHubRepository } from "../../types/api";
 import { Button } from "../ui/Button";
 import { Field } from "../ui/Field";
 import { Pill } from "../ui/Pill";
+import { Tooltip } from "../ui/Tooltip";
 import { Combobox, type ComboOption } from "./Combobox";
 import { Note, Pager } from "./PickerControls";
 import { HideError, PickerError } from "./PickerError";
@@ -24,7 +25,7 @@ interface Props {
 // The GitHub repository field: a searchable combobox over what the token can
 // see (#126, #167). Typing filters through the server-side search and still
 // works as free entry for a repository that is not listed. The fixed
-// organisation note is always shown under the field. A new credential
+// organisation note is a tooltip on the field label. A new credential
 // starts the search and page clean.
 export function GitHubRepositoryField({ credentialId, value, error, onText, onPick }: Props) {
   const [search, setSearch] = useState("");
@@ -70,7 +71,12 @@ export function GitHubRepositoryField({ credentialId, value, error, onText, onPi
   }));
 
   return (
-    <Field id="github-repository" label={t("mappings.form.githubRepository")} error={error}>
+    <Field
+      id="github-repository"
+      label={t("mappings.form.githubRepository")}
+      error={error}
+      hint={<Tooltip label={t("mapping.github.orgNoteLabel")} text={t("mapping.github.orgNote")} />}
+    >
       <Combobox
         id="github-repository"
         value={value}
@@ -79,7 +85,7 @@ export function GitHubRepositoryField({ credentialId, value, error, onText, onPi
         listLabel={t("mapping.github.list")}
         options={options}
         invalid={error !== undefined}
-        describedBy={error === undefined ? "github-repository-note" : "github-repository-note github-repository-error"}
+        describedBy={error === undefined ? undefined : "github-repository-error"}
         onChange={(text) => {
           setSearch(text);
           setPage(1);
@@ -106,9 +112,6 @@ export function GitHubRepositoryField({ credentialId, value, error, onText, onPi
           </>
         )}
       </Combobox>
-      <div id="github-repository-note">
-        <Note>{t("mapping.github.orgNote")}</Note>
-      </div>
     </Field>
   );
 }

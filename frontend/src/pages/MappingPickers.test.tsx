@@ -315,21 +315,20 @@ describe("GitHub repository combobox", () => {
     expect(screen.getByLabelText(GITHUB_LABEL())).toHaveValue("");
   });
 
-  it("always shows the org note; the cut note only when truncated", async () => {
+  it("keeps the org note as a tooltip; the cut note only when truncated", async () => {
     stub();
     renderWithRoutes(routes, "/mappings/new");
-    expect(await screen.findByText(t("mapping.github.orgNote"))).toBeInTheDocument();
+    await screen.findByLabelText(GITHUB_LABEL());
+    expect(screen.getByRole("tooltip", { hidden: true })).toHaveTextContent(t("mapping.github.orgNote"));
     await openGitHub();
-    expect(screen.getByText(t("mapping.github.orgNote"))).toBeInTheDocument();
     expect(screen.queryByText(t("mapping.github.cut"))).not.toBeInTheDocument();
   });
 
-  it("shows the cut note when truncated, and the org note still", async () => {
+  it("shows the cut note when truncated", async () => {
     stub({ github: () => json(page([{ owner: "a", repo: "b", full_name: "a/b", private: false, archived: false }], { truncated: true })) });
     renderWithRoutes(routes, "/mappings/new");
     await openGitHub();
     expect(await screen.findByText(t("mapping.github.cut"))).toBeInTheDocument();
-    expect(screen.getByText(t("mapping.github.orgNote"))).toBeInTheDocument();
   });
 
   it("renders the private, public and archived flags as text", async () => {
