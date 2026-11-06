@@ -216,7 +216,7 @@ CREATE TABLE IF NOT EXISTS project_webhooks (
     token_hash TEXT NOT NULL UNIQUE,
     secret_hash TEXT NOT NULL,
     created_at INTEGER DEFAULT (unixepoch()),
-    rotated_at INTEGER DEFAULT (unixepoch()), -- NULL until the first rotation: the API inserts NULL, which overrides the column default
+    rotated_at INTEGER, -- NULL until the first rotation. No column default (Decided 2026-11-06, user, #145; migration 0005 drops the insert-time default)
     UNIQUE (harbor_base_url, harbor_project)
 );
 

@@ -59,10 +59,12 @@ fn refuse(state: &AppState, failure_key: Option<&str>, now: Instant) -> AppError
 /// 2. The body is read under the 64 KiB cap.
 /// 3. The project token is looked up by digest. An unknown token is a `401` and counts one IP
 ///    failure.
-/// 4. The event's repository picks the mapping on that project. No mapping matches: the event
-///    is counted as unmatched and the request returns `202` with nothing queued.
-/// 5. The per-mapping budget is charged, then the `Authorization` secret and the event logic
-///    run. The secret is the project secret, checked against its digest.
+/// 4. The `Authorization` secret is checked against the project secret's digest, before the
+///    body is parsed. A failure is a `401` that counts one IP failure.
+/// 5. The event must name a repository in the webhook's own project, else `202` and nothing
+///    is stored or counted. The repository picks the mapping on that project. No mapping
+///    matches: a valid name is counted as unmatched and the request returns `202`.
+/// 6. The per-mapping budget is charged, then the event logic runs.
 pub async fn receive_project(
     State(state): State<AppState>,
     Path(project_token): Path<String>,
@@ -89,45 +91,59 @@ pub async fn receive_project(
     let authorization = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
+    // The project secret is known as soon as the token is found, so it is checked before the
+    // body is looked at: a token-only caller gets the same 401 for any body, and learns
+    // nothing about whether the token is valid (#145).
+    if !harbor_webhook::secret_matches(&project.secret_hash, authorization) {
+        return Err(refuse(&state, failure_key.as_deref(), now));
+    }
     let Some(repository) = harbor_webhook::event_repository(&body) else {
         return Err(AppError::InvalidRequest(
             "the event does not name a repository.".to_owned(),
         ));
     };
-    let Some(mapping_id) = db::project_webhooks::mapping_for_repository(
+    // Project scope (#145): an event for another Harbor project is not for this webhook. It is
+    // acknowledged, stored nowhere, and not counted. This check comes before any routing.
+    let Some(event_repository) =
+        harbor_webhook::repository_in_project(&project.harbor_project, &repository)
+    else {
+        return Ok((StatusCode::ACCEPTED, Json(Accepted { status: "accepted" })).into_response());
+    };
+    let Some(mapping) = db::project_webhooks::mapping_for_repository(
         &state.pool,
         &project.harbor_base_url,
         &project.harbor_project,
-        repository_name(&repository),
+        event_repository,
     )
     .await?
     else {
-        // No mapping covers this repository. The event is authenticated first, so an unknown
-        // sender cannot fill the count, then counted and acknowledged with nothing queued.
-        if !harbor_webhook::secret_matches(&project.secret_hash, authorization) {
-            return Err(refuse(&state, failure_key.as_deref(), now));
-        }
-        db::project_webhooks::record_unmatched(&state.pool, &project.id, &repository, now_secs())
+        // No mapping covers this repository. The sender is authenticated, so an unknown
+        // sender cannot fill the count. A name that fails Harbor's name rule is ignored
+        // (#145); a valid one is counted. Either way nothing is queued.
+        if harbor_webhook::unmatched_name_is_valid(&project.harbor_project, &repository) {
+            db::project_webhooks::record_unmatched(
+                &state.pool,
+                &project.id,
+                &repository,
+                now_secs(),
+            )
             .await?;
+        }
         return Ok((StatusCode::ACCEPTED, Json(Accepted { status: "accepted" })).into_response());
     };
+    // The per-mapping budget is charged only for an authenticated event.
     if let Err(retry) = state
         .webhook_token_limiter
-        .check(&format!("mapping:{mapping_id}"), now)
+        .check(&format!("mapping:{}", mapping.id), now)
     {
         return Ok(too_many_requests(retry));
     }
-    // The project secret is checked here, not the mapping's: a project event is authenticated
-    // by the project webhook it arrived at (#132).
-    if !harbor_webhook::secret_matches(&project.secret_hash, authorization) {
-        return Err(refuse(&state, failure_key.as_deref(), now));
-    }
     let job_id = crate::services::ids::new_id()?;
-    // The event's own repo_full_name is already `project/repository`, the form classify compares.
-    let repo_full_name = repository.clone();
+    // The repository name always comes from the mapping, never from the event (#145).
+    let repo_full_name = format!("{}/{}", project.harbor_project, mapping.harbor_repository);
     match harbor_webhook::queue_event(
         &state.pool,
-        &mapping_id,
+        &mapping.id,
         &repo_full_name,
         &body,
         now_secs(),
@@ -140,12 +156,6 @@ pub async fn receive_project(
         }
         Err(other) => Err(other),
     }
-}
-
-/// The repository part of `owner/name` (the Harbor repository), as the mapping stores it.
-fn repository_name(full: &str) -> &str {
-    full.split_once('/')
-        .map_or(full, |(_, repository)| repository)
 }
 
 /// `POST /api/v1/webhooks/harbor/:mapping_token`.

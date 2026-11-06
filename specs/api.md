@@ -132,11 +132,11 @@ One project webhook per Harbor base URL and project. Its rules (owner, routing, 
 
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |
-| POST | `/api/v1/project-webhooks` | session | `{"mapping_id"}`; the caller must own that mapping | `{"id","webhook_url": "<shown once>","auth_secret": "<shown once>"}` | 201, 404 (mapping not the caller's, or not found), 409 `conflict` (a project webhook already exists for that Harbor base URL and project) |
+| POST | `/api/v1/project-webhooks` | session | `{"mapping_id"}`; the caller must own that mapping | `{"id","webhook_url": "<shown once>","auth_secret": "<shown once>"}` | 201, 400 (body not valid), 401, 404 (mapping not the caller's, or not found), 409 `conflict` (a project webhook already exists for that Harbor base URL and project) |
 | GET | `/api/v1/project-webhooks/:id` | session (owner or admin, read) | none | `ProjectWebhook` with `mappings` | 200, 401, 403 (not owner or admin), 404 |
 | POST | `/api/v1/project-webhooks/:id/rotate-token` | session (owner only) | none | `{"webhook_url": "<new, shown once>","mappings": [harbor_repository, ...]}` | 200, 401, 403 (any non-owner, including admins), 404 |
 | POST | `/api/v1/project-webhooks/:id/rotate-secret` | session (owner only) | none | `{"auth_secret": "<new, shown once>","mappings": [harbor_repository, ...]}` | 200, 401, 403 (any non-owner, including admins), 404 |
-| GET | `/api/v1/project-webhooks/:id/unmatched` | session (owner or admin, read) | list params; `sort` (`last_seen_at`, `count`, `repository`), default `last_seen_at` descending; any other `sort` value is `400 invalid_request` | paged list of `{"repository","count","last_seen_at"}`; rows for repositories that now have a mapping are hidden | 200, 400, 401, 403, 404 |
+| GET | `/api/v1/project-webhooks/:id/unmatched` | session (owner or admin, read) | list params; `sort` (`last_seen_at`, `count`, `repository`), default `last_seen_at` descending; any other `sort` value is `400 invalid_request` | paged list of `{"repository","count","last_seen_at"}`; rows for repositories that now have a mapping are hidden | 200, 400, 401, 403, 404 | Decided (2026-11-06, user, #145): an event for another Harbor project, or a repository name that fails the Harbor name rule or is over 255 characters, is not counted here.
 
 - Audit: create writes `project_webhook.create`, token rotation writes `project_webhook.token_rotate`, secret rotation writes `project_webhook.secret_rotate`, and an owner change writes `project_webhook.owner_transfer`. Details hold ids only, never values ([database.md](database.md)).
 
