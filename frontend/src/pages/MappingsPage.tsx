@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
+import { ArrowDown, ArrowUp, Plus } from "lucide-react";
 import { Link, useSearchParams } from "react-router";
 import { PageHeader } from "../components/mappings/PageHeader";
 import { TABLE, TD, TH } from "../components/mappings/styles";
@@ -12,7 +12,7 @@ import { Card } from "../components/ui/Card";
 import { currentPage, Pagination } from "../components/ui/Pagination";
 import { ScopeToggle } from "../components/ui/ScopeToggle";
 import { ErrorMessage, LoadingMessage } from "../components/ui/StatusMessage";
-import { t } from "../i18n";
+import { t, type MessageKey } from "../i18n";
 import { api } from "../lib/api";
 import { useMe } from "../lib/session";
 import type { MappingListItem, OpenCves, Page } from "../types/api";
@@ -68,16 +68,80 @@ function OpenCounts({ counts }: { counts: OpenCves }) {
   );
 }
 
+type SortKey = "harbor_project" | "github_owner" | "open_issues" | "last_sync_at";
+type SortOrder = "asc" | "desc";
+
+// First direction when a column becomes the sort. Text columns start
+// ascending (A to Z). Open issues and last sync start descending, since the
+// most severe and the newest rows are the useful ones to see first.
+const SORT_COLUMNS: { key: SortKey; label: MessageKey; first: SortOrder }[] = [
+  { key: "harbor_project", label: "mappings.sort.harborSource", first: "asc" },
+  { key: "github_owner", label: "mappings.sort.githubTarget", first: "asc" },
+  { key: "open_issues", label: "mappings.sort.openIssues", first: "desc" },
+  { key: "last_sync_at", label: "mappings.sort.lastSync", first: "desc" },
+];
+
+function SortHeader({
+  column,
+  active,
+  order,
+  onSort,
+}: {
+  column: (typeof SORT_COLUMNS)[number];
+  active: boolean;
+  order: SortOrder;
+  onSort: (column: (typeof SORT_COLUMNS)[number]) => void;
+}) {
+  const Arrow = order === "asc" ? ArrowUp : ArrowDown;
+  return (
+    <th className={TH} aria-sort={active ? (order === "asc" ? "ascending" : "descending") : undefined}>
+      <button
+        type="button"
+        onClick={() => onSort(column)}
+        className="inline-flex cursor-pointer items-center gap-1 uppercase focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+      >
+        {t(column.label)}
+        {active ? (
+          <>
+            <Arrow aria-hidden="true" size={12} />
+            <span className="sr-only">{t(order === "asc" ? "mappings.sort.ascending" : "mappings.sort.descending")}</span>
+          </>
+        ) : null}
+      </button>
+    </th>
+  );
+}
+
 export default function MappingsPage() {
   const scopeAll = useScopeAll();
   const me = useMe();
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const page = currentPage(params);
+  const sortParam = params.get("sort");
+  const sort = SORT_COLUMNS.find((column) => column.key === sortParam)?.key ?? null;
+  const order: SortOrder = params.get("order") === "desc" ? "desc" : "asc";
+  // No URL params: send none and keep the server default.
+  const sortQuery = sort === null ? "" : `&sort=${sort}&order=${order}`;
   const list = useQuery({
-    queryKey: ["mappings", "list", scopeAll, page],
+    queryKey: ["mappings", "list", scopeAll, page, sort, order],
     queryFn: () =>
-      api<Page<MappingListItem>>("GET", `/mappings?page=${page}&page_size=${PAGE_SIZE}${scopeAll ? "&scope=all" : ""}`),
+      api<Page<MappingListItem>>(
+        "GET",
+        `/mappings?page=${page}&page_size=${PAGE_SIZE}${scopeAll ? "&scope=all" : ""}${sortQuery}`,
+      ),
   });
+
+  function onSort(column: (typeof SORT_COLUMNS)[number]) {
+    const updated = new URLSearchParams(params);
+    updated.set("sort", column.key);
+    updated.set("order", sort === column.key ? (order === "asc" ? "desc" : "asc") : column.first);
+    updated.delete("page");
+    setParams(updated);
+  }
+  const sortHeader = (key: SortKey) => {
+    const column = SORT_COLUMNS.find((c) => c.key === key) ?? SORT_COLUMNS[0];
+    return <SortHeader column={column} active={sort === key} order={order} onSort={onSort} />;
+  };
 
   const header = (
     <PageHeader title={t("page.mappings")} subtitle={t("mappings.subtitle")}>
@@ -117,11 +181,11 @@ export default function MappingsPage() {
             <table className={TABLE}>
               <thead>
                 <tr>
-                  <th className={TH}>{t("mappings.col.harbor")}</th>
-                  <th className={TH}>{t("mappings.col.github")}</th>
+                  {sortHeader("harbor_project")}
+                  {sortHeader("github_owner")}
                   <th className={TH}>{t("mappings.col.issues")}</th>
-                  <th className={TH}>{t("mappings.col.openCves")}</th>
-                  <th className={TH}>{t("mappings.col.lastSync")}</th>
+                  {sortHeader("open_issues")}
+                  {sortHeader("last_sync_at")}
                   <th className={TH}>
                     <span className="sr-only">{t("syncJobs.col.actions")}</span>
                   </th>

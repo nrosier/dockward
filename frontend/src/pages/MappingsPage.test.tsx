@@ -1,6 +1,7 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { t } from "../i18n";
+import { t, type MessageKey } from "../i18n";
 import { json, renderAt, stubApi, user } from "../test/render";
 import type { MappingListItem } from "../types/api";
 import MappingsPage from "./MappingsPage";
@@ -89,5 +90,62 @@ describe("MappingsPage", () => {
     const row = (await screen.findByText("platform/web")).closest("tr") as HTMLElement;
     expect(within(row).getByText(t("mappings.never"))).toBeInTheDocument();
     expect(within(row).getByText(t("mappings.neverReason"))).toBeInTheDocument();
+  });
+
+  describe("sortable headers", () => {
+    function setup() {
+      return stubApi((path) => {
+        if (path === "/api/v1/account/me") return json({ user: user("user") });
+        if (path.startsWith("/api/v1/mappings")) {
+          return json({ items: [mapping({})], page: 2, page_size: 50, total: 120 });
+        }
+        return undefined;
+      });
+    }
+    const listCalls = (fetchMock: ReturnType<typeof setup>) =>
+      fetchMock.mock.calls.map((call) => String(call[0])).filter((path) => path.startsWith("/api/v1/mappings"));
+    const header = (key: MessageKey) => screen.getByRole("button", { name: new RegExp(`^${t(key)}`) }).closest("th") as HTMLElement;
+
+    it("sends sort and order when a header is clicked", async () => {
+      const fetchMock = setup();
+      const { router } = renderAt(<MappingsPage />);
+      await screen.findByText("platform/api-gateway");
+      expect(listCalls(fetchMock)[0]).not.toContain("sort=");
+      await userEvent.click(screen.getByRole("button", { name: new RegExp(`^${t("mappings.sort.harborSource")}`) }));
+      await waitFor(() => expect(listCalls(fetchMock).at(-1)).toContain("&sort=harbor_project&order=asc"));
+      expect(router.state.location.search).toContain("sort=harbor_project");
+      await userEvent.click(screen.getByRole("button", { name: new RegExp(`^${t("mappings.sort.lastSync")}`) }));
+      await waitFor(() => expect(listCalls(fetchMock).at(-1)).toContain("&sort=last_sync_at&order=desc"));
+    });
+
+    it("flips the order when the active header is clicked again", async () => {
+      const fetchMock = setup();
+      renderAt(<MappingsPage />);
+      await screen.findByText("platform/api-gateway");
+      const button = () => screen.getByRole("button", { name: new RegExp(`^${t("mappings.sort.githubTarget")}`) });
+      await userEvent.click(button());
+      await waitFor(() => expect(listCalls(fetchMock).at(-1)).toContain("&sort=github_owner&order=asc"));
+      await userEvent.click(button());
+      await waitFor(() => expect(listCalls(fetchMock).at(-1)).toContain("&sort=github_owner&order=desc"));
+    });
+
+    it("sets aria-sort on the active column only", async () => {
+      setup();
+      renderAt(<MappingsPage />, "/?sort=open_issues&order=desc");
+      await screen.findByText("platform/api-gateway");
+      expect(header("mappings.sort.openIssues")).toHaveAttribute("aria-sort", "descending");
+      expect(header("mappings.sort.harborSource")).not.toHaveAttribute("aria-sort");
+      await userEvent.click(screen.getByRole("button", { name: new RegExp(`^${t("mappings.sort.openIssues")}`) }));
+      await waitFor(() => expect(header("mappings.sort.openIssues")).toHaveAttribute("aria-sort", "ascending"));
+    });
+
+    it("resets the page to 1 when the sort changes", async () => {
+      const fetchMock = setup();
+      const { router } = renderAt(<MappingsPage />, "/?page=2");
+      await waitFor(() => expect(listCalls(fetchMock).at(-1)).toContain("page=2&"));
+      await userEvent.click(await screen.findByRole("button", { name: new RegExp(`^${t("mappings.sort.harborSource")}`) }));
+      await waitFor(() => expect(listCalls(fetchMock).at(-1)).toContain("page=1&"));
+      expect(router.state.location.search).not.toContain("page=");
+    });
   });
 });
