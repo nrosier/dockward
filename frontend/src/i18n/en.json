@@ -151,8 +151,6 @@
   "mappings.form.harborRepository": "Harbor repository",
   "mappings.form.harborRepositoryHelp": "The name inside the project, without the project prefix.",
   "mappings.form.harborCredential": "Harbor credential",
-  "mappings.form.credentialHelpBefore": "Credentials are managed on the",
-  "mappings.form.credentialHelpAfter": "page.",
   "mappings.form.credentialOption": "{label} · {host}",
   "mappings.form.noCredential": "Add a credential on the Account page first.",
   "mappings.form.noCredentialLink": "Go to Account",

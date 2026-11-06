@@ -265,15 +265,6 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
               }
               set("harborCredId", value);
             }}
-            help={
-              <p className="text-[12.5px] text-muted">
-                {t("mappings.form.credentialHelpBefore")}{" "}
-                <Link to="/account" className={LINK}>
-                  {t("nav.account")}
-                </Link>{" "}
-                {t("mappings.form.credentialHelpAfter")}
-              </p>
-            }
           />
           <HarborPickers
             credential={harborCredential}
