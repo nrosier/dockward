@@ -230,6 +230,29 @@ pub async fn set_state_with<H: ScanHttp>(
     Ok(())
 }
 
+/// Reads one issue and returns whether it is open on GitHub (`state == "open"`). Used to
+/// notice an issue that was closed by hand.
+pub async fn is_open_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    number: u64,
+    now: i64,
+) -> Result<bool, ScanError> {
+    check_names(owner, repo)?;
+    let path = format!("repos/{owner}/{repo}/issues/{number}");
+    let response = http.get(&path, token).await?;
+    if response.status != 200 {
+        return Err(classify(&response, now));
+    }
+    match response.body.get("state").and_then(Value::as_str) {
+        Some("open") => Ok(true),
+        Some("closed") => Ok(false),
+        _ => Err(bad_answer()),
+    }
+}
+
 /// The GitHub Issues client. Built on the guarded outbound client for `api.github.com`.
 pub struct GithubIssues {
     client: OutboundClient,
@@ -283,6 +306,18 @@ impl GithubIssues {
         now: i64,
     ) -> Result<(), ScanError> {
         comment_with(&self.http(), token, owner, repo, number, body, now).await
+    }
+
+    /// True when the issue is open on GitHub. See [`is_open_with`].
+    pub async fn is_open(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        now: i64,
+    ) -> Result<bool, ScanError> {
+        is_open_with(&self.http(), token, owner, repo, number, now).await
     }
 
     /// Opens or closes an issue. See [`set_state_with`].

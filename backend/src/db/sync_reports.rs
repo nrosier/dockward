@@ -17,6 +17,9 @@ pub struct NewReport<'a> {
     pub commit_sha: Option<&'a str>,
     /// JSON text: `{"critical": 0, "high": 2, ...}`.
     pub vulnerability_summary: &'a str,
+    /// Harbor's push time of the tag on this digest, Unix milliseconds. `None` when Harbor
+    /// sent none.
+    pub image_push_time: Option<i64>,
 }
 
 /// A pending report found for a job.
@@ -35,8 +38,8 @@ pub async fn insert_pending(
     sqlx::query!(
         "INSERT INTO sync_reports
             (id, mapping_id, sync_job_id, harbor_repository, image_tag, image_digest,
-             commit_sha, vulnerability_summary, sarif_status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+             commit_sha, vulnerability_summary, image_push_time, sarif_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
         report.id,
         report.mapping_id,
         report.sync_job_id,
@@ -44,7 +47,8 @@ pub async fn insert_pending(
         report.image_tag,
         report.image_digest,
         report.commit_sha,
-        report.vulnerability_summary
+        report.vulnerability_summary,
+        report.image_push_time
     )
     .execute(conn)
     .await
