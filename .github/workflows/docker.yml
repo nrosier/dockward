@@ -42,6 +42,9 @@ jobs:
           push: false
           load: true
           tags: harborgate:ci
+          # The revision build argument is required by the Dockerfile, so every image carries the label.
+          build-args: |
+            REVISION=${{ github.sha }}
           # Provenance is disabled on the PR build path only. Empty means the buildx default on push.
           provenance: ${{ github.event_name == 'pull_request' && 'false' || '' }}
 
@@ -146,8 +149,10 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          # The revision label is set explicitly to the commit being built, so consumers such as
-          # HarborGate can read the source commit of this image (org.opencontainers.image.revision).
+          # The Dockerfile requires REVISION, and it also sets the label from it. The label stays set
+          # explicitly here, so HarborGate can read the source commit (org.opencontainers.image.revision).
+          build-args: |
+            REVISION=${{ github.sha }}
           labels: |
             ${{ steps.meta-digest.outputs.labels }}
             org.opencontainers.image.revision=${{ github.sha }}
