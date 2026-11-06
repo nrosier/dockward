@@ -6,6 +6,7 @@ import { ApiError, api } from "../../lib/api";
 import type { Credential, IssueSeverity, Mapping, MappingCreated, MappingListItem, Page } from "../../types/api";
 import { Button, buttonClass } from "../ui/Button";
 import { Card } from "../ui/Card";
+import { Tooltip } from "../ui/Tooltip";
 import { Field } from "../ui/Field";
 import { Switch } from "../ui/Switch";
 import { GitHubRepositoryField } from "../pickers/GitHubRepositoryField";
@@ -343,7 +344,7 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
               setServerError(null);
             }}
           />
-          <Field id="default-branch" label={t("mappings.form.defaultBranch")} help={t("mappings.form.defaultBranchHelp")}>
+          <Field id="default-branch" label={t("mappings.form.defaultBranch")} hint={<Tooltip label={t("mappings.form.defaultBranchTipLabel")} text={t("mappings.form.defaultBranchHelp")} />}>
             <input
               id="default-branch"
               value={values.defaultBranch}

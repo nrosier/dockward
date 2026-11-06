@@ -319,7 +319,9 @@ describe("GitHub repository combobox", () => {
     stub();
     renderWithRoutes(routes, "/mappings/new");
     await screen.findByLabelText(GITHUB_LABEL());
-    expect(screen.getByRole("tooltip", { hidden: true })).toHaveTextContent(t("mapping.github.orgNote"));
+    const trigger = screen.getByRole("button", { name: t("mapping.github.orgNoteLabel") });
+    const tip = document.getElementById(trigger.getAttribute("aria-describedby") ?? "");
+    expect(tip).toHaveTextContent(t("mapping.github.orgNote"));
     await openGitHub();
     expect(screen.queryByText(t("mapping.github.cut"))).not.toBeInTheDocument();
   });
