@@ -4,6 +4,15 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.12.1
+
+### Changed
+- The mapping screen is redesigned as side-by-side cards (#167).
+
+### Fixed
+- The mapping popup is no longer clipped, and the Harbor repository is disabled until a project is typed (#167).
+- Every mapping save error shows fixed text (#167).
+
 ## 0.12.0
 
 ### Added
