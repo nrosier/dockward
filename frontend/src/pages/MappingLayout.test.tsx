@@ -97,8 +97,7 @@ describe("Mapping screen layout (#167)", () => {
     renderWithRoutes(routes, "/mappings/new");
     await userEvent.type(await screen.findByLabelText(t("mappings.form.harborProject")), "not-listed");
     await userEvent.type(screen.getByLabelText(t("mappings.form.harborRepository")), "typed-repo");
-    await userEvent.type(screen.getByLabelText(t("mappings.form.githubOwner")), "acme");
-    await userEvent.type(screen.getByLabelText(t("mappings.form.githubRepository")), "app");
+    await userEvent.type(screen.getByLabelText(t("mappings.form.githubRepository")), "acme/app");
     await waitFor(() => expect(screen.getByLabelText(t("mappings.form.githubCredential"))).toHaveValue("gc"));
     await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
     await waitFor(() => {
@@ -119,12 +118,17 @@ describe("Mapping screen layout (#167)", () => {
     expect(screen.getByLabelText(t("mappings.form.harborRepository"))).toHaveValue("");
   });
 
+  it("the automation panel has no Issues heading", async () => {
+    stub();
+    renderWithRoutes(routes, "/mappings/new");
+    await screen.findByRole("switch", { name: t("mappings.form.autoCreate") });
+    expect(screen.queryByRole("heading", { name: "Issues" })).not.toBeInTheDocument();
+  });
+
   it("the automation panel keeps the switch and the minimum severity", async () => {
     stub();
     renderWithRoutes(routes, "/mappings/new");
-    const heading = await screen.findByRole("heading", { name: t("mappings.form.issuesSection") });
-    expect(heading).toBeInTheDocument();
-    const sw = screen.getByRole("switch", { name: t("mappings.form.autoCreate") });
+    const sw = await screen.findByRole("switch", { name: t("mappings.form.autoCreate") });
     const critical = screen.getByRole("button", { name: t("mappings.form.sevCritical") });
     expect(critical).toBeEnabled();
     await userEvent.click(critical);

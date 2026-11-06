@@ -28,6 +28,7 @@ interface Opts {
   github?: (url: URL) => Response;
   suggestion?: (url: URL) => Response;
   hide?: (body: unknown) => Response;
+  extraGithub?: boolean;
 }
 
 function stub(opts: Opts = {}) {
@@ -35,7 +36,7 @@ function stub(opts: Opts = {}) {
     const url = new URL(path, "http://x");
     const p = url.pathname;
     if (p === "/api/v1/credentials" && url.searchParams.get("service_type") === "harbor") return json(listResp([HARBOR_A, HARBOR_B]));
-    if (p === "/api/v1/credentials" && url.searchParams.get("service_type") === "github") return json(listResp([GITHUB]));
+    if (p === "/api/v1/credentials" && url.searchParams.get("service_type") === "github") return json(listResp(opts.extraGithub === true ? [GITHUB, { ...GITHUB, id: "gc2", label: "gh-other" }] : [GITHUB]));
     if (p === "/api/v1/mappings" && (init?.method ?? "GET") === "GET") return json(listResp([]));
     if (p === "/api/v1/mappings/m1") return json(existing);
     if (/\/credentials\/hc\d\/harbor-projects$/.test(p)) {
@@ -47,7 +48,7 @@ function stub(opts: Opts = {}) {
         { project: "nrosier", repository: "astraya", full_name: "nrosier/astraya" },
       ]));
     }
-    if (p === "/api/v1/credentials/gc1/github-repositories") {
+    if (/^\/api\/v1\/credentials\/gc\d\/github-repositories$/.test(p)) {
       return opts.github?.(url) ?? json(page([
         { owner: "nrosier", repo: "walley", full_name: "nrosier/walley", private: false, archived: false },
         { owner: "nrosier", repo: "old-service", full_name: "nrosier/old-service", private: true, archived: true },
@@ -187,7 +188,7 @@ describe("Mapping form pickers", () => {
     renderWithRoutes(routes, "/mappings/m1");
     expect(await screen.findByLabelText(t("mappings.form.harborProject"))).toHaveValue("gone-project");
     expect(screen.getByLabelText(t("mappings.form.harborRepository"))).toHaveValue("gone-repo");
-    expect(screen.getByLabelText(t("mappings.form.githubOwner"))).toHaveValue("old-org");
+    expect(screen.getByLabelText(t("mappings.form.githubRepository"))).toHaveValue("old-org/old-repo");
   });
 
   it("hides a Harbor project with the picked credential's base URL, then refreshes", async () => {
@@ -203,43 +204,152 @@ describe("Mapping form pickers", () => {
   });
 });
 
-describe("GitHub picker", () => {
+const GITHUB_LABEL = () => t("mappings.form.githubRepository");
+
+// The list is off until the default GitHub credential is filled in.
+async function openGitHub() {
+  const input = await screen.findByLabelText(GITHUB_LABEL());
+  await waitFor(() => expect(screen.getByLabelText(t("mappings.form.githubCredential"))).toHaveValue("gc1"));
+  await userEvent.click(input);
+  return screen.findByRole("listbox", { name: t("mapping.github.list") });
+}
+
+describe("GitHub repository combobox", () => {
   beforeEach(() => { vi.stubGlobal("ResizeObserver", NoopResizeObserver); });
   afterEach(() => { vi.unstubAllGlobals(); });
 
-  it("always shows the org note, with the private and archived flags as text", async () => {
+  it("opens the list on click and shows the repositories, with no table", async () => {
     stub();
     renderWithRoutes(routes, "/mappings/new");
-    const table = await screen.findByRole("table");
-    expect(screen.getByText(t("mapping.github.orgNote"))).toBeInTheDocument();
-    expect(screen.queryByText(t("mapping.github.cut"))).not.toBeInTheDocument();
-    expect(within(table).getByText(t("mapping.github.private"))).toBeInTheDocument();
-    expect(within(table).getByText(t("mapping.github.public"))).toBeInTheDocument();
-    expect(within(table).getByText(t("mapping.github.archived"))).toBeInTheDocument();
-    expect(screen.getByText(t("mapping.github.count", { count: 2 }))).toBeInTheDocument();
+    const input = await screen.findByLabelText(GITHUB_LABEL());
+    expect(input).toHaveAttribute("role", "combobox");
+    const box = await openGitHub();
+    expect(within(box).getByRole("option", { name: /nrosier\/walley/ })).toBeInTheDocument();
+    expect(within(box).getByRole("option", { name: /nrosier\/old-service/ })).toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 
-  it("shows the cut note only when truncated", async () => {
+  it("opens the list on focus", async () => {
+    stub();
+    renderWithRoutes(routes, "/mappings/new");
+    const input = await screen.findByLabelText(GITHUB_LABEL());
+    await waitFor(() => expect(screen.getByLabelText(t("mappings.form.githubCredential"))).toHaveValue("gc1"));
+    input.focus();
+    expect(await screen.findByRole("listbox", { name: t("mapping.github.list") })).toBeInTheDocument();
+  });
+
+  it("typing sends the search once after the debounce, not per keystroke", async () => {
+    const fetchMock = stub({
+      github: (url) => json(page(url.searchParams.get("q") === "old"
+        ? [{ owner: "nrosier", repo: "old-service", full_name: "nrosier/old-service", private: true, archived: true }]
+        : [])),
+    });
+    renderWithRoutes(routes, "/mappings/new");
+    await openGitHub();
+    await userEvent.type(screen.getByLabelText(GITHUB_LABEL()), "old");
+    await waitFor(() => expect(calls(fetchMock, "github-repositories?q=old")).toHaveLength(0));
+    await waitFor(() => expect(calls(fetchMock, "q=old")).toHaveLength(1));
+    expect(calls(fetchMock, "q=o&")).toEqual([]);
+    expect(calls(fetchMock, "q=ol&")).toEqual([]);
+    const box = screen.getByRole("listbox", { name: t("mapping.github.list") });
+    expect(await within(box).findByRole("option", { name: /old-service/ })).toBeInTheDocument();
+  });
+
+  it("keyboard: arrows move, Enter chooses, Escape closes", async () => {
+    stub();
+    renderWithRoutes(routes, "/mappings/new");
+    const input = await screen.findByLabelText(GITHUB_LABEL());
+    await openGitHub();
+    await screen.findByRole("option", { name: /nrosier\/walley/ });
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}");
+    expect(screen.getByRole("option", { name: /old-service/ })).toHaveAttribute("aria-selected", "true");
+    await userEvent.keyboard("{ArrowUp}{Enter}");
+    expect(input).toHaveValue("nrosier/walley");
+    expect(screen.queryByRole("listbox", { name: t("mapping.github.list") })).not.toBeInTheDocument();
+    await userEvent.click(input);
+    expect(await screen.findByRole("listbox", { name: t("mapping.github.list") })).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("listbox", { name: t("mapping.github.list") })).not.toBeInTheDocument();
+  });
+
+  it("choosing an item fills owner and repo, and the field reads owner/repo", async () => {
+    const fetchMock = stub();
+    renderWithRoutes(routes, "/mappings/new");
+    await userEvent.type(await screen.findByLabelText(t("mappings.form.harborProject")), "p");
+    await userEvent.type(screen.getByLabelText(t("mappings.form.harborRepository")), "r");
+    const box = await openGitHub();
+    await userEvent.click(within(box).getByRole("option", { name: /nrosier\/walley/ }));
+    expect(screen.getByLabelText(GITHUB_LABEL())).toHaveValue("nrosier/walley");
+    await waitFor(() => expect(screen.getByLabelText(t("mappings.form.githubCredential"))).toHaveValue("gc1"));
+    await waitFor(() => expect(screen.getByLabelText(t("mappings.form.harborCredential"))).toHaveValue("hc1"));
+    await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+    await waitFor(() => {
+      const post = fetchMock.mock.calls.find(([u, i]) => String(u) === "/api/v1/mappings" && (i as RequestInit | undefined)?.method === "POST");
+      expect(JSON.parse(String((post?.[1] as RequestInit | undefined)?.body))).toMatchObject({ github_owner: "nrosier", github_repo: "walley" });
+    });
+  });
+
+  it("a typed value that is not in the list still saves", async () => {
+    const fetchMock = stub({ github: () => json(page([])) });
+    renderWithRoutes(routes, "/mappings/new");
+    await userEvent.type(await screen.findByLabelText(t("mappings.form.harborProject")), "p");
+    await userEvent.type(screen.getByLabelText(t("mappings.form.harborRepository")), "r");
+    await userEvent.type(screen.getByLabelText(GITHUB_LABEL()), "hidden-org/secret");
+    await waitFor(() => expect(screen.getByLabelText(t("mappings.form.githubCredential"))).toHaveValue("gc1"));
+    await waitFor(() => expect(screen.getByLabelText(t("mappings.form.harborCredential"))).toHaveValue("hc1"));
+    await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+    await waitFor(() => {
+      const post = fetchMock.mock.calls.find(([u, i]) => String(u) === "/api/v1/mappings" && (i as RequestInit | undefined)?.method === "POST");
+      expect(JSON.parse(String((post?.[1] as RequestInit | undefined)?.body))).toMatchObject({ github_owner: "hidden-org", github_repo: "secret" });
+    });
+  });
+
+  it("choosing a different GitHub credential clears the pick", async () => {
+    stub({ extraGithub: true });
+    renderWithRoutes(routes, "/mappings/new");
+    const box = await openGitHub();
+    await userEvent.click(within(box).getByRole("option", { name: /nrosier\/walley/ }));
+    expect(screen.getByLabelText(GITHUB_LABEL())).toHaveValue("nrosier/walley");
+    await waitFor(() => expect(screen.getByLabelText(t("mappings.form.githubCredential"))).toHaveValue("gc1"));
+    await userEvent.selectOptions(screen.getByLabelText(t("mappings.form.githubCredential")), "gc2");
+    expect(screen.getByLabelText(GITHUB_LABEL())).toHaveValue("");
+  });
+
+  it("always shows the org note; the cut note only when truncated", async () => {
+    stub();
+    renderWithRoutes(routes, "/mappings/new");
+    expect(await screen.findByText(t("mapping.github.orgNote"))).toBeInTheDocument();
+    await openGitHub();
+    expect(screen.getByText(t("mapping.github.orgNote"))).toBeInTheDocument();
+    expect(screen.queryByText(t("mapping.github.cut"))).not.toBeInTheDocument();
+  });
+
+  it("shows the cut note when truncated, and the org note still", async () => {
     stub({ github: () => json(page([{ owner: "a", repo: "b", full_name: "a/b", private: false, archived: false }], { truncated: true })) });
     renderWithRoutes(routes, "/mappings/new");
+    await openGitHub();
     expect(await screen.findByText(t("mapping.github.cut"))).toBeInTheDocument();
     expect(screen.getByText(t("mapping.github.orgNote"))).toBeInTheDocument();
   });
 
-  it("Use fills the owner and repository fields", async () => {
+  it("renders the private, public and archived flags as text", async () => {
     stub();
     renderWithRoutes(routes, "/mappings/new");
-    await userEvent.click(await screen.findByRole("button", { name: t("mapping.github.useNamed", { name: "nrosier/walley" }) }));
-    expect(screen.getByLabelText(t("mappings.form.githubOwner"))).toHaveValue("nrosier");
-    expect(screen.getByLabelText(t("mappings.form.githubRepository"))).toHaveValue("walley");
+    const box = await openGitHub();
+    await within(box).findByRole("option", { name: /nrosier\/walley/ });
+    expect(within(box).getByText(t("mapping.github.private"))).toBeInTheDocument();
+    expect(within(box).getByText(t("mapping.github.public"))).toBeInTheDocument();
+    expect(within(box).getByText(t("mapping.github.archived"))).toBeInTheDocument();
   });
 
   it("Hide posts the GitHub item without a base URL and refreshes the list", async () => {
     const hide = vi.fn(() => json({ id: "h1", source: "github", full_name: "nrosier/walley", harbor_base_url: null, created_at: "2026-11-05T10:00:00Z" }, 201));
     const fetchMock = stub({ hide });
     renderWithRoutes(routes, "/mappings/new");
+    const box = await openGitHub();
+    await within(box).findByRole("option", { name: /nrosier\/walley/ });
     const before = calls(fetchMock, "github-repositories").length;
-    await userEvent.click(await screen.findByRole("button", { name: `${t("mapping.hide.action")}nrosier/walley` }));
+    await userEvent.click(within(box).getByRole("button", { name: `${t("mapping.hide.action")}nrosier/walley` }));
     await waitFor(() => expect(hide).toHaveBeenCalledWith({ source: "github", full_name: "nrosier/walley" }));
     await waitFor(() => expect(calls(fetchMock, "github-repositories").length).toBeGreaterThan(before));
   });
@@ -247,7 +357,8 @@ describe("GitHub picker", () => {
   it("shows the cap message for a 422 on hide", async () => {
     stub({ hide: () => json({ error: { code: "validation_failed", message: "RAW SERVER CAP TEXT" } }, 422) });
     renderWithRoutes(routes, "/mappings/new");
-    await userEvent.click(await screen.findByRole("button", { name: `${t("mapping.hide.action")}nrosier/walley` }));
+    const box = await openGitHub();
+    await userEvent.click(await within(box).findByRole("button", { name: `${t("mapping.hide.action")}nrosier/walley` }));
     expect(await screen.findByText(t("mapping.hide.cap"))).toBeInTheDocument();
     expect(screen.queryByText("RAW SERVER CAP TEXT")).not.toBeInTheDocument();
   });
@@ -300,8 +411,7 @@ describe("Source suggestion", () => {
     renderWithRoutes(routes, "/mappings/new");
     await pickRepository();
     await userEvent.click(await screen.findByRole("button", { name: t("mapping.suggest.confirm") }));
-    expect(screen.getByLabelText(t("mappings.form.githubOwner"))).toHaveValue("acme-corp");
-    expect(screen.getByLabelText(t("mappings.form.githubRepository"))).toHaveValue("platform");
+    expect(screen.getByLabelText(t("mappings.form.githubRepository"))).toHaveValue("acme-corp/platform");
     const writes = fetchMock.mock.calls.filter((c) => ((c[1] as RequestInit | undefined)?.method ?? "GET") !== "GET");
     expect(writes).toEqual([]);
   });

@@ -8,12 +8,12 @@ import { Button, buttonClass } from "../ui/Button";
 import { Card } from "../ui/Card";
 import { Field } from "../ui/Field";
 import { Switch } from "../ui/Switch";
-import { GitHubPicker } from "../pickers/GitHubPicker";
+import { GitHubRepositoryField } from "../pickers/GitHubRepositoryField";
 import { HarborPickers } from "../pickers/HarborPickers";
 import { SourceSuggestion } from "../pickers/SourceSuggestion";
 import { useCredentials } from "../pickers/useCredentials";
 import { Segmented } from "./Segmented";
-import { INPUT, INPUT_INVALID, LINK } from "./styles";
+import { INPUT, LINK } from "./styles";
 import { mappingName } from "./useMappings";
 
 interface FormValues {
@@ -145,6 +145,10 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
   const [serverError, setServerError] = useState<string | null>(null);
   // What the user picked from the Harbor lists (typed entry leaves these null).
   const [picked, setPicked] = useState<{ project: string; repository: string | null } | null>(null);
+  // What the GitHub repository field shows: owner/repo, or what was typed.
+  const [githubText, setGithubText] = useState(
+    initial.githubOwner !== "" || initial.githubRepo !== "" ? `${initial.githubOwner}/${initial.githubRepo}` : "",
+  );
   const [dismissed, setDismissed] = useState<string[]>([]);
   const harborCreds = useCredentials("harbor");
   const harborCredential = harborCreds.data?.items.find((item) => item.id === values.harborCredId);
@@ -295,7 +299,10 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
               githubCredId={values.githubCredId}
               project={picked.project}
               repository={values.harborRepository}
-              onConfirm={(owner, repo) => setValues((current) => ({ ...current, githubOwner: owner, githubRepo: repo }))}
+              onConfirm={(owner, repo) => {
+                setGithubText(`${owner}/${repo}`);
+                setValues((current) => ({ ...current, githubOwner: owner, githubRepo: repo }));
+              }}
               onDismiss={() => setDismissed((current) => [...current, suggestKey])}
             />
           )}
@@ -309,42 +316,30 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
             value={values.githubCredId}
             onChange={(value) => {
               if (values.githubCredId !== "" && value !== values.githubCredId) {
+                setGithubText("");
                 setValues((current) => ({ ...current, githubOwner: "", githubRepo: "" }));
               }
               set("githubCredId", value);
             }}
           />
-          <GitHubPicker
-            key={values.githubCredId}
+          <GitHubRepositoryField
             credentialId={values.githubCredId === "" ? undefined : values.githubCredId}
-            savedOwner={values.githubOwner}
-            savedRepo={values.githubRepo}
-            onUse={(owner, repo) => setValues((current) => ({ ...current, githubOwner: owner, githubRepo: repo }))}
-          />
-          <Field id="github-owner" label={t("mappings.form.githubOwner")}>
-            <input
-              id="github-owner"
-              value={values.githubOwner}
-              onChange={(event) => set("githubOwner", event.target.value)}
-              className={INPUT}
-            />
-          </Field>
-          <Field
-            id="github-repo"
-            label={t("mappings.form.githubRepository")}
+            value={githubText}
             error={
               githubClash === undefined ? undefined : t("mappings.form.duplicate", { name: mappingName(githubClash) })
             }
-          >
-            <input
-              id="github-repo"
-              value={values.githubRepo}
-              onChange={(event) => set("githubRepo", event.target.value)}
-              aria-invalid={githubClash !== undefined}
-              aria-describedby={githubClash === undefined ? undefined : "github-repo-error"}
-              className={`${INPUT} ${githubClash === undefined ? "" : INPUT_INVALID}`}
-            />
-          </Field>
+            onText={(text) => {
+              const slash = text.indexOf("/");
+              setGithubText(text);
+              set("githubOwner", slash < 0 ? text : text.slice(0, slash));
+              set("githubRepo", slash < 0 ? "" : text.slice(slash + 1));
+            }}
+            onPick={(owner, repo) => {
+              setGithubText(`${owner}/${repo}`);
+              setValues((current) => ({ ...current, githubOwner: owner, githubRepo: repo }));
+              setServerError(null);
+            }}
+          />
           <Field id="default-branch" label={t("mappings.form.defaultBranch")} help={t("mappings.form.defaultBranchHelp")}>
             <input
               id="default-branch"
@@ -358,7 +353,6 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
         </Card>
 
         <Card className="m-0 flex min-w-0 flex-col gap-[18px] px-[22px] py-5">
-          <h2 className="text-[15px] font-semibold">{t("mappings.form.issuesSection")}</h2>
           <div className="flex items-start justify-between gap-4">
             <div className="flex flex-col gap-1.5">
               <label htmlFor="auto-issues" className="text-[13px] font-semibold">

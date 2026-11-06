@@ -162,7 +162,6 @@
   "mappings.form.githubRepository": "GitHub repository",
   "mappings.form.defaultBranch": "Default branch",
   "mappings.form.defaultBranchHelp": "Used when the image has no HarborGate branch label.",
-  "mappings.form.issuesSection": "Issues",
   "mappings.form.autoCreate": "Create GitHub issues automatically",
   "mappings.form.autoCreateHelp": "One issue per CVE in the target repository. The token needs the Issues permission.",
   "mappings.form.minSeverity": "Minimum severity",

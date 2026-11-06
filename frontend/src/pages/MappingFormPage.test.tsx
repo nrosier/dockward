@@ -75,8 +75,7 @@ const routes = [
 async function fillNew(githubRepo: string) {
   await userEvent.type(await screen.findByLabelText(t("mappings.form.harborProject")), "platform");
   await userEvent.type(screen.getByLabelText(t("mappings.form.harborRepository")), "billing-api");
-  await userEvent.type(screen.getByLabelText(t("mappings.form.githubOwner")), "example-org");
-  await userEvent.type(screen.getByLabelText(t("mappings.form.githubRepository")), githubRepo);
+  await userEvent.type(screen.getByLabelText(t("mappings.form.githubRepository")), `example-org/${githubRepo}`);
   // Wait for the credential selects to default to their first option.
   await vi.waitFor(() => expect(screen.getByLabelText(t("mappings.form.githubCredential"))).toHaveValue("gc"));
   await vi.waitFor(() => expect(screen.getByLabelText(t("mappings.form.harborCredential"))).toHaveValue("hc"));
