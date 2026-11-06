@@ -148,6 +148,8 @@ Treat the webhook URL and the auth secret as secrets. Anyone who has the URL can
 
 Do these steps once for each repository HarborGate will write to.
 
+In Admin > Settings, leave the GitHub URL empty to use github.com. Set a custom GitHub host only for GitHub Enterprise Server.
+
 ### 4a. Create a fine-grained personal access token
 
 1. In GitHub, go to **Settings > Developer settings > Personal access tokens > Fine-grained tokens** and click **Generate new token** (verified in GitHub's "Managing your personal access tokens"). A pre-filled form with the right permissions: `https://github.com/settings/personal-access-tokens/new?name=HarborGate&target_name=<owner>&expires_in=90&security_events=write&issues=write`. You still pick the repositories yourself. Leave out `&issues=write` if issues are not used.
