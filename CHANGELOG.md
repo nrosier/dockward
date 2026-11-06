@@ -4,6 +4,15 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.12.4
+
+### Fixed
+- CVE issues close when the newest scanned digest is clean, not when every tracked tag is clean (#196, PR #200).
+- A manual close of a HarborGate issue on GitHub is honoured: HarborGate does not reopen it while the CVE stays, and posts no close comment on an issue already closed (#196, PR #200).
+
+### Changed
+- Migration 0006 adds `sync_reports.image_push_time` and `github_issues.closed_manually` (#196, PR #200).
+
 ## 0.12.3
 
 ### Fixed
