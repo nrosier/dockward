@@ -108,6 +108,15 @@ describe("Mapping form pickers", () => {
     expect(screen.getByLabelText(t("mappings.form.harborRepository"))).toHaveValue("walley");
   });
 
+  it("the Harbor repository is disabled until a project has a value, then enabled", async () => {
+    stub();
+    renderWithRoutes(routes, "/mappings/new");
+    const repository = await screen.findByLabelText(t("mappings.form.harborRepository"));
+    expect(repository).toBeDisabled();
+    await pickProject("nrosier");
+    expect(screen.getByLabelText(t("mappings.form.harborRepository"))).toBeEnabled();
+  });
+
   it("opens the repository list only from a picked project", async () => {
     const fetchMock = stub();
     renderWithRoutes(routes, "/mappings/new");

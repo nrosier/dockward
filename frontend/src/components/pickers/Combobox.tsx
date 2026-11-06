@@ -22,6 +22,8 @@ interface ComboboxProps {
   options: ComboOption[];
   // False keeps the control a plain text input (no list).
   listEnabled?: boolean;
+  // True disables the input and its list until it is enabled again.
+  disabled?: boolean;
   placeholder?: string;
   invalid?: boolean;
   describedBy?: string;
@@ -39,6 +41,7 @@ export function Combobox({
   listLabel,
   options,
   listEnabled = true,
+  disabled = false,
   placeholder,
   invalid = false,
   describedBy,
@@ -47,7 +50,7 @@ export function Combobox({
   const listId = useId();
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
-  const shown = listEnabled && open;
+  const shown = listEnabled && !disabled && open;
   const activeIndex = active < options.length ? active : -1;
 
   function choose(index: number) {
@@ -98,6 +101,7 @@ export function Combobox({
         aria-invalid={invalid}
         aria-describedby={describedBy}
         autoComplete="off"
+        disabled={disabled}
         placeholder={placeholder}
         value={value}
         onChange={(event) => {
