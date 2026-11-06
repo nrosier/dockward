@@ -5,17 +5,28 @@ interface FieldProps {
   label: string;
   help?: string;
   error?: string;
+  // Shown beside the label, for example a Tooltip.
+  hint?: ReactNode;
   children: ReactNode;
 }
 
 // Stacked: label, optional help, the control, then the error
 // (specs/frontend.md, "Settings rows"). The control gets `id` from the caller.
-export function Field({ id, label, help, error, children }: FieldProps) {
+export function Field({ id, label, help, error, hint, children }: FieldProps) {
   return (
     <div className="flex flex-col gap-1.5">
-      <label htmlFor={id} className="text-[13px] font-semibold">
-        {label}
-      </label>
+      {hint === undefined ? (
+        <label htmlFor={id} className="text-[13px] font-semibold">
+          {label}
+        </label>
+      ) : (
+        <div className="relative flex items-center gap-1.5">
+          <label htmlFor={id} className="text-[13px] font-semibold">
+            {label}
+          </label>
+          {hint}
+        </div>
+      )}
       {help === undefined ? null : (
         <p id={`${id}-help`} className="text-[12.5px] text-muted">
           {help}

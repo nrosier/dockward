@@ -6,14 +6,15 @@ import { ApiError, api } from "../../lib/api";
 import type { Credential, IssueSeverity, Mapping, MappingCreated, MappingListItem, Page } from "../../types/api";
 import { Button, buttonClass } from "../ui/Button";
 import { Card } from "../ui/Card";
+import { Tooltip } from "../ui/Tooltip";
 import { Field } from "../ui/Field";
 import { Switch } from "../ui/Switch";
-import { GitHubPicker } from "../pickers/GitHubPicker";
+import { GitHubRepositoryField } from "../pickers/GitHubRepositoryField";
 import { HarborPickers } from "../pickers/HarborPickers";
 import { SourceSuggestion } from "../pickers/SourceSuggestion";
 import { useCredentials } from "../pickers/useCredentials";
 import { Segmented } from "./Segmented";
-import { INPUT, INPUT_INVALID, LINK } from "./styles";
+import { INPUT, LINK } from "./styles";
 import { mappingName } from "./useMappings";
 
 interface FormValues {
@@ -59,14 +60,24 @@ function changedFields(initial: FormValues, now: FormValues): Record<string, str
   return body;
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+// One column of the two-column card: a heading and its fields. The columns
+// share one bordered card with a divider; narrow screens stack them (#167).
+// From md up each column is a subgrid over the same rows (the heading, then
+// one row per field), so the fields line up across the columns. A div with
+// role "group" is used because a fieldset does not take part in subgrid.
+function Column({ id, title, rows, children }: { id: string; title: string; rows: 4 | 5; children: ReactNode }) {
   return (
-    <Card className="m-0 flex min-w-0 flex-col gap-[18px] px-[22px] py-5">
-      <fieldset className="m-0 flex min-w-0 flex-col gap-[18px] border-0 p-0">
-        <legend className="float-left mb-0.5 text-[15px] font-semibold">{title}</legend>
-        <div className="clear-both flex flex-col gap-[18px]">{children}</div>
-      </fieldset>
-    </Card>
+    <div
+      // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- a fieldset does not take part in a grid subgrid
+      role="group"
+      aria-labelledby={id}
+      className={`m-0 flex min-w-0 flex-col gap-[18px] p-5 max-md:border-t max-md:border-border max-md:first:border-t-0 md:grid md:grid-rows-subgrid md:gap-y-[18px] md:border-l md:border-border md:first:border-l-0 ${rows === 5 ? "md:row-span-5" : "md:row-span-4"}`}
+    >
+      <h2 id={id} className="m-0 mb-0.5 text-[15px] font-semibold">
+        {title}
+      </h2>
+      {children}
+    </div>
   );
 }
 
@@ -145,6 +156,10 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
   const [serverError, setServerError] = useState<string | null>(null);
   // What the user picked from the Harbor lists (typed entry leaves these null).
   const [picked, setPicked] = useState<{ project: string; repository: string | null } | null>(null);
+  // What the GitHub repository field shows: owner/repo, or what was typed.
+  const [githubText, setGithubText] = useState(
+    initial.githubOwner !== "" || initial.githubRepo !== "" ? `${initial.githubOwner}/${initial.githubRepo}` : "",
+  );
   const [dismissed, setDismissed] = useState<string[]>([]);
   const harborCreds = useCredentials("harbor");
   const harborCredential = harborCreds.data?.items.find((item) => item.id === values.harborCredId);
@@ -210,6 +225,8 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
   const pairKey = picked === null || picked.repository === null ? null : `${picked.project}/${values.harborRepository}`;
   const suggestKey = pairKey === null || dismissed.includes(pairKey) ? null : pairKey;
 
+  const showSuggestion = !(suggestKey === null || values.harborCredId === "" || picked === null || picked.repository === null);
+
   const filled = [
     values.harborProject,
     values.harborRepository,
@@ -234,7 +251,8 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
   return (
     <form onSubmit={submit} className="flex flex-col gap-5" noValidate>
       <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-5 border-0 p-0">
-        <Section title={t("mappings.form.harborSection")}>
+        <Card className="m-0 grid min-w-0 grid-cols-1 overflow-hidden md:grid-cols-2">
+        <Column id="harbor-section" title={t("mappings.form.harborSection")} rows={showSuggestion ? 5 : 4}>
           <CredentialSelect
             id="harbor-cred"
             label={t("mappings.form.harborCredential")}
@@ -248,27 +266,29 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
               }
               set("harborCredId", value);
             }}
-            help={
-              <p className="text-[12.5px] text-muted">
-                {t("mappings.form.credentialHelpBefore")}{" "}
-                <Link to="/account" className={LINK}>
-                  {t("nav.account")}
-                </Link>{" "}
-                {t("mappings.form.credentialHelpAfter")}
-              </p>
-            }
           />
           <HarborPickers
-            key={values.harborCredId}
             credential={harborCredential}
             project={picked?.project ?? null}
-            repository={picked?.repository ?? ""}
-            savedProject={values.harborProject}
-            savedRepository={values.harborRepository}
+            projectValue={values.harborProject}
+            repositoryValue={values.harborRepository}
+            repositoryError={
+              harborClash === undefined
+                ? undefined
+                : t("mappings.form.duplicate", { name: mappingName(harborClash) })
+            }
+            onProjectText={(text) => {
+              setPicked(null);
+              set("harborProject", text);
+            }}
             onProject={(name) => {
               setPicked({ project: name, repository: null });
               setValues((current) => ({ ...current, harborProject: name, harborRepository: "" }));
               setServerError(null);
+            }}
+            onRepositoryText={(text) => {
+              setPicked((current) => (current === null ? null : { ...current, repository: null }));
+              set("harborRepository", text);
             }}
             onRepository={(fullName) => {
               const slash = fullName.indexOf("/");
@@ -276,55 +296,23 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
               set("harborRepository", fullName.slice(slash + 1));
             }}
           />
-          <Field id="harbor-project" label={t("mappings.form.harborProject")}>
-            <input
-              id="harbor-project"
-              value={values.harborProject}
-              onChange={(event) => {
-                setPicked(null);
-                set("harborProject", event.target.value);
-              }}
-              className={INPUT}
-            />
-          </Field>
-          <Field
-            id="harbor-repository"
-            label={t("mappings.form.harborRepository")}
-            help={t("mappings.form.harborRepositoryHelp")}
-            error={
-              harborClash === undefined
-                ? undefined
-                : t("mappings.form.duplicate", { name: mappingName(harborClash) })
-            }
-          >
-            <input
-              id="harbor-repository"
-              value={values.harborRepository}
-              onChange={(event) => {
-                setPicked((current) => (current === null ? null : { ...current, repository: null }));
-                set("harborRepository", event.target.value);
-              }}
-              aria-invalid={harborClash !== undefined}
-              aria-describedby={
-                harborClash === undefined ? "harbor-repository-help" : "harbor-repository-help harbor-repository-error"
-              }
-              className={`${INPUT} ${harborClash === undefined ? "" : INPUT_INVALID}`}
-            />
-          </Field>
-          {suggestKey === null || values.harborCredId === "" || picked === null || picked.repository === null ? null : (
+          {!showSuggestion || suggestKey === null || picked === null ? null : (
             <SourceSuggestion
               key={suggestKey}
               harborCredId={values.harborCredId}
               githubCredId={values.githubCredId}
               project={picked.project}
               repository={values.harborRepository}
-              onConfirm={(owner, repo) => setValues((current) => ({ ...current, githubOwner: owner, githubRepo: repo }))}
+              onConfirm={(owner, repo) => {
+                setGithubText(`${owner}/${repo}`);
+                setValues((current) => ({ ...current, githubOwner: owner, githubRepo: repo }));
+              }}
               onDismiss={() => setDismissed((current) => [...current, suggestKey])}
             />
           )}
-        </Section>
+        </Column>
 
-        <Section title={t("mappings.form.githubSection")}>
+        <Column id="github-section" title={t("mappings.form.githubSection")} rows={showSuggestion ? 5 : 4}>
           <CredentialSelect
             id="github-cred"
             label={t("mappings.form.githubCredential")}
@@ -332,43 +320,31 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
             value={values.githubCredId}
             onChange={(value) => {
               if (values.githubCredId !== "" && value !== values.githubCredId) {
+                setGithubText("");
                 setValues((current) => ({ ...current, githubOwner: "", githubRepo: "" }));
               }
               set("githubCredId", value);
             }}
           />
-          <GitHubPicker
-            key={values.githubCredId}
+          <GitHubRepositoryField
             credentialId={values.githubCredId === "" ? undefined : values.githubCredId}
-            savedOwner={values.githubOwner}
-            savedRepo={values.githubRepo}
-            onUse={(owner, repo) => setValues((current) => ({ ...current, githubOwner: owner, githubRepo: repo }))}
-          />
-          <Field id="github-owner" label={t("mappings.form.githubOwner")}>
-            <input
-              id="github-owner"
-              value={values.githubOwner}
-              onChange={(event) => set("githubOwner", event.target.value)}
-              className={INPUT}
-            />
-          </Field>
-          <Field
-            id="github-repo"
-            label={t("mappings.form.githubRepository")}
+            value={githubText}
             error={
               githubClash === undefined ? undefined : t("mappings.form.duplicate", { name: mappingName(githubClash) })
             }
-          >
-            <input
-              id="github-repo"
-              value={values.githubRepo}
-              onChange={(event) => set("githubRepo", event.target.value)}
-              aria-invalid={githubClash !== undefined}
-              aria-describedby={githubClash === undefined ? undefined : "github-repo-error"}
-              className={`${INPUT} ${githubClash === undefined ? "" : INPUT_INVALID}`}
-            />
-          </Field>
-          <Field id="default-branch" label={t("mappings.form.defaultBranch")} help={t("mappings.form.defaultBranchHelp")}>
+            onText={(text) => {
+              const slash = text.indexOf("/");
+              setGithubText(text);
+              set("githubOwner", slash < 0 ? text : text.slice(0, slash));
+              set("githubRepo", slash < 0 ? "" : text.slice(slash + 1));
+            }}
+            onPick={(owner, repo) => {
+              setGithubText(`${owner}/${repo}`);
+              setValues((current) => ({ ...current, githubOwner: owner, githubRepo: repo }));
+              setServerError(null);
+            }}
+          />
+          <Field id="default-branch" label={t("mappings.form.defaultBranch")} hint={<Tooltip label={t("mappings.form.defaultBranchTipLabel")} text={t("mappings.form.defaultBranchHelp")} />}>
             <input
               id="default-branch"
               value={values.defaultBranch}
@@ -377,9 +353,10 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
               className={INPUT}
             />
           </Field>
-        </Section>
+        </Column>
+        </Card>
 
-        <Section title={t("mappings.form.issuesSection")}>
+        <Card className="m-0 flex min-w-0 flex-col gap-[18px] px-[22px] py-5">
           <div className="flex items-start justify-between gap-4">
             <div className="flex flex-col gap-1.5">
               <label htmlFor="auto-issues" className="text-[13px] font-semibold">
@@ -406,7 +383,7 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
               ]}
             />
           </div>
-        </Section>
+        </Card>
       </fieldset>
 
       {serverError === null ? null : (
@@ -415,9 +392,7 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
         </p>
       )}
 
-      {readOnly ? (
-        <p className="text-[13px] text-muted">{t("mappings.form.readOnly")}</p>
-      ) : (
+      {readOnly ? null : (
         <div className="flex flex-wrap justify-end gap-2.5">
           <Link to="/mappings" className={buttonClass("default")}>
             {t("mappings.cancel")}
