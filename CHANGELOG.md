@@ -4,6 +4,11 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.12.3
+
+### Fixed
+- A child image of a tagged multi-arch index is marked done, covered by its parent index, instead of failing (#132, PR #194).
+
 ## 0.12.2
 
 ### Fixed
