@@ -127,6 +127,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
   - Who may pull: the mapping owner, and any admin, for any tenant's mapping. This is the second admin exception to read-only access, beside retry ([security.md](security.md), Tenancy).
   - A Harbor error (unreachable, a non-`200` answer, or a body that does not parse) fails only this pull, with `502 upstream_unreachable` and its fixed message. Jobs already queued from earlier pages of the same pull stay queued, as in the scheduled poll.
   - Audit: a pull that finishes writes `mapping.pull` with `details` `{"mapping_id","queued"}`. A pull that fails at Harbor writes no audit row. No URL, credential, or Harbor answer is recorded.
+- Project webhook check (Decided 2026-11-06, user, #179): the `POST /mappings` response adds `"project_webhook_exists": true|false`, and the `PUT /mappings/:id` response adds the same field. It is `true` when a `project_webhooks` row exists for the saved mapping's `harbor_base_url` and `harbor_project`, whoever owns it. It is read from the database only, with no Harbor call, and carries no id, owner, URL, or secret. `GET /mappings` and `GET /mappings/:id` do not carry it.
 
 ## Project webhooks
 
