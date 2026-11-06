@@ -106,7 +106,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |
-| GET | `/api/v1/mappings` | session | list params; `sort` (`harbor_repository`, `created_at`); admin may add `scope=all` | list of `Mapping` | 200, 401 |
+| GET | `/api/v1/mappings` | session | list params; `sort` (`harbor_repository`, `created_at`, and, decided 2026-11-06 user #190, `harbor_project`, `github_owner`, `github_repo`, `open_issues`, `last_sync_at`); admin may add `scope=all`. `open_issues` is counted at list time from the `cve_findings` and `github_issues` rows, not stored on the mapping (see [cve-lifecycle.md](cve-lifecycle.md)). Other `sort` values return `400 invalid_request`. | list of `Mapping` | 200, 401 |
 | POST | `/api/v1/mappings` | session | `{"harbor_cred_id","github_cred_id","harbor_project","harbor_repository","github_owner","github_repo","default_branch","auto_create_issues","min_issue_severity"}` | `{"mapping": Mapping, "webhook_url": "<shown once>", "auth_secret": "<shown once>"}` | 201, 400, 404 (credential), 409 `conflict` (duplicate Harbor repository on the same Harbor instance, or duplicate GitHub target), 422 (including `code_scanning_unavailable`, and `validation_failed` when `auto_create_issues` is on and the token lacks the Issues permission) |
 | GET | `/api/v1/mappings/:id` | session | none | `Mapping` | 200, 404 |
 | PUT | `/api/v1/mappings/:id` | session (owner only) | any subset of the create fields except the credentials' owner | `Mapping` | 200, 404, 409, 422 |
