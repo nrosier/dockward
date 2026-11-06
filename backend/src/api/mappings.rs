@@ -365,4 +365,264 @@ mod tests {
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ---- Sort tests (#190) ----
+
+    /// `(id, harbor_project, harbor_repository, github_owner, github_repo, created_at)`.
+    type Row = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        i64,
+    );
+
+    async fn seed_sortable(pool: &SqlitePool, rows: &[Row]) {
+        sqlx::query("INSERT INTO users (id, username, role, token_version) VALUES ('owner', 'owner', 'user', 0), ('other', 'other', 'user', 0)")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
+             VALUES ('c1', 'owner', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
+                    ('c2', 'owner', 'github', 'g', NULL, NULL, 'v1:fake')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        for (id, project, repo, owner, gh_repo, created) in rows {
+            let user = if id.starts_with('x') {
+                "other"
+            } else {
+                "owner"
+            };
+            sqlx::query(
+                "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash, created_at)
+                 VALUES (?, ?, 'c1', 'c2', 'https://harbor.example.com', ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(user)
+            .bind(project)
+            .bind(repo)
+            .bind(owner)
+            .bind(gh_repo)
+            .bind(format!("t-{id}"))
+            .bind(format!("s-{id}"))
+            .bind(created)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn ids_sorted(
+        pool: &SqlitePool,
+        sort: &str,
+        order: &str,
+        all_users: bool,
+    ) -> Result<Vec<String>, crate::error::AppError> {
+        let query = mapping_service::ListQuery {
+            sort: Some(sort.to_owned()),
+            order: Some(order.to_owned()),
+            all_users,
+            ..Default::default()
+        };
+        let page = mapping_service::list(pool, "owner", &query).await?;
+        Ok(page.items.into_iter().map(|m| m.id).collect())
+    }
+
+    /// Adds `n` open issues of `severity` to a mapping, each with its own finding.
+    async fn add_open_issues(
+        pool: &SqlitePool,
+        mapping: &str,
+        owner: &str,
+        repo: &str,
+        severity: &str,
+        n: usize,
+    ) {
+        for k in 0..n {
+            let cve = format!("CVE-{mapping}-{severity}-{k}");
+            sqlx::query("INSERT INTO github_issues (id, github_owner, github_repo, cve_id, github_issue_number, github_issue_url, status) VALUES (?, ?, ?, ?, ?, 'https://github.com/x', 'open')")
+                .bind(format!("gi-{cve}"))
+                .bind(owner)
+                .bind(repo)
+                .bind(&cve)
+                .bind(k as i64 + 1)
+                .execute(pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, severity, status) VALUES (?, ?, 'r', 'v1', ?, ?, 'open')")
+                .bind(format!("f-{cve}"))
+                .bind(mapping)
+                .bind(&cve)
+                .bind(severity)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn sort_orders_by_harbor_and_github_keys() {
+        let (pool, dir) = fresh_pool("sort-keys").await;
+        seed_sortable(
+            &pool,
+            &[
+                ("a", "p2", "r1", "o3", "g1", 30),
+                ("b", "p1", "r2", "o1", "g2", 10),
+                ("c", "p1", "r1", "o1", "g1", 20),
+                ("d", "p3", "r0", "o2", "g0", 40),
+            ],
+        )
+        .await;
+        assert_eq!(
+            ids_sorted(&pool, "harbor_project", "asc", false)
+                .await
+                .unwrap(),
+            ["c", "b", "a", "d"]
+        );
+        assert_eq!(
+            ids_sorted(&pool, "harbor_project", "desc", false)
+                .await
+                .unwrap(),
+            ["d", "a", "b", "c"]
+        );
+        assert_eq!(
+            ids_sorted(&pool, "harbor_repository", "asc", false)
+                .await
+                .unwrap(),
+            ["d", "a", "c", "b"]
+        );
+        assert_eq!(
+            ids_sorted(&pool, "github_owner", "asc", false)
+                .await
+                .unwrap(),
+            ["c", "b", "d", "a"]
+        );
+        assert_eq!(
+            ids_sorted(&pool, "github_repo", "asc", false)
+                .await
+                .unwrap(),
+            ["d", "a", "c", "b"]
+        );
+        assert_eq!(
+            ids_sorted(&pool, "created_at", "asc", false).await.unwrap(),
+            ["b", "c", "a", "d"]
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sort_unknown_value_is_invalid_request() {
+        let (pool, dir) = fresh_pool("sort-unknown").await;
+        seed_sortable(&pool, &[("a", "p", "r", "o", "g", 1)]).await;
+        let err = ids_sorted(&pool, "webhook_token_hash", "asc", false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::AppError::InvalidRequest(_)));
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sort_open_issues_compares_the_severity_tuple() {
+        let (pool, dir) = fresh_pool("sort-open-issues").await;
+        seed_sortable(
+            &pool,
+            &[
+                ("a", "p", "r1", "o", "g1", 1),
+                ("b", "p", "r2", "o", "g2", 2),
+                ("c", "p", "r3", "o", "g3", 3),
+            ],
+        )
+        .await;
+        // a: 3 critical. b: 2 critical + 9 high. c: none.
+        add_open_issues(&pool, "a", "o", "g1", "CRITICAL", 3).await;
+        add_open_issues(&pool, "b", "o", "g2", "CRITICAL", 2).await;
+        add_open_issues(&pool, "b", "o", "g2", "HIGH", 9).await;
+        assert_eq!(
+            ids_sorted(&pool, "open_issues", "desc", false)
+                .await
+                .unwrap(),
+            ["a", "b", "c"]
+        );
+        assert_eq!(
+            ids_sorted(&pool, "open_issues", "asc", false)
+                .await
+                .unwrap(),
+            ["c", "b", "a"]
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sort_last_sync_newest_first_and_no_sync_last() {
+        let (pool, dir) = fresh_pool("sort-last-sync").await;
+        seed_sortable(
+            &pool,
+            &[
+                ("a", "p", "r1", "o", "g1", 1),
+                ("b", "p", "r2", "o", "g2", 2),
+                ("c", "p", "r3", "o", "g3", 3),
+            ],
+        )
+        .await;
+        for (id, mapping, updated) in [("j1", "a", 1000), ("j2", "a", 2000), ("j3", "b", 3000)] {
+            sqlx::query("INSERT INTO sync_jobs (id, mapping_id, status, attempts, payload, created_at, updated_at) VALUES (?, ?, 'done', 1, '{}', 1, ?)")
+                .bind(id)
+                .bind(mapping)
+                .bind(updated)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            ids_sorted(&pool, "last_sync_at", "desc", false)
+                .await
+                .unwrap(),
+            ["b", "a", "c"]
+        );
+        // Oldest first still puts the mapping with no sync last.
+        assert_eq!(
+            ids_sorted(&pool, "last_sync_at", "asc", false)
+                .await
+                .unwrap(),
+            ["a", "b", "c"]
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sort_scope_all_uses_the_same_ordering() {
+        let (pool, dir) = fresh_pool("sort-scope-all").await;
+        seed_sortable(
+            &pool,
+            &[
+                ("a", "p", "r1", "o", "g1", 1),
+                ("xb", "p", "r2", "o", "g2", 2),
+                ("c", "p", "r3", "o", "g3", 3),
+            ],
+        )
+        .await;
+        add_open_issues(&pool, "a", "o", "g1", "HIGH", 1).await;
+        add_open_issues(&pool, "xb", "o", "g2", "CRITICAL", 1).await;
+        assert_eq!(
+            ids_sorted(&pool, "open_issues", "desc", false)
+                .await
+                .unwrap(),
+            ["a", "c"]
+        );
+        assert_eq!(
+            ids_sorted(&pool, "open_issues", "desc", true)
+                .await
+                .unwrap(),
+            ["xb", "a", "c"]
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -25,7 +25,15 @@ use crate::services::{
 };
 
 /// Sort keys the list route accepts. The first is the default.
-const SORTS: &[&str] = &["harbor_repository", "created_at"];
+const SORTS: &[&str] = &[
+    "harbor_repository",
+    "created_at",
+    "harbor_project",
+    "github_owner",
+    "github_repo",
+    "open_issues",
+    "last_sync_at",
+];
 
 /// Severities the spec allows for `min_issue_severity`.
 const SEVERITIES: &[&str] = &["CRITICAL", "HIGH"];

@@ -272,22 +272,60 @@ pub async fn list_owned(
                   auto_create_issues, min_issue_severity, default_branch AS "default_branch!",
                   created_at
            FROM repo_mappings
-           WHERE (? IS NULL OR user_id = ?)
+           LEFT JOIN (
+               SELECT m.id AS mapping_id,
+                      SUM(CASE WHEN b.rank = 5 THEN 1 ELSE 0 END) AS crit,
+                      SUM(CASE WHEN b.rank = 4 THEN 1 ELSE 0 END) AS high,
+                      SUM(CASE WHEN b.rank = 3 THEN 1 ELSE 0 END) AS med,
+                      SUM(CASE WHEN b.rank = 2 THEN 1 ELSE 0 END) AS low
+               FROM github_issues gi
+               JOIN repo_mappings m
+                 ON m.github_owner = gi.github_owner AND m.github_repo = gi.github_repo
+               JOIN (
+                   SELECT f.mapping_id AS mapping_id, f.cve_id AS cve_id,
+                          MAX(CASE f.severity WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4
+                              WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 ELSE 1 END) AS rank
+                   FROM cve_findings f
+                   GROUP BY f.mapping_id, f.cve_id
+               ) b ON b.mapping_id = m.id AND b.cve_id = gi.cve_id
+               WHERE gi.status = 'open'
+               GROUP BY m.id
+           ) oi ON oi.mapping_id = repo_mappings.id
+           LEFT JOIN (
+               SELECT mapping_id, MAX(updated_at) AS last_at
+               FROM sync_jobs
+               GROUP BY mapping_id
+           ) ls ON ls.mapping_id = repo_mappings.id
+           WHERE (?1 IS NULL OR user_id = ?1)
            ORDER BY
-             CASE WHEN ? = 'harbor_repository' AND ? = 1 THEN harbor_repository END ASC,
-             CASE WHEN ? = 'harbor_repository' AND ? = -1 THEN harbor_repository END DESC,
-             CASE WHEN ? = 'created_at' AND ? = 1 THEN created_at END ASC,
-             CASE WHEN ? = 'created_at' AND ? = -1 THEN created_at END DESC,
+             CASE WHEN ?2 = 'last_sync_at' THEN ls.last_at IS NULL END ASC,
+             CASE WHEN ?2 = 'harbor_repository' AND ?3 = 1 THEN harbor_repository END ASC,
+             CASE WHEN ?2 = 'harbor_repository' AND ?3 = -1 THEN harbor_repository END DESC,
+             CASE WHEN ?2 = 'harbor_project' AND ?3 = 1 THEN harbor_project END ASC,
+             CASE WHEN ?2 = 'harbor_project' AND ?3 = -1 THEN harbor_project END DESC,
+             CASE WHEN ?2 = 'harbor_project' AND ?3 = 1 THEN harbor_repository END ASC,
+             CASE WHEN ?2 = 'harbor_project' AND ?3 = -1 THEN harbor_repository END DESC,
+             CASE WHEN ?2 = 'github_owner' AND ?3 = 1 THEN github_owner END ASC,
+             CASE WHEN ?2 = 'github_owner' AND ?3 = -1 THEN github_owner END DESC,
+             CASE WHEN ?2 = 'github_owner' AND ?3 = 1 THEN github_repo END ASC,
+             CASE WHEN ?2 = 'github_owner' AND ?3 = -1 THEN github_repo END DESC,
+             CASE WHEN ?2 = 'github_repo' AND ?3 = 1 THEN github_repo END ASC,
+             CASE WHEN ?2 = 'github_repo' AND ?3 = -1 THEN github_repo END DESC,
+             CASE WHEN ?2 = 'open_issues' AND ?3 = 1 THEN COALESCE(oi.crit, 0) END ASC,
+             CASE WHEN ?2 = 'open_issues' AND ?3 = -1 THEN COALESCE(oi.crit, 0) END DESC,
+             CASE WHEN ?2 = 'open_issues' AND ?3 = 1 THEN COALESCE(oi.high, 0) END ASC,
+             CASE WHEN ?2 = 'open_issues' AND ?3 = -1 THEN COALESCE(oi.high, 0) END DESC,
+             CASE WHEN ?2 = 'open_issues' AND ?3 = 1 THEN COALESCE(oi.med, 0) END ASC,
+             CASE WHEN ?2 = 'open_issues' AND ?3 = -1 THEN COALESCE(oi.med, 0) END DESC,
+             CASE WHEN ?2 = 'open_issues' AND ?3 = 1 THEN COALESCE(oi.low, 0) END ASC,
+             CASE WHEN ?2 = 'open_issues' AND ?3 = -1 THEN COALESCE(oi.low, 0) END DESC,
+             CASE WHEN ?2 = 'last_sync_at' AND ?3 = 1 THEN ls.last_at END ASC,
+             CASE WHEN ?2 = 'last_sync_at' AND ?3 = -1 THEN ls.last_at END DESC,
+             CASE WHEN ?2 = 'created_at' AND ?3 = 1 THEN created_at END ASC,
+             CASE WHEN ?2 = 'created_at' AND ?3 = -1 THEN created_at END DESC,
              id ASC
-           LIMIT ? OFFSET ?"#,
+           LIMIT ?4 OFFSET ?5"#,
         filter.user_id,
-        filter.user_id,
-        filter.sort,
-        filter.sort_sign,
-        filter.sort,
-        filter.sort_sign,
-        filter.sort,
-        filter.sort_sign,
         filter.sort,
         filter.sort_sign,
         filter.limit,
