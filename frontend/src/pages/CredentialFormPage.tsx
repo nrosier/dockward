@@ -51,20 +51,13 @@ function CredentialForm({ id, loaded }: { id: string | undefined; loaded: Creden
   const [username, setUsername] = useState(loaded?.username ?? "");
   const [token, setToken] = useState("");
   const [expires, setExpires] = useState(loaded?.expires_at ? loaded.expires_at.slice(0, 10) : "");
-  const [owner, setOwner] = useState("");
-  const [repo, setRepo] = useState("");
   const [savedId, setSavedId] = useState<string | null>(id ?? null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [result, setResult] = useState<TestResult | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
 
   const runTest = useMutation({
-    mutationFn: (credentialId: string) =>
-      api<TestResult>(
-        "POST",
-        `/credentials/${credentialId}/test`,
-        service === "github" ? { owner: owner.trim(), repo: repo.trim() } : undefined,
-      ),
+    mutationFn: (credentialId: string) => api<TestResult>("POST", `/credentials/${credentialId}/test`),
     onSuccess: (body) => {
       setResult(body);
       setTestError(null);
@@ -115,7 +108,7 @@ function CredentialForm({ id, loaded }: { id: string | undefined; loaded: Creden
   const canSubmit =
     label.trim() !== "" &&
     (editing || token !== "") &&
-    (isGithub ? owner.trim() !== "" && repo.trim() !== "" : baseUrl.trim() !== "" && username.trim() !== "") &&
+    (isGithub || (baseUrl.trim() !== "" && username.trim() !== "")) &&
     !save.isPending;
 
   function submit(event: FormEvent) {
@@ -202,21 +195,6 @@ function CredentialForm({ id, loaded }: { id: string | undefined; loaded: Creden
               onChange={(event) => setExpires(event.target.value)}
             />
           </Field>
-          {isGithub ? (
-            <>
-              <Field id="cred-owner" label={t("credentials.form.owner")} help={t("credentials.form.testOnlyHelp")}>
-                <input
-                  id="cred-owner"
-                  className={INPUT}
-                  value={owner}
-                  onChange={(event) => setOwner(event.target.value)}
-                />
-              </Field>
-              <Field id="cred-repo" label={t("credentials.form.repo")}>
-                <input id="cred-repo" className={INPUT} value={repo} onChange={(event) => setRepo(event.target.value)} />
-              </Field>
-            </>
-          ) : null}
         </Card>
 
         {tested ? (
