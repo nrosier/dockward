@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use reqwest::Url;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::error::AppError;
 use crate::services::credential_probe::{encode_repository_path, encode_segment};
@@ -122,37 +123,62 @@ pub struct ArtifactLabels {
     pub branch: Option<String>,
 }
 
-/// The shape of `GET .../artifacts/{reference}`, reduced to the config labels.
-#[derive(Debug, Deserialize)]
-struct ArtifactBody {
-    #[serde(default)]
-    extra_attrs: Option<ExtraAttrs>,
-    #[serde(default)]
-    labels: Option<BTreeMap<String, String>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExtraAttrs {
-    #[serde(default)]
-    labels: Option<BTreeMap<String, String>>,
-}
-
-/// Reads the labels from an artifact JSON body. Labels may sit at the top level or under
-/// `extra_attrs` in Harbor's responses, so both are read, with the top level winning.
-pub fn parse_labels(body: &[u8]) -> Result<ArtifactLabels, AppError> {
-    let parsed: ArtifactBody = serde_json::from_slice(body).map_err(|_| AppError::InternalError)?;
-    let mut merged: BTreeMap<String, String> = parsed
-        .extra_attrs
-        .and_then(|attrs| attrs.labels)
-        .unwrap_or_default();
-    for (key, value) in parsed.labels.unwrap_or_default() {
-        merged.insert(key, value);
+/// Copies the string members of `value` into `into` when `value` is a JSON object. Anything
+/// else (missing, `null`, or Harbor's own label array at the top level) adds nothing.
+fn merge_string_map(into: &mut BTreeMap<String, String>, value: Option<&Value>) {
+    if let Some(Value::Object(map)) = value {
+        for (key, value) in map {
+            if let Value::String(text) = value {
+                into.insert(key.clone(), text.clone());
+            }
+        }
     }
+}
+
+/// Reads the labels from an artifact JSON body. Harbor stores the image config, including
+/// its OCI `Labels`, in `extra_attrs.config` (`specs/integrations.md`, verified against a
+/// live Harbor on 2026-11-06). The older `extra_attrs.labels` and a top-level object are
+/// also read, later ones winning. Harbor's top-level `labels` is normally `null` or an array
+/// of Harbor label objects, which carry no OCI labels and are ignored. An image index has no
+/// `extra_attrs`; see [`index_image_child`].
+pub fn parse_labels(body: &[u8]) -> Result<ArtifactLabels, AppError> {
+    let parsed: Value = serde_json::from_slice(body).map_err(|_| AppError::InternalError)?;
+    if !parsed.is_object() {
+        return Err(AppError::InternalError);
+    }
+    let mut merged: BTreeMap<String, String> = BTreeMap::new();
+    merge_string_map(&mut merged, parsed.pointer("/extra_attrs/config/Labels"));
+    merge_string_map(&mut merged, parsed.pointer("/extra_attrs/labels"));
+    merge_string_map(&mut merged, parsed.get("labels"));
     Ok(ArtifactLabels {
         revision: merged.get(LABEL_REVISION).cloned(),
         source: merged.get(LABEL_SOURCE).cloned(),
         branch: merged.get(LABEL_BRANCH).cloned(),
     })
+}
+
+/// For an image index (a multi-platform push, as `docker buildx` makes by default), the
+/// digest of the first child that is a real image: not a BuildKit attestation manifest
+/// (`vnd.docker.reference.type` = `attestation-manifest`) and not platform `unknown`. The
+/// index itself has no image config, so its labels live on this child. `None` when the
+/// body is not an index or no child qualifies, or the child digest is not a valid digest.
+pub fn index_image_child(body: &[u8]) -> Option<String> {
+    let parsed: Value = serde_json::from_slice(body).ok()?;
+    let references = parsed.get("references")?.as_array()?;
+    references
+        .iter()
+        .filter(|reference| {
+            reference
+                .pointer("/annotations/vnd.docker.reference.type")
+                .and_then(Value::as_str)
+                != Some("attestation-manifest")
+        })
+        .filter(|reference| {
+            reference.pointer("/platform/os").and_then(Value::as_str) != Some("unknown")
+        })
+        .filter_map(|reference| reference.get("child_digest").and_then(Value::as_str))
+        .find(|digest| valid_digest(digest))
+        .map(str::to_owned)
 }
 
 /// Builds the artifact URL for a digest. Every name segment is encoded, and the
@@ -392,8 +418,8 @@ pub fn branch_for(labels: &ArtifactLabels, default_branch: &str) -> String {
 mod tests {
     use super::*;
 
-    /// A spec-derived artifact body. Harbor's real response was not captured here; this
-    /// follows the shape recorded in `specs/integrations.md`. Values are fake.
+    /// An older assumed shape (`extra_attrs.labels` and a top-level object), still read.
+    /// Values are fake. See `LIVE_IMAGE` for the shape a real Harbor returns.
     const ARTIFACT: &str = r#"{
         "digest": "sha256:aaaa",
         "extra_attrs": {"labels": {
@@ -415,6 +441,79 @@ mod tests {
             Some("https://github.com/octo/app")
         );
         assert_eq!(labels.branch.as_deref(), Some("release"));
+    }
+
+    /// The shape a live Harbor returned on 2026-11-06 for an image manifest (keys and types
+    /// captured, values fake): the OCI labels sit in `extra_attrs.config.Labels`, and the
+    /// top-level `labels` is `null`.
+    const LIVE_IMAGE: &str = r#"{
+        "digest": "sha256:aaaa",
+        "labels": null,
+        "tags": null,
+        "media_type": "application/vnd.oci.image.config.v1+json",
+        "extra_attrs": {
+            "architecture": "amd64", "os": "linux", "author": "", "created": "2026-11-06T00:00:00Z",
+            "config": {"Cmd": ["/app"], "Labels": {
+                "org.opencontainers.image.revision": "0123456789abcdef0123456789abcdef01234567",
+                "org.opencontainers.image.source": "https://github.com/octo/app"
+            }}
+        }
+    }"#;
+
+    #[test]
+    fn labels_are_read_from_the_image_config() {
+        let labels = parse_labels(LIVE_IMAGE.as_bytes()).unwrap();
+        assert_eq!(
+            labels.revision.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert_eq!(
+            labels.source.as_deref(),
+            Some("https://github.com/octo/app")
+        );
+        assert_eq!(labels.branch, None);
+    }
+
+    #[test]
+    fn harbor_label_array_at_the_top_level_is_ignored() {
+        let body = r#"{"labels": [{"id": 1, "name": "prod"}],
+            "extra_attrs": {"config": {"Labels": {"org.opencontainers.image.revision": "abc"}}}}"#;
+        let labels = parse_labels(body.as_bytes()).unwrap();
+        assert_eq!(labels.revision.as_deref(), Some("abc"));
+        assert!(parse_labels(b"[]").is_err());
+    }
+
+    /// The live shape of a buildx image index (2026-11-06): no `extra_attrs`, an amd64 image
+    /// child and a BuildKit attestation child on platform `unknown`.
+    fn live_index(image_child: &str, attestation_child: &str) -> String {
+        format!(
+            r#"{{"digest": "sha256:{}", "labels": null, "tags": [{{"name": "latest"}}],
+            "media_type": "application/vnd.oci.image.index.v1+json",
+            "references": [
+                {{"child_digest": "{attestation_child}", "platform": {{"os": "unknown", "architecture": "unknown"}},
+                  "annotations": {{"vnd.docker.reference.type": "attestation-manifest"}}}},
+                {{"child_digest": "{image_child}", "platform": {{"os": "linux", "architecture": "amd64", "OsFeatures": null}}}}
+            ]}}"#,
+            "c".repeat(64)
+        )
+    }
+
+    #[test]
+    fn an_index_has_no_labels_and_names_its_image_child() {
+        let image = format!("sha256:{}", "a".repeat(64));
+        let attestation = format!("sha256:{}", "b".repeat(64));
+        let body = live_index(&image, &attestation);
+        assert_eq!(parse_labels(body.as_bytes()).unwrap().revision, None);
+        assert_eq!(index_image_child(body.as_bytes()), Some(image));
+    }
+
+    #[test]
+    fn no_image_child_without_a_valid_reference() {
+        assert_eq!(index_image_child(LIVE_IMAGE.as_bytes()), None);
+        assert_eq!(index_image_child(br#"{"references": null}"#), None);
+        let body = live_index("sha256:../../x", &format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(index_image_child(body.as_bytes()), None);
+        assert_eq!(index_image_child(b"not json"), None);
     }
 
     #[test]
