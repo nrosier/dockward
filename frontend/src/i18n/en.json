@@ -387,7 +387,6 @@
   "credentials.form.expiresHelp": "HarborGate warns 14 days before this date.",
   "credentials.form.owner": "Owner",
   "credentials.form.repo": "Repository",
-  "credentials.form.testOnlyHelp": "Owner and repository are used for the connection test only. They are not saved.",
   "credentials.test.title": "Connection test",
   "credentials.test.saved": "Saved. HarborGate tested the credential from the server.",
   "credentials.test.repository": "Repository checked: {name}",

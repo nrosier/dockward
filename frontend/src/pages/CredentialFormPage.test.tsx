@@ -50,7 +50,7 @@ describe("CredentialFormPage", () => {
     expect(screen.getByLabelText(t("credentials.form.robotSecret"))).toHaveValue("");
   });
 
-  it("sends owner and repo with the GitHub test", async () => {
+  it("GitHub form has no owner or repository field and the test sends no body", async () => {
     const fetchMock = stubApi((path, init) => {
       if (path === "/api/v1/credentials" && init?.method === "POST") {
         return json({ ...saved, service_type: "github" }, 201);
@@ -62,15 +62,17 @@ describe("CredentialFormPage", () => {
     });
     renderWithRoutes(routes, "/account/credentials/new");
     await userEvent.click(screen.getByRole("button", { name: t("credentials.service.github") }));
+    expect(document.getElementById("cred-owner")).toBeNull();
+    expect(document.getElementById("cred-repo")).toBeNull();
     fireEvent.change(screen.getByLabelText(t("credentials.form.label")), { target: { value: "gh" } });
     fireEvent.change(screen.getByLabelText(t("credentials.form.githubToken")), { target: { value: "ghp_token" } });
-    fireEvent.change(screen.getByLabelText(t("credentials.form.owner")), { target: { value: "example-org" } });
-    fireEvent.change(screen.getByLabelText(t("credentials.form.repo")), { target: { value: "billing" } });
-    await userEvent.click(screen.getByRole("button", { name: t("credentials.saveAndTest") }));
+    const submit = screen.getByRole("button", { name: t("credentials.saveAndTest") });
+    expect(submit).toBeEnabled();
+    await userEvent.click(submit);
 
     await screen.findByText(t("credentials.test.title"));
     const test = fetchMock.mock.calls.find((call) => String(call[0]).endsWith("/test"));
-    expect(bodyOf(test)).toEqual({ owner: "example-org", repo: "billing" });
+    expect(test?.[1]?.body).toBeUndefined();
     const post = fetchMock.mock.calls.find((call) => String(call[0]) === "/api/v1/credentials");
     expect(bodyOf(post)).not.toHaveProperty("owner");
     expect(bodyOf(post)).not.toHaveProperty("repo");
