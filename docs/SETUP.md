@@ -88,8 +88,9 @@ Do these steps for each Harbor project that HarborGate will map. Use a project a
 | Artifact: Read | Read one artifact, including its OCI labels and scan overview |
 | Artifact Addition: Read | Read the vulnerability report (`GET .../artifacts/{reference}/additions/vulnerabilities`) |
 | Tag: List | List the tags of an artifact (`GET .../artifacts/{reference}/tags`). Required (live test 2026-11-06: without it, the tags endpoint returned `403` for a digest tagged `latest`) |
+| Scan | Start a scan of an artifact (`POST .../artifacts/{reference}/scan`). Required for a mapping's scheduled scan to start. Decided 2026-11-06 (user, #191): granted to the robot in Harbor. |
 
-In the robot's permission list these appear as the resources **Repository**, **Artifact**, **Artifact Addition**, and **Tag**, with the actions **List** and **Read** (**Tag** uses only **List**). Do not grant anything else: no Repository Pull or Push, no Scan, no create, delete, or tag create or delete permissions, and no project or system administration.
+In the robot's permission list these appear as the resources **Repository**, **Artifact**, **Artifact Addition**, **Tag**, and **Scan**, with the actions **List** and **Read** (**Tag** uses only **List**). Do not grant anything else: no Repository Pull or Push, no create, delete, or tag create or delete permissions, and no project or system administration. The "do not grant Scan" rule is replaced by the row above (Decided 2026-11-06, user, #191).
 
 Verification status (2026-11-03, updated 2026-11-05):
 - Each endpoint's permission check was read in the Harbor source (`src/server/v2.0/handler/artifact.go`): listing artifacts needs Artifact List, reading an artifact needs Artifact Read, and the vulnerabilities addition needs Artifact Addition Read. The scan overview comes with the artifact read, so Scan Read is not needed. HarborGate never pulls an image, so Repository Pull is not needed.
