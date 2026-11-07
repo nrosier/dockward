@@ -218,6 +218,13 @@ impl OutboundClient {
         Ok(self.inner.post(url.as_str()))
     }
 
+    /// A PUT request builder for `url`, after the target check. Used only to set the Harbor
+    /// project scanner (#224).
+    pub fn put(&self, url: &reqwest::Url) -> Result<reqwest::RequestBuilder, OutboundError> {
+        self.check(url)?;
+        Ok(self.inner.put(url.as_str()))
+    }
+
     /// A PATCH request builder for `url`, after the target check.
     pub fn patch(&self, url: &reqwest::Url) -> Result<reqwest::RequestBuilder, OutboundError> {
         self.check(url)?;

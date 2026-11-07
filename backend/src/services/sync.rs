@@ -39,7 +39,7 @@ use crate::services::harbor_client::{
 };
 use crate::services::issue_lifecycle::{self, IssueApi};
 use crate::services::resolve::{self, JobKind};
-use crate::services::{findings, ids, sarif, scheduled_scan};
+use crate::services::{findings, ids, sarif, scanner_scan, scheduled_scan};
 use crate::worker::{JobHandler, JobOutcome, now_secs};
 
 /// Waits between processing polls: 5 s, then 10 s, then every 15 s.
@@ -84,15 +84,29 @@ pub trait HarborFetch: Send + Sync + 'static {
         extra_headers: &[(&str, &str)],
     ) -> impl Future<Output = Result<HarborReply, AppError>> + Send;
 
-    /// Sends one JSON `POST`. Only the scheduled scan uses it, to start a Harbor scan (#191).
-    /// The default refuses, so a reader that never starts a scan (the poller, the pull, the
-    /// read-only test fakes) needs no implementation.
+    /// Sends one JSON `POST`. The scheduled scan (#191) and the scanner job (#224) use it, to
+    /// start a Harbor scan. The default refuses, so a reader that never starts a scan (the poller,
+    /// the pull, the read-only test fakes) needs no implementation.
     fn post_json(
         &self,
         _url: &Url,
         _username: &str,
         _secret: &[u8],
         _body: &[u8],
+        _extra_headers: &[(&str, &str)],
+    ) -> impl Future<Output = Result<HarborReply, AppError>> + Send {
+        std::future::ready(Err(AppError::InternalError))
+    }
+
+    /// Sends one JSON `PUT` with extra headers. Only the scanner job uses it, to set the project
+    /// scanner (#224). The default refuses.
+    fn put_json(
+        &self,
+        _url: &Url,
+        _username: &str,
+        _secret: &[u8],
+        _body: &[u8],
+        _extra_headers: &[(&str, &str)],
     ) -> impl Future<Output = Result<HarborReply, AppError>> + Send {
         std::future::ready(Err(AppError::InternalError))
     }
@@ -115,8 +129,20 @@ impl HarborFetch for HarborGet {
         username: &str,
         secret: &[u8],
         body: &[u8],
+        extra_headers: &[(&str, &str)],
     ) -> Result<HarborReply, AppError> {
-        HarborGet::post_json(self, url, username, secret, body).await
+        HarborGet::post_json(self, url, username, secret, body, extra_headers).await
+    }
+
+    async fn put_json(
+        &self,
+        url: &Url,
+        username: &str,
+        secret: &[u8],
+        body: &[u8],
+        extra_headers: &[(&str, &str)],
+    ) -> Result<HarborReply, AppError> {
+        HarborGet::put_json(self, url, username, secret, body, extra_headers).await
     }
 }
 
@@ -800,6 +826,26 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> JobHandler
             }
             JobKind::Scan => {
                 scheduled_scan::run_job(
+                    &self.pool,
+                    &self.credentials_key,
+                    &self.harbor,
+                    &self.clock,
+                    &job,
+                )
+                .await
+            }
+            JobKind::ScannerScan => {
+                scanner_scan::run_job(
+                    &self.pool,
+                    &self.credentials_key,
+                    &self.harbor,
+                    &self.clock,
+                    &job,
+                )
+                .await
+            }
+            JobKind::ScannerRestore => {
+                scanner_scan::run_restore_job(
                     &self.pool,
                     &self.credentials_key,
                     &self.harbor,
