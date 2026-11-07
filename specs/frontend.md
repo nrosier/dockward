@@ -93,7 +93,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 ## Dashboard (decided)
 
 - Summary counts: open CVEs by severity (CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN; every severity since 2026-11-05, user, #129), fixed CVEs, open GitHub issues, failed syncs.
-- Decided (2026-11-07, user, #196, decisions 21 and 22): the CVE counts (open by severity, fixed) follow the newest scanned digest of each mapping, the same view as the CVE list. A CVE open only on an older tag adds nothing to them. The same holds for the Open CVEs column of the mapping list. Rules: [cve-lifecycle.md](cve-lifecycle.md), "Dashboard counts". No layout changes, so no new design is needed.
+- Decided (2026-11-07, user, #196, decisions 21 and 22): the CVE counts (open by severity, fixed) follow the newest scanned digest of each mapping, the same view as the CVE list. A CVE open only on an older tag adds nothing to them. Decided (2026-11-07, user, #196, decision 23): the fixed count follows the newest digest only too, so a CVE that only an older digest reported as fixed adds nothing to it. The same holds for the Open CVEs column of the mapping list. Rules: [cve-lifecycle.md](cve-lifecycle.md), "Dashboard counts". No layout changes, so no new design is needed.
 - Below the counts: recent syncs with status and time. Failed rows have a retry action.
 
 ## Mapping form (decided)
@@ -167,15 +167,15 @@ Decided (2026-11-07, user, #224 d1, d8, d12): each tag has a Scan button on the 
 - Header: CVE id, severity pill, status pill, package, first seen date, link to the GitHub issue, and an "Accept risk" action.
 - Decided (2026-11-03): the manual-issue button sits in this header, next to the GitHub issue link. It calls `POST /api/v1/cves/{id}/issue`.
 - Below the header: a table with one row per tracked tag that reports this CVE (up to 10). Columns: tag, status, last scan date, fixed-in version when known.
-- Decided (2026-11-07, user, #196, decisions 21 and 22): this table is where the rows of older tags stay visible. A row for a tag of the newest scanned digest has no marker. A row for any other tag shows the pill text `cves.detail.olderTag`. The header status is the status in the newest-digest view, so a CVE that only older tags report shows `fixed`. In that case a notice with `cves.detail.olderTagsOnly` is shown above the table, and the Accept risk action and the manual-issue button follow the rules they already have ([api.md](api.md), CVEs). The page is reached by its URL; the CVE list does not link to it.
+- Decided (2026-11-07, user, #196, decisions 21 and 22): this table is where the rows of older tags stay visible. A row for a tag of the newest scanned digest has no marker. A row for any other tag shows the plain text `cves.detail.olderTag`, not a badge. The header status is the status in the newest-digest view, so a CVE that only older tags report shows `fixed`. In that case the CVE row in the header carries the inline text `cves.detail.olderTagsOnly` with the names of the older tags that report it (the `tags[]` entries with `newest_digest` false and status `open`). It is plain inline text: no badge and no separate panel (Approved by the user 2026-11-07, issue #196, decision 24). The Accept risk action and the manual-issue button follow the rules they already have ([api.md](api.md), CVEs). The page is reached by its URL; the CVE list does not link to it.
 - Catalog keys for this change (Decided 2026-11-07, English text delegated, #196; parity kept in `frontend/src/i18n/en.json`):
 
   | Key | English text |
   | --- | --- |
   | `cves.detail.olderTag` | Older tag, not counted |
-  | `cves.detail.olderTagsOnly` | Only older tags report this CVE. The newest scan does not, so it is not in the CVE list and not counted on the Dashboard. |
+  | `cves.detail.olderTagsOnly` | Open on older tags only: {tags} |
 
-- OPEN (2026-11-07, #196): the notice and the tag marker are new UI. Their design needs the user's approval before they are built (CLAUDE.md, design before build). Only the contract above is decided.
+- Design approval (2026-11-07, user, #196, decision 24): the older-tag notice is approved as inline text in the CVE row, for example "open on older tags only" with the tag names. No badge and no separate panel. The design needs no further approval.
 
 ## Admin (decided)
 
