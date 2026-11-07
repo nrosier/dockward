@@ -79,6 +79,7 @@ impl HarborFetch for Arc<FakeHarbor> {
         username: &str,
         secret: &[u8],
         body: &[u8],
+        _extra_headers: &[(&str, &str)],
     ) -> Result<HarborReply, AppError> {
         assert_eq!(username, "robot$one");
         assert_eq!(secret, b"secret-one");

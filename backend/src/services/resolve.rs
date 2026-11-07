@@ -68,6 +68,10 @@ pub enum JobKind {
     Resolve,
     /// `"scan"`: a scheduled scan of the newest tagged image (#191).
     Scan,
+    /// `"scanner_scan"`: a scan with one Harbor scanner, or the project's own (#224).
+    ScannerScan,
+    /// `"scanner_restore"`: restores a project's scanner after a failed restore (#224).
+    ScannerRestore,
     /// Any other `kind`. The job fails for good.
     Unknown,
 }
@@ -84,6 +88,8 @@ pub fn job_kind(payload: &str) -> JobKind {
         Some(Value::String(kind)) if kind == "sync" => JobKind::Sync,
         Some(Value::String(kind)) if kind == "resolve" => JobKind::Resolve,
         Some(Value::String(kind)) if kind == "scan" => JobKind::Scan,
+        Some(Value::String(kind)) if kind == "scanner_scan" => JobKind::ScannerScan,
+        Some(Value::String(kind)) if kind == "scanner_restore" => JobKind::ScannerRestore,
         Some(_) => JobKind::Unknown,
     }
 }

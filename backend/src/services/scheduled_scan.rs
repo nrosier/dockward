@@ -274,7 +274,7 @@ async fn scan<H: HarborFetch, C: Clock>(
     )
     .map_err(|_| failed(MSG_BAD_NAMES))?;
     let reply = harbor
-        .post_json(&url, &username, &secret, SCAN_REQUEST_BODY)
+        .post_json(&url, &username, &secret, SCAN_REQUEST_BODY, &[])
         .await
         .map_err(|_| failed(MSG_UNREACHABLE))?;
     scan_answer(reply, clock.now())?;

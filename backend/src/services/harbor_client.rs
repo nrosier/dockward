@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use reqwest::Url;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::error::AppError;
 use crate::services::credential_probe::{encode_repository_path, encode_segment};
@@ -85,24 +85,54 @@ impl HarborGet {
         read_reply("GET", url, request).await
     }
 
-    /// Sends `POST url` with HTTP Basic auth and a JSON body. Used only to start a scan
-    /// (#191). Returns the status, the body and `Retry-After`, like [`HarborGet::get`].
+    /// Sends `POST url` with HTTP Basic auth, a JSON body and the given extra headers. Used to
+    /// start a scan (#191, #224). Returns the status, the body and `Retry-After`, like
+    /// [`HarborGet::get`].
     pub async fn post_json(
         &self,
         url: &Url,
         username: &str,
         secret: &[u8],
         body: &[u8],
+        extra_headers: &[(&str, &str)],
     ) -> Result<HarborReply, AppError> {
         let secret = std::str::from_utf8(secret).map_err(|_| AppError::InternalError)?;
-        let request = self
+        let mut request = self
             .client
             .post(url)
             .map_err(|_| AppError::UpstreamUnreachable)?
             .basic_auth(username, Some(secret))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_vec());
+        for (name, value) in extra_headers {
+            request = request.header(*name, *value);
+        }
         read_reply("POST", url, request).await
+    }
+
+    /// Sends `PUT url` with HTTP Basic auth, a JSON body and the given extra headers. Used only to
+    /// set the project scanner (#224). Returns the status, the body and `Retry-After`, like
+    /// [`HarborGet::get`].
+    pub async fn put_json(
+        &self,
+        url: &Url,
+        username: &str,
+        secret: &[u8],
+        body: &[u8],
+        extra_headers: &[(&str, &str)],
+    ) -> Result<HarborReply, AppError> {
+        let secret = std::str::from_utf8(secret).map_err(|_| AppError::InternalError)?;
+        let mut request = self
+            .client
+            .put(url)
+            .map_err(|_| AppError::UpstreamUnreachable)?
+            .basic_auth(username, Some(secret))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_vec());
+        for (name, value) in extra_headers {
+            request = request.header(*name, *value);
+        }
+        read_reply("PUT", url, request).await
     }
 }
 
@@ -156,6 +186,154 @@ pub fn scan_url(
         encode_segment(digest)
     );
     base.join(&path).map_err(|_| invalid_name())
+}
+
+/// Header Harbor needs on project paths, so a numeric project name is read as a name and not an
+/// id (swagger `isResourceName`, #224).
+pub const PROJECT_NAME_HEADER: (&str, &str) = ("X-Is-Resource-Name", "true");
+
+/// The most scanner registrations read from the candidates list: 100 per page, at most 10 pages,
+/// the same cap as the other Harbor lists (`specs/integrations.md`, "Scanner choice and listing").
+pub const SCANNER_PAGE_SIZE: u32 = 100;
+pub const SCANNER_MAX_PAGES: u32 = 10;
+
+/// Builds the project scanner URL (`GET` and `PUT .../projects/{p}/scanner`, #224).
+pub fn project_scanner_url(base: &Url, project: &str) -> Result<Url, AppError> {
+    let path = format!("api/v2.0/projects/{}/scanner", encode_segment(project));
+    base.join(&path).map_err(|_| invalid_name())
+}
+
+/// Builds the scanner candidates URL for one page (`GET .../scanner/candidates`, #224).
+pub fn scanner_candidates_url(base: &Url, project: &str, page: u32) -> Result<Url, AppError> {
+    let path = format!(
+        "api/v2.0/projects/{}/scanner/candidates",
+        encode_segment(project)
+    );
+    let mut url = base.join(&path).map_err(|_| invalid_name())?;
+    url.query_pairs_mut()
+        .append_pair("page", &page.to_string())
+        .append_pair("page_size", &SCANNER_PAGE_SIZE.to_string());
+    Ok(url)
+}
+
+/// Builds the artifact URL with `with_scan_overview=true`, which carries `scan_overview` (#224).
+pub fn artifact_overview_url(
+    base: &Url,
+    project: &str,
+    repository: &str,
+    digest: &str,
+) -> Result<Url, AppError> {
+    let mut url = artifact_url(base, project, repository, digest)?;
+    url.query_pairs_mut()
+        .append_pair("with_scan_overview", "true");
+    Ok(url)
+}
+
+/// The body of `PUT .../projects/{p}/scanner` (`{"uuid"}`, swagger `setScannerOfProject`).
+pub fn set_scanner_body(uuid: &str) -> Vec<u8> {
+    json!({ "uuid": uuid }).to_string().into_bytes()
+}
+
+/// One Harbor scanner registration, as HarborGate reads it. Only these fields are read: `url`,
+/// `auth` and `access_credential` have no field here, so they cannot be stored or logged
+/// (`specs/integrations.md`, "Harbor calls").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScannerRegistration {
+    pub uuid: String,
+    pub name: String,
+    pub vendor: Option<String>,
+    pub version: Option<String>,
+    pub disabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawScanner {
+    #[serde(default)]
+    uuid: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    vendor: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    disabled: Option<bool>,
+}
+
+impl RawScanner {
+    /// A registration with no UUID cannot be keyed, so it is `None`.
+    fn into_registration(self) -> Option<ScannerRegistration> {
+        let uuid = self.uuid.filter(|uuid| !uuid.is_empty())?;
+        Some(ScannerRegistration {
+            uuid,
+            name: self.name.unwrap_or_default(),
+            vendor: self.vendor,
+            version: self.version,
+            disabled: self.disabled.unwrap_or(false),
+        })
+    }
+}
+
+/// Reads one scanner registration (`GET .../scanner`). A body with no UUID is a failure.
+pub fn parse_scanner(body: &[u8]) -> Result<ScannerRegistration, AppError> {
+    let raw: RawScanner =
+        serde_json::from_slice(body).map_err(|_| AppError::UpstreamUnreachable)?;
+    raw.into_registration().ok_or(AppError::UpstreamUnreachable)
+}
+
+/// Reads one page of scanner registrations (`GET .../scanner/candidates`). Entries with no UUID
+/// are skipped. A body that is not a JSON array is a failure.
+pub fn parse_scanner_list(body: &[u8]) -> Result<Vec<ScannerRegistration>, AppError> {
+    let raw: Vec<RawScanner> =
+        serde_json::from_slice(body).map_err(|_| AppError::UpstreamUnreachable)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(RawScanner::into_registration)
+        .collect())
+}
+
+/// The scan state of the vulnerability report for the project's current scanner (#224).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanStatus {
+    /// `Success`: the report is final and can be read.
+    Success,
+    /// `Pending`, `Running` or `Scheduled`: the scan is not done.
+    InProgress,
+    /// `Error` or `Stopped`: the scan did not finish.
+    Failed,
+    /// No overview for this MIME type, or a status string HarborGate does not know. The status
+    /// strings are UNVERIFIED against live Harbor (`specs/integrations.md`), so this is not an error.
+    Other,
+}
+
+/// Reads the scan state of the Trivy MIME type from an artifact body fetched with
+/// `with_scan_overview=true` (`scan_overview[<mime>].scan_status`). Matching is case-insensitive.
+pub fn overview_status(body: &[u8]) -> Result<ScanStatus, AppError> {
+    let value: Value = serde_json::from_slice(body).map_err(|_| AppError::UpstreamUnreachable)?;
+    let status = value
+        .pointer("/scan_overview")
+        .and_then(|overview| overview.get(TRIVY_REPORT_MIME))
+        .and_then(|entry| entry.get("scan_status"))
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    Ok(match status.as_deref() {
+        Some("success") => ScanStatus::Success,
+        Some("pending" | "running" | "scheduled") => ScanStatus::InProgress,
+        Some("error" | "stopped") => ScanStatus::Failed,
+        _ => ScanStatus::Other,
+    })
+}
+
+/// The artifact's digest from an artifact body (`GET .../artifacts/{reference}`). A tag
+/// resolves to the digest it points at now.
+pub fn parse_artifact_digest(body: &[u8]) -> Result<String, AppError> {
+    let value: Value = serde_json::from_slice(body).map_err(|_| AppError::UpstreamUnreachable)?;
+    value
+        .get("digest")
+        .and_then(Value::as_str)
+        .filter(|digest| valid_digest(digest))
+        .map(str::to_owned)
+        .ok_or(AppError::UpstreamUnreachable)
 }
 
 /// Builds the list URL for the newest tagged artifact of a repository: one item, sorted by

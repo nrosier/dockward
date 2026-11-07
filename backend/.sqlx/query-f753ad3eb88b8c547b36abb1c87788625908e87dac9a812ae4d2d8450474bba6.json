@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE project_scanner_locks\n         SET job_id = ?, state = 'restore_pending'\n         WHERE harbor_base_url = ? AND harbor_project = ? AND job_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "f753ad3eb88b8c547b36abb1c87788625908e87dac9a812ae4d2d8450474bba6"
+}

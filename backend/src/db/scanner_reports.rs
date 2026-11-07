@@ -380,6 +380,79 @@ pub async fn release_project_lock(
     Ok(result.rows_affected() == 1)
 }
 
+/// Records the project's scanner from before the switch on the lock row that `job_id` holds, once.
+/// Returns `false` when `job_id` does not hold the lock.
+pub async fn set_lock_previous(
+    pool: &SqlitePool,
+    harbor_base_url: &str,
+    harbor_project: &str,
+    job_id: &str,
+    previous: &str,
+) -> Result<bool, AppError> {
+    let result = sqlx::query!(
+        "UPDATE project_scanner_locks
+         SET previous_scanner_uuid = ?
+         WHERE harbor_base_url = ? AND harbor_project = ? AND job_id = ?",
+        previous,
+        harbor_base_url,
+        harbor_project,
+        job_id
+    )
+    .execute(pool)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Sets the time the report wait started, once. The 5-minute ceiling counts from it, and the
+/// value survives a deferral or a restart. Returns `false` when `job_id` does not hold the lock.
+pub async fn set_lock_wait_started(
+    pool: &SqlitePool,
+    harbor_base_url: &str,
+    harbor_project: &str,
+    job_id: &str,
+    now: i64,
+) -> Result<bool, AppError> {
+    let result = sqlx::query!(
+        "UPDATE project_scanner_locks
+         SET wait_started_at = COALESCE(wait_started_at, ?)
+         WHERE harbor_base_url = ? AND harbor_project = ? AND job_id = ?",
+        now,
+        harbor_base_url,
+        harbor_project,
+        job_id
+    )
+    .execute(pool)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Hands the lock from the scan job `from_job` to its restore job `to_job` and marks it
+/// `restore_pending`. Runs on the caller's connection, so it can join the restore job's insert in
+/// one transaction. Returns `false` when `from_job` does not hold the lock.
+pub async fn hand_over_lock(
+    conn: &mut SqliteConnection,
+    harbor_base_url: &str,
+    harbor_project: &str,
+    from_job: &str,
+    to_job: &str,
+) -> Result<bool, AppError> {
+    let result = sqlx::query!(
+        "UPDATE project_scanner_locks
+         SET job_id = ?, state = 'restore_pending'
+         WHERE harbor_base_url = ? AND harbor_project = ? AND job_id = ?",
+        to_job,
+        harbor_base_url,
+        harbor_project,
+        from_job
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(result.rows_affected() == 1)
+}
+
 /// The values of a new project scanner lock.
 pub struct NewProjectLock<'a> {
     pub job_id: &'a str,
