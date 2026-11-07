@@ -282,6 +282,8 @@ export interface HarborRepository {
   repository: string;
   // `<project>/<repository>`.
   full_name: string;
+  // True when a mapping on the same Harbor instance already uses it (#189).
+  mapped: boolean;
 }
 
 export interface GitHubRepository {

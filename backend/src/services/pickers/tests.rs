@@ -1789,3 +1789,107 @@ async fn a_base_url_with_a_path_prefix_keeps_the_prefix_on_every_call() {
     );
     fx.close().await;
 }
+
+/// Inserts a mapping row straight into the table, for the `mapped` flag (#189).
+async fn add_mapping(
+    pool: &SqlitePool,
+    id: &str,
+    owner: &str,
+    base: &str,
+    project: &str,
+    repo: &str,
+) {
+    sqlx::query(
+        "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+         SELECT ?, ?, h.id, h.id, ?, ?, ?, 'o', ?, ?, ?
+           FROM user_credentials h
+          WHERE h.user_id = ? AND h.service_type = 'harbor'
+          LIMIT 1",
+    )
+    .bind(id)
+    .bind(owner)
+    .bind(base)
+    .bind(project)
+    .bind(repo)
+    .bind(id)
+    .bind(format!("t-{id}"))
+    .bind(format!("s-{id}"))
+    .bind(owner)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// A repository mapped on this Harbor base URL, by any user, stays listed with
+/// `mapped: true` (#189). Unmapped ones are `false`. A mapping on another base URL, or in
+/// another project, does not mark it. A new mapping shows at once, without the cache.
+#[tokio::test]
+async fn mapped_repositories_stay_listed_and_are_marked() {
+    let fx = Fixture::new("repos-mapped").await;
+    let fake = Arc::new(Recorded::default());
+    robot_ok(&fake);
+    fake.on(
+        path_is("/api/v2.0/projects/proj/repositories"),
+        ok(r#"[{"name":"proj/app"},{"name":"proj/web"},{"name":"proj/worker"}]"#),
+    );
+    // Another user's mapping on the same base URL; one on another base URL; one in another
+    // project with the same repository name.
+    add_mapping(&fx.pool, "m-other", "other-2", BASE, "proj", "app").await;
+    add_mapping(
+        &fx.pool,
+        "m-far",
+        "owner-1",
+        "https://harbor-two.example.com",
+        "proj",
+        "web",
+    )
+    .await;
+    add_mapping(&fx.pool, "m-proj", "owner-1", BASE, "elsewhere", "worker").await;
+    let picker = state(fake.clone());
+    let marks = |page: &PickerPage<HarborRepository>| -> Vec<(String, bool)> {
+        page.items
+            .iter()
+            .map(|i| (i.repository.clone(), i.mapped))
+            .collect()
+    };
+    let page = picker
+        .harbor_repositories(&fx.caller(), &fx.harbor, "proj", &ListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        marks(&page),
+        [
+            ("app".to_owned(), true),
+            ("web".to_owned(), false),
+            ("worker".to_owned(), false)
+        ]
+    );
+    assert_eq!(page.total, 3, "a mapped repository is not hidden");
+    let json = serde_json::to_string(&page.items).unwrap();
+    assert!(
+        !json.contains("m-other") && !json.contains("other-2"),
+        "no id or owner: {json}"
+    );
+
+    // A new mapping on this base URL is marked on the next read, from the cache.
+    let calls = fake.calls.load(Ordering::SeqCst);
+    add_mapping(&fx.pool, "m-web", "owner-1", BASE, "proj", "web").await;
+    let page = picker
+        .harbor_repositories(&fx.caller(), &fx.harbor, "proj", &ListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.calls.load(Ordering::SeqCst),
+        calls,
+        "served from the cache"
+    );
+    assert_eq!(
+        marks(&page),
+        [
+            ("app".to_owned(), true),
+            ("web".to_owned(), true),
+            ("worker".to_owned(), false)
+        ]
+    );
+    fx.close().await;
+}

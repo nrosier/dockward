@@ -153,7 +153,7 @@ Decided (2026-11-05, user, #126): the mapping form picks the Harbor project, the
 
 Decided (2026-11-05, delegated, #126): route names. The three lists and the suggestion hang under the credential they use (`/credentials/:id/...`), like the existing `/credentials/:id/test`, so the owner-only check is the credential's. Path words are hyphenated plurals, like `sync-jobs` and `rotate-webhook-token`. Hidden items are their own resource, `/pickers/hidden`, because they belong to the user, not to a credential. Reason: the decisions name the routes' purpose, not their paths.
 
-`HarborProject` is `{"name"}`. `HarborRepository` is `{"project","repository","full_name"}`, where `full_name` is `<project>/<repository>`. `GitHubRepository` is `{"owner","repo","full_name","private","archived"}`. `HiddenItem` is `{"id","source","full_name","harbor_base_url","created_at"}`, where `harbor_base_url` is `null` for `github` source. None of them carries a token, a URL with credentials, or an upstream header.
+`HarborProject` is `{"name"}`. `HarborRepository` is `{"project","repository","full_name","mapped"}`, where `full_name` is `<project>/<repository>` and `mapped` is `true` when a mapping on the same Harbor base URL already uses that repository, for any user (Decided 2026-11-06, user, #189; [integrations.md](integrations.md), "Hide and restore"). `mapped` names no mapping or owner. `GitHubRepository` is `{"owner","repo","full_name","private","archived"}`. `HiddenItem` is `{"id","source","full_name","harbor_base_url","created_at"}`, where `harbor_base_url` is `null` for `github` source. None of them carries a token, a URL with credentials, or an upstream header.
 
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |

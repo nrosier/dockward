@@ -278,6 +278,11 @@ export function MappingForm({ mapping, readOnly = false, onCreated, onUpdated }:
             project={picked?.project ?? null}
             projectValue={values.harborProject}
             repositoryValue={values.harborRepository}
+            ownRepository={
+              mapping !== undefined && harborCredential?.base_url === mapping.harbor_base_url
+                ? `${mapping.harbor_project}/${mapping.harbor_repository}`
+                : undefined
+            }
             repositoryError={
               harborClash === undefined
                 ? undefined

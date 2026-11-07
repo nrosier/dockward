@@ -7,6 +7,8 @@ export interface ComboOption {
   content: ReactNode;
   // Called when the option is chosen.
   onSelect: () => void;
+  // Shown but not choosable (#189).
+  disabled?: boolean;
   // A control beside the option (for example Hide). Not part of the option itself.
   action?: ReactNode;
 }
@@ -55,7 +57,7 @@ export function Combobox({
 
   function choose(index: number) {
     const option = options[index];
-    if (option !== undefined) {
+    if (option !== undefined && option.disabled !== true) {
       option.onSelect();
       setOpen(false);
       setActive(-1);
@@ -134,10 +136,11 @@ export function Combobox({
                 // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- option of the ARIA listbox above
                 role="option"
                 aria-selected={index === activeIndex}
+                aria-disabled={option.disabled === true ? true : undefined}
                 tabIndex={-1}
                 onClick={() => choose(index)}
                 onKeyDown={() => undefined}
-                className={`min-w-0 flex-1 cursor-pointer truncate rounded-md px-2.5 py-1.5 hover:bg-surface-2 ${index === activeIndex ? "bg-surface-2" : ""}`}
+                className={`min-w-0 flex-1 truncate rounded-md px-2.5 py-1.5 ${option.disabled === true ? "cursor-not-allowed text-muted" : "cursor-pointer hover:bg-surface-2"} ${index === activeIndex ? "bg-surface-2" : ""}`}
               >
                 {option.content}
               </div>
