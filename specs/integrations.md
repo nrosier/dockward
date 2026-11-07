@@ -304,6 +304,26 @@ Each is OPEN: and is not decided here.
 4. OPEN: the Scans card needs a design approval before build (see [frontend.md](frontend.md)).
 5. OPEN: the 5-minute report-wait ceiling and the 5-minute scan cooldown are reused from existing rules, not measured. Is a scan with a large scanner done within 5 minutes? A longer scan fails the attempt and retries on the 8-attempt backoff with a new switch each time.
 
+### Verification and acceptance changes (#224)
+
+Required test scenarios (Decided 2026-11-07, delegated, #224): (a) the sequence with a fake Harbor: switch, scan, wait, fetch, store, restore, in order; (b) restore runs after a failed scan, a failed fetch and a rate-limit deferral; (c) a failed restore queues `scanner_restore`, holds the lock, retries on the backoff, raises the alert; (d) two jobs for one project never switch at the same time, and a restart mid-wait resumes and restores; (e) a second scanner's report does not replace the first, and the same scanner's replaces its own; (f) the merge: same CVE id and package from two scanners is one finding with count 2 and names in the fixed order, one scanner gives count 1; (g) the issue stays open while one scanner still reports and closes when none do; (h) SARIF has one result per (CVE, package) with the two property keys and validates against the SARIF 2.1.0 schema in `backend/tests/schemas`; (i) the migration gives one `unknown` report per digest and leaves counts and issues unchanged; (j) a robot without Scanner Create gets `unavailable` and a plain scan; (k) no secret, scanner `url` or `access_credential` appears in a log, job row, response or alert.
+
+Changes the spec makes to the acceptance criteria on #224 (the issue body is not edited here; the criteria stay unticked):
+
+- Criterion 1: met by this spec once merged; it records the decisions in `integrations.md`, `database.md` and `cve-lifecycle.md`, and also `backend.md`, `api.md`, `frontend.md`.
+- Criterion 2: "Harbor runs it with the chosen scanner" becomes: HarborGate sets the project's scanner to the chosen one, starts the scan, waits, and restores (d11). Harbor's scan call cannot take a scanner.
+- Criterion 3: "with one scanner, no prompt" also holds when the robot cannot list scanners (`unavailable`); the picker lists scanners by name.
+- Criterion 4: "name and version" are the report's scanner object (snapshot); the scanner key is the registration UUID.
+- Criterion 5: stored per (digest, scanner UUID); the same scanner replaces its own.
+- Criteria 6 and 7: merge key is CVE id plus package; names are in the fixed order of `cve-lifecycle.md`.
+- Criterion 8: scanner count and names are in the issue body line and in the SARIF result properties `harborgate/scannerCount` and `harborgate/scannerNames`.
+- Criterion 9: add: the scan is per scanner; other scanners' reports are kept; the fixed messages are in "Failure and messages"; a failed restore also raises the alert.
+- Criterion 10: also covers scanner `url`, `auth` and `access_credential`, which are never read.
+- Criterion 12: `docs/SETUP.md` lists Scanner Read and Scanner Create (optional) beside Scan Create, with the side effects.
+- Criterion 13: unchanged. Note: the issue lists 14 criteria, not 13.
+- Criterion 14: the live check needs a Harbor with two scanners and covers the UNVERIFIED items below; add to it a check that the previous scanner is restored after each scan and after a forced failure.
+- New criterion proposed (not added to the issue): a switch is always restored, or the failed restore is visible on the mapping page and in an alert.
+
 ### Live checks (UNVERIFIED)
 
 Run against a Harbor with two scanners. Record here when done.
