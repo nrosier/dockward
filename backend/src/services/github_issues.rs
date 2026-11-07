@@ -385,6 +385,81 @@ pub async fn is_open_with<H: ScanHttp>(
     }
 }
 
+/// The `Found by` line of an issue body starts with this text.
+const FOUND_BY_PREFIX: &str = "Found by ";
+
+/// The body with the `Found by` line set right after the table (`specs/integrations.md`, "GitHub
+/// issues"). An existing `Found by` line is replaced where it stands. Without one, the line goes on
+/// its own paragraph after the last table row. Everything else, including a user's edits, is kept.
+/// Returns `None` when the body already has this line, or has no table to put it after.
+pub fn with_found_by(body: &str, line: &str) -> Option<String> {
+    let lines: Vec<&str> = body.split('\n').collect();
+    if let Some(index) = lines.iter().position(|l| l.starts_with(FOUND_BY_PREFIX)) {
+        if lines[index] == line {
+            return None;
+        }
+        let mut next = lines.clone();
+        next[index] = line;
+        return Some(next.join("\n"));
+    }
+    // The table is the run of `|` lines that starts at the header row HarborGate wrote. A table-like
+    // line in the description fence, further down, is never taken for it.
+    let header = lines.iter().position(|l| *l == "| Field | Value |")?;
+    let last_row = lines[header..]
+        .iter()
+        .take_while(|l| l.starts_with('|'))
+        .count()
+        + header
+        - 1;
+    let mut next: Vec<&str> = lines[..=last_row].to_vec();
+    next.push("");
+    next.push(line);
+    next.extend_from_slice(&lines[last_row + 1..]);
+    Some(next.join("\n"))
+}
+
+/// Reads one issue and returns its body (an empty string when it has none).
+pub async fn body_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    number: u64,
+    now: i64,
+) -> Result<String, ScanError> {
+    check_names(owner, repo)?;
+    let path = format!("repos/{owner}/{repo}/issues/{number}");
+    let response = http.get(&path, token).await?;
+    if response.status != 200 {
+        return Err(classify(&response, now));
+    }
+    Ok(response
+        .body
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned())
+}
+
+/// Replaces the body of an issue.
+pub async fn set_body_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    number: u64,
+    body: &str,
+    now: i64,
+) -> Result<(), ScanError> {
+    check_names(owner, repo)?;
+    let path = format!("repos/{owner}/{repo}/issues/{number}");
+    let response = http.patch(&path, token, &json!({"body": body})).await?;
+    if response.status != 200 {
+        return Err(classify(&response, now));
+    }
+    Ok(())
+}
+
 /// The GitHub Issues client. Built on the guarded outbound client for the configured GitHub
 /// API base URL.
 pub struct GithubIssues {
@@ -493,6 +568,31 @@ impl GithubIssues {
         now: i64,
     ) -> Result<bool, ScanError> {
         is_open_with(&self.http(), token, owner, repo, number, now).await
+    }
+
+    /// Reads an issue body. See [`body_with`].
+    pub async fn body(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        now: i64,
+    ) -> Result<String, ScanError> {
+        body_with(&self.http(), token, owner, repo, number, now).await
+    }
+
+    /// Replaces an issue body. See [`set_body_with`].
+    pub async fn set_body(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        body: &str,
+        now: i64,
+    ) -> Result<(), ScanError> {
+        set_body_with(&self.http(), token, owner, repo, number, body, now).await
     }
 
     /// Opens or closes an issue. See [`set_state_with`].
@@ -921,5 +1021,35 @@ mod tests {
         );
         assert!(body.contains("| Package | a\\|b c |"));
         assert!(body.contains("| Fixed in | none yet |"));
+    }
+
+    #[test]
+    fn found_by_goes_right_after_the_table_and_is_replaced_in_place() {
+        let body = issue_body(
+            "CVE-2026-1",
+            "HIGH",
+            "p",
+            None,
+            "a/b",
+            Some("| Field | Value |\n| x | y |"),
+        );
+        let one = with_found_by(&body, "Found by 1 scanner: `Trivy`").unwrap();
+        let lines: Vec<&str> = one.split('\n').collect();
+        let table_end = lines
+            .iter()
+            .position(|l| l.starts_with("| Harbor repository"))
+            .unwrap();
+        assert_eq!(lines[table_end + 1], "");
+        assert_eq!(lines[table_end + 2], "Found by 1 scanner: `Trivy`");
+        assert_eq!(lines[0], marker("CVE-2026-1"), "the marker stays first");
+        assert!(one.contains("Description:"), "the rest is kept");
+        // The same line again needs no change.
+        assert_eq!(with_found_by(&one, "Found by 1 scanner: `Trivy`"), None);
+        // A changed scanner set replaces the line where it stands.
+        let two = with_found_by(&one, "Found by 2 scanners: `Grype`, `Trivy`").unwrap();
+        assert_eq!(two.matches("Found by ").count(), 1);
+        assert!(two.contains("Found by 2 scanners: `Grype`, `Trivy`"));
+        // A body without HarborGate's table is left alone.
+        assert_eq!(with_found_by("just text", "Found by 1 scanner: `a`"), None);
     }
 }

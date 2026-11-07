@@ -33,6 +33,7 @@ pub mod job_runs;
 pub mod key_rotation;
 #[allow(dead_code)] // Used by the mapping routes.
 pub mod mappings;
+pub mod merged_view;
 #[allow(dead_code)] // The list routes that use this are added with the admin routes.
 pub mod pagination;
 pub mod picker_upstream;
@@ -43,6 +44,7 @@ pub mod resolve;
 pub mod retention;
 #[allow(dead_code)] // Used by the sync pipeline.
 pub mod sarif;
+pub mod scanner_launch;
 pub mod scanner_scan;
 pub mod scheduled_scan;
 #[allow(dead_code)] // Used by the session extractor and logout routes.

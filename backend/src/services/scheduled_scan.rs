@@ -20,6 +20,7 @@
 
 use std::time::Duration;
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use tokio::sync::watch;
@@ -30,7 +31,8 @@ use crate::db::sync_jobs::{self, ClaimedJob};
 use crate::error::AppError;
 use crate::services::credentials::base_for_join;
 use crate::services::harbor_client::{
-    SCAN_REQUEST_BODY, newest_tagged_url, parse_artifact_list_dated, scan_url, valid_digest,
+    SCAN_REQUEST_BODY, artifact_url, newest_tagged_url, parse_artifact_digest,
+    parse_artifact_list_dated, scan_url, valid_digest,
 };
 use crate::services::ids;
 use crate::services::poller::harbor_login;
@@ -60,6 +62,19 @@ const MSG_UNREACHABLE: &str = "Harbor could not be reached";
 const MSG_REJECTED: &str = "Harbor rejected the robot account credentials";
 const MSG_BAD_NAMES: &str = "the Harbor names are not valid";
 const MSG_UNREADABLE: &str = "Harbor returned an artifact list that could not be read";
+
+/// The members of a `scan` payload the job reads. A scan started from the mapping page names one
+/// `tag` and has `"trigger":"manual"` (#224, no chosen scanner); a scheduled one has neither.
+#[derive(Debug, Default, Deserialize)]
+struct ScanPayload {
+    #[serde(default)]
+    tag: Option<String>,
+    #[serde(default)]
+    trigger: Option<String>,
+}
+
+/// The `trigger` of jobs a user starts from the mapping page.
+pub const TRIGGER_MANUAL: &str = "manual";
 
 /// The most recent slot at or before `now` (Unix seconds, UTC) for a schedule, or `None` when
 /// the schedule is off or not known. `minute` is the minute of the UTC day (0 to 1439) and
@@ -235,24 +250,61 @@ async fn scan<H: HarborFetch, C: Clock>(
             })?;
     let base = base_for_join(&mapping.harbor_base_url).map_err(|_| failed(MSG_INTERNAL))?;
 
-    // The newest tagged artifact by push time.
-    let list = newest_tagged_url(&base, &mapping.harbor_project, &mapping.harbor_repository)
-        .map_err(|_| failed(MSG_BAD_NAMES))?;
-    let reply = harbor
-        .fetch(&list, &username, &secret, &[])
-        .await
-        .map_err(|_| failed(MSG_UNREACHABLE))?;
-    let body = body_or_outcome(reply, clock.now())?;
-    let artifacts = parse_artifact_list_dated(&body).map_err(|_| failed(MSG_UNREADABLE))?;
-    let Some((digest, tags)) = artifacts.into_iter().next() else {
-        return Ok(JobOutcome::DoneWithNote(NOTE_NO_TAGGED_IMAGE.to_owned()));
+    let requested: ScanPayload = serde_json::from_str(&job.payload).unwrap_or_default();
+    let trigger = if requested.trigger.as_deref() == Some(TRIGGER_MANUAL) {
+        TRIGGER_MANUAL
+    } else {
+        TRIGGER_SCHEDULE
     };
-    // The digest goes into a URL path, so it must be `sha256:<64 hex>`.
-    if !valid_digest(&digest) {
-        return Err(failed(MSG_UNREADABLE));
-    }
-    let Some(tag) = newest_tags(tags, 1).into_iter().next() else {
-        return Ok(JobOutcome::DoneWithNote(NOTE_NO_TAGGED_IMAGE.to_owned()));
+    let (digest, tag) = match requested.tag.as_deref().filter(|tag| !tag.is_empty()) {
+        // A tag the user chose: resolve it to its digest. A `404` is final.
+        Some(tag) => {
+            let url = artifact_url(
+                &base,
+                &mapping.harbor_project,
+                &mapping.harbor_repository,
+                tag,
+            )
+            .map_err(|_| failed(MSG_BAD_NAMES))?;
+            let reply = harbor
+                .fetch(&url, &username, &secret, &[])
+                .await
+                .map_err(|_| failed(MSG_UNREACHABLE))?;
+            if reply.status == 404 {
+                return Ok(JobOutcome::DoneWithNote(
+                    resolve::NOTE_ARTIFACT_GONE.to_owned(),
+                ));
+            }
+            let body = body_or_outcome(reply, clock.now())?;
+            let digest = parse_artifact_digest(&body).map_err(|_| failed(MSG_UNREADABLE))?;
+            if !valid_digest(&digest) {
+                return Err(failed(MSG_UNREADABLE));
+            }
+            (digest, tag.to_owned())
+        }
+        // The newest tagged artifact by push time.
+        None => {
+            let list =
+                newest_tagged_url(&base, &mapping.harbor_project, &mapping.harbor_repository)
+                    .map_err(|_| failed(MSG_BAD_NAMES))?;
+            let reply = harbor
+                .fetch(&list, &username, &secret, &[])
+                .await
+                .map_err(|_| failed(MSG_UNREACHABLE))?;
+            let body = body_or_outcome(reply, clock.now())?;
+            let artifacts = parse_artifact_list_dated(&body).map_err(|_| failed(MSG_UNREADABLE))?;
+            let Some((digest, tags)) = artifacts.into_iter().next() else {
+                return Ok(JobOutcome::DoneWithNote(NOTE_NO_TAGGED_IMAGE.to_owned()));
+            };
+            // The digest goes into a URL path, so it must be `sha256:<64 hex>`.
+            if !valid_digest(&digest) {
+                return Err(failed(MSG_UNREADABLE));
+            }
+            let Some(tag) = newest_tags(tags, 1).into_iter().next() else {
+                return Ok(JobOutcome::DoneWithNote(NOTE_NO_TAGGED_IMAGE.to_owned()));
+            };
+            (digest, tag)
+        }
     };
 
     // A scheduled scan of this digest is still waiting for its report: do not start another.
@@ -281,7 +333,7 @@ async fn scan<H: HarborFetch, C: Clock>(
 
     // One sync job for the scanned digest and its newest tag, committed with this job's done
     // mark, so a retry after a crash cannot queue it twice.
-    queue_sync(pool, job, &mapping, &digest, &tag, clock.now()).await?;
+    queue_sync(pool, job, &mapping, &digest, &tag, trigger, clock.now()).await?;
     Ok(JobOutcome::Done)
 }
 
@@ -291,6 +343,7 @@ async fn queue_sync(
     mapping: &MappingRow,
     digest: &str,
     tag: &str,
+    trigger: &str,
     now: i64,
 ) -> Flow<()> {
     let id = ids::new_id().map_err(|_| failed(MSG_INTERNAL))?;
@@ -298,7 +351,7 @@ async fn queue_sync(
         "repo_full_name": format!("{}/{}", mapping.harbor_project, mapping.harbor_repository),
         "digest": digest,
         "tag": tag,
-        "trigger": TRIGGER_SCHEDULE,
+        "trigger": trigger,
     })
     .to_string();
     let mut tx = pool

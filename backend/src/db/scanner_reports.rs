@@ -302,6 +302,31 @@ pub async fn findings_for_digest(
         .collect())
 }
 
+/// How many enabled scanners of a Harbor have no stored report for (mapping, digest). Enabled means
+/// not `disabled` and not `removed_at` in `harbor_scanners`. The issue close rule waits while this
+/// is not zero (`specs/cve-lifecycle.md`, #224 d14). A Harbor with no known scanner gives zero.
+pub async fn enabled_scanners_without_report(
+    conn: &mut SqliteConnection,
+    harbor_base_url: &str,
+    mapping_id: &str,
+    image_digest: &str,
+) -> Result<i64, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM harbor_scanners AS hs
+           WHERE hs.harbor_base_url = ? AND hs.disabled = 0 AND hs.removed_at IS NULL
+             AND NOT EXISTS (
+                SELECT 1 FROM scanner_reports AS sr
+                WHERE sr.mapping_id = ? AND sr.image_digest = ? AND sr.scanner_uuid = hs.uuid)"#,
+        harbor_base_url,
+        mapping_id,
+        image_digest
+    )
+    .fetch_one(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.n)
+}
+
 /// Takes the scan lock of a Harbor project for `job_id`. Returns `false` when another job holds
 /// it. The primary key of `project_scanner_locks` makes the insert the check.
 pub async fn try_acquire_project_lock(

@@ -516,3 +516,40 @@ async fn a_gone_tag_still_restores_after_a_wait() {
     pool.close().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Step 8: the store queues one sync job for the digest and tag, carrying the scanner and the
+/// trigger. A second scan while that job is still queued does not queue another.
+#[tokio::test]
+async fn a_stored_report_queues_one_sync_job() {
+    let (pool, dir) = fixture("sync-after-store").await;
+    let harbor = FakeHarbor::new(PREVIOUS);
+    enqueue(&pool, "j-sync", &scan_payload(CHOSEN)).await;
+    assert_eq!(run(&pool, &harbor, "j-sync", 2_000).await, JobOutcome::Done);
+
+    let syncs: Vec<String> = sqlx::query_scalar(
+        "SELECT payload FROM sync_jobs WHERE json_extract(payload, '$.kind') IS NULL",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(syncs.len(), 1);
+    let payload: serde_json::Value = serde_json::from_str(&syncs[0]).unwrap();
+    assert_eq!(payload["digest"], DIGEST);
+    assert_eq!(payload["tag"], "v1");
+    assert_eq!(payload["scanner_uuid"], CHOSEN);
+
+    enqueue(&pool, "j-sync-2", &scan_payload(CHOSEN)).await;
+    assert_eq!(
+        run(&pool, &harbor, "j-sync-2", 2_100).await,
+        JobOutcome::Done
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sync_jobs WHERE json_extract(payload, '$.kind') IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1, "deduped like the resolve job's");
+    pool.close().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

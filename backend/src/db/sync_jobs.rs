@@ -67,6 +67,7 @@ pub async fn has_pending_pair(
            WHERE mapping_id = ?
              AND status IN ('queued', 'running')
              AND json_valid(payload)
+             AND COALESCE(json_extract(payload, '$.kind'), 'sync') = 'sync'
              AND json_extract(payload, '$.digest') = ?
              AND json_extract(payload, '$.tag') = ?"#,
         mapping_id,
@@ -92,6 +93,33 @@ pub async fn has_pending_scan_job(
              AND json_valid(payload)
              AND json_extract(payload, '$.kind') = 'scan'"#,
         mapping_id
+    )
+    .fetch_one(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.n > 0)
+}
+
+/// Whether a `queued` or `running` `scanner_scan` job exists for this mapping, tag and scanner
+/// (#224). `scanner_uuid` is `""` for a scan with the project's current scanner. Reads on the
+/// caller's connection, so a check and an insert can share one transaction.
+pub async fn has_pending_scanner_scan(
+    conn: &mut SqliteConnection,
+    mapping_id: &str,
+    tag: &str,
+    scanner_uuid: &str,
+) -> Result<bool, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM sync_jobs
+           WHERE mapping_id = ?
+             AND status IN ('queued', 'running')
+             AND json_valid(payload)
+             AND json_extract(payload, '$.kind') = 'scanner_scan'
+             AND json_extract(payload, '$.tag') = ?
+             AND COALESCE(json_extract(payload, '$.scanner_uuid'), '') = ?"#,
+        mapping_id,
+        tag,
+        scanner_uuid
     )
     .fetch_one(conn)
     .await

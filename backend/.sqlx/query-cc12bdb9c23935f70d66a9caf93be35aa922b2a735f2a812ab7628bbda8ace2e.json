@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM harbor_scanners AS hs\n           WHERE hs.harbor_base_url = ? AND hs.disabled = 0 AND hs.removed_at IS NULL\n             AND NOT EXISTS (\n                SELECT 1 FROM scanner_reports AS sr\n                WHERE sr.mapping_id = ? AND sr.image_digest = ? AND sr.scanner_uuid = hs.uuid)",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cc12bdb9c23935f70d66a9caf93be35aa922b2a735f2a812ab7628bbda8ace2e"
+}
