@@ -163,11 +163,13 @@ Decisions are marked `Decided (<date>)`. On 2026-11-03 the user delegated every 
 - Admins cannot change another user's credentials or mappings.
 - Decided (2026-11-03): the first operational exception to read-only admin access is retry. An admin may retry failed sync jobs of any tenant (`POST /api/v1/sync-jobs/:id/retry`). Retry only re-queues work and changes no mapping or credential.
 - Decided (2026-11-05, user, #131): the second operational exception is the manual scan pull. An admin may pull scan reports from Harbor for any tenant's mapping (`POST /api/v1/mappings/:id/pull`). The pull only queues sync jobs, the same as the scheduled poll, and changes no mapping or credential. It uses the owner's Harbor credential on the server, and no credential value is shown to the admin.
+- Decided (2026-11-07, delegated, #224): the third operational exception is starting a tag scan (`POST /api/v1/mappings/:id/tags/:tag/scan`). It queues a job that runs with the owner's Harbor credential on the server and may switch the Harbor project's scanner and restore it ([integrations.md](integrations.md), "Scanner reports and scan launch"). No credential value is shown to the admin. Reason: the same as the pull, and the user said a switch is always restored.
 - A credential may be referenced only by a mapping owned by the same user. The application checks this on write.
 - Decided (2026-11-05, user, #126): the mapping picker lists and the source suggestion run only with the caller's own credential, on the server. There is no admin exception: an admin cannot list Harbor or GitHub items with another user's credential. Picker hidden items are per user and never change another user's view or a mapping. See [api.md](api.md), Pickers.
 
 ## Secrets in logs
 
+- Decided (2026-11-07, user, #224): the same rule covers every Harbor scanner call. A Harbor scanner registration can carry an `access_credential` and an `auth` value for the scanner adapter (Harbor swagger `ScannerRegistration`). HarborGate never reads, stores, returns or logs them or the scanner `url`; the Harbor client's scanner type has no field for them. Scanner names, UUIDs, versions and report contents are not secrets.
 - GitHub PATs, Harbor robot secrets, AES keys, the webhook URL token, and the webhook auth header value are never printed in logs, traces, or Server-Sent Events streams.
 - The webhook URL token is redacted or omitted from access logs and traces. Access logs record the route template `/api/v1/webhooks/harbor/:mapping_token`, not the value.
 - Audit `details` never contain tokens or key material.

@@ -357,6 +357,7 @@ Decided (2026-11-03) for `restore.run`: the offline restore command appends one 
 - `retention.run`
 - `sync_job.retry` (manual retry of a failed sync job; `details` is `{"job_id","mapping_id"}`; Decided (2026-11-03, delegated))
 - `log.level_change` (application log level change; `details` is `{"old","new"}`, each one of `info`, `debug`, `trace`; target `log_level`; the automatic revert to `info` uses the actor `system`. Decided (2026-11-05, user, #136). The application log itself is an in-memory buffer and has no table; see [security.md](security.md), "Application log")
+- `mapping.scan` (a scan of one tag started from the mapping page; `details` is `{"mapping_id","tag","scanner_uuid"}`, ids and the tag only; Decided (2026-11-07, delegated, #224))
 - `mapping.pull` (manual scan pull from Harbor for one mapping; `details` is `{"mapping_id","queued"}`, the number of jobs queued, and no values; Decided (2026-11-05, user, #131))
 
 No value is added for the mapping pickers (Decided 2026-11-05, #126, issue "Auditing"): listing, suggesting, hiding, and restoring write no audit row, because hiding is a user preference. A mapping saved from a picked value or a suggestion writes `mapping.create` or `mapping.update` as before.
