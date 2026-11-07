@@ -102,7 +102,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
   - GitHub target: GitHub owner, GitHub repository, default branch.
   - Issues: auto-create issues on or off, minimum severity.
 - Actions: Cancel and Save mapping.
-- Duplicate target: shows an inline error under the GitHub repository field: "Already used by mapping <name>. Choose another repository." Save is blocked until the target changes.
+- Duplicate Harbor repository: shows an inline error on the Harbor repository field when the same Harbor repository is already mapped. Save is blocked until it changes. A GitHub repository already used by another mapping is not an error (Decided 2026-11-06, user, #185), and the form shows no warning for it.
 - The app never moves a target from one mapping to another.
 - Project webhook proposal (Decided 2026-11-06, user, #179): after Save mapping succeeds, the form proposes creating the project webhook only when the response has `project_webhook_exists: false`. Catalog keys: `mapping.projectWebhook.propose` ("Harbor project {project} has no project webhook yet. One webhook covers every repository in this project.") and `mapping.projectWebhook.create` ("Create project webhook"). It names the Harbor project and no repository. When `project_webhook_exists` is `true`, no proposal is shown. Decided (2026-11-06, user, #179): the proposal is an inline banner on the saved-mapping result, with the "Create project webhook" button. It is not a modal and does not block the user; the user can dismiss it.
 
