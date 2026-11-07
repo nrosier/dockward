@@ -98,6 +98,9 @@ pub struct SyncReport {
     pub vulnerability_summary: serde_json::Value,
     pub sarif_status: String,
     pub synced_at: Option<String>,
+    /// The CVE ids a scheduled scan found that were not in the last stored result for the
+    /// same digest (#191). `null` for any other trigger. An empty list means nothing new.
+    pub new_cve_ids: Option<Vec<String>>,
 }
 
 /// The image a job is for, from its payload, so queued jobs show it before a report exists.
@@ -122,7 +125,7 @@ pub struct SyncJob {
     pub updated_at: Option<String>,
     /// `webhook` or `poll`. A payload with no `trigger` is `webhook`.
     pub trigger: String,
-    /// `sync` or `resolve`. A payload with no `kind` is `sync` (#132).
+    /// `sync`, `resolve` (#132) or `scan` (#191). A payload with no `kind` is `sync`.
     pub kind: String,
     pub image: JobImage,
     pub report: Option<SyncReport>,
@@ -141,6 +144,10 @@ fn to_sync_job(row: db::JobRow) -> Result<SyncJob, AppError> {
                 .unwrap_or(serde_json::Value::Null),
             sarif_status: report.sarif_status,
             synced_at: report.synced_at.map(time::rfc3339).transpose()?,
+            new_cve_ids: report
+                .new_cve_ids
+                .as_deref()
+                .and_then(|text| serde_json::from_str(text).ok()),
         }),
     };
     Ok(SyncJob {
@@ -155,6 +162,7 @@ fn to_sync_job(row: db::JobRow) -> Result<SyncJob, AppError> {
         trigger: row.trigger.unwrap_or_else(|| "webhook".to_owned()),
         kind: match row.kind.as_deref() {
             Some("resolve") => "resolve",
+            Some("scan") => "scan",
             _ => "sync",
         }
         .to_owned(),

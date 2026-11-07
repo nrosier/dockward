@@ -23,6 +23,9 @@ const existing: Mapping = {
   auto_create_issues: true,
   min_issue_severity: "HIGH",
   created_at: null,
+  scan_schedule: "off",
+  scan_time: "00:00",
+  scan_weekday: 1,
 };
 
 const harborCred = {
@@ -79,6 +82,7 @@ function stub(options: Options = {}) {
       return options.createProjectWebhook?.() ?? json({ id: "pw1", webhook_url: PW_URL, auth_secret: PW_SECRET }, 201);
     }
     if (path === "/api/v1/mappings/m1" && (init?.method ?? "GET") === "GET") return json(existing);
+    if (path === "/api/v1/mappings/m1" && init?.method === "PUT") return json(existing);
     if (path === "/api/v1/mappings/m1/rotate-webhook-token" && init?.method === "POST") {
       return json({ webhook_url: SECRET_URL });
     }
@@ -178,6 +182,42 @@ describe("MappingFormPage", () => {
     await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
     expect(await screen.findByText(t("errors.generic"))).toBeInTheDocument();
     expect(screen.queryByText(t("mappings.form.harborRepositoryMapped"))).not.toBeInTheDocument();
+  });
+
+  it("sends the scan schedule off by default when a mapping is created (#191)", async () => {
+    const fetchMock = stub();
+    renderWithRoutes(routes, "/mappings/new");
+    await fillNew("new-repo");
+    const schedule = screen.getByRole("group", { name: t("mappings.form.scanSchedule") });
+    expect(within(schedule).getByRole("button", { name: t("mappings.form.scanOff") })).toHaveAttribute("aria-pressed", "true");
+    // No time or day field while the schedule is off.
+    expect(screen.queryByLabelText(t("mappings.form.scanTime"))).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+    await screen.findByDisplayValue(SECRET_URL);
+    const post = fetchMock.mock.calls.find((call) => (call[1] as RequestInit | undefined)?.method === "POST");
+    const body = JSON.parse(String((post?.[1] as RequestInit | undefined)?.body)) as Record<string, unknown>;
+    expect(body.scan_schedule).toBe("off");
+  });
+
+  it("sends only the changed schedule fields on edit (#191)", async () => {
+    const fetchMock = stub();
+    renderWithRoutes(routes, "/mappings/m1");
+    const schedule = await screen.findByRole("group", { name: t("mappings.form.scanSchedule") });
+    await userEvent.click(within(schedule).getByRole("button", { name: t("mappings.form.scanWeekly") }));
+    await userEvent.selectOptions(screen.getByLabelText(t("mappings.form.scanWeekday")), t("mappings.form.weekday6"));
+    const time = screen.getByLabelText(t("mappings.form.scanTime"));
+    await userEvent.clear(time);
+    await userEvent.type(time, "03:15");
+    await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+    await vi.waitFor(() =>
+      expect(fetchMock.mock.calls.some((call) => (call[1] as RequestInit | undefined)?.method === "PUT")).toBe(true),
+    );
+    const put = fetchMock.mock.calls.find((call) => (call[1] as RequestInit | undefined)?.method === "PUT");
+    expect(JSON.parse(String((put?.[1] as RequestInit | undefined)?.body))).toEqual({
+      scan_schedule: "weekly",
+      scan_weekday: 6,
+      scan_time: "03:15",
+    });
   });
 
   it("shows the webhook URL and auth secret once after create", async () => {

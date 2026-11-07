@@ -67,6 +67,40 @@ describe("SyncJobsPage", () => {
     expect(screen.getByText(t("syncJobs.attempts", { attempts: 5, max: 8 }))).toBeInTheDocument();
   });
 
+  it("a scheduled scan shows its trigger and only the new vulnerabilities (#191)", async () => {
+    const report = {
+      image_tag: "3.8.1",
+      image_digest: "sha256:51ab07d3ffff",
+      commit_sha: null,
+      vulnerability_summary: {},
+      sarif_status: "success" as const,
+      synced_at: "2026-11-05T12:00:00Z",
+    };
+    stub([
+      { ...failed, id: "s1", status: "done", last_error: null, trigger: "schedule", report: { ...report, new_cve_ids: ["CVE-2026-0003", "CVE-2026-0004"] } },
+      { ...failed, id: "s2", status: "done", last_error: null, trigger: "schedule", report: { ...report, new_cve_ids: [] } },
+      { ...failed, id: "s3", status: "done", last_error: null, trigger: "webhook", report: { ...report, new_cve_ids: null } },
+    ]);
+    renderAt(<SyncJobsPage />);
+    const table = await screen.findByRole("table");
+    expect(await within(table).findAllByText(t("syncJobs.trigger.schedule"))).toHaveLength(2);
+    expect(within(table).getByText(t("syncJobs.newVulns", { ids: "CVE-2026-0003, CVE-2026-0004" }))).toBeInTheDocument();
+    expect(within(table).getAllByText(t("syncJobs.noNewVulns"))).toHaveLength(1);
+  });
+
+  it("a refused scheduled scan shows the fixed catalog message (#191)", async () => {
+    stub([
+      {
+        ...failed,
+        trigger: "schedule",
+        last_error: "Harbor refused to start the scan; grant the robot account the Scan permission",
+        image: { repo_full_name: "platform/billing-worker", tag: null, digest: null },
+      },
+    ]);
+    renderAt(<SyncJobsPage />);
+    expect(await screen.findByText(t("sync.note.scanForbidden"))).toBeInTheDocument();
+  });
+
   it("a failed job still shows its error", async () => {
     stub([failed]);
     renderAt(<SyncJobsPage />);

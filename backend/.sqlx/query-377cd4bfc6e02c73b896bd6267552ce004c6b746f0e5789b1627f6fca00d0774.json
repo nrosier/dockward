@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE repo_mappings SET scan_last_slot = ?\n         WHERE id = ? AND scan_schedule = ? AND scan_minute = ? AND scan_weekday = ?\n           AND scan_last_slot IS ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "377cd4bfc6e02c73b896bd6267552ce004c6b746f0e5789b1627f6fca00d0774"
+}

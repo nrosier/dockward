@@ -23,6 +23,14 @@ pub struct MappingRow {
     pub min_issue_severity: Option<String>,
     pub default_branch: String,
     pub created_at: Option<i64>,
+    /// Scheduled scan (#191): `off`, `daily` or `weekly`. Times are UTC.
+    pub scan_schedule: String,
+    /// Minute of the UTC day a scheduled run is due, 0 to 1439.
+    pub scan_minute: i64,
+    /// ISO weekday of a weekly run, 1 (Monday) to 7 (Sunday).
+    pub scan_weekday: i64,
+    /// Unix seconds of the last slot the scheduler handled, or the time the schedule was saved.
+    pub scan_last_slot: Option<i64>,
 }
 
 /// Inserts a mapping row. The digests are the only secret material stored.
@@ -32,8 +40,9 @@ pub async fn insert(conn: &mut SqliteConnection, row: &MappingRow) -> Result<(),
             id, user_id, harbor_cred_id, github_cred_id, harbor_base_url,
             harbor_project, harbor_repository, github_owner, github_repo,
             webhook_token_hash, webhook_auth_secret_hash,
-            auto_create_issues, min_issue_severity, default_branch)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            auto_create_issues, min_issue_severity, default_branch,
+            scan_schedule, scan_minute, scan_weekday, scan_last_slot)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         row.id,
         row.user_id,
         row.harbor_cred_id,
@@ -47,7 +56,11 @@ pub async fn insert(conn: &mut SqliteConnection, row: &MappingRow) -> Result<(),
         row.webhook_auth_secret_hash,
         row.auto_create_issues,
         row.min_issue_severity,
-        row.default_branch
+        row.default_branch,
+        row.scan_schedule,
+        row.scan_minute,
+        row.scan_weekday,
+        row.scan_last_slot
     )
     .execute(conn)
     .await
@@ -70,7 +83,9 @@ pub async fn find_owned(
                   webhook_token_hash AS "webhook_token_hash!",
                   webhook_auth_secret_hash AS "webhook_auth_secret_hash!",
                   auto_create_issues, min_issue_severity, default_branch AS "default_branch!",
-                  created_at
+                  created_at,
+                  scan_schedule AS "scan_schedule!", scan_minute AS "scan_minute!: i64",
+                  scan_weekday AS "scan_weekday!: i64", scan_last_slot AS "scan_last_slot?: i64"
            FROM repo_mappings WHERE id = ? AND user_id = ?"#,
         id,
         user_id
@@ -91,7 +106,13 @@ pub async fn update_owned(
         "UPDATE repo_mappings
             SET harbor_cred_id = ?, github_cred_id = ?, harbor_base_url = ?,
                 harbor_project = ?, harbor_repository = ?, github_owner = ?, github_repo = ?,
-                auto_create_issues = ?, min_issue_severity = ?, default_branch = ?
+                auto_create_issues = ?, min_issue_severity = ?, default_branch = ?,
+                -- The last slot is written only when the schedule changes, so an edit of another
+                -- field never moves back a slot the scheduler claimed (#191).
+                scan_last_slot = CASE
+                    WHEN scan_schedule IS NOT ? OR scan_minute IS NOT ? OR scan_weekday IS NOT ?
+                    THEN ? ELSE scan_last_slot END,
+                scan_schedule = ?, scan_minute = ?, scan_weekday = ?
           WHERE id = ? AND user_id = ?",
         row.harbor_cred_id,
         row.github_cred_id,
@@ -103,6 +124,13 @@ pub async fn update_owned(
         row.auto_create_issues,
         row.min_issue_severity,
         row.default_branch,
+        row.scan_schedule,
+        row.scan_minute,
+        row.scan_weekday,
+        row.scan_last_slot,
+        row.scan_schedule,
+        row.scan_minute,
+        row.scan_weekday,
         row.id,
         user_id
     )
@@ -307,7 +335,9 @@ pub async fn list_owned(
                   webhook_token_hash AS "webhook_token_hash!",
                   webhook_auth_secret_hash AS "webhook_auth_secret_hash!",
                   auto_create_issues, min_issue_severity, default_branch AS "default_branch!",
-                  created_at
+                  created_at,
+                  scan_schedule AS "scan_schedule!", scan_minute AS "scan_minute!: i64",
+                  scan_weekday AS "scan_weekday!: i64", scan_last_slot AS "scan_last_slot?: i64"
            FROM repo_mappings
            LEFT JOIN (
                SELECT m.id AS mapping_id,
@@ -413,6 +443,54 @@ pub async fn all_targets(pool: &SqlitePool) -> Result<Vec<TargetRow>, AppError> 
     .map_err(|_| AppError::InternalError)
 }
 
+/// Every mapping whose scan schedule is on (#191). The scheduler reads them each minute.
+pub async fn list_scheduled(pool: &SqlitePool) -> Result<Vec<MappingRow>, AppError> {
+    sqlx::query_as!(
+        MappingRow,
+        r#"SELECT id AS "id!", user_id AS "user_id!", harbor_cred_id AS "harbor_cred_id!",
+                  github_cred_id AS "github_cred_id!", harbor_base_url AS "harbor_base_url!",
+                  harbor_project AS "harbor_project!", harbor_repository AS "harbor_repository!",
+                  github_owner AS "github_owner!", github_repo AS "github_repo!",
+                  webhook_token_hash AS "webhook_token_hash!",
+                  webhook_auth_secret_hash AS "webhook_auth_secret_hash!",
+                  auto_create_issues AS "auto_create_issues?", min_issue_severity AS "min_issue_severity?",
+                  default_branch AS "default_branch!", created_at AS "created_at?",
+                  scan_schedule AS "scan_schedule!", scan_minute AS "scan_minute!: i64",
+                  scan_weekday AS "scan_weekday!: i64", scan_last_slot AS "scan_last_slot?: i64"
+           FROM repo_mappings WHERE scan_schedule <> 'off'
+           ORDER BY id"#
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Moves a mapping's `scan_last_slot` from its read value to `slot`, only while the schedule
+/// still reads as in `row`. Returns the rows changed: zero means the mapping was edited or
+/// deleted, or another run already took the slot, and the caller must queue nothing (#191).
+/// Runs on the caller's connection, inside its transaction.
+pub async fn claim_scan_slot(
+    conn: &mut SqliteConnection,
+    row: &MappingRow,
+    slot: i64,
+) -> Result<u64, AppError> {
+    sqlx::query!(
+        "UPDATE repo_mappings SET scan_last_slot = ?
+         WHERE id = ? AND scan_schedule = ? AND scan_minute = ? AND scan_weekday = ?
+           AND scan_last_slot IS ?",
+        slot,
+        row.id,
+        row.scan_schedule,
+        row.scan_minute,
+        row.scan_weekday,
+        row.scan_last_slot
+    )
+    .execute(conn)
+    .await
+    .map(|done| done.rows_affected())
+    .map_err(|_| AppError::InternalError)
+}
+
 /// Reads one mapping by id with no owner check. Callers check access first or have already
 /// selected the mapping: the webhook path (by token digest), the worker, and the manual
 /// scan pull, which checks owner or admin in `services::poller::find_pullable`.
@@ -429,7 +507,9 @@ pub async fn find_by_id(
                   webhook_token_hash AS "webhook_token_hash!",
                   webhook_auth_secret_hash AS "webhook_auth_secret_hash!",
                   auto_create_issues AS "auto_create_issues?", min_issue_severity AS "min_issue_severity?",
-                  default_branch AS "default_branch!", created_at AS "created_at?"
+                  default_branch AS "default_branch!", created_at AS "created_at?",
+                  scan_schedule AS "scan_schedule!", scan_minute AS "scan_minute!: i64",
+                  scan_weekday AS "scan_weekday!: i64", scan_last_slot AS "scan_last_slot?: i64"
            FROM repo_mappings WHERE id = ?"#,
         id
     )

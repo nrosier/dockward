@@ -9,6 +9,7 @@ import { TableScroll } from "../components/mappings/TableScroll";
 import { mappingName, useMappingLookup, useScopeAll } from "../components/mappings/useMappings";
 import { ImageCell } from "../components/syncjobs/ImageCell";
 import { JobStatusPill } from "../components/syncjobs/jobPill";
+import { newVulnsText, noteText, triggerLabel } from "../components/syncjobs/labels";
 import { RetryButton } from "../components/syncjobs/RetryButton";
 import { formatDateTime } from "../components/syncjobs/dates";
 import { Time } from "../components/syncjobs/Time";
@@ -163,17 +164,19 @@ export default function SyncJobsPage() {
               <tbody>
                 {list.data.items.map((job) => {
                   const mapping = mappings.get(job.mapping_id);
+                  const newVulns = newVulnsText(job);
                   return (
                     <Fragment key={job.id}>
                       <tr>
                         <td className={TD}>
                           <ImageCell job={job} />
+                          {newVulns === null ? null : <div className="mt-1 text-[12.5px]">{newVulns}</div>}
                           {mapping === undefined ? null : (
                             <div className="mt-1 text-[12.5px] text-muted">{mappingName(mapping)}</div>
                           )}
                         </td>
                         <td className={`${TD} text-muted`}>
-                          {t(job.trigger === "poll" ? "syncJobs.trigger.poll" : "syncJobs.trigger.webhook")}
+                          {triggerLabel(job.trigger)}
                         </td>
                         <td className={TD}>
                           <JobStatusPill
@@ -196,7 +199,7 @@ export default function SyncJobsPage() {
                         <tr>
                           <td colSpan={COLUMNS} className="border-b border-border/60 px-3.5 pb-3">
                             <div className="rounded-lg border border-crit/30 bg-crit/5 px-3 py-2.5 text-[13px] text-crit-ink">
-                              {job.last_error === null ? null : capText(job.last_error, ERROR_DISPLAY_MAX)}
+                              {job.last_error === null ? null : capText(noteText(job.last_error), ERROR_DISPLAY_MAX)}
                               {isRetrying(job) && job.next_attempt_at !== null ? (
                                 <time
                                   dateTime={job.next_attempt_at}

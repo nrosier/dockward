@@ -66,6 +66,8 @@ pub enum JobKind {
     Sync,
     /// `"resolve"`: expand a digest into sync jobs.
     Resolve,
+    /// `"scan"`: a scheduled scan of the newest tagged image (#191).
+    Scan,
     /// Any other `kind`. The job fails for good.
     Unknown,
 }
@@ -81,6 +83,7 @@ pub fn job_kind(payload: &str) -> JobKind {
         None => JobKind::Sync,
         Some(Value::String(kind)) if kind == "sync" => JobKind::Sync,
         Some(Value::String(kind)) if kind == "resolve" => JobKind::Resolve,
+        Some(Value::String(kind)) if kind == "scan" => JobKind::Scan,
         Some(_) => JobKind::Unknown,
     }
 }
@@ -148,7 +151,7 @@ fn failed(message: &str) -> JobOutcome {
 
 /// Maps a Harbor answer to the body, or to the job outcome. Same classification as the sync
 /// handler's `harbor_body`, plus the rate limit, which defers. The text is fixed.
-fn body_or_outcome(reply: HarborReply, now: i64) -> Result<Vec<u8>, JobOutcome> {
+pub(crate) fn body_or_outcome(reply: HarborReply, now: i64) -> Result<Vec<u8>, JobOutcome> {
     match reply.status {
         200 => Ok(reply.body),
         429 => {

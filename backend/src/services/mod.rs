@@ -43,6 +43,7 @@ pub mod resolve;
 pub mod retention;
 #[allow(dead_code)] // Used by the sync pipeline.
 pub mod sarif;
+pub mod scheduled_scan;
 #[allow(dead_code)] // Used by the session extractor and logout routes.
 pub mod sessions;
 pub mod sync;

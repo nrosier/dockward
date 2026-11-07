@@ -690,13 +690,19 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         stop_rx.clone(),
     ));
 
+    // The scan scheduler queues a scan job for each mapping whose scheduled slot is due (#191).
+    let schedule_task = tokio::spawn(services::scheduled_scan::run(
+        state.pool.clone(),
+        stop_rx.clone(),
+    ));
+
     let mut graceful = stop_rx.clone();
     let router = app(settings.trusted_proxies.clone(), state)
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
     let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
         let _ = graceful.wait_for(|stopped| *stopped).await;
     });
-    let tasks = vec![worker_task, poller_task, retention_task];
+    let tasks = vec![worker_task, poller_task, retention_task, schedule_task];
 
     let mut serve = Box::pin(std::future::IntoFuture::into_future(serve));
     let first = tokio::select! {
@@ -3904,9 +3910,10 @@ mod tests {
         pool.close().await;
         // Migration 2 is removed; migrations 3 (project webhooks, #132), 4 (picker hidden
         // items, #126), 5 (project webhook rotated_at, #145), 6 (newest-digest close, #196)
-        // and 7 (many mappings per GitHub repository, #185) are still applied.
+        // 7 (many mappings per GitHub repository, #185) and 8 (scan schedule, #191) are still
+        // applied.
         assert!(
-            before == (vec![1, 3, 4, 5, 6, 7], 0),
+            before == (vec![1, 3, 4, 5, 6, 7, 8], 0),
             "the setup did not remove migration 2"
         );
 

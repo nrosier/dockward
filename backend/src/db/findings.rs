@@ -80,6 +80,27 @@ pub async fn exists_for_mapping(
     Ok(row.found != 0)
 }
 
+/// The CVE ids open on one tag of a mapping, sorted. The scheduled scan reads them as the last
+/// result of a digest whose report was stored before migration 0008 (#191).
+pub async fn open_ids_for_tag(
+    pool: &SqlitePool,
+    mapping_id: &str,
+    repo: &str,
+    tag: &str,
+) -> Result<Vec<String>, AppError> {
+    sqlx::query_scalar!(
+        r#"SELECT DISTINCT cve_id AS "cve_id!" FROM cve_findings
+           WHERE mapping_id = ? AND harbor_repository = ? AND image_tag = ? AND status = 'open'
+           ORDER BY cve_id"#,
+        mapping_id,
+        repo,
+        tag
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
 /// Marks the tag's `open` rows `fixed` when their CVE is not in `seen_ids`. The ids go to
 /// SQLite as one JSON array, so the list length is not limited by the bind count. Returns
 /// the number of rows changed.

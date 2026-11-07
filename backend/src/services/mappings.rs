@@ -21,8 +21,9 @@ use crate::services::credentials::{self, SERVICE_HARBOR};
 use crate::services::{
     ids,
     pagination::{Page, Pagination},
-    time,
+    scheduled_scan, time,
 };
+use crate::worker::now_secs;
 
 /// Sort keys the list route accepts. The first is the default.
 const SORTS: &[&str] = &[
@@ -54,6 +55,12 @@ pub struct Mapping {
     pub auto_create_issues: bool,
     pub min_issue_severity: String,
     pub created_at: Option<String>,
+    /// Scheduled scan (#191): `off`, `daily` or `weekly`.
+    pub scan_schedule: String,
+    /// UTC time of a scheduled run, `HH:MM`.
+    pub scan_time: String,
+    /// ISO weekday of a weekly run, 1 (Monday) to 7 (Sunday).
+    pub scan_weekday: i64,
 }
 
 /// The create response: the mapping plus the two values shown once. `auth_secret` is the
@@ -88,6 +95,12 @@ pub struct NewMapping {
     pub default_branch: Option<String>,
     pub auto_create_issues: Option<bool>,
     pub min_issue_severity: Option<String>,
+    #[serde(default)]
+    pub scan_schedule: Option<String>,
+    #[serde(default)]
+    pub scan_time: Option<String>,
+    #[serde(default)]
+    pub scan_weekday: Option<i64>,
 }
 
 /// A partial update (`PUT /mappings/:id`). Each field is optional, and `None` leaves it
@@ -104,6 +117,9 @@ pub struct MappingPatch {
     pub default_branch: Option<String>,
     pub auto_create_issues: Option<bool>,
     pub min_issue_severity: Option<String>,
+    pub scan_schedule: Option<String>,
+    pub scan_time: Option<String>,
+    pub scan_weekday: Option<i64>,
 }
 
 /// The two outbound probes a mapping write uses. Grouped so the write functions keep
@@ -181,6 +197,60 @@ fn validate_severity(value: &str) -> Result<(), AppError> {
     }
 }
 
+/// Schedules the mapping form offers (#191).
+const SCHEDULES: &[&str] = &[
+    scheduled_scan::SCHEDULE_OFF,
+    scheduled_scan::SCHEDULE_DAILY,
+    scheduled_scan::SCHEDULE_WEEKLY,
+];
+
+fn validate_schedule(value: &str) -> Result<(), AppError> {
+    if SCHEDULES.contains(&value) {
+        Ok(())
+    } else {
+        Err(AppError::ValidationFailed(
+            "scan_schedule must be off, daily or weekly.".to_owned(),
+        ))
+    }
+}
+
+/// Reads a UTC time `HH:MM` (00:00 to 23:59) as the minute of the day.
+fn parse_scan_time(value: &str) -> Result<i64, AppError> {
+    let invalid = || AppError::ValidationFailed("scan_time must be HH:MM in UTC.".to_owned());
+    let bytes = value.as_bytes();
+    if bytes.len() != 5 || bytes[2] != b':' {
+        return Err(invalid());
+    }
+    let digits = |range: std::ops::Range<usize>| -> Result<i64, AppError> {
+        let part = value.get(range).ok_or_else(invalid)?;
+        if !part.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        part.parse().map_err(|_| invalid())
+    };
+    let (hours, minutes) = (digits(0..2)?, digits(3..5)?);
+    if hours > 23 || minutes > 59 {
+        return Err(invalid());
+    }
+    Ok(hours * 60 + minutes)
+}
+
+/// The minute of the day as `HH:MM`.
+fn format_scan_time(minute: i64) -> String {
+    let minute = minute.clamp(0, 1439);
+    format!("{:02}:{:02}", minute / 60, minute % 60)
+}
+
+fn validate_weekday(value: i64) -> Result<(), AppError> {
+    if (1..=7).contains(&value) {
+        Ok(())
+    } else {
+        Err(AppError::ValidationFailed(
+            "scan_weekday must be 1 (Monday) to 7 (Sunday).".to_owned(),
+        ))
+    }
+}
+
 fn to_mapping(row: MappingRow) -> Result<Mapping, AppError> {
     Ok(Mapping {
         id: row.id,
@@ -198,6 +268,9 @@ fn to_mapping(row: MappingRow) -> Result<Mapping, AppError> {
             .min_issue_severity
             .unwrap_or_else(|| "CRITICAL".to_owned()),
         created_at: row.created_at.map(time::rfc3339).transpose()?,
+        scan_time: format_scan_time(row.scan_minute),
+        scan_schedule: row.scan_schedule,
+        scan_weekday: row.scan_weekday,
     })
 }
 
@@ -361,6 +434,17 @@ pub async fn create<P: HarborProbe, G: GithubProbe>(
         .clone()
         .unwrap_or_else(|| "CRITICAL".to_owned());
     validate_severity(&severity)?;
+    let schedule = input
+        .scan_schedule
+        .clone()
+        .unwrap_or_else(|| scheduled_scan::SCHEDULE_OFF.to_owned());
+    validate_schedule(&schedule)?;
+    let scan_minute = match input.scan_time.as_deref() {
+        Some(value) => parse_scan_time(value)?,
+        None => 0,
+    };
+    let scan_weekday = input.scan_weekday.unwrap_or(1);
+    validate_weekday(scan_weekday)?;
 
     let id = ids::new_id()?;
     let token = new_secret()?;
@@ -433,6 +517,11 @@ pub async fn create<P: HarborProbe, G: GithubProbe>(
             .clone()
             .unwrap_or_else(|| "main".to_owned()),
         created_at: None,
+        scan_schedule: schedule,
+        scan_minute,
+        scan_weekday,
+        // A slot before the save never fires (#191).
+        scan_last_slot: Some(now_secs()),
     };
     db::insert(&mut tx, &row).await?;
     audit::record(
@@ -651,6 +740,35 @@ fn apply_patch(
     if let Some(value) = patch.auto_create_issues {
         next.auto_create_issues = Some(value);
         changed.push("auto_create_issues");
+    }
+    let mut schedule_changed = false;
+    if let Some(value) = patch.scan_schedule.as_deref() {
+        validate_schedule(value)?;
+        if value != next.scan_schedule {
+            next.scan_schedule = value.to_owned();
+            changed.push("scan_schedule");
+            schedule_changed = true;
+        }
+    }
+    if let Some(value) = patch.scan_time.as_deref() {
+        let minute = parse_scan_time(value)?;
+        if minute != next.scan_minute {
+            next.scan_minute = minute;
+            changed.push("scan_time");
+            schedule_changed = true;
+        }
+    }
+    if let Some(value) = patch.scan_weekday {
+        validate_weekday(value)?;
+        if value != next.scan_weekday {
+            next.scan_weekday = value;
+            changed.push("scan_weekday");
+            schedule_changed = true;
+        }
+    }
+    if schedule_changed {
+        // A changed schedule starts from the save time, so a slot already past never fires.
+        next.scan_last_slot = Some(now_secs());
     }
     if let Some(value) = patch.harbor_cred_id.as_deref() {
         next.harbor_cred_id = value.to_owned();
@@ -979,6 +1097,9 @@ mod tests {
             default_branch: None,
             auto_create_issues: None,
             min_issue_severity: None,
+            scan_schedule: None,
+            scan_time: None,
+            scan_weekday: None,
         }
     }
 
@@ -1803,6 +1924,126 @@ mod tests {
         patch: MappingPatch,
     ) -> Result<Mapping, AppError> {
         update(pool, &key(), probes, &actor(owner), owner, id, patch).await
+    }
+
+    /// #191: a new mapping has the scan schedule off. A schedule can be set on create and
+    /// changed on update, with UTC `HH:MM` and an ISO weekday. A change resets the last slot to
+    /// the save time, so a slot already past never fires.
+    #[tokio::test]
+    async fn the_scan_schedule_is_off_by_default_and_can_be_set_and_changed() {
+        let (pool, dir) = fresh_pool("schedule").await;
+        let owner = user(&pool, "owner").await;
+        let id = mapping_for(&pool, &owner, "repo", "gh").await;
+        let stored = load_owned(&pool, &owner, &id).await.unwrap();
+        assert_eq!(stored.scan_schedule, "off");
+        assert_eq!(stored.scan_time, "00:00");
+        assert_eq!(stored.scan_weekday, 1);
+
+        let probes = || Probes {
+            harbor: &READABLE,
+            github: &GH_READY,
+        };
+        let before = now_secs();
+        let updated = update_with(
+            &pool,
+            probes(),
+            &owner,
+            &id,
+            MappingPatch {
+                scan_schedule: Some("weekly".to_owned()),
+                scan_time: Some("03:15".to_owned()),
+                scan_weekday: Some(6),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.scan_schedule, "weekly");
+        assert_eq!(updated.scan_time, "03:15");
+        assert_eq!(updated.scan_weekday, 6);
+        let row = load_owned_row(&pool, &owner, &id).await;
+        assert_eq!(row.scan_minute, 195);
+        assert!(row.scan_last_slot.is_some_and(|slot| slot >= before));
+
+        // The scheduler claims a later slot. An edit of another field keeps it, so the claimed
+        // slot never fires twice.
+        let claimed = row.scan_last_slot.unwrap_or(0) + 7 * 86_400;
+        sqlx::query("UPDATE repo_mappings SET scan_last_slot = ? WHERE id = ?")
+            .bind(claimed)
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        update_with(
+            &pool,
+            probes(),
+            &owner,
+            &id,
+            MappingPatch {
+                default_branch: Some("trunk".to_owned()),
+                // Same schedule values: not a change.
+                scan_schedule: Some("weekly".to_owned()),
+                scan_time: Some("03:15".to_owned()),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap();
+        let kept = load_owned_row(&pool, &owner, &id).await;
+        assert_eq!(kept.scan_last_slot, Some(claimed));
+
+        // Create with a schedule.
+        let (h, g) = creds(&pool, &owner).await;
+        let mut daily = input(&h, &g, "repo-2", "gh-2");
+        daily.scan_schedule = Some("daily".to_owned());
+        daily.scan_time = Some("23:59".to_owned());
+        let created = create(
+            &pool,
+            &key(),
+            &READABLE,
+            &GH_READY,
+            &actor(&owner),
+            &owner,
+            PUBLIC,
+            daily,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.mapping.scan_schedule, "daily");
+        assert_eq!(created.mapping.scan_time, "23:59");
+
+        // Invalid values are 422 and change nothing.
+        for patch in [
+            MappingPatch {
+                scan_schedule: Some("hourly".to_owned()),
+                ..no_change()
+            },
+            MappingPatch {
+                scan_time: Some("24:00".to_owned()),
+                ..no_change()
+            },
+            MappingPatch {
+                scan_time: Some("3:15".to_owned()),
+                ..no_change()
+            },
+            MappingPatch {
+                scan_weekday: Some(0),
+                ..no_change()
+            },
+            MappingPatch {
+                scan_weekday: Some(8),
+                ..no_change()
+            },
+        ] {
+            let error = update_with(&pool, probes(), &owner, &id, patch)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AppError::ValidationFailed(_)), "{error:?}");
+        }
+        let unchanged = load_owned(&pool, &owner, &id).await.unwrap();
+        assert_eq!(unchanged.scan_schedule, "weekly");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

@@ -82,30 +82,91 @@ impl HarborGet {
         for (name, value) in extra_headers {
             request = request.header(*name, *value);
         }
-        let sent = request.send().await;
-        crate::services::app_log::log_outbound(
-            "GET",
-            url,
-            sent.as_ref().ok().map(|r| r.status().as_u16()),
-        );
-        let response = sent.map_err(|_| AppError::UpstreamUnreachable)?;
-        let status = response.status().as_u16();
-        let retry_after = response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .and_then(parse_retry_after);
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| AppError::UpstreamUnreachable)?
-            .to_vec();
-        Ok(HarborReply {
-            status,
-            body,
-            retry_after,
-        })
+        read_reply("GET", url, request).await
     }
+
+    /// Sends `POST url` with HTTP Basic auth and a JSON body. Used only to start a scan
+    /// (#191). Returns the status, the body and `Retry-After`, like [`HarborGet::get`].
+    pub async fn post_json(
+        &self,
+        url: &Url,
+        username: &str,
+        secret: &[u8],
+        body: &[u8],
+    ) -> Result<HarborReply, AppError> {
+        let secret = std::str::from_utf8(secret).map_err(|_| AppError::InternalError)?;
+        let request = self
+            .client
+            .post(url)
+            .map_err(|_| AppError::UpstreamUnreachable)?
+            .basic_auth(username, Some(secret))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_vec());
+        read_reply("POST", url, request).await
+    }
+}
+
+/// Sends one prepared request and reads the status, `Retry-After` and body. Both the GET and the
+/// POST go through it, so the logging and the response handling stay in one place.
+async fn read_reply(
+    method: &str,
+    url: &Url,
+    request: reqwest::RequestBuilder,
+) -> Result<HarborReply, AppError> {
+    let sent = request.send().await;
+    crate::services::app_log::log_outbound(
+        method,
+        url,
+        sent.as_ref().ok().map(|r| r.status().as_u16()),
+    );
+    let response = sent.map_err(|_| AppError::UpstreamUnreachable)?;
+    let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_retry_after);
+    let body = response
+        .bytes()
+        .await
+        .map_err(|_| AppError::UpstreamUnreachable)?
+        .to_vec();
+    Ok(HarborReply {
+        status,
+        body,
+        retry_after,
+    })
+}
+
+/// The body of a scan request: a vulnerability scan (Harbor swagger, `scanArtifact`, `ScanType`).
+pub const SCAN_REQUEST_BODY: &[u8] = br#"{"scan_type":"vulnerability"}"#;
+
+/// Builds the scan URL for a digest (`POST .../artifacts/{reference}/scan`, Harbor swagger
+/// `scanArtifact`). Encoding as in [`artifact_url`].
+pub fn scan_url(
+    base: &Url,
+    project: &str,
+    repository: &str,
+    digest: &str,
+) -> Result<Url, AppError> {
+    let path = format!(
+        "api/v2.0/projects/{}/repositories/{}/artifacts/{}/scan",
+        encode_segment(project),
+        encode_repository_path(repository),
+        encode_segment(digest)
+    );
+    base.join(&path).map_err(|_| invalid_name())
+}
+
+/// Builds the list URL for the newest tagged artifact of a repository: one item, sorted by
+/// push time, newest first, tagged only. The same query as the source suggestion
+/// (`specs/integrations.md`, "Source suggestion").
+pub fn newest_tagged_url(base: &Url, project: &str, repository: &str) -> Result<Url, AppError> {
+    let mut url = artifacts_list_url(base, project, repository, 1, 1)?;
+    url.query_pairs_mut()
+        .append_pair("sort", "-push_time")
+        .append_pair("q", "tags=*");
+    Ok(url)
 }
 
 /// OCI label carrying the commit SHA. Required.

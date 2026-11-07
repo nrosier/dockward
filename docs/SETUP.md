@@ -88,9 +88,9 @@ Do these steps for each Harbor project that HarborGate will map. Use a project a
 | Artifact: Read | Read one artifact, including its OCI labels and scan overview |
 | Artifact Addition: Read | Read the vulnerability report (`GET .../artifacts/{reference}/additions/vulnerabilities`) |
 | Tag: List | List the tags of an artifact (`GET .../artifacts/{reference}/tags`). Required (live test 2026-11-06: without it, the tags endpoint returned `403` for a digest tagged `latest`) |
-| Scan | Start a scan of an artifact (`POST .../artifacts/{reference}/scan`). Required for a mapping's scheduled scan to start. Decided 2026-11-06 (user, #191): granted to the robot in Harbor. |
+| Scan: Create | Start a vulnerability scan of an artifact (`POST .../artifacts/{reference}/scan`). Required for a mapping's scheduled scan (#191). Harbor checks Scan Create for this call (`src/server/v2.0/handler/scan.go`, checked 2026-11-07). Decided 2026-11-06 (user, #191): granted to the robot in Harbor. |
 
-In the robot's permission list these appear as the resources **Repository**, **Artifact**, **Artifact Addition**, **Tag**, and **Scan**, with the actions **List** and **Read** (**Tag** uses only **List**). Do not grant anything else: no Repository Pull or Push, no create, delete, or tag create or delete permissions, and no project or system administration. The "do not grant Scan" rule is replaced by the row above (Decided 2026-11-06, user, #191).
+In the robot's permission list these appear as the resources **Repository**, **Artifact**, **Artifact Addition**, **Tag**, and **Scan**. **Repository**, **Artifact** and **Artifact Addition** use the actions **List** and **Read** as in the table, **Tag** uses only **List**, and **Scan** uses only **Create**. Do not grant anything else: no Repository Pull or Push, no Scan Read or Stop, no other create, delete, or tag create or delete permissions, and no project or system administration. Decided 2026-11-06 (user, #191): the earlier "do not grant Scan" rule is replaced by the Scan row above. A mapping whose schedule is off never calls the scan endpoint, so a robot without Scan still works for webhooks and polling; only its scheduled scans fail, with "Harbor refused to start the scan".
 
 Verification status (2026-11-03, updated 2026-11-05):
 - Each endpoint's permission check was read in the Harbor source (`src/server/v2.0/handler/artifact.go`): listing artifacts needs Artifact List, reading an artifact needs Artifact Read, and the vulnerabilities addition needs Artifact Addition Read. The scan overview comes with the artifact read, so Scan Read is not needed. HarborGate never pulls an image, so Repository Pull is not needed.
@@ -205,6 +205,7 @@ These steps are for the first run and for each user. The first local account you
    - Default branch: used only when the image has no `io.github.nrosier.harborgate.branch` label (default `main`)
    - Auto-create issues: on or off
    - Minimum issue severity: `CRITICAL` (default) or `HIGH`
+   - Scheduled scan: off (default), daily, or weekly, at a time in UTC. When on, HarborGate asks Harbor to scan the newest tagged image in the repository and the Sync jobs page lists only the vulnerabilities that are new for that image. It needs the robot's Scan Create permission (section 3a).
 5. **Copy the webhook URL and auth secret:** after you save the mapping, copy the webhook URL and the auth secret shown for it. They are shown once. Paste the URL into the Harbor project webhook from section 3c, replacing `<mapping_token>`, and paste the secret into the Auth Header.
 6. **SARIF category:** HarborGate sets the SARIF run ID to `harborgate/<project>/<harbor-repository>/` automatically. The category is the part before the last `/`, so each image's results stay separate in the Security tab. You do not configure it.
 

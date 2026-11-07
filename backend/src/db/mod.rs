@@ -374,4 +374,54 @@ mod tests {
         assert_eq!(jobs_left, 0);
         Ok(())
     }
+
+    /// Migration 0008 (#191) gives every existing mapping the schedule off, and the CHECK
+    /// constraints refuse values outside the allowed ranges.
+    #[tokio::test]
+    async fn migration_0008_turns_the_scan_schedule_off_for_existing_mappings()
+    -> Result<(), AppError> {
+        let options = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let migrator = sqlx::migrate!("./migrations");
+        migrator
+            .run_to(7, &pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        seed_mapping(&pool).await?;
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+             VALUES ('m8', 'user-1', 'cred-harbor', 'cred-gh', 'https://harbor.example.com', 'proj', 'eight', 'o', 'r', 'th8', 'sh')",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        migrator
+            .run(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let (schedule, minute, weekday, last): (String, i64, i64, Option<i64>) = sqlx::query_as(
+            "SELECT scan_schedule, scan_minute, scan_weekday, scan_last_slot FROM repo_mappings WHERE id = 'm8'",
+        )
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        assert_eq!(
+            (schedule.as_str(), minute, weekday, last),
+            ("off", 0, 1, None)
+        );
+        for bad in [
+            "UPDATE repo_mappings SET scan_schedule = 'hourly' WHERE id = 'm8'",
+            "UPDATE repo_mappings SET scan_minute = 1440 WHERE id = 'm8'",
+            "UPDATE repo_mappings SET scan_weekday = 0 WHERE id = 'm8'",
+        ] {
+            assert!(sqlx::query(bad).execute(&pool).await.is_err(), "{bad}");
+        }
+        Ok(())
+    }
 }

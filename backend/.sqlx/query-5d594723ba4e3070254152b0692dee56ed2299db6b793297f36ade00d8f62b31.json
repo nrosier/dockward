@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT cve_id AS \"cve_id!\" FROM cve_findings\n           WHERE mapping_id = ? AND harbor_repository = ? AND image_tag = ? AND status = 'open'\n           ORDER BY cve_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "cve_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "cve_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5d594723ba4e3070254152b0692dee56ed2299db6b793297f36ade00d8f62b31"
+}

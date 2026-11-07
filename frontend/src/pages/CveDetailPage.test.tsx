@@ -20,6 +20,9 @@ const mapping: Mapping = {
   auto_create_issues: true,
   min_issue_severity: "HIGH",
   created_at: null,
+  scan_schedule: "off",
+  scan_time: "00:00",
+  scan_weekday: 1,
 };
 
 function cve(over: Partial<CveDetail>): CveDetail {

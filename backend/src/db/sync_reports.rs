@@ -89,6 +89,57 @@ pub async fn set_sarif_id(pool: &SqlitePool, id: &str, sarif_id: &str) -> Result
     .map_err(|_| AppError::InternalError)
 }
 
+/// Stores the CVE ids of a successful report and, for a scheduled scan, the new ones (#191).
+/// Both are JSON arrays of ids; `new_cve_ids` is `None` for any other trigger.
+pub async fn set_cve_ids(
+    pool: &SqlitePool,
+    id: &str,
+    cve_ids: &str,
+    new_cve_ids: Option<&str>,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "UPDATE sync_reports SET cve_ids = ?, new_cve_ids = ? WHERE id = ?",
+        cve_ids,
+        new_cve_ids,
+        id
+    )
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// The last stored result for a digest (#191): the newest successful report of the mapping for
+/// that digest stored before the scan started, as its tag and its `cve_ids`. The scan started
+/// when `sync_job_id` (the scheduled sync job) was queued, so a webhook sync of the same scan
+/// that finished first is not taken as the last result. Times are whole seconds, so a report
+/// from the second the job was queued counts as after it: the scan's result cannot be ready in
+/// that second, while a report from it may already hold the new scan. The job's own report is never taken.
+/// Any tag counts, because one digest is one image. `cve_ids` is `None` for a report stored
+/// before migration 0008. `None` when no such report exists.
+pub async fn last_result_for_digest(
+    pool: &SqlitePool,
+    mapping_id: &str,
+    digest: &str,
+    sync_job_id: &str,
+) -> Result<Option<(String, Option<String>)>, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT r.image_tag AS "image_tag!", r.cve_ids FROM sync_reports r
+           WHERE r.mapping_id = ?1 AND r.image_digest = ?2 AND r.sarif_status = 'success'
+             AND (r.sync_job_id IS NULL OR r.sync_job_id <> ?3)
+             AND r.synced_at < (SELECT j.created_at FROM sync_jobs j WHERE j.id = ?3)
+           ORDER BY r.synced_at DESC, r.rowid DESC
+           LIMIT 1"#,
+        mapping_id,
+        digest,
+        sync_job_id
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.map(|r| (r.image_tag, r.cve_ids)))
+}
+
 /// True when polling must not queue this `(digest, tag)` for the mapping: either a
 /// successful sync exists (`sync_jobs.status = 'done'` and `sarif_status = 'success'` on
 /// the linked report), or a `queued` or `running` job for the same digest and tag exists.
