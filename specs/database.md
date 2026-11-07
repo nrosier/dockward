@@ -165,6 +165,7 @@ CREATE TABLE IF NOT EXISTS project_scanner_locks (
     previous_scanner_uuid TEXT,      -- NULL when Harbor reported none; nothing to restore then
     state TEXT NOT NULL CHECK (state IN ('switched', 'restore_pending')),
     acquired_at INTEGER NOT NULL,
+    wait_started_at INTEGER,         -- Unix seconds of the first report poll; the 5-minute ceiling counts from it
     PRIMARY KEY (harbor_base_url, harbor_project)
 );
 CREATE INDEX IF NOT EXISTS idx_scanner_reports_digest ON scanner_reports (mapping_id, image_digest);
