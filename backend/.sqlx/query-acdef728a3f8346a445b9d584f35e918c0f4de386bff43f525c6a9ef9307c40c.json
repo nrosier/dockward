@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT image_digest AS \"image_digest!\" FROM sync_reports\n           WHERE mapping_id = ? AND harbor_repository = ? AND image_tag = ?\n           ORDER BY COALESCE(synced_at, 0) DESC, rowid DESC\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "image_digest!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "image_digest"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "acdef728a3f8346a445b9d584f35e918c0f4de386bff43f525c6a9ef9307c40c"
+}

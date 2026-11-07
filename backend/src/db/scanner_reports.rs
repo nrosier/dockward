@@ -115,6 +115,15 @@ pub async fn upsert_scanner(
     pool: &SqlitePool,
     scanner: &HarborScannerUpsert<'_>,
 ) -> Result<(), AppError> {
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    upsert_scanner_in(&mut conn, scanner).await
+}
+
+/// [`upsert_scanner`] on a connection the caller holds, so it can join a transaction.
+pub async fn upsert_scanner_in(
+    conn: &mut SqliteConnection,
+    scanner: &HarborScannerUpsert<'_>,
+) -> Result<(), AppError> {
     let disabled = i64::from(scanner.disabled);
     sqlx::query!(
         "INSERT INTO harbor_scanners
@@ -135,7 +144,7 @@ pub async fn upsert_scanner(
         disabled,
         scanner.seen_at
     )
-    .execute(pool)
+    .execute(conn)
     .await
     .map(|_| ())
     .map_err(|_| AppError::InternalError)
@@ -146,6 +155,15 @@ pub async fn list_scanners(
     pool: &SqlitePool,
     harbor_base_url: &str,
 ) -> Result<Vec<HarborScannerRow>, AppError> {
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    list_scanners_in(&mut conn, harbor_base_url).await
+}
+
+/// [`list_scanners`] on a connection the caller holds.
+pub async fn list_scanners_in(
+    conn: &mut SqliteConnection,
+    harbor_base_url: &str,
+) -> Result<Vec<HarborScannerRow>, AppError> {
     let rows = sqlx::query!(
         r#"SELECT uuid, name, vendor, version, disabled, last_seen_at, removed_at
            FROM harbor_scanners
@@ -153,7 +171,7 @@ pub async fn list_scanners(
            ORDER BY uuid"#,
         harbor_base_url
     )
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(|_| AppError::InternalError)?;
     Ok(rows
@@ -238,6 +256,16 @@ pub async fn reports_for_digest(
     mapping_id: &str,
     image_digest: &str,
 ) -> Result<Vec<ScannerReportRow>, AppError> {
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    reports_for_digest_in(&mut conn, mapping_id, image_digest).await
+}
+
+/// [`reports_for_digest`] on a connection the caller holds.
+pub async fn reports_for_digest_in(
+    conn: &mut SqliteConnection,
+    mapping_id: &str,
+    image_digest: &str,
+) -> Result<Vec<ScannerReportRow>, AppError> {
     let rows = sqlx::query!(
         r#"SELECT id AS "id!", scanner_uuid, scanner_name, scanner_vendor, scanner_version,
                   image_push_time, stored_at
@@ -247,7 +275,7 @@ pub async fn reports_for_digest(
         mapping_id,
         image_digest
     )
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(|_| AppError::InternalError)?;
     Ok(rows
@@ -271,6 +299,16 @@ pub async fn findings_for_digest(
     mapping_id: &str,
     image_digest: &str,
 ) -> Result<Vec<ScannerFindingRow>, AppError> {
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    findings_for_digest_in(&mut conn, mapping_id, image_digest).await
+}
+
+/// [`findings_for_digest`] on a connection the caller holds.
+pub async fn findings_for_digest_in(
+    conn: &mut SqliteConnection,
+    mapping_id: &str,
+    image_digest: &str,
+) -> Result<Vec<ScannerFindingRow>, AppError> {
     let rows = sqlx::query!(
         r#"SELECT sr.id AS "report_id!", sr.scanner_uuid AS "scanner_uuid!",
                   sf.cve_id AS "cve_id!", sf.package AS "package!", sf.version,
@@ -283,7 +321,7 @@ pub async fn findings_for_digest(
         mapping_id,
         image_digest
     )
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(|_| AppError::InternalError)?;
     Ok(rows
@@ -476,6 +514,198 @@ pub async fn hand_over_lock(
     .await
     .map_err(|_| AppError::InternalError)?;
     Ok(result.rows_affected() == 1)
+}
+
+/// Marks every scanner of a Harbor that is not in `listed_json` (a JSON array of UUIDs) as removed
+/// at `now`, and returns their UUIDs. A scanner that is already removed is not returned again. The
+/// caller passes only a complete scanner list (`specs/integrations.md`, "Scheduled scans").
+pub async fn mark_missing_removed(
+    conn: &mut SqliteConnection,
+    harbor_base_url: &str,
+    listed_json: &str,
+    now: i64,
+) -> Result<Vec<String>, AppError> {
+    let rows = sqlx::query!(
+        r#"SELECT uuid AS "uuid!" FROM harbor_scanners
+           WHERE harbor_base_url = ? AND removed_at IS NULL
+             AND uuid NOT IN (SELECT value FROM json_each(?))"#,
+        harbor_base_url,
+        listed_json
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    sqlx::query!(
+        "UPDATE harbor_scanners SET removed_at = ?
+         WHERE harbor_base_url = ? AND removed_at IS NULL
+           AND uuid NOT IN (SELECT value FROM json_each(?))",
+        now,
+        harbor_base_url,
+        listed_json
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(rows.into_iter().map(|row| row.uuid).collect())
+}
+
+/// Deletes the stored reports (and, by cascade, their findings) of the scanners in `uuids_json`
+/// for every mapping on a Harbor. Returns the affected (mapping id, digest) pairs.
+pub async fn delete_reports_of_scanners(
+    conn: &mut SqliteConnection,
+    harbor_base_url: &str,
+    uuids_json: &str,
+) -> Result<Vec<(String, String)>, AppError> {
+    let rows = sqlx::query!(
+        r#"SELECT DISTINCT sr.mapping_id AS "mapping_id!", sr.image_digest AS "image_digest!"
+           FROM scanner_reports AS sr
+           JOIN repo_mappings AS m ON m.id = sr.mapping_id
+           WHERE m.harbor_base_url = ?
+             AND sr.scanner_uuid IN (SELECT value FROM json_each(?))"#,
+        harbor_base_url,
+        uuids_json
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    sqlx::query!(
+        "DELETE FROM scanner_reports
+         WHERE scanner_uuid IN (SELECT value FROM json_each(?))
+           AND mapping_id IN (SELECT id FROM repo_mappings WHERE harbor_base_url = ?)",
+        uuids_json,
+        harbor_base_url
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.mapping_id, row.image_digest))
+        .collect())
+}
+
+/// How many stored reports a (mapping, digest) has.
+pub async fn report_count(
+    conn: &mut SqliteConnection,
+    mapping_id: &str,
+    image_digest: &str,
+) -> Result<i64, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM scanner_reports
+           WHERE mapping_id = ? AND image_digest = ?"#,
+        mapping_id,
+        image_digest
+    )
+    .fetch_one(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.n)
+}
+
+/// The tags of a mapping whose sync of this digest succeeded. A recompute runs per tag.
+pub async fn synced_tags_for_digest(
+    conn: &mut SqliteConnection,
+    mapping_id: &str,
+    image_digest: &str,
+) -> Result<Vec<String>, AppError> {
+    let rows = sqlx::query!(
+        r#"SELECT DISTINCT image_tag AS "image_tag!" FROM sync_reports
+           WHERE mapping_id = ? AND image_digest = ? AND sarif_status = 'success'
+           ORDER BY image_tag"#,
+        mapping_id,
+        image_digest
+    )
+    .fetch_all(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(rows.into_iter().map(|row| row.image_tag).collect())
+}
+
+/// Deletes the `unknown` report of (mapping, digest), if any. The first normal sync with a known
+/// scanner calls it in the transaction that stores the known report. A chosen scan never does.
+pub async fn delete_unknown_report(
+    conn: &mut SqliteConnection,
+    mapping_id: &str,
+    image_digest: &str,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "DELETE FROM scanner_reports
+         WHERE mapping_id = ? AND image_digest = ? AND scanner_uuid = 'unknown'",
+        mapping_id,
+        image_digest
+    )
+    .execute(conn)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// The digest the newest sync report of a tag points at, if the tag was ever synced.
+pub async fn latest_digest_for_tag(
+    pool: &SqlitePool,
+    mapping_id: &str,
+    harbor_repository: &str,
+    tag: &str,
+) -> Result<Option<String>, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT image_digest AS "image_digest!" FROM sync_reports
+           WHERE mapping_id = ? AND harbor_repository = ? AND image_tag = ?
+           ORDER BY COALESCE(synced_at, 0) DESC, rowid DESC
+           LIMIT 1"#,
+        mapping_id,
+        harbor_repository,
+        tag
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.map(|row| row.image_digest))
+}
+
+/// A `scanner_scan` job of a tag, as the Scans card reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagScanJob {
+    pub id: String,
+    pub scanner_uuid: String,
+    pub status: String,
+    pub last_error: Option<String>,
+    pub updated_at: Option<i64>,
+}
+
+/// The `scanner_scan` jobs of (mapping, tag) that name a scanner, newest first. At most 200.
+pub async fn scanner_jobs_for_tag(
+    pool: &SqlitePool,
+    mapping_id: &str,
+    tag: &str,
+) -> Result<Vec<TagScanJob>, AppError> {
+    let rows = sqlx::query!(
+        r#"SELECT id AS "id!", status AS "status!", last_error, updated_at AS "updated_at?: i64",
+                  CAST(json_extract(payload, '$.scanner_uuid') AS TEXT) AS "scanner_uuid?: String"
+           FROM sync_jobs
+           WHERE mapping_id = ?
+             AND json_valid(payload)
+             AND json_extract(payload, '$.kind') = 'scanner_scan'
+             AND json_extract(payload, '$.tag') = ?
+           ORDER BY COALESCE(created_at, 0) DESC, rowid DESC
+           LIMIT 200"#,
+        mapping_id,
+        tag
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(TagScanJob {
+                id: row.id,
+                scanner_uuid: row.scanner_uuid.filter(|uuid| !uuid.is_empty())?,
+                status: row.status,
+                last_error: row.last_error,
+                updated_at: row.updated_at,
+            })
+        })
+        .collect())
 }
 
 /// The values of a new project scanner lock.

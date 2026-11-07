@@ -36,6 +36,8 @@ struct FakeHarbor {
     list: Mutex<(u16, String)>,
     scan: Mutex<Result<u16, ()>>,
     calls: Mutex<Vec<(String, String, String)>>,
+    /// The body of the scanner list. `None` answers `403`, a robot without Scanner Create.
+    candidates: Mutex<Option<String>>,
 }
 
 impl FakeHarbor {
@@ -44,7 +46,13 @@ impl FakeHarbor {
             list: Mutex::new((list_status, list_body.to_owned())),
             scan: Mutex::new(Ok(scan_status)),
             calls: Mutex::new(Vec::new()),
+            candidates: Mutex::new(None),
         })
+    }
+
+    fn with_scanners(self: Arc<Self>, body: &str) -> Arc<Self> {
+        *lock(&self.candidates) = Some(body.to_owned());
+        self
     }
 
     fn calls(&self) -> Vec<(String, String, String)> {
@@ -64,6 +72,13 @@ impl HarborFetch for Arc<FakeHarbor> {
         _secret: &[u8],
         _extra_headers: &[(&str, &str)],
     ) -> Result<HarborReply, AppError> {
+        // The scanner list: the robot of the single-scanner tests has no Scanner Create (`403`).
+        if url.path().ends_with("/scanner/candidates") {
+            return Ok(match lock(&self.candidates).clone() {
+                Some(body) => HarborReply::new(200, body.into_bytes()),
+                None => HarborReply::new(403, Vec::new()),
+            });
+        }
         lock(&self.calls).push((
             "GET".to_owned(),
             url.path().to_owned(),
@@ -552,4 +567,101 @@ fn new_ids_are_those_not_in_the_last_result_for_the_digest() {
     assert!(new_cve_ids(&[], Some(r#"["CVE-1"]"#)).is_empty());
     // An unchanged scan reports nothing new.
     assert!(new_cve_ids(&ids, Some(r#"["CVE-1","CVE-2","CVE-3"]"#)).is_empty());
+}
+
+// ---- several scanners (#224 d5) -------------------------------------------------------------
+
+fn scanner_list(entries: &[(&str, &str, bool)]) -> String {
+    let items: Vec<Value> = entries
+        .iter()
+        .map(|(uuid, name, disabled)| {
+            json!({"uuid": uuid, "name": name, "vendor": "V", "version": "1", "disabled": disabled,
+                   "url": format!("https://{SENTINEL}.invalid")})
+        })
+        .collect();
+    Value::Array(items).to_string()
+}
+
+async fn scanner_scan_payloads(fx: &Fixture) -> Vec<Value> {
+    fx.payloads()
+        .await
+        .into_iter()
+        .map(|(_, payload)| payload)
+        .filter(|payload| payload["kind"] == "scanner_scan")
+        .collect()
+}
+
+/// A scheduled run with two enabled scanners queues one `scanner_scan` job per scanner for the
+/// same tag, makes no scan call itself, and marks itself done in the same transaction. A disabled
+/// scanner gets none.
+#[tokio::test]
+async fn a_scheduled_run_queues_one_scan_per_enabled_scanner() {
+    let fx = Fixture::new("fan-out").await;
+    let harbor = FakeHarbor::new(200, &newest_body(), 202).with_scanners(&scanner_list(&[
+        ("uuid-b", "Grype", false),
+        ("uuid-a", "Trivy", false),
+        ("uuid-c", "Old", true),
+    ]));
+    let job = fx.scan_job("s1").await;
+    assert_eq!(fx.run(&harbor, &job).await, JobOutcome::Done);
+
+    assert_eq!(harbor.posts(), 0, "the scanner jobs start the scans");
+    let queued = scanner_scan_payloads(&fx).await;
+    assert_eq!(queued.len(), 2);
+    let uuids: Vec<&str> = queued
+        .iter()
+        .map(|p| p["scanner_uuid"].as_str().unwrap())
+        .collect();
+    assert_eq!(uuids, vec!["uuid-a", "uuid-b"]);
+    for payload in &queued {
+        assert_eq!(payload["tag"], "v2");
+        assert_eq!(payload["trigger"], "schedule");
+        assert!(payload.get("fetch_only").is_none());
+    }
+    let jobs = fx.payloads().await;
+    assert_eq!(
+        jobs[0].0, "done",
+        "the scan job is finished with the fan-out"
+    );
+    // The scanner url a Harbor list carries never reaches a job row.
+    assert!(!format!("{jobs:?}").contains(SENTINEL));
+}
+
+/// A second run while the first run's scanner jobs are still queued or running does not queue them
+/// again, so scans do not pile up on one project.
+#[tokio::test]
+async fn a_scheduled_run_does_not_overlap_the_previous_one() {
+    let fx = Fixture::new("no-overlap").await;
+    let harbor = FakeHarbor::new(200, &newest_body(), 202).with_scanners(&scanner_list(&[
+        ("uuid-a", "Trivy", false),
+        ("uuid-b", "Grype", false),
+    ]));
+    let first = fx.scan_job("s1").await;
+    assert_eq!(fx.run(&harbor, &first).await, JobOutcome::Done);
+    let second = fx.scan_job("s2").await;
+    assert_eq!(fx.run(&harbor, &second).await, JobOutcome::Done);
+    assert_eq!(
+        scanner_scan_payloads(&fx).await.len(),
+        2,
+        "the same two jobs, not four"
+    );
+}
+
+/// One enabled scanner, or a robot that cannot list scanners, keeps the plain #191 scan.
+#[tokio::test]
+async fn one_scanner_or_no_scanner_access_keeps_the_plain_scan() {
+    for (name, harbor) in [
+        (
+            "single",
+            FakeHarbor::new(200, &newest_body(), 202)
+                .with_scanners(&scanner_list(&[("uuid-a", "Trivy", false)])),
+        ),
+        ("forbidden", FakeHarbor::new(200, &newest_body(), 202)),
+    ] {
+        let fx = Fixture::new(name).await;
+        let job = fx.scan_job("s1").await;
+        assert_eq!(fx.run(&harbor, &job).await, JobOutcome::Done, "{name}");
+        assert_eq!(harbor.posts(), 1, "{name}: the plain scan call");
+        assert!(scanner_scan_payloads(&fx).await.is_empty(), "{name}");
+    }
 }

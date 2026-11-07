@@ -9,7 +9,7 @@
 use serde_json::Value;
 
 use crate::error::AppError;
-use crate::services::harbor_client::valid_digest;
+use crate::services::harbor_client::{TRIVY_REPORT_MIME, valid_digest};
 
 /// The validated event stored in `sync_jobs.payload`. It holds no secrets.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -20,6 +20,10 @@ pub struct ScanEvent {
     pub digest: String,
     /// The first tag. Always non-empty: an untagged event makes a [`ResolveEvent`] instead.
     pub tag: String,
+    /// `resources[0].scan_overview[<mime>].scanner.name` of the event (#224 d10), absent when the
+    /// event has none. The sync job matches it to a registered scanner. Not a secret.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scanner_name: Option<String>,
 }
 
 /// The payload of a resolve job (#132): a digest with no tag. Stored as
@@ -29,6 +33,9 @@ pub struct ResolveEvent {
     pub kind: &'static str,
     pub repo_full_name: String,
     pub digest: String,
+    /// The scanner name of the event, copied to each sync job the resolve job fans out (#224 d10).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scanner_name: Option<String>,
 }
 
 /// What a valid body means for the mapping.
@@ -122,6 +129,7 @@ pub fn classify(body: &[u8], repo_full_name: &str) -> Result<Outcome, AppError> 
     let digest = string_at(&data, &["resources", "0", "digest"])
         .filter(|digest| valid_digest(digest))
         .ok_or_else(bad_request)?;
+    let scanner_name = event_scanner_name(&data);
     // An untagged event is pushed by digest. CVEs are tracked per tag, so a resolve job reads
     // the tags from Harbor later, in the worker.
     let tag = match string_at(&data, &["resources", "0", "tag"]) {
@@ -131,6 +139,7 @@ pub fn classify(body: &[u8], repo_full_name: &str) -> Result<Outcome, AppError> 
                 kind: "resolve",
                 repo_full_name: repo_full_name.to_owned(),
                 digest,
+                scanner_name,
             }));
         }
     };
@@ -138,7 +147,32 @@ pub fn classify(body: &[u8], repo_full_name: &str) -> Result<Outcome, AppError> 
         repo_full_name: repo_full_name.to_owned(),
         digest,
         tag,
+        scanner_name,
     }))
+}
+
+/// Longest scanner name copied into a job payload, in characters.
+const MAX_SCANNER_NAME_CHARS: usize = 256;
+
+/// The name of the scanner that produced the event: `resources[0].scan_overview[<mime>].scanner.name`
+/// for the vulnerability report MIME type only (#224 d10). `None` when absent, empty, or holding a
+/// control character. The event carries no scanner UUID.
+fn event_scanner_name(data: &Value) -> Option<String> {
+    let name = string_at(
+        data,
+        &[
+            "resources",
+            "0",
+            "scan_overview",
+            TRIVY_REPORT_MIME,
+            "scanner",
+            "name",
+        ],
+    )?;
+    let valid = !name.is_empty()
+        && name.chars().count() <= MAX_SCANNER_NAME_CHARS
+        && !name.chars().any(char::is_control);
+    valid.then_some(name)
 }
 
 /// Walks a JSON path of object keys or array indexes and returns the string at the end.
@@ -223,6 +257,7 @@ mod tests {
                 repo_full_name: REPO.to_owned(),
                 digest: DIGEST.to_owned(),
                 tag: "1.2.3".to_owned(),
+                scanner_name: None,
             })
         );
     }
@@ -233,6 +268,7 @@ mod tests {
             kind: "resolve",
             repo_full_name: REPO.to_owned(),
             digest: DIGEST.to_owned(),
+            scanner_name: None,
         });
         for body in [untagged(&default_vuln()), untagged(&cloudevents_vuln())] {
             assert_eq!(classify(body.as_bytes(), REPO).unwrap(), expected);
@@ -291,6 +327,44 @@ mod tests {
         let default = classify(default_vuln().as_bytes(), REPO).unwrap();
         let cloud = classify(cloudevents_vuln().as_bytes(), REPO).unwrap();
         assert_eq!(default, cloud);
+    }
+
+    /// The scanner name of the report MIME key is copied into the job, in both formats, and only
+    /// that key counts (#224 d10).
+    #[test]
+    fn the_scanner_name_of_the_vulnerability_report_is_copied() {
+        let overview = format!(
+            r#""scan_overview": {{"{TRIVY_REPORT_MIME}": {{"scanner": {{"name": "Grype", "vendor": "Anchore"}}}}}}"#
+        );
+        for body in [default_vuln(), cloudevents_vuln()] {
+            let with = body.replace(
+                r#""tag": "1.2.3""#,
+                &format!(r#""tag": "1.2.3", {overview}"#),
+            );
+            let Outcome::Queue(event) = classify(with.as_bytes(), REPO).unwrap() else {
+                panic!("expected a sync job");
+            };
+            assert_eq!(event.scanner_name.as_deref(), Some("Grype"));
+        }
+        let other_key = default_vuln().replace(
+            r#""tag": "1.2.3""#,
+            r#""tag": "1.2.3", "scan_overview": {"application/other": {"scanner": {"name": "Grype"}}}"#,
+        );
+        let Outcome::Queue(event) = classify(other_key.as_bytes(), REPO).unwrap() else {
+            panic!("expected a sync job");
+        };
+        assert_eq!(event.scanner_name, None);
+        // A name with a control character is dropped, not stored.
+        let control = default_vuln().replace(
+            r#""tag": "1.2.3""#,
+            &format!(
+                r#""tag": "1.2.3", "scan_overview": {{"{TRIVY_REPORT_MIME}": {{"scanner": {{"name": "a\nb"}}}}}}"#
+            ),
+        );
+        let Outcome::Queue(event) = classify(control.as_bytes(), REPO).unwrap() else {
+            panic!("expected a sync job");
+        };
+        assert_eq!(event.scanner_name, None);
     }
 
     #[test]

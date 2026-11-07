@@ -452,6 +452,7 @@ async fn resolve_with_three_tags_queues_three_sync_children_equal_to_webhook_job
             repo_full_name: "proj/app".to_owned(),
             digest: DIGEST.to_owned(),
             tag: tag.to_owned(),
+            scanner_name: None,
         })
         .unwrap();
         assert_eq!(child, &expected);

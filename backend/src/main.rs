@@ -122,6 +122,11 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/mappings/{id}/tags/{tag}/scan",
             post(api::scanners::scan),
         )
+        // No rate limit: it reads only the database (`specs/api.md`, "Scanners and tag scans").
+        .route(
+            "/api/v1/mappings/{id}/tags/{tag}/scans",
+            get(api::scanners::scans),
+        )
         .route(
             "/api/v1/mappings/{id}/cves",
             get(api::cves::list_for_mapping),

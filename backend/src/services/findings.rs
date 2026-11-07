@@ -49,13 +49,32 @@ pub async fn apply_scan(
     report: &Value,
     now: i64,
 ) -> Result<ApplyResult, AppError> {
+    let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
+    let (new_critical, pruned_tags, deleted) =
+        apply_scan_in(&mut tx, mapping_id, repo, tag, report, now).await?;
+    tx.commit().await.map_err(|_| AppError::InternalError)?;
+    finish_pruned(pool, new_critical, pruned_tags, deleted, now).await
+}
+
+/// What [`apply_scan_in`] returns: the new CRITICAL ids, the pruned tags and the number of rows the
+/// 10-tag limit deleted.
+pub type Applied = (Vec<String>, Vec<String>, u64);
+
+/// [`apply_scan`] on a connection the caller holds, so the findings can change in the same
+/// transaction as a stored report (#224). The caller commits, then calls [`finish_pruned`].
+pub async fn apply_scan_in(
+    tx: &mut sqlx::SqliteConnection,
+    mapping_id: &str,
+    repo: &str,
+    tag: &str,
+    report: &Value,
+    now: i64,
+) -> Result<Applied, AppError> {
     let items = report
         .get("vulnerabilities")
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default();
-
-    let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
 
     // First pass, before any write: which CRITICAL ids are new to the mapping.
     let mut new_critical: Vec<String> = Vec::new();
@@ -69,7 +88,7 @@ pub async fn apply_scan(
                 .and_then(Value::as_str)
                 .unwrap_or("Unknown"),
         );
-        if severity == "CRITICAL" && !findings::exists_for_mapping(&mut tx, mapping_id, id).await? {
+        if severity == "CRITICAL" && !findings::exists_for_mapping(tx, mapping_id, id).await? {
             new_critical.push(id.to_owned());
         }
     }
@@ -94,7 +113,7 @@ pub async fn apply_scan(
         let description = cap_description(item.get("description").and_then(Value::as_str));
         let row_id = ids::new_id()?;
         findings::upsert(
-            &mut tx,
+            tx,
             &Finding {
                 id: &row_id,
                 mapping_id,
@@ -114,18 +133,27 @@ pub async fn apply_scan(
         }
     }
 
-    findings::mark_missing_fixed(&mut tx, mapping_id, repo, tag, &seen_ids).await?;
+    findings::mark_missing_fixed(tx, mapping_id, repo, tag, &seen_ids).await?;
 
     let mut pruned_tags: Vec<String> = Vec::new();
     let mut deleted: u64 = 0;
-    let tags = findings::tags_by_recency(&mut tx, mapping_id).await?;
+    let tags = findings::tags_by_recency(tx, mapping_id).await?;
     for old in tags.into_iter().skip(MAX_TAGS) {
-        deleted += findings::delete_tag(&mut tx, mapping_id, repo, &old).await?;
+        deleted += findings::delete_tag(tx, mapping_id, repo, &old).await?;
         pruned_tags.push(old);
     }
 
-    tx.commit().await.map_err(|_| AppError::InternalError)?;
+    Ok((new_critical, pruned_tags, deleted))
+}
 
+/// Records the cleanup run when the 10-tag limit deleted tags, after the commit.
+pub async fn finish_pruned(
+    pool: &SqlitePool,
+    new_critical: Vec<String>,
+    pruned_tags: Vec<String>,
+    deleted: u64,
+    now: i64,
+) -> Result<ApplyResult, AppError> {
     if !pruned_tags.is_empty() {
         job_runs::insert(
             pool,

@@ -37,6 +37,7 @@ use crate::services::harbor_client::{
 use crate::services::ids;
 use crate::services::poller::harbor_login;
 use crate::services::resolve::{self, body_or_outcome, newest_tags};
+use crate::services::scanner_scan;
 use crate::services::sync::{Clock, HarborFetch, MSG_DATABASE, MSG_GONE, MSG_INTERNAL};
 use crate::worker::{JobOutcome, now_secs};
 
@@ -307,6 +308,21 @@ async fn scan<H: HarborFetch, C: Clock>(
         }
     };
 
+    // A scheduled run over several scanners: one `scanner_scan` job per enabled scanner, one at a
+    // time per project through the project lock (#224 d5). With one enabled scanner, or when the
+    // robot cannot list scanners, the plain scan below runs as in #191.
+    if trigger == TRIGGER_SCHEDULE
+        && let Some(enabled) = enabled_scanners(pool, harbor, clock, &mapping, &username, &secret)
+            .await?
+            .filter(|enabled| enabled.len() > 1)
+    {
+        let jobs = fan_out_payloads(&mapping, &tag, &enabled);
+        scanner_scan::queue_scanner_jobs(pool, &mapping, &jobs, Some(&job.id), clock.now())
+            .await
+            .map_err(|_| failed(MSG_DATABASE))?;
+        return Ok(JobOutcome::Done);
+    }
+
     // A scheduled scan of this digest is still waiting for its report: do not start another.
     let mut conn = pool.acquire().await.map_err(|_| failed(MSG_DATABASE))?;
     let running = sync_jobs::has_pending_scheduled_sync(&mut conn, &mapping.id, &digest)
@@ -335,6 +351,54 @@ async fn scan<H: HarborFetch, C: Clock>(
     // mark, so a retry after a crash cannot queue it twice.
     queue_sync(pool, job, &mapping, &digest, &tag, trigger, clock.now()).await?;
     Ok(JobOutcome::Done)
+}
+
+/// The UUIDs of the enabled scanners (not `disabled`) of the project, by UUID, after a read that
+/// also stores them and drops the reports of a scanner Harbor no longer has. `None` when the robot
+/// cannot list scanners.
+async fn enabled_scanners<H: HarborFetch, C: Clock>(
+    pool: &SqlitePool,
+    harbor: &H,
+    clock: &C,
+    mapping: &MappingRow,
+    username: &str,
+    secret: &[u8],
+) -> Flow<Option<Vec<String>>> {
+    let listed =
+        scanner_scan::refresh_scanners(pool, harbor, clock, mapping, username, secret).await?;
+    Ok(listed.map(|scanners| {
+        let mut uuids: Vec<String> = scanners
+            .into_iter()
+            .filter(|scanner| !scanner.disabled)
+            .map(|scanner| scanner.uuid)
+            .collect();
+        uuids.sort();
+        uuids.dedup();
+        uuids
+    }))
+}
+
+/// One `(tag, scanner, payload)` per enabled scanner for a scheduled run.
+fn fan_out_payloads(
+    mapping: &MappingRow,
+    tag: &str,
+    scanner_uuids: &[String],
+) -> Vec<(String, String, String)> {
+    scanner_uuids
+        .iter()
+        .map(|uuid| {
+            let payload = json!({
+                "kind": "scanner_scan",
+                "repo_full_name":
+                    format!("{}/{}", mapping.harbor_project, mapping.harbor_repository),
+                "tag": tag,
+                "scanner_uuid": uuid,
+                "trigger": TRIGGER_SCHEDULE,
+            })
+            .to_string();
+            (tag.to_owned(), uuid.clone(), payload)
+        })
+        .collect()
 }
 
 async fn queue_sync(

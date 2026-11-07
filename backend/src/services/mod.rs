@@ -46,12 +46,14 @@ pub mod retention;
 pub mod sarif;
 pub mod scanner_launch;
 pub mod scanner_scan;
+pub mod scanner_store;
 pub mod scheduled_scan;
 #[allow(dead_code)] // Used by the session extractor and logout routes.
 pub mod sessions;
 pub mod sync;
 #[allow(dead_code)] // Used by the job worker and the retry route.
 pub mod sync_jobs;
+pub mod tag_scans;
 #[allow(dead_code)] // Used by the login service.
 pub mod throttle;
 #[allow(dead_code)] // Used by the user response shape.

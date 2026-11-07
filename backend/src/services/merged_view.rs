@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Value, json};
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::db::scanner_reports::{
     self as scanner_db, ScannerFindingRow, ScannerReportRow, UNKNOWN_SCANNER_UUID,
@@ -163,17 +163,28 @@ pub async fn load(
     harbor_base_url: &str,
     digest: &str,
 ) -> Result<MergedDigest, AppError> {
-    let reports = scanner_db::reports_for_digest(pool, mapping_id, digest).await?;
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    load_in(&mut conn, mapping_id, harbor_base_url, digest).await
+}
+
+/// [`load`] on a connection the caller holds, so it sees that transaction's own writes.
+pub async fn load_in(
+    conn: &mut SqliteConnection,
+    mapping_id: &str,
+    harbor_base_url: &str,
+    digest: &str,
+) -> Result<MergedDigest, AppError> {
+    let reports = scanner_db::reports_for_digest_in(conn, mapping_id, digest).await?;
     if reports.is_empty() {
         return Ok(MergedDigest::default());
     }
-    let current: HashMap<String, String> = scanner_db::list_scanners(pool, harbor_base_url)
+    let current: HashMap<String, String> = scanner_db::list_scanners_in(conn, harbor_base_url)
         .await?
         .into_iter()
         .map(|row| (row.uuid, row.name))
         .collect();
     let scanners = order_scanners(&reports, &current);
-    let rows = scanner_db::findings_for_digest(pool, mapping_id, digest).await?;
+    let rows = scanner_db::findings_for_digest_in(conn, mapping_id, digest).await?;
     let findings = merge(&rows, &scanners);
     Ok(MergedDigest { scanners, findings })
 }

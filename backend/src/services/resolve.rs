@@ -239,14 +239,20 @@ async fn resolve<H: HarborFetch, C: Clock>(
     job: &ClaimedJob,
 ) -> Result<JobOutcome, JobOutcome> {
     // (a) The payload.
-    let digest = match serde_json::from_str::<Value>(&job.payload) {
-        Ok(value) => value
-            .get("digest")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        Err(_) => None,
-    }
-    .ok_or_else(|| JobOutcome::Permanent(MSG_BAD_PAYLOAD.to_owned()))?;
+    let payload = serde_json::from_str::<Value>(&job.payload).ok();
+    let digest = payload
+        .as_ref()
+        .and_then(|value| value.get("digest"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| JobOutcome::Permanent(MSG_BAD_PAYLOAD.to_owned()))?;
+    // The scanner name of the event goes on to every sync job this job fans out (#224 d10).
+    let scanner_name = payload
+        .as_ref()
+        .and_then(|value| value.get("scanner_name"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty() && name.chars().count() <= 256)
+        .map(str::to_owned);
     // (b) The digest goes into a URL path, so it is checked again here. A stored payload is not
     // trusted: a restore or a hand edit could have put anything in it.
     if !valid_digest(&digest) {
@@ -310,6 +316,7 @@ async fn resolve<H: HarborFetch, C: Clock>(
             repo_full_name: repo_full_name.clone(),
             digest: digest.clone(),
             tag: tag.clone(),
+            scanner_name: scanner_name.clone(),
         })
         .map_err(|_| failed(MSG_INTERNAL))?;
         children.push((
