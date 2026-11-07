@@ -132,6 +132,10 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             get(api::cves::list_for_mapping),
         )
         .route(
+            "/api/v1/mappings/{id}/tags",
+            get(api::cves::tags_for_mapping),
+        )
+        .route(
             "/api/v1/project-webhooks",
             post(api::project_webhooks::create),
         )

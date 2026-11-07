@@ -1,0 +1,40 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT ts.image_tag AS \"image_tag!: String\", ts.scan_at AS \"last_scan_at!: i64\",\n                  (SELECT COUNT(*) FROM cve_findings f\n                   WHERE f.mapping_id = ts.mapping_id AND f.image_tag = ts.image_tag\n                     AND f.status = 'open') AS \"open_cves!: i64\"\n           FROM (\n               SELECT mapping_id, image_tag, MAX(synced_at) AS scan_at, MAX(rowid) AS last_row\n               FROM sync_reports\n               WHERE mapping_id = ?1 AND sarif_status = 'success'\n               GROUP BY mapping_id, image_tag\n           ) ts\n           ORDER BY ts.scan_at DESC, ts.last_row DESC\n           LIMIT 10",
+  "describe": {
+    "columns": [
+      {
+        "name": "image_tag!: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "image_tag"
+          }
+        }
+      },
+      {
+        "name": "last_scan_at!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "open_cves!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "7f667fb4ffd069569b89f5bcf59a531f1571cf59e9f57ab01f49d4ff8ae34212"
+}

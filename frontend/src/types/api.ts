@@ -168,6 +168,13 @@ export interface ScannerList {
 
 export type TagScanState = "queued" | "running" | "waiting" | "ok" | "failed" | "none";
 
+// One item of GET /mappings/:id/tags: the CVE view's tag set.
+export interface MappingTag {
+  image_tag: string;
+  last_scan_at: string;
+  open_cves: number;
+}
+
 export interface TagScan {
   scanner_uuid: string;
   scanner_name: string;

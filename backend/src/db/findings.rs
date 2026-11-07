@@ -149,6 +149,45 @@ pub async fn tags_by_recency(
     Ok(rows.into_iter().map(|row| row.image_tag).collect())
 }
 
+/// One tag of the CVE view's tag set, as `GET /mappings/:id/tags` returns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackedTagRow {
+    pub image_tag: String,
+    /// The tag's latest successful `synced_at`, Unix seconds.
+    pub last_scan_at: i64,
+    /// The tag's `cve_findings` rows that are `open`.
+    pub open_cves: i64,
+}
+
+/// The mapping's tag set in the CVE view: the tags with a successful `sync_reports` row,
+/// most recently scanned first, at most 10. This is the `tag_scans` and `tracked` rule of
+/// [`list_cves`] (`tracked_tags` is the length of this list) with the order of
+/// [`tags_by_recency`].
+pub async fn tracked_tags(
+    pool: &SqlitePool,
+    mapping_id: &str,
+) -> Result<Vec<TrackedTagRow>, AppError> {
+    sqlx::query_as!(
+        TrackedTagRow,
+        r#"SELECT ts.image_tag AS "image_tag!: String", ts.scan_at AS "last_scan_at!: i64",
+                  (SELECT COUNT(*) FROM cve_findings f
+                   WHERE f.mapping_id = ts.mapping_id AND f.image_tag = ts.image_tag
+                     AND f.status = 'open') AS "open_cves!: i64"
+           FROM (
+               SELECT mapping_id, image_tag, MAX(synced_at) AS scan_at, MAX(rowid) AS last_row
+               FROM sync_reports
+               WHERE mapping_id = ?1 AND sarif_status = 'success'
+               GROUP BY mapping_id, image_tag
+           ) ts
+           ORDER BY ts.scan_at DESC, ts.last_row DESC
+           LIMIT 10"#,
+        mapping_id
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
 /// Deletes a tag's `cve_findings` and `sync_reports`. It never touches `github_issues`;
 /// their `sync_report_id` and the findings' `github_issue_id` are `ON DELETE SET NULL`.
 /// Returns the number of rows deleted from both tables.

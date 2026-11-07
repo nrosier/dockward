@@ -65,6 +65,20 @@ pub async fn list_for_mapping(
     Ok(Json(page))
 }
 
+/// `GET /api/v1/mappings/:id/tags`. The CVE view's tag set of the mapping as
+/// `{"items": [{"image_tag","last_scan_at","open_cves"}]}`, most recently scanned first, at
+/// most 10. Same access as the CVE list: the owner or any admin; another tenant's or an
+/// unknown mapping is `404`. Returns `200`.
+pub async fn tags_for_mapping(
+    State(state): State<AppState>,
+    user: AuthUser,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mapping_id = path_of(path)?;
+    let items = cves::mapping_tags(&state.pool, &reader_of(&user), &mapping_id).await?;
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
 /// `GET /api/v1/cves`. The caller's CVEs across their mappings, or one mapping with
 /// `mapping_id`. Admins may add `scope=all` (`403` for anyone else). Returns `200`; `400` for
 /// a bad list parameter; `404` for an unknown or foreign `mapping_id`.
@@ -1066,6 +1080,109 @@ mod tests {
         let page = all_cves(&state, &user("u1"), "").await.unwrap();
         let cve = item(&page, "CVE-2026-0001");
         assert_eq!((cve.open_tags, cve.tracked_tags), (2, 10));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `GET /api/v1/mappings/:mapping/tags` as `who`, as the JSON body.
+    async fn tag_list(
+        state: &AppState,
+        who: &AuthUser,
+        mapping: &str,
+    ) -> Result<serde_json::Value, AppError> {
+        tags_for_mapping(
+            State(state.clone()),
+            who.clone(),
+            Ok(Path(mapping.to_owned())),
+        )
+        .await
+        .map(|Json(body)| body)
+    }
+
+    #[tokio::test]
+    async fn mapping_tags_are_the_cve_view_tag_set() {
+        let (state, dir, _, _) = setup("tag-list").await;
+        for (n, tag) in ["v1", "v2", "v3"].into_iter().enumerate() {
+            report(&state, "m1", tag, AT + n as i64, "success").await;
+        }
+        // A failed report does not track a tag.
+        report(&state, "m1", "bad", AT + 50, "failed").await;
+        seen(&state, "m1", "v1", "CVE-2026-0001", "HIGH", AT).await;
+        seen(&state, "m1", "v1", "CVE-2026-0002", "LOW", AT).await;
+        seen(&state, "m1", "v3", "CVE-2026-0001", "HIGH", AT).await;
+        fix(&state, "m1", "v1", "CVE-2026-0002").await;
+
+        let body = tag_list(&state, &user("u1"), "m1").await.unwrap();
+        let items = body["items"].as_array().unwrap();
+        let shown: Vec<(&str, i64)> = items
+            .iter()
+            .map(|i| {
+                (
+                    i["image_tag"].as_str().unwrap(),
+                    i["open_cves"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [("v3", 1), ("v2", 0), ("v1", 1)],
+            "newest scan first"
+        );
+        assert_eq!(items[0]["last_scan_at"], "2001-09-09T01:46:42Z");
+        assert_eq!(
+            items[0].as_object().unwrap().len(),
+            3,
+            "names and counts only"
+        );
+
+        // The CVE list counts the same tags.
+        let page = by_mapping(&state, &user("u1"), "m1", "").await.unwrap();
+        assert_eq!(
+            item(&page, "CVE-2026-0001").tracked_tags,
+            items.len() as i64
+        );
+
+        // More than 10 tags: both views stop at 10 and agree on which.
+        for n in 0..12 {
+            report(&state, "m1", &format!("w{n}"), AT + 100 + n, "success").await;
+        }
+        let body = tag_list(&state, &user("u1"), "m1").await.unwrap();
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 10);
+        assert_eq!(items[0]["image_tag"], "w11");
+        let page = by_mapping(&state, &user("u1"), "m1", "").await.unwrap();
+        assert_eq!(item(&page, "CVE-2026-0001").tracked_tags, 10);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn mapping_tags_follow_the_mapping_access_check() {
+        let (state, dir, _, _) = setup("tag-list-access").await;
+        report(&state, "m1", "v1", AT, "success").await;
+
+        // Another tenant gets the same answer as for an unknown mapping, and the CVE list.
+        let foreign = tag_list(&state, &user("u2"), "m1").await.unwrap_err();
+        let unknown = tag_list(&state, &user("u2"), "nope").await.unwrap_err();
+        let cves = by_mapping(&state, &user("u2"), "m1", "").await.unwrap_err();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        assert_eq!(unknown.status(), foreign.status());
+        assert_eq!(cves.status(), foreign.status());
+        assert_eq!(format!("{foreign:?}"), format!("{unknown:?}"));
+
+        // The owner and an admin read it; a tagless mapping gives an empty list.
+        assert_eq!(
+            tag_list(&state, &user("u1"), "m1").await.unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            tag_list(&state, &admin("a1"), "m1").await.unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
