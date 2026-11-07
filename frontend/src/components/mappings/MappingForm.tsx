@@ -207,9 +207,13 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
         void navigate("/mappings");
       }
     },
+    // Fixed catalog text chosen by the error code and detail, never the server message
+    // (#167, #180). The duplicate text names no other mapping or user.
     onError: (failure) => {
       if (failure instanceof ApiError && failure.code === "code_scanning_unavailable") {
         setServerError(t("mappings.form.codeScanningUnavailable"));
+      } else if (failure instanceof ApiError && failure.code === "conflict" && failure.detail === "harbor_repository_mapped") {
+        setServerError(t("mappings.form.harborRepositoryMapped"));
       } else {
         setServerError(t("errors.generic"));
       }

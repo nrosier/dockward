@@ -21,6 +21,10 @@ pub enum AppError {
     CsrfInvalid,
     NotFound,
     Conflict(String),
+    /// The Harbor repository is already mapped on this Harbor instance, by any user. A
+    /// `409 conflict` with the fixed `harbor_repository_mapped` detail and fixed text that
+    /// never names the other mapping, its owner or its id (`specs/api.md`, #180).
+    HarborRepositoryMapped,
     ValidationFailed(String),
     /// GitHub cannot take code scanning uploads for the repository (`specs/security.md`).
     CodeScanningUnavailable,
@@ -61,6 +65,8 @@ pub enum ErrorDetail {
     GithubToken,
     /// The credential is the wrong type for the route.
     WrongCredentialType,
+    /// A mapping create or update names a Harbor repository that is already mapped.
+    HarborRepositoryMapped,
 }
 
 /// Builds an error envelope response. Every error response is built here, so the envelope
@@ -89,7 +95,7 @@ impl AppError {
             AppError::Unauthenticated | AppError::InvalidCredentials => StatusCode::UNAUTHORIZED,
             AppError::Forbidden | AppError::CsrfInvalid => StatusCode::FORBIDDEN,
             AppError::NotFound => StatusCode::NOT_FOUND,
-            AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::Conflict(_) | AppError::HarborRepositoryMapped => StatusCode::CONFLICT,
             AppError::ValidationFailed(_) | AppError::CodeScanningUnavailable => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
@@ -112,7 +118,7 @@ impl AppError {
             AppError::Forbidden => "forbidden",
             AppError::CsrfInvalid => "csrf_invalid",
             AppError::NotFound => "not_found",
-            AppError::Conflict(_) => "conflict",
+            AppError::Conflict(_) | AppError::HarborRepositoryMapped => "conflict",
             AppError::ValidationFailed(_) => "validation_failed",
             AppError::CodeScanningUnavailable => "code_scanning_unavailable",
             AppError::PayloadTooLarge => "payload_too_large",
@@ -134,6 +140,9 @@ impl AppError {
             AppError::CodeScanningUnavailable => {
                 "This repository cannot receive code scanning uploads.".to_owned()
             }
+            AppError::HarborRepositoryMapped => {
+                "This Harbor repository is already mapped on this instance.".to_owned()
+            }
             AppError::Unauthenticated => "Authentication is required.".to_owned(),
             AppError::InvalidCredentials => "Invalid username or password.".to_owned(),
             AppError::Forbidden => "You do not have permission to do this.".to_owned(),
@@ -148,11 +157,19 @@ impl AppError {
             AppError::UpstreamUnreachable => "An upstream service could not be reached.".to_owned(),
         }
     }
+
+    /// The fixed `detail` code, for the errors that carry one.
+    pub fn detail(&self) -> Option<ErrorDetail> {
+        match self {
+            AppError::HarborRepositoryMapped => Some(ErrorDetail::HarborRepositoryMapped),
+            _ => None,
+        }
+    }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        envelope_response(self.status(), self.code(), self.message(), None)
+        envelope_response(self.status(), self.code(), self.message(), self.detail())
     }
 }
 
@@ -182,6 +199,7 @@ mod tests {
             (AppError::CsrfInvalid, 403, "csrf_invalid"),
             (AppError::NotFound, 404, "not_found"),
             (AppError::Conflict("x".into()), 409, "conflict"),
+            (AppError::HarborRepositoryMapped, 409, "conflict"),
             (
                 AppError::ValidationFailed("x".into()),
                 422,
@@ -234,9 +252,25 @@ mod tests {
             (ErrorDetail::RobotScope, "robot_scope"),
             (ErrorDetail::GithubToken, "github_token"),
             (ErrorDetail::WrongCredentialType, "wrong_credential_type"),
+            (
+                ErrorDetail::HarborRepositoryMapped,
+                "harbor_repository_mapped",
+            ),
         ] {
             assert_eq!(serde_json::to_value(detail).unwrap(), text);
         }
+    }
+
+    #[tokio::test]
+    async fn harbor_repository_mapped_has_fixed_detail_and_text() {
+        let (status, json) = render(AppError::HarborRepositoryMapped).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(json["error"]["code"], "conflict");
+        assert_eq!(json["error"]["detail"], "harbor_repository_mapped");
+        assert_eq!(
+            json["error"]["message"],
+            "This Harbor repository is already mapped on this instance."
+        );
     }
 
     #[tokio::test]

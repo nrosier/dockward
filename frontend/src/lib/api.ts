@@ -11,7 +11,8 @@ export class ApiError extends Error {
   code: string;
   // Seconds from a `Retry-After` header, when the response had a valid one.
   retryAfter?: number;
-  // The envelope's `detail` code (picker 422 answers only), e.g. `robot_scope`.
+  // The envelope's `detail` code (picker 422 answers and the mapping duplicate 409),
+  // e.g. `robot_scope` or `harbor_repository_mapped`.
   detail?: string;
 
   constructor(status: number, code: string, message: string, retryAfter?: number, detail?: string) {
