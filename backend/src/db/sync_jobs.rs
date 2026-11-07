@@ -79,6 +79,51 @@ pub async fn has_pending_pair(
     Ok(row.n > 0)
 }
 
+/// Whether a `queued` or `running` scheduled-scan job exists for this mapping (#191). The
+/// scheduler queues no second one while it does.
+pub async fn has_pending_scan_job(
+    conn: &mut SqliteConnection,
+    mapping_id: &str,
+) -> Result<bool, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM sync_jobs
+           WHERE mapping_id = ?
+             AND status IN ('queued', 'running')
+             AND json_valid(payload)
+             AND json_extract(payload, '$.kind') = 'scan'"#,
+        mapping_id
+    )
+    .fetch_one(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.n > 0)
+}
+
+/// Whether a `queued` or `running` sync job from a scheduled scan exists for this mapping and
+/// digest (#191). Such a job waits for a scan HarborGate started, so a second scan of the same
+/// digest is not started.
+pub async fn has_pending_scheduled_sync(
+    conn: &mut SqliteConnection,
+    mapping_id: &str,
+    digest: &str,
+) -> Result<bool, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM sync_jobs
+           WHERE mapping_id = ?
+             AND status IN ('queued', 'running')
+             AND json_valid(payload)
+             AND json_extract(payload, '$.trigger') = 'schedule'
+             AND json_extract(payload, '$.kind') IS NULL
+             AND json_extract(payload, '$.digest') = ?"#,
+        mapping_id,
+        digest
+    )
+    .fetch_one(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.n > 0)
+}
+
 /// Marks a job `done` only while it is still `running`. Returns the rows changed: zero means
 /// the job is no longer running (it was re-queued, failed, or deleted), and the caller must
 /// not act on its result. Runs on the caller's connection, inside its transaction.
@@ -301,6 +346,8 @@ pub struct ReportRow {
     pub vulnerability_summary: String,
     pub sarif_status: String,
     pub synced_at: Option<i64>,
+    /// JSON array of the CVE ids new for the digest, for a scheduled scan only (#191).
+    pub new_cve_ids: Option<String>,
 }
 
 /// Filters and paging for [`list_jobs`] and [`count_jobs`]. Every filter is optional.
@@ -349,7 +396,8 @@ pub async fn list_jobs_in(
                   substr(CAST(r.commit_sha AS TEXT), 1, ?) AS "report_commit_sha?: String",
                   r.vulnerability_summary AS "report_summary?",
                   r.sarif_status AS "report_sarif_status?",
-                  r.synced_at AS "report_synced_at?: i64"
+                  r.synced_at AS "report_synced_at?: i64",
+                  r.new_cve_ids AS "report_new_cve_ids?: String"
            FROM sync_jobs j
            JOIN repo_mappings m ON m.id = j.mapping_id
            LEFT JOIN sync_reports r
@@ -413,6 +461,7 @@ pub async fn list_jobs_in(
                         vulnerability_summary,
                         sarif_status: sarif,
                         synced_at: row.report_synced_at,
+                        new_cve_ids: row.report_new_cve_ids,
                     })
                 }
                 _ => None,

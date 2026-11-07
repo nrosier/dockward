@@ -4,6 +4,13 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+### Added
+- Scheduled Harbor scan per mapping: off by default, daily or weekly at a UTC time. HarborGate asks Harbor to scan the newest tagged image and the Sync jobs page lists only the CVEs new for that image (#191).
+
+### Changed
+- The Harbor robot needs Scan Create for scheduled scans; `docs/SETUP.md` lists it (#191).
+- Migration 0008 adds the scan schedule to `repo_mappings` and `cve_ids`, `new_cve_ids` to `sync_reports` (#191).
+
 ## 0.12.4
 
 ### Fixed

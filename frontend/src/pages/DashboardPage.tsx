@@ -7,6 +7,7 @@ import { TableScroll } from "../components/mappings/TableScroll";
 import { useMappingLookup, useScopeAll } from "../components/mappings/useMappings";
 import { ImageCell } from "../components/syncjobs/ImageCell";
 import { JobStatusPill } from "../components/syncjobs/jobPill";
+import { triggerLabel } from "../components/syncjobs/labels";
 import { RetryButton } from "../components/syncjobs/RetryButton";
 import { Time } from "../components/syncjobs/Time";
 import { buttonClass } from "../components/ui/Button";
@@ -189,7 +190,7 @@ export default function DashboardPage() {
                       <td className={`${TD} font-mono text-[12.5px]`}>
                         {mapping === undefined ? null : `${mapping.github_owner}/${mapping.github_repo}`}
                       </td>
-                      <td className={`${TD} text-muted`}>{t(job.trigger === "poll" ? "syncJobs.trigger.poll" : "syncJobs.trigger.webhook")}</td>
+                      <td className={`${TD} text-muted`}>{triggerLabel(job.trigger)}</td>
                       <td className={TD}>
                         <JobStatusPill status={job.status} />
                       </td>

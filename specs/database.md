@@ -69,6 +69,11 @@ CREATE TABLE IF NOT EXISTS repo_mappings (
     min_issue_severity TEXT DEFAULT 'CRITICAL' CHECK (min_issue_severity IN ('CRITICAL', 'HIGH')), -- Decided (2026-11-03, delegated) CHECK: integrations.md allows only CRITICAL or HIGH
     default_branch TEXT NOT NULL DEFAULT 'main',
     created_at INTEGER DEFAULT (unixepoch()),
+    -- Scheduled scan (#191, migration 0008). Times are UTC.
+    scan_schedule TEXT NOT NULL DEFAULT 'off' CHECK (scan_schedule IN ('off', 'daily', 'weekly')),
+    scan_minute INTEGER NOT NULL DEFAULT 0 CHECK (scan_minute BETWEEN 0 AND 1439), -- minute of the UTC day
+    scan_weekday INTEGER NOT NULL DEFAULT 1 CHECK (scan_weekday BETWEEN 1 AND 7), -- ISO weekday, weekly only
+    scan_last_slot INTEGER, -- Unix seconds of the last slot handled; set to the save time when the schedule changes
     UNIQUE (harbor_base_url, harbor_project, harbor_repository) -- one mapping per Harbor repository per Harbor instance. No constraint on the GitHub target (Decided 2026-11-06, user, #185). default_branch sets the SARIF upload branch only.
 );
 
@@ -100,7 +105,10 @@ CREATE TABLE IF NOT EXISTS sync_reports (
     sarif_status TEXT NOT NULL, -- 'pending' | 'success' | 'failed'
     github_sarif_id TEXT,
     error_message TEXT,
-    synced_at INTEGER DEFAULT (unixepoch())
+    synced_at INTEGER DEFAULT (unixepoch()),
+    image_push_time INTEGER, -- migration 0006 (#196)
+    cve_ids TEXT, -- migration 0008 (#191): JSON array of the scan's distinct CVE ids, set on success
+    new_cve_ids TEXT -- migration 0008 (#191): JSON array of ids not in the digest's last result; scheduled scans only
 );
 CREATE INDEX IF NOT EXISTS idx_sync_reports_digest
     ON sync_reports (mapping_id, harbor_repository, image_tag, image_digest, sarif_status);
@@ -325,6 +333,7 @@ Source: none external. The list follows the audit examples in [frontend.md](fron
 - Decided (2026-11-03): Jobs tab storage is the `job_runs` table (see the schema above). It has `job_kind` (`cleanup`, `retention`, `poll`) and `status` (`done`, `failed`) with CHECK constraints. The table holds counts and error text only, never secrets.
 - Decided: `sync_reports.sync_job_id` links each report to its job (nullable, `ON DELETE SET NULL`). The overall sync status is `sync_jobs.status`, not a column on this table (Decided 2026-11-03, see Decisions section).
 - Decided: `sync_reports.image_digest` is NOT NULL. Polling skips an image whose digest already has a successful sync for that mapping and tag. "Successful" means `sync_jobs.status = 'done'` and `sarif_status = 'success'` on the linked report (Decided 2026-11-03, see Decisions section). Decided (2026-11-05, user, #132): fan-out from a resolve job does not use this success rule. It skips a tag only when a `queued` or `running` sync job for the same mapping, digest and tag exists, so a rescan re-syncs a synced tag.
+- Decided (2026-11-07, #191): migration 0008 adds the scan schedule to `repo_mappings` (`scan_schedule` default `off`, `scan_minute`, `scan_weekday`, `scan_last_slot`) and the CVE id lists to `sync_reports` (`cve_ids`, `new_cve_ids`). Existing mappings get the schedule off; existing reports keep NULL lists. A scan job is a `sync_jobs` row whose payload is `{"kind":"scan","repo_full_name","trigger":"schedule"}`; the sync job it queues carries `"trigger":"schedule"`. No other table changes. Rules in [integrations.md](integrations.md), "Scheduled scan".
 - Decided (2026-11-05, user, #132): a resolve job is a `sync_jobs` row whose payload JSON is `{"kind":"resolve","repo_full_name","digest"}` with no `tag`. A payload with no `kind` is a sync job. No schema change and no migration: `payload` is already free JSON, and `kind` is read from it as `trigger` is.
 - Decided (2026-11-06, user, #179): the mapping-save project webhook check reads `project_webhooks` through `UNIQUE (harbor_base_url, harbor_project)`. No schema change and no migration.
 - Decided (2026-11-03, delegated): `user_credentials.username` (nullable) and `user_credentials.expires_at` (nullable) are added for the Harbor robot account. Harbor robot accounts expire after 30 days by default. Source: Harbor robot account documentation, https://goharbor.io/docs/latest/administration/robot-accounts/ (fetched in this session; the default expiry text is confirmed). The expiry is configurable through the `robot_token_duration` system setting (Harbor API swagger, `robot_token_duration`, "robot account token duration in days"). The Harbor robot username form is `<prefix><name>` for system robots and `<prefix><project>+<name>` for project robots, with the configurable prefix defaulting to `robot$` (verified (2026-11-03) in `src/controller/robot/controller.go`).

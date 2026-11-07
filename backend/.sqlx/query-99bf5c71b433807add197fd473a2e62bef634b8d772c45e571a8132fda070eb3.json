@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!\", user_id AS \"user_id!\", harbor_cred_id AS \"harbor_cred_id!\",\n                  github_cred_id AS \"github_cred_id!\", harbor_base_url AS \"harbor_base_url!\",\n                  harbor_project AS \"harbor_project!\", harbor_repository AS \"harbor_repository!\",\n                  github_owner AS \"github_owner!\", github_repo AS \"github_repo!\",\n                  webhook_token_hash AS \"webhook_token_hash!\",\n                  webhook_auth_secret_hash AS \"webhook_auth_secret_hash!\",\n                  auto_create_issues, min_issue_severity, default_branch AS \"default_branch!\",\n                  created_at\n           FROM repo_mappings WHERE id = ? AND user_id = ?",
+  "query": "SELECT id AS \"id!\", user_id AS \"user_id!\", harbor_cred_id AS \"harbor_cred_id!\",\n                  github_cred_id AS \"github_cred_id!\", harbor_base_url AS \"harbor_base_url!\",\n                  harbor_project AS \"harbor_project!\", harbor_repository AS \"harbor_repository!\",\n                  github_owner AS \"github_owner!\", github_repo AS \"github_repo!\",\n                  webhook_token_hash AS \"webhook_token_hash!\",\n                  webhook_auth_secret_hash AS \"webhook_auth_secret_hash!\",\n                  auto_create_issues, min_issue_severity, default_branch AS \"default_branch!\",\n                  created_at,\n                  scan_schedule AS \"scan_schedule!\", scan_minute AS \"scan_minute!: i64\",\n                  scan_weekday AS \"scan_weekday!: i64\", scan_last_slot AS \"scan_last_slot?: i64\"\n           FROM repo_mappings WHERE id = ? AND user_id = ?",
   "describe": {
     "columns": [
       {
@@ -167,6 +167,50 @@
             "name": "created_at"
           }
         }
+      },
+      {
+        "name": "scan_schedule!",
+        "ordinal": 15,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "scan_schedule"
+          }
+        }
+      },
+      {
+        "name": "scan_minute!: i64",
+        "ordinal": 16,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "scan_minute"
+          }
+        }
+      },
+      {
+        "name": "scan_weekday!: i64",
+        "ordinal": 17,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "scan_weekday"
+          }
+        }
+      },
+      {
+        "name": "scan_last_slot?: i64",
+        "ordinal": 18,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "repo_mappings",
+            "name": "scan_last_slot"
+          }
+        }
       }
     ],
     "parameters": {
@@ -187,8 +231,12 @@
       true,
       true,
       false,
+      true,
+      false,
+      false,
+      false,
       true
     ]
   },
-  "hash": "8e7f8a7bdc58c6f972c8447ed3e148a5e4a7432116544e8e2493804fa6394e9f"
+  "hash": "99bf5c71b433807add197fd473a2e62bef634b8d772c45e571a8132fda070eb3"
 }

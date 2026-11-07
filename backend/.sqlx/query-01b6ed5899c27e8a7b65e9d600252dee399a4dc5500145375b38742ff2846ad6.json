@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE sync_reports SET cve_ids = ?, new_cve_ids = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "01b6ed5899c27e8a7b65e9d600252dee399a4dc5500145375b38742ff2846ad6"
+}

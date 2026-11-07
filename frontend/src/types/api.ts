@@ -24,7 +24,15 @@ export interface Mapping {
   auto_create_issues: boolean;
   min_issue_severity: IssueSeverity;
   created_at: string | null;
+  // Scheduled Harbor scan (#191). Off by default. Times are UTC.
+  scan_schedule: ScanSchedule;
+  // UTC time, HH:MM.
+  scan_time: string;
+  // ISO weekday of a weekly run, 1 (Monday) to 7 (Sunday).
+  scan_weekday: number;
 }
+
+export type ScanSchedule = "off" | "daily" | "weekly";
 
 // Open CVEs per severity, and their sum (#129).
 export interface OpenCves {
@@ -112,6 +120,9 @@ export interface SyncReport {
   vulnerability_summary: unknown;
   sarif_status: "pending" | "success" | "failed";
   synced_at: string | null;
+  // CVE ids a scheduled scan found that were not in the last result for the digest (#191).
+  // Null for other triggers; empty when nothing is new.
+  new_cve_ids: string[] | null;
 }
 
 export interface SyncJob {
@@ -123,7 +134,7 @@ export interface SyncJob {
   last_error: string | null;
   created_at: string | null;
   updated_at: string | null;
-  trigger: "webhook" | "poll";
+  trigger: "webhook" | "poll" | "schedule";
   image: {
     repo_full_name: string | null;
     tag: string | null;

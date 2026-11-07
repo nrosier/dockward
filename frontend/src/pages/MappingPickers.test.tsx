@@ -17,6 +17,7 @@ const existing: Mapping = {
   id: "m1", user_id: "u1", harbor_cred_id: "hc1", github_cred_id: "gc1", harbor_base_url: HARBOR_A.base_url,
   harbor_project: "gone-project", harbor_repository: "gone-repo", github_owner: "old-org", github_repo: "old-repo",
   default_branch: "main", auto_create_issues: true, min_issue_severity: "HIGH", created_at: null,
+  scan_schedule: "off", scan_time: "00:00", scan_weekday: 1,
 };
 
 const page = <T,>(items: T[], extra: Record<string, unknown> = {}) => ({ items, page: 1, page_size: 50, total: items.length, truncated: false, ...extra });

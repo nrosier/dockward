@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM sync_jobs\n           WHERE mapping_id = ?\n             AND status IN ('queued', 'running')\n             AND json_valid(payload)\n             AND json_extract(payload, '$.trigger') = 'schedule'\n             AND json_extract(payload, '$.kind') IS NULL\n             AND json_extract(payload, '$.digest') = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0f423e536f8f7f5751fb62cb58ae01f7aa5abf05e6acc68d1e4ff066f13e2d04"
+}

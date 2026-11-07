@@ -39,7 +39,7 @@ use crate::services::harbor_client::{
 };
 use crate::services::issue_lifecycle::{self, IssueApi};
 use crate::services::resolve::{self, JobKind};
-use crate::services::{findings, ids, sarif};
+use crate::services::{findings, ids, sarif, scheduled_scan};
 use crate::worker::{JobHandler, JobOutcome, now_secs};
 
 /// Waits between processing polls: 5 s, then 10 s, then every 15 s.
@@ -59,11 +59,14 @@ const MSG_PENDING: &str = "GitHub processing still pending";
 
 /// The job payload (`specs/integrations.md`): `{repo_full_name, digest, tag}`. The Harbor
 /// project and repository come from the mapping, which the webhook already matched to
-/// `repo_full_name`, so that field is not read. It and `trigger` are ignored.
+/// `repo_full_name`, so that field is not read. `trigger` is read only to tell a scheduled
+/// scan (#191), whose report records the CVE ids that are new for the digest.
 #[derive(Debug, Deserialize)]
 struct Payload {
     digest: String,
     tag: String,
+    #[serde(default)]
+    trigger: Option<String>,
 }
 
 /// What [`SyncHandler::read_and_convert`] returns: the encoded SARIF (`None` when over the
@@ -80,6 +83,19 @@ pub trait HarborFetch: Send + Sync + 'static {
         secret: &[u8],
         extra_headers: &[(&str, &str)],
     ) -> impl Future<Output = Result<HarborReply, AppError>> + Send;
+
+    /// Sends one JSON `POST`. Only the scheduled scan uses it, to start a Harbor scan (#191).
+    /// The default refuses, so a reader that never starts a scan (the poller, the pull, the
+    /// read-only test fakes) needs no implementation.
+    fn post_json(
+        &self,
+        _url: &Url,
+        _username: &str,
+        _secret: &[u8],
+        _body: &[u8],
+    ) -> impl Future<Output = Result<HarborReply, AppError>> + Send {
+        std::future::ready(Err(AppError::InternalError))
+    }
 }
 
 impl HarborFetch for HarborGet {
@@ -91,6 +107,16 @@ impl HarborFetch for HarborGet {
         extra_headers: &[(&str, &str)],
     ) -> Result<HarborReply, AppError> {
         self.get(url, username, secret, extra_headers).await
+    }
+
+    async fn post_json(
+        &self,
+        url: &Url,
+        username: &str,
+        secret: &[u8],
+        body: &[u8],
+    ) -> Result<HarborReply, AppError> {
+        HarborGet::post_json(self, url, username, secret, body).await
     }
 }
 
@@ -326,6 +352,7 @@ fn wait_for(index: u32) -> Duration {
 
 /// What one job needs after the database reads and the decryption.
 struct Context {
+    job_id: String,
     mapping: MappingRow,
     harbor_username: String,
     harbor_secret: Zeroizing<Vec<u8>>,
@@ -447,6 +474,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
             harbor_secret: self.decrypt(&harbor)?,
             github_token: self.decrypt(&github)?,
             harbor_username,
+            job_id: job.id.clone(),
             mapping,
             payload,
         })
@@ -615,6 +643,48 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
         }
     }
 
+    /// The CVE ids of this scan as a JSON array and, for a scheduled scan only, the ids not in
+    /// the last stored result for the same digest (#191). A report from before migration 0008
+    /// has no stored ids, so the open findings of its tag stand in for them.
+    async fn cve_result(
+        &self,
+        context: &Context,
+        vuln_report: &Value,
+    ) -> Flow<(String, Option<String>)> {
+        let ids = scheduled_scan::report_cve_ids(vuln_report);
+        let encoded = serde_json::to_string(&ids).map_err(|_| failed(MSG_INTERNAL))?;
+        if context.payload.trigger.as_deref() != Some(scheduled_scan::TRIGGER_SCHEDULE) {
+            return Ok((encoded, None));
+        }
+        let mapping = &context.mapping;
+        let previous = report_db::last_result_for_digest(
+            &self.pool,
+            &mapping.id,
+            &context.payload.digest,
+            &context.job_id,
+        )
+        .await
+        .map_err(database)?;
+        let previous = match previous {
+            None => None,
+            Some((_, Some(stored))) => Some(stored),
+            Some((tag, None)) => {
+                let open = crate::db::findings::open_ids_for_tag(
+                    &self.pool,
+                    &mapping.id,
+                    &mapping.harbor_repository,
+                    &tag,
+                )
+                .await
+                .map_err(database)?;
+                Some(serde_json::to_string(&open).map_err(|_| failed(MSG_INTERNAL))?)
+            }
+        };
+        let new_ids = scheduled_scan::new_cve_ids(&ids, previous.as_deref());
+        let new_encoded = serde_json::to_string(&new_ids).map_err(|_| failed(MSG_INTERNAL))?;
+        Ok((encoded, Some(new_encoded)))
+    }
+
     /// Polls GitHub after 5 s, 10 s, then every 15 s, for at most 300 s in total. On
     /// `Complete` the report is marked `success` and the findings of the tag are updated
     /// from `vuln_report`. A retry has no report in hand (`None`), so it is fetched from
@@ -656,6 +726,14 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
                             &fetched
                         }
                     };
+                    // The last stored result for the digest is read before this scan's
+                    // findings replace the tag's rows (#191).
+                    // The ids are written while the report is still pending, so a crash between
+                    // the two writes leaves a pending report that the retry completes again.
+                    let (cve_ids, new_ids) = self.cve_result(context, vuln_report).await?;
+                    report_db::set_cve_ids(&self.pool, report_id, &cve_ids, new_ids.as_deref())
+                        .await
+                        .map_err(database)?;
                     report_db::finish(&self.pool, report_id, "success", None, self.clock.now())
                         .await
                         .map_err(database)?;
@@ -712,6 +790,16 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> JobHandler
             },
             JobKind::Resolve => {
                 resolve::run(
+                    &self.pool,
+                    &self.credentials_key,
+                    &self.harbor,
+                    &self.clock,
+                    &job,
+                )
+                .await
+            }
+            JobKind::Scan => {
+                scheduled_scan::run_job(
                     &self.pool,
                     &self.credentials_key,
                     &self.harbor,
@@ -1094,6 +1182,185 @@ mod tests {
             applied[0],
             ("CVE-2026-0001".to_owned(), "CRITICAL".to_owned())
         );
+    }
+
+    /// A scheduled scan (#191) records only the CVE ids that are not in the last stored result
+    /// for the same digest, and the usual sync still runs (upload, findings). Other triggers
+    /// store the ids but no new list. A clean scheduled scan reports nothing new.
+    #[tokio::test]
+    async fn a_scheduled_sync_records_only_the_new_ids_for_the_digest() {
+        let fx = Fixture::new("scheduled-new").await;
+        // A webhook sync of the same digest on another tag stored the last result: 0001, 0002.
+        sqlx::query(
+            "INSERT INTO sync_reports (id, mapping_id, sync_job_id, harbor_repository, image_tag, image_digest, vulnerability_summary, sarif_status, synced_at, cve_ids)
+             VALUES ('r0', 'm1', NULL, 'app', 'v0', 'sha256:aaaa', '{}', 'success', 900, '[\"CVE-2026-0001\",\"CVE-2026-0002\"]')",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        let payload = r#"{"repo_full_name":"proj/app","digest":"sha256:aaaa","tag":"v1","trigger":"schedule"}"#;
+        sqlx::query("UPDATE sync_jobs SET payload = ? WHERE id = 'j1'")
+            .bind(payload)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        let mut job = fx.job();
+        job.payload = payload.to_owned();
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+        let outcome = fx.handler(&ok_harbor(), &scanner).run(job).await;
+        assert_eq!(outcome, JobOutcome::Done);
+        assert_eq!(scanner.uploads(), 1, "the existing sync rules apply");
+        let (all, new): (String, Option<String>) = sqlx::query_as(
+            "SELECT cve_ids, new_cve_ids FROM sync_reports WHERE sync_job_id = 'j1'",
+        )
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            all,
+            r#"["CVE-2026-0001","CVE-2026-0002","CVE-2026-0003","CVE-2026-0004"]"#
+        );
+        assert_eq!(new.as_deref(), Some(r#"["CVE-2026-0003","CVE-2026-0004"]"#));
+
+        // A clean scheduled scan of the same digest: nothing new.
+        let clean = format!(r#"{{"{TRIVY_REPORT_MIME}": {{"vulnerabilities": []}}}}"#);
+        let harbor = Arc::new(FakeHarbor::new(&good_artifact(), (200, &clean)));
+        db::sync_jobs::enqueue(&fx.pool, "j2", "m1", payload, 1_000)
+            .await
+            .unwrap();
+        let job2 = ClaimedJob {
+            id: "j2".to_owned(),
+            mapping_id: "m1".to_owned(),
+            attempts: 0,
+            payload: payload.to_owned(),
+        };
+        let scanner = FakeScanner::new(Ok("sarif-2".to_owned()), vec![Ok(Processing::Complete)]);
+        assert_eq!(
+            fx.handler(&harbor, &scanner).run(job2).await,
+            JobOutcome::Done
+        );
+        let new: Option<String> =
+            sqlx::query_scalar("SELECT new_cve_ids FROM sync_reports WHERE sync_job_id = 'j2'")
+                .fetch_one(&fx.pool)
+                .await
+                .unwrap();
+        assert_eq!(new.as_deref(), Some("[]"));
+    }
+
+    /// Harbor's own scan-completed webhook for the same scan can finish its sync first. That
+    /// report is newer than the scheduled job, so it is not the "last result", and the new ids
+    /// are still reported once, against the result from before the scan.
+    #[tokio::test]
+    async fn a_report_stored_after_the_scan_started_is_not_the_last_result() {
+        let fx = Fixture::new("scheduled-race").await;
+        for (id, synced_at, ids) in [
+            ("r-before", 900, r#"["CVE-2026-0001"]"#),
+            (
+                "r-after",
+                1_500,
+                r#"["CVE-2026-0001","CVE-2026-0002","CVE-2026-0003","CVE-2026-0004"]"#,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO sync_reports (id, mapping_id, sync_job_id, harbor_repository, image_tag, image_digest, vulnerability_summary, sarif_status, synced_at, cve_ids)
+                 VALUES (?, 'm1', NULL, 'app', 'v1', 'sha256:aaaa', '{}', 'success', ?, ?)",
+            )
+            .bind(id)
+            .bind(synced_at)
+            .bind(ids)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        }
+        let payload = r#"{"repo_full_name":"proj/app","digest":"sha256:aaaa","tag":"v1","trigger":"schedule"}"#;
+        sqlx::query("UPDATE sync_jobs SET payload = ? WHERE id = 'j1'")
+            .bind(payload)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        let mut job = fx.job();
+        job.payload = payload.to_owned();
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+        assert_eq!(
+            fx.handler(&ok_harbor(), &scanner).run(job).await,
+            JobOutcome::Done
+        );
+        let new: Option<String> =
+            sqlx::query_scalar("SELECT new_cve_ids FROM sync_reports WHERE sync_job_id = 'j1'")
+                .fetch_one(&fx.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            new.as_deref(),
+            Some(r#"["CVE-2026-0002","CVE-2026-0003","CVE-2026-0004"]"#)
+        );
+    }
+
+    /// A report from before migration 0008 has no stored ids; the open findings of its tag
+    /// stand in for them.
+    #[tokio::test]
+    async fn a_legacy_last_result_is_read_from_its_tag_findings() {
+        let fx = Fixture::new("scheduled-legacy").await;
+        sqlx::query(
+            "INSERT INTO sync_reports (id, mapping_id, sync_job_id, harbor_repository, image_tag, image_digest, vulnerability_summary, sarif_status, synced_at)
+             VALUES ('r-old', 'm1', NULL, 'app', 'old', 'sha256:aaaa', '{}', 'success', 900)",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        for (id, cve, status) in [
+            ("f1", "CVE-2026-0001", "open"),
+            ("f2", "CVE-2026-0002", "open"),
+            ("f3", "CVE-2026-0003", "fixed"),
+        ] {
+            sqlx::query(
+                "INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, severity, status)
+                 VALUES (?, 'm1', 'app', 'old', ?, 'HIGH', ?)",
+            )
+            .bind(id)
+            .bind(cve)
+            .bind(status)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        }
+        let payload = r#"{"repo_full_name":"proj/app","digest":"sha256:aaaa","tag":"v1","trigger":"schedule"}"#;
+        sqlx::query("UPDATE sync_jobs SET payload = ? WHERE id = 'j1'")
+            .bind(payload)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        let mut job = fx.job();
+        job.payload = payload.to_owned();
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+        assert_eq!(
+            fx.handler(&ok_harbor(), &scanner).run(job).await,
+            JobOutcome::Done
+        );
+        let new: Option<String> =
+            sqlx::query_scalar("SELECT new_cve_ids FROM sync_reports WHERE sync_job_id = 'j1'")
+                .fetch_one(&fx.pool)
+                .await
+                .unwrap();
+        assert_eq!(new.as_deref(), Some(r#"["CVE-2026-0003","CVE-2026-0004"]"#));
+    }
+
+    #[tokio::test]
+    async fn a_webhook_sync_stores_the_ids_and_no_new_list() {
+        let fx = Fixture::new("webhook-ids").await;
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+        assert_eq!(
+            fx.handler(&ok_harbor(), &scanner).run(fx.job()).await,
+            JobOutcome::Done
+        );
+        let (all, new): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT cve_ids, new_cve_ids FROM sync_reports WHERE sync_job_id = 'j1'",
+        )
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+        assert!(all.is_some());
+        assert_eq!(new, None);
     }
 
     /// A payload with no `kind` (every job stored before #132) still runs the sync.

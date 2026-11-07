@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.image_tag AS \"image_tag!\", r.cve_ids FROM sync_reports r\n           WHERE r.mapping_id = ?1 AND r.image_digest = ?2 AND r.sarif_status = 'success'\n             AND (r.sync_job_id IS NULL OR r.sync_job_id <> ?3)\n             AND r.synced_at < (SELECT j.created_at FROM sync_jobs j WHERE j.id = ?3)\n           ORDER BY r.synced_at DESC, r.rowid DESC\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "image_tag!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "image_tag"
+          }
+        }
+      },
+      {
+        "name": "cve_ids",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "cve_ids"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "f0327388e2e0b9197bb0e31558b7c188d43975b9f3e05e7839bef3818d269d11"
+}

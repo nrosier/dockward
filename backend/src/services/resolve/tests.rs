@@ -360,6 +360,7 @@ fn job_kind_reads_the_payload_leniently() {
         job_kind(r#"{"kind":"resolve","extra":[1,2],"trigger":"poll"}"#),
         JobKind::Resolve
     );
+    assert_eq!(job_kind(r#"{"kind":"scan"}"#), JobKind::Scan);
     assert_eq!(job_kind(r#"{"kind":"refresh"}"#), JobKind::Unknown);
     assert_eq!(job_kind(r#"{"kind":null}"#), JobKind::Unknown);
     assert_eq!(job_kind(r#"{"kind":7}"#), JobKind::Unknown);

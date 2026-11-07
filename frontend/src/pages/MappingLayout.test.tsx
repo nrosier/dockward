@@ -16,6 +16,7 @@ const other: Mapping = {
   id: "m9", user_id: "u2", harbor_cred_id: "hc", github_cred_id: "gc", harbor_base_url: "https://harbor.example.org",
   harbor_project: "x", harbor_repository: "y", github_owner: "o", github_repo: "r", default_branch: "main",
   auto_create_issues: true, min_issue_severity: "HIGH", created_at: null,
+  scan_schedule: "off", scan_time: "00:00", scan_weekday: 1,
 };
 
 function stub() {

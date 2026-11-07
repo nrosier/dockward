@@ -3,7 +3,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
 import { t } from "../../i18n";
 import { ApiError, api } from "../../lib/api";
-import type { Credential, IssueSeverity, Mapping, MappingCreated, MappingListItem, MappingSaved, Page } from "../../types/api";
+import type { Credential, IssueSeverity, Mapping, MappingCreated, MappingListItem, MappingSaved, Page, ScanSchedule } from "../../types/api";
 import { Button, buttonClass } from "../ui/Button";
 import { Card } from "../ui/Card";
 import { Tooltip } from "../ui/Tooltip";
@@ -27,6 +27,24 @@ interface FormValues {
   defaultBranch: string;
   autoCreate: boolean;
   minSeverity: IssueSeverity;
+  scanSchedule: ScanSchedule;
+  scanTime: string;
+  scanWeekday: number;
+}
+
+const WEEKDAYS = [1, 2, 3, 4, 5, 6, 7] as const;
+const WEEKDAY_KEYS = {
+  1: "mappings.form.weekday1",
+  2: "mappings.form.weekday2",
+  3: "mappings.form.weekday3",
+  4: "mappings.form.weekday4",
+  5: "mappings.form.weekday5",
+  6: "mappings.form.weekday6",
+  7: "mappings.form.weekday7",
+} as const;
+
+function asSchedule(value: string): ScanSchedule {
+  return value === "daily" || value === "weekly" ? value : "off";
 }
 
 function initialValues(mapping: Mapping | undefined): FormValues {
@@ -40,14 +58,18 @@ function initialValues(mapping: Mapping | undefined): FormValues {
     defaultBranch: mapping?.default_branch ?? "main",
     autoCreate: mapping?.auto_create_issues ?? true,
     minSeverity: mapping?.min_issue_severity ?? "HIGH",
+    // Off by default (#191).
+    scanSchedule: mapping?.scan_schedule ?? "off",
+    scanTime: mapping?.scan_time ?? "02:00",
+    scanWeekday: mapping?.scan_weekday ?? 1,
   };
 }
 
 const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
 // The fields that changed, in the API's names, for `PUT`.
-function changedFields(initial: FormValues, now: FormValues): Record<string, string | boolean> {
-  const body: Record<string, string | boolean> = {};
+function changedFields(initial: FormValues, now: FormValues): Record<string, string | boolean | number> {
+  const body: Record<string, string | boolean | number> = {};
   if (now.harborProject !== initial.harborProject) body.harbor_project = now.harborProject.trim();
   if (now.harborRepository !== initial.harborRepository) body.harbor_repository = now.harborRepository.trim();
   if (now.harborCredId !== initial.harborCredId) body.harbor_cred_id = now.harborCredId;
@@ -57,6 +79,9 @@ function changedFields(initial: FormValues, now: FormValues): Record<string, str
   if (now.defaultBranch !== initial.defaultBranch) body.default_branch = now.defaultBranch.trim();
   if (now.autoCreate !== initial.autoCreate) body.auto_create_issues = now.autoCreate;
   if (now.minSeverity !== initial.minSeverity) body.min_issue_severity = now.minSeverity;
+  if (now.scanSchedule !== initial.scanSchedule) body.scan_schedule = now.scanSchedule;
+  if (now.scanTime !== initial.scanTime) body.scan_time = now.scanTime;
+  if (now.scanWeekday !== initial.scanWeekday) body.scan_weekday = now.scanWeekday;
   return body;
 }
 
@@ -197,6 +222,9 @@ export function MappingForm({ mapping, readOnly = false, onCreated, onUpdated }:
           default_branch: values.defaultBranch.trim(),
           auto_create_issues: values.autoCreate,
           min_issue_severity: values.minSeverity,
+          scan_schedule: values.scanSchedule,
+          scan_time: values.scanTime,
+          scan_weekday: values.scanWeekday,
         });
         onCreated(created);
         return;
@@ -241,7 +269,7 @@ export function MappingForm({ mapping, readOnly = false, onCreated, onUpdated }:
     values.githubOwner,
     values.githubRepo,
     values.defaultBranch,
-  ].every((value) => value.trim() !== "");
+  ].every((value) => value.trim() !== "") && (values.scanSchedule === "off" || /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(values.scanTime));
   const changed = mapping === undefined || Object.keys(changedFields(initial, values)).length > 0;
   const canSave = !readOnly && filled && changed && harborClash === undefined && !save.isPending;
 
@@ -391,6 +419,61 @@ export function MappingForm({ mapping, readOnly = false, onCreated, onUpdated }:
               ]}
             />
           </div>
+        </Card>
+
+        <Card className="m-0 flex min-w-0 flex-col gap-[18px] px-[22px] py-5">
+          <div className="flex flex-col gap-1.5">
+            <h2 id="scan-section" className="m-0 text-[15px] font-semibold">
+              {t("mappings.form.scanSection")}
+            </h2>
+            <p className="text-[12.5px] text-muted">{t("mappings.form.scanHelp")}</p>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[13px] font-semibold">{t("mappings.form.scanSchedule")}</span>
+            <Segmented
+              label={t("mappings.form.scanSchedule")}
+              value={values.scanSchedule}
+              onChange={(value) => set("scanSchedule", asSchedule(value))}
+              options={[
+                { value: "off", label: t("mappings.form.scanOff") },
+                { value: "daily", label: t("mappings.form.scanDaily") },
+                { value: "weekly", label: t("mappings.form.scanWeekly") },
+              ]}
+            />
+          </div>
+          {values.scanSchedule === "off" ? null : (
+            <div className="flex flex-wrap gap-[18px]">
+              {values.scanSchedule === "weekly" ? (
+                <div className="w-48">
+                  <Field id="scan-weekday" label={t("mappings.form.scanWeekday")}>
+                    <select
+                      id="scan-weekday"
+                      value={values.scanWeekday}
+                      onChange={(event) => set("scanWeekday", Number(event.target.value))}
+                      className={INPUT}
+                    >
+                      {WEEKDAYS.map((day) => (
+                        <option key={day} value={day}>
+                          {t(WEEKDAY_KEYS[day])}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                </div>
+              ) : null}
+              <div className="w-36">
+                <Field id="scan-time" label={t("mappings.form.scanTime")}>
+                  <input
+                    id="scan-time"
+                    type="time"
+                    value={values.scanTime}
+                    onChange={(event) => set("scanTime", event.target.value)}
+                    className={INPUT}
+                  />
+                </Field>
+              </div>
+            </div>
+          )}
         </Card>
       </fieldset>
 

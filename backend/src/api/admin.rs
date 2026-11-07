@@ -736,6 +736,10 @@ pub(crate) mod test_support {
             min_issue_severity: None,
             default_branch: "main".to_owned(),
             created_at: None,
+            scan_schedule: "off".to_owned(),
+            scan_minute: 0,
+            scan_weekday: 1,
+            scan_last_slot: None,
         };
         let mut conn = pool.acquire().await.unwrap();
         mapping_rows::insert(&mut conn, &row).await.unwrap();

@@ -563,6 +563,10 @@ mod tests {
             min_issue_severity: None,
             default_branch: "main".to_owned(),
             created_at: None,
+            scan_schedule: "off".to_owned(),
+            scan_minute: 0,
+            scan_weekday: 1,
+            scan_last_slot: None,
         };
         notifier.spawn_new_critical(&mapping, "v1", &["CVE-2026-0001".to_owned()]);
         for _ in 0..200 {
