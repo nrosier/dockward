@@ -2,7 +2,6 @@ name: Docker
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   pull_request:
 
@@ -98,7 +97,7 @@ jobs:
 
   publish-digest:
     name: Publish image by digest
-    if: github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -138,10 +137,9 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=sha,prefix=sha-,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       # Untagged push: the image is stored by digest only. Tags are added to this digest in promote.
       - name: Build and push by digest
@@ -163,7 +161,7 @@ jobs:
   scan-digest:
     name: Trivy scan (digest)
     needs: publish-digest
-    if: github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -205,7 +203,7 @@ jobs:
   promote:
     name: Apply tags, sign and attest
     needs: [publish-digest, scan-digest]
-    if: github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -230,7 +228,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # latest is only applied from main. A v* tag never moves latest.
+      # Publishing runs only on v* tags. Every release tag also moves latest.
       - name: Compute image tags
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -239,10 +237,9 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=sha,prefix=sha-,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       # Adds each tag to the scanned digest. No new image is built, so the digest does not change.
       - name: Apply tags to digest
