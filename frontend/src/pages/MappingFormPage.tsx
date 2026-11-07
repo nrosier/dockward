@@ -6,13 +6,14 @@ import { ShownOnce } from "../components/mappings/ShownOnce";
 import { LINK } from "../components/mappings/styles";
 import { mappingName } from "../components/mappings/useMappings";
 import { PullScans } from "../components/mappings/PullScans";
+import { ProjectWebhookProposal } from "../components/mappings/ProjectWebhookProposal";
 import { WebhookCard, type Rotated } from "../components/mappings/WebhookCard";
 import { PageTitle } from "../components/ui/PageTitle";
 import { ErrorMessage, LoadingMessage, NotFoundMessage } from "../components/ui/StatusMessage";
 import { t } from "../i18n";
 import { ApiError, api } from "../lib/api";
 import { useMe } from "../lib/session";
-import type { Mapping, MappingCreated } from "../types/api";
+import type { Mapping, MappingCreated, MappingSaved } from "../types/api";
 
 // What the shown-once panel displays. It lives in component state only: never
 // in the query cache, the URL, localStorage, or the console.
@@ -21,6 +22,7 @@ interface Shown {
   mapping: Mapping;
   webhookUrl?: string;
   authSecret?: string;
+  projectWebhookExists?: boolean;
 }
 
 export default function MappingFormPage() {
@@ -28,6 +30,9 @@ export default function MappingFormPage() {
   const navigate = useNavigate();
   const me = useMe();
   const [shown, setShown] = useState<Shown | null>(null);
+  // After an edit save whose Harbor project has no project webhook (#179). Not stored:
+  // the next save proposes again.
+  const [proposal, setProposal] = useState<{ mappingId: string; harborProject: string } | null>(null);
 
   const existing = useQuery({
     queryKey: ["mappings", "one", id],
@@ -44,6 +49,11 @@ export default function MappingFormPage() {
         githubTarget={`${shown.mapping.github_owner}/${shown.mapping.github_repo}`}
         webhookUrl={shown.webhookUrl}
         authSecret={shown.authSecret}
+        project={
+          shown.kind === "created" && shown.projectWebhookExists !== undefined
+            ? { mappingId: shown.mapping.id, webhookExists: shown.projectWebhookExists }
+            : undefined
+        }
         onDone={() => void navigate("/mappings")}
       />
     );
@@ -70,6 +80,7 @@ export default function MappingFormPage() {
               mapping: created.mapping,
               webhookUrl: created.webhook_url,
               authSecret: created.auth_secret,
+              projectWebhookExists: created.project_webhook_exists,
             })
           }
         />
@@ -88,6 +99,15 @@ export default function MappingFormPage() {
   const canPull = owned || me.data?.role === "admin";
 
   const onRotated = (rotated: Rotated) => setShown({ kind: "rotated", mapping, ...rotated });
+  // A project with a project webhook goes back to the list as before. Without one, the
+  // page stays and shows the proposal banner, which does not block the form.
+  const onUpdated = (saved: MappingSaved) => {
+    if (saved.project_webhook_exists) {
+      void navigate("/mappings");
+    } else {
+      setProposal({ mappingId: saved.id, harborProject: saved.harbor_project });
+    }
+  };
 
   return (
     <>
@@ -97,7 +117,19 @@ export default function MappingFormPage() {
         <p className="text-muted">{mappingName(mapping)}</p>
       </div>
       {canPull ? <PullScans key={`pull-${mapping.id}`} mapping={mapping} /> : null}
-      <MappingForm key={mapping.id} mapping={mapping} readOnly={!owned} onCreated={() => undefined} />
+      <MappingForm key={mapping.id} mapping={mapping} readOnly={!owned} onCreated={() => undefined} onUpdated={onUpdated} />
+      {/* Below the form actions, where Save was clicked. */}
+      {proposal === null ? null : (
+        <div className="flex flex-col gap-2">
+          <output className="text-[13px] text-ok-ink">{t("mapping.projectWebhook.saved")}</output>
+          <ProjectWebhookProposal
+            key={`${proposal.mappingId}-${proposal.harborProject}`}
+            mappingId={proposal.mappingId}
+            harborProject={proposal.harborProject}
+            onDismiss={() => setProposal(null)}
+          />
+        </div>
+      )}
       {owned ? (
         <WebhookCard mapping={mapping} onRotated={onRotated} onDeleted={() => void navigate("/mappings")} />
       ) : null}

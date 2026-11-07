@@ -144,6 +144,19 @@ export interface MappingCreated {
   mapping: Mapping;
   webhook_url: string;
   auth_secret: string;
+  // True when HarborGate stores a project webhook for the mapping's Harbor project (#179).
+  project_webhook_exists: boolean;
+}
+
+// The `PUT /mappings/:id` response: the mapping plus the project webhook check (#179).
+export interface MappingSaved extends Mapping {
+  project_webhook_exists: boolean;
+}
+
+export interface ProjectWebhookCreated {
+  id: string;
+  webhook_url: string;
+  auth_secret: string;
 }
 
 export interface CheckResult {

@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { t } from "../i18n";
@@ -36,8 +36,14 @@ const harborCred = {
 };
 const githubCred = { ...harborCred, id: "gc", service_type: "github", label: "gh-token", base_url: null, username: null };
 
+const PW_URL = "https://harborgate.example.org/api/v1/webhooks/harbor/project/fake-project-token";
+const PW_SECRET = "Bearer fake-project-secret-for-tests";
+
 interface Options {
   create?: () => Response;
+  // The save responses' `project_webhook_exists` (#179). Default false.
+  projectWebhookExists?: boolean;
+  createProjectWebhook?: () => Response;
 }
 
 function stub(options: Options = {}) {
@@ -55,8 +61,22 @@ function stub(options: Options = {}) {
     if (path === "/api/v1/mappings" && init?.method === "POST") {
       return (
         options.create?.() ??
-        json({ mapping: { ...existing, id: "m2", github_repo: "new-repo" }, webhook_url: SECRET_URL, auth_secret: SECRET_VALUE }, 201)
+        json(
+          {
+            mapping: { ...existing, id: "m2", github_repo: "new-repo" },
+            webhook_url: SECRET_URL,
+            auth_secret: SECRET_VALUE,
+            project_webhook_exists: options.projectWebhookExists ?? false,
+          },
+          201,
+        )
       );
+    }
+    if (path === "/api/v1/mappings/m1" && init?.method === "PUT") {
+      return json({ ...existing, default_branch: "develop", project_webhook_exists: options.projectWebhookExists ?? false });
+    }
+    if (path === "/api/v1/project-webhooks" && init?.method === "POST") {
+      return options.createProjectWebhook?.() ?? json({ id: "pw1", webhook_url: PW_URL, auth_secret: PW_SECRET }, 201);
     }
     if (path === "/api/v1/mappings/m1" && (init?.method ?? "GET") === "GET") return json(existing);
     if (path === "/api/v1/mappings/m1/rotate-webhook-token" && init?.method === "POST") {
@@ -210,5 +230,108 @@ describe("MappingFormPage", () => {
     stub();
     renderWithRoutes(routes, "/mappings/m1");
     expect(await screen.findByRole("button", { name: t("mapping.pull.button") })).toBeEnabled();
+  });
+
+  describe("project webhook proposal (#179)", () => {
+    const proposalText = t("mapping.projectWebhook.propose", { project: "platform" });
+
+    it("proposes the project webhook after creating the first mapping in a project with none", async () => {
+      stub({ projectWebhookExists: false });
+      renderWithRoutes(routes, "/mappings/new");
+      await fillNew("new-repo");
+      await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+      const banner = await screen.findByRole("region", { name: t("mapping.projectWebhook.label") });
+      // Names the Harbor project, and no repository.
+      expect(within(banner).getByText(proposalText)).toBeInTheDocument();
+      expect(banner.textContent).not.toContain("billing-worker");
+      expect(banner.textContent).not.toContain("billing-api");
+      // Not a modal: the shown-once values stay on the page beside it.
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.getByDisplayValue(SECRET_URL)).toBeInTheDocument();
+    });
+
+    it("shows no proposal when the project already has a project webhook", async () => {
+      const fetchMock = stub({ projectWebhookExists: true });
+      renderWithRoutes(routes, "/mappings/new");
+      await fillNew("new-repo");
+      await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+      await screen.findByDisplayValue(SECRET_URL);
+      expect(screen.queryByRole("region", { name: t("mapping.projectWebhook.label") })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: t("mapping.projectWebhook.create") })).not.toBeInTheDocument();
+      expect(screen.getByText(t("mapping.projectWebhook.exists", { project: "platform" }))).toBeInTheDocument();
+      expect(fetchMock.mock.calls.some(([path]) => String(path).includes("/project-webhooks"))).toBe(false);
+    });
+
+    it("creates the project webhook from the banner and shows its values once, not cached", async () => {
+      const fetchMock = stub({ projectWebhookExists: false });
+      const { client } = renderWithRoutes(routes, "/mappings/new");
+      await fillNew("new-repo");
+      await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+      await userEvent.click(await screen.findByRole("button", { name: t("mapping.projectWebhook.create") }));
+      expect(await screen.findByDisplayValue(PW_URL)).toBeInTheDocument();
+      expect(screen.getByDisplayValue(PW_SECRET)).toBeInTheDocument();
+      const call = fetchMock.mock.calls.find(([path]) => String(path) === "/api/v1/project-webhooks");
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ mapping_id: "m2" });
+      // The mapping's own values are unchanged.
+      expect(screen.getByDisplayValue(SECRET_URL)).toBeInTheDocument();
+      const cached = JSON.stringify(client.getMutationCache().getAll().map((mutation) => mutation.state.data ?? null));
+      expect(cached).not.toContain(PW_URL);
+      expect(cached).not.toContain(PW_SECRET);
+    });
+
+    it("shows the setup note when another user created the project webhook first (409)", async () => {
+      stub({
+        projectWebhookExists: false,
+        createProjectWebhook: () => json({ error: { code: "conflict", message: "RAW exists" } }, 409),
+      });
+      renderWithRoutes(routes, "/mappings/new");
+      await fillNew("new-repo");
+      await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+      await userEvent.click(await screen.findByRole("button", { name: t("mapping.projectWebhook.create") }));
+      expect(await screen.findByText(t("mapping.projectWebhook.exists", { project: "platform" }))).toBeInTheDocument();
+      expect(screen.queryByText("RAW exists")).not.toBeInTheDocument();
+    });
+
+    it("can be dismissed without blocking the page", async () => {
+      stub({ projectWebhookExists: false });
+      const { router } = renderWithRoutes(routes, "/mappings/new");
+      await fillNew("new-repo");
+      await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+      await screen.findByText(proposalText);
+      await userEvent.click(screen.getByRole("button", { name: t("mapping.projectWebhook.dismiss") }));
+      expect(screen.queryByText(proposalText)).not.toBeInTheDocument();
+      expect(screen.getByDisplayValue(SECRET_URL)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: t("mappings.shownOnce.done") }));
+      expect(router.state.location.pathname).toBe("/mappings");
+    });
+
+    it("proposes after an edit save in a project with none, and again on the next save", async () => {
+      stub({ projectWebhookExists: false });
+      const { router } = renderWithRoutes(routes, "/mappings/m1");
+      const branch = await screen.findByLabelText(t("mappings.form.defaultBranch"));
+      await userEvent.clear(branch);
+      await userEvent.type(branch, "develop");
+      await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+      expect(await screen.findByText(proposalText)).toBeInTheDocument();
+      expect(router.state.location.pathname).toBe("/mappings/m1");
+      await userEvent.click(screen.getByRole("button", { name: t("mapping.projectWebhook.dismiss") }));
+      expect(screen.queryByText(proposalText)).not.toBeInTheDocument();
+      // A dismissal is not stored: the next save proposes again.
+      await userEvent.clear(branch);
+      await userEvent.type(branch, "release");
+      await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+      expect(await screen.findByText(proposalText)).toBeInTheDocument();
+    });
+
+    it("returns to the list after an edit save when the project has a project webhook", async () => {
+      stub({ projectWebhookExists: true });
+      const { router } = renderWithRoutes(routes, "/mappings/m1");
+      const branch = await screen.findByLabelText(t("mappings.form.defaultBranch"));
+      await userEvent.clear(branch);
+      await userEvent.type(branch, "develop");
+      await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+      await vi.waitFor(() => expect(router.state.location.pathname).toBe("/mappings"));
+      expect(screen.queryByText(proposalText)).not.toBeInTheDocument();
+    });
   });
 });

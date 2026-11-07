@@ -275,6 +275,21 @@ pub async fn rotate_secret(
     })
 }
 
+/// True when HarborGate stores a project webhook for this Harbor base URL and project,
+/// whoever owns it. Reads the stored record only; no Harbor call (#179).
+pub async fn exists_for(
+    pool: &SqlitePool,
+    harbor_base_url: &str,
+    harbor_project: &str,
+) -> Result<bool, AppError> {
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    Ok(
+        db::find_by_project(&mut conn, harbor_base_url, harbor_project)
+            .await?
+            .is_some(),
+    )
+}
+
 /// Reads one project webhook with its mapping repository names. Owner or admin.
 pub async fn get(pool: &SqlitePool, user: &AuthUser, id: &str) -> Result<ProjectWebhook, AppError> {
     let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
@@ -971,6 +986,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hidden.total, 0);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mapping-save check (#179) reads the stored record per Harbor base URL and project,
+    /// whoever owns it, and makes no Harbor call.
+    #[tokio::test]
+    async fn exists_for_is_per_base_url_and_project() {
+        let (pool, dir) = fresh_pool("exists-for").await;
+        add_user(&pool, "u1", "user").await;
+        add_user(&pool, "u2", "user").await;
+        add_mapping(&pool, "m1", "u1", "proj", "app").await;
+        add_mapping(&pool, "m2", "u2", "proj", "other").await;
+        add_mapping(&pool, "m3", "u1", "elsewhere", "app").await;
+        assert!(!exists_for(&pool, BASE, "proj").await.unwrap());
+        create(&pool, &user("u1", Role::User), "https://hg", "m1")
+            .await
+            .unwrap();
+        // Same project, any owner: true. Another project or another base URL: false.
+        assert!(exists_for(&pool, BASE, "proj").await.unwrap());
+        assert!(!exists_for(&pool, BASE, "elsewhere").await.unwrap());
+        assert!(
+            !exists_for(&pool, "https://harbor-two.example.com", "proj")
+                .await
+                .unwrap()
+        );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
