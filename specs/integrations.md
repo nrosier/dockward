@@ -366,7 +366,6 @@ Decisions applied here:
 
 - Effect of d19 (user): a `Negligible` finding counts as `LOW` for `min_issue_severity`, shows with the Low label, and takes part in the merged "highest severity" as `LOW`. No sixth stored value is added, so the schema, the labels and the threshold list do not change.
 - The adapter's own comment says Harbor remaps `Negligible` to `None` when it aggregates (`model.go:43`). Harbor's `ParseSeverityVersion3` does that for CVSS v3 ratings (`severity.go:75-89`). Whether the per-item report that HarborGate reads still carries `Negligible` is UNVERIFIED 2. If Harbor returns `None` for it, the guard row above applies and the finding is `UNKNOWN`, not `LOW`.
-- Follow-up, not done in this change (scope is this file only): the "Severity values stored" paragraph in [cve-lifecycle.md](cve-lifecycle.md) still says `Negligible` maps to `UNKNOWN`. It must be changed to `LOW` to match d19.
 
 **Merge consequences** (rules in [cve-lifecycle.md](cve-lifecycle.md), "Merged view", unchanged; user, #224 d20):
 
