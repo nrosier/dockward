@@ -296,62 +296,94 @@ Decided (2026-11-07, user, #224 d11): a scan with a chosen scanner is one `scann
 
 ### Grype report reader
 
-Decided (2026-11-07, user, #224 d16, d17): the Harbor instance runs Trivy and Grype, and HarborGate reads both reports. The Trivy rules ("Vulnerability report endpoint") are unchanged. The Grype reader is built only after this section is merged (d17); the Trivy path can be built before.
+Changed (2026-11-07, user, #224 d18, d19, d20): the Grype adapter is the user's own, `nrosier/harbor-scanner-grype`. This section replaces the text merged in PR #226, which was written from two community adapters. Those adapters, their facts and the rules that only existed for them are removed. Every adapter fact below was read from the user's repository and cites `file:line`. Decided (2026-11-07, user, #224 d16, d17): the Harbor instance runs Trivy and Grype, and HarborGate reads both reports. The Trivy rules ("Vulnerability report endpoint") are unchanged.
 
-**Sources.** Verified (2026-11-07) in source, each pinned to a commit:
+Decisions applied here:
 
-- Harbor, `goharbor/harbor` at `3852755e06aa621ebfc7b665545de1e7d0032b47`: `src/pkg/scan/rest/v1/spec.go` (MIME constants), `src/pkg/scan/rest/v1/models.go` (registration check), `src/pkg/scan/vuln/report.go` (item struct), `src/pkg/scan/vuln/severity.go`.
-- Adapter A, `TechPrototyper/harbor-scanner-grype` at `50c86a85f7f0b8ccf34d8b3ee12951bb41c60571` (Apache-2.0, last push 2026-09-07): `pkg/grype/mapper.go`, `pkg/harbor/model.go`, `pkg/api/server.go`, `cmd/adapter/main.go`, `docs/ARCHITECTURE.md`.
-- Adapter B, `hamster513/harbor-scanner-grype` at `29111e534ff87967bd07318fc6ac4fa46925fc94` (last push 2025-09-30): `pkg/scan/transformer.go`, `pkg/harbor/model.go`, `pkg/http/api/api.go`.
+- d18: the adapter is the user's own; MIME type, fields and severities come from its source; differences from Trivy are recorded.
+- d19: the severity `Negligible` maps to `LOW`, so it shows with the Low label.
+- d20: the merge key stays the CVE id plus the package name (d2).
 
-**There is no official Grype adapter.** Verified (2026-11-07): the `goharbor` organisation has `harbor-scanner-trivy`, `harbor-scanner-clair`, `harbor-scanner-fake` and `pluggable-scanner-spec`, and no Grype repository. A GitHub repository search for "harbor scanner grype" finds only the two community adapters above, both single-maintainer. Neither has a git tag or a release. Which one (or another) the user's Harbor runs is not known; see UNVERIFIED 1. The reader therefore accepts the item shapes of both and relies on neither.
+**Sources.** Verified (2026-11-07):
 
-**Report MIME type.** Verified (2026-11-07): both adapters produce `application/vnd.security.vulnerability.report; version=1.1`, the same key as Trivy (A: `pkg/harbor/model.go` `MimeTypeSecurityVulnReport`; B: `pkg/http/api/api.go` `MimeTypeSecurityVulnerabilityReport`; Harbor: `MimeTypeGenericVulnerabilityReport` in `spec.go`). Adapter A also offers the legacy `application/vnd.scanner.adapter.vuln.report.harbor+json; version=1.0`, which HarborGate does not request. So the request header, the response key check and the "empty object means not yet" rule are the Trivy ones, unchanged. Decided (2026-11-07, user, #224 d17): no second MIME type is requested. Reason: both adapters answer under the type already requested.
+- Adapter: `nrosier/harbor-scanner-grype` at commit `9c55174ccbb99fad2f0bb904745c85f405380ea7`. That commit was the head of `main` and the commit of the tag `v0.2.0` when read. Paths below are relative to it. The repository is a GitHub fork of `TechPrototyper/harbor-scanner-grype` (GitHub API `fork: true`; `go.mod:1` still names that module path), and it is Apache-2.0 licensed (`README.md:213`).
+- Harbor, for the Harbor-side facts only: `goharbor/harbor` at `3852755e06aa621ebfc7b665545de1e7d0032b47`, `src/pkg/scan/vuln/severity.go`, and the files already cited in "Vulnerability report endpoint".
 
-**Scanner object.** Verified (2026-11-07): both adapters report `name` `Grype` and `vendor` `Anchore`. `version` is the Grype version in A (read at start; empty if that call fails) and the `GRYPE_VERSION` environment value in B, or the string `Unknown` when unset. The version is stored with the report as the snapshot, as for Trivy, and is never used to choose a rule. The registration `name` in Harbor is chosen by the admin and may differ; see UNVERIFIED 4.
+**Adapter release.** Verified (2026-11-07): one release exists, `v0.2.0` (annotated tag on commit `9c55174`; GitHub release published 2026-11-07T11:52:24Z). The chart has `version` and `appVersion` `0.2.0` (`charts/harbor-scanner-grype/Chart.yaml:7-8`). The release workflow publishes `ghcr.io/nrosier/harbor-scanner-grype` with the tags `0.2.0` and `0.2` (`.github/workflows/release.yml:77-79`), and the registry listing shows `0.2.0`, `0.2` and `latest`. The image bundles Grype `v0.112.0` (`Dockerfile:20,23`). So the version range this section is written for is exactly `v0.2.0`; no later release exists. Which tag the user's Harbor has registered is not in the repository; see UNVERIFIED 1. The author's own status line, "Working and tested against Harbor 2.15 with Grype 0.112" (`README.md:186`), is not checked here.
 
-**Adapter version range.** No tag or release exists for either adapter, so no version range can be named. The only claim found is the author's, in adapter A's README: "Working and tested against Harbor 2.15 with Grype 0.112". It is not checked here. See UNVERIFIED 1.
+**Report MIME type.** Verified (2026-11-07): the adapter produces `application/vnd.security.vulnerability.report; version=1.1` (`pkg/harbor/model.go:19`, used by `pkg/api/server.go:125`). It also produces the legacy `application/vnd.scanner.adapter.vuln.report.harbor+json; version=1.0` (`model.go:20`; `README.md:62-63`), with the same JSON shape (`model.go:16-18`). When the request has no `Accept` header or `*/*`, the adapter answers with the v1.1 type (`server.go:497-499`), and the body is written with the negotiated type (`server.go:489`). This is the key Trivy uses, so the request header, the response key check and the "empty object means not yet" rule are the Trivy ones, unchanged. Decided (2026-11-07, user, #224 d17, d18): no second MIME type is requested; the legacy type is not read. The adapter also advertises an SBOM report type (`model.go:23`; `server.go:148-158`); HarborGate requests no SBOM, so that capability is not read.
 
-**Field mapping.** The item is Harbor's `VulnerabilityItem` (`report.go`), so the key names are the Trivy ones. What differs is which fields each adapter fills.
+**Scanner object.** Verified (2026-11-07): the report's `scanner` is `{name: "Grype", vendor: "Anchore", version: <Grype version>}`. The name and vendor are fixed in code (`cmd/adapter/main.go:83`). The version is read once at start from `grype version -o json` (`pkg/grype/runner.go:304-319`; `main.go:84-90`) and is empty if that call fails (`main.go:85-87`). The same object is used in `GET /api/v1/metadata` and in every report (`server.go:134-164,393`; `pkg/grype/mapper.go:85`). The image pins Grype `v0.112.0` (`Dockerfile:23`), so the version is expected to name that release; the exact string is UNVERIFIED 1. The version is stored with the report as the snapshot, as for Trivy, and is never used to choose a rule. The registration `name` in Harbor is chosen by the admin and may differ from `Grype`; see UNVERIFIED 4.
 
-| Item field (as the converter reads it) | Adapter A | Adapter B | Reader rule |
+**Field mapping.** The item is Harbor's `VulnerabilityItem`, so the key names are the Trivy ones. The adapter's item type is `pkg/harbor/model.go:165-177`, filled by `newItem` (`pkg/grype/mapper.go:133-149`).
+
+| Item field (as the converter reads it) | What the adapter writes | Source | Reader rule |
 | --- | --- | --- | --- |
-| `id` | Grype `vulnerability.id`; if it is not `CVE-*`, the first related `CVE-*` id (original in `vendor_attributes.grype_id`) | Grype `vulnerability.id` as is (may be `GHSA-...`) | Read as is. No rewriting. An id that is not a CVE is a valid finding id. |
-| `package` | `artifact.name` | not set | Missing, `null` or empty is `''`. |
-| `version` | `artifact.version` | not set | Missing, `null` or empty is no version. |
-| `fix_version` | first of `fix.versions`, else absent | not set | Missing, `null` or empty is no fix. A has only the first fixed version; the rest cannot be recovered. |
-| `severity` | `Critical`, `High`, `Medium`, `Low`, `Negligible`, `Unknown` | `Critical`, `High`, `Medium`, `Low`, `Unknown` (any other Grype value, `Negligible` included, is written as `Unknown`) | See "Severity" below. |
-| `description` | Grype description | Grype description, with risk text appended when B's risk calculation is on (see UNVERIFIED 1) | Read as is. |
-| `links` | `dataSource`, then `urls`, then related ones, no duplicates | `urls` only | Read as is. Empty list allowed. |
-| `preferred_cvss` | first CVSS 3.x and first CVSS 2.x score and vector; absent if none | first CVSS entry only: the score goes by its version (`2.0` is `score_v2`; `3.0` and `3.1` are `score_v3`; any other version, no score), but its vector is written to both `vector_v2` and `vector_v3` | Use `score_v3` and `score_v2` only. Never show or store a `vector_v3` without a `score_v3`, because B can put a v2 vector there. |
-| `artifact_digests` | not set | not set | Same as Trivy: optional, and not needed by the reader. Harbor's `report.go` has `WithArtifactDigest`, which sets the field on every item; whether the read path calls it is not checked here. |
-| `cwe_ids` | from Grype `cwes` | not set | Optional, as for Trivy. |
-| `status` | not set | not set | Grype has no equivalent. The reader never needs it. |
-| `layer`, `vendor_attributes` | `layer.digest`; `purl`, `namespace`, `matcher`, `fix_state`, `grype_id` | both unset | Not read. Decided (2026-11-07, delegated, #224): HarborGate reads no adapter-specific field. |
+| `id` | Grype `vulnerability.id`. If `SCANNER_PREFER_CVE` is on (default on) and the id does not start with `CVE-`, the first related vulnerability id that starts with `CVE-`; if there is none, the Grype id stays. The replaced id is kept in `vendor_attributes.grype_id`. | `mapper.go:118-131`; default on: `internal/config/config.go:61`, `charts/.../values.yaml:38` | Read as is. No rewriting. An id that is not a CVE (for example `GHSA-...`) is a valid finding id. |
+| `package` | Grype `artifact.name` (the installed package name; the `upstreams` field of the Grype model is never read). Key always written. | `mapper.go:138`; `model.go:167`; `pkg/grype/model.go:100-103` | Missing, `null` or empty is `''`. |
+| `version` | Grype `artifact.version`. Key always written. | `mapper.go:139`; `model.go:168` | Missing, `null` or empty is no version. |
+| `fix_version` | The first entry of Grype `fix.versions`; the key is left out when there is none. Only the first fixed version is kept. | `mapper.go:140,254-259`; `model.go:169` | Missing, `null` or empty is no fix. |
+| `severity` | One of `Critical`, `High`, `Medium`, `Low`, `Negligible`, `Unknown`. | `mapper.go:92-109`; `model.go:46-53` | See "Severity" below. |
+| `description` | Grype `vulnerability.description`. Key always written, so it can be `""`. | `mapper.go:142`; `model.go:171` | Read as is. |
+| `links` | Grype `dataSource`, then `urls`, then each related vulnerability's `dataSource` and `urls`; no duplicates; order kept; never `null`. | `mapper.go:171-199`; `mapper_test.go:205` | Read as is. Empty list allowed. |
+| `preferred_cvss` | The first CVSS entry whose version starts with `3.` fills `score_v3` and `vector_v3`; the first that starts with `2.` fills `score_v2` and `vector_v2`; other versions (CVSS 4.x) are ignored; the object is left out when neither exists. Record order, not highest score. | `mapper.go:225-244`; `model.go:156-162`; regression test `pkg/grype/mapper_test.go:238-271`; `README.md:69-70` | Read as for Trivy. A `vector_v3` always comes with a `score_v3` here. |
+| `cwe_ids` | Grype `cwes[].id`; left out when empty. | `mapper.go:146,246-252`; `model.go:175` | Optional, as for Trivy. |
+| `layer` | `layer.digest` from the first location's layer id; left out when none. | `mapper.go:218-223`; `model.go:150-154,173` | Not read. |
+| `vendor_attributes` | Only the non-empty ones of `purl`, `namespace`, `matcher`, `fix_state`, `grype_id`. | `mapper.go:35-42,151-169`; `model.go:176` | Not read. Decided (2026-11-07, delegated, #224): HarborGate reads no adapter-specific field. |
+| `status` | No field in the adapter's item type; never written. | `model.go:165-177` | Not needed by the reader. |
+| `artifact_digests` | No field in the adapter's item type; never written by the adapter. | `model.go:165-177` | Optional, and not needed by the reader. Whether Harbor sets it on the read path is not checked here. |
 
-- Fields Grype lacks, as the converter sees them: `package`, `version` and `fix_version` in adapter B, `cwe_ids` in B, and `status` in both. A missing field never fails the report.
-- A report may list the same finding twice (adapter A merges rows per id, package and version; adapter B was not checked for this). Duplicate rows are handled as for a Trivy report. No new rule.
+- A missing field never fails the report.
+- Inside the adapter, rows are merged on id, package and version, with links joined and the first layer kept (`mapper.go:60-67,111-116`), and rows are sorted by severity (high first), then id, then package (`mapper.go:68-76`). The report's own `severity` is the highest item severity, `Unknown` for no items (`mapper.go:77-82`). Decided (2026-11-07, delegated, #224): the reader maps each item's severity and does not use the report-level one. Two rows can still share an id and package and differ in version, because the adapter's key includes the version. Duplicate rows are handled as for a Trivy report. No new rule.
 
-**Severity.** Verified (2026-11-07): Harbor's own scale is `None`, `Unknown`, `Negligible`, `Low`, `Medium`, `High`, `Critical` (`severity.go`), in title case. HarborGate stores five values ([cve-lifecycle.md](cve-lifecycle.md)).
+**Differences from the Trivy rules.** The Trivy column is what "Vulnerability report endpoint" records; where it records nothing, the cell says so and no claim is made.
 
-- Compare case-insensitively, then store upper-case: `Critical` is `CRITICAL`, `High` is `HIGH`, `Medium` is `MEDIUM`, `Low` is `LOW`, `Unknown` is `UNKNOWN`.
-- Decided (2026-11-07, delegated, #224): `Negligible` is `LOW`. Reason: it is a rated severity below `Low`, so `UNKNOWN` would drop a real rating, and a sixth stored value would change the schema, the labels and the threshold list. Effect: a Negligible finding counts as LOW for `min_issue_severity`. The user may change this.
-- A value not in the list, `None` or an empty string is `UNKNOWN`. Reason: Harbor defines `Unknown` as "a priority that the scanner did not recognize" (`severity.go`).
+| Point | Trivy (this spec) | Grype, user's adapter v0.2.0 | Effect on the reader |
+| --- | --- | --- | --- |
+| Report key | `application/vnd.security.vulnerability.report; version=1.1` only | the same key; also the legacy v1.0 type, which is not requested | None. |
+| Severity values | `Critical`, `High`, `Medium`, `Low`, `Unknown` only (line "Severity values are title case") | the same five, plus `Negligible` | `Negligible` is new; it maps to `LOW` (d19). |
+| `id` kinds | "the CVE or advisory id" | a `CVE-` id, or another id when no related CVE exists or `SCANNER_PREFER_CVE` is off | A non-CVE id is read as is and never merges with a CVE id. |
+| `fix_version` | key `fix_version` | key `fix_version`, only the first fixed version, left out when none | None; the rest of the fixed versions cannot be recovered. |
+| `status` | key listed in the item | never written | None; the reader never needs it. |
+| `artifact_digests` | key listed in the item | never written by the adapter | None. |
+| `layer` | not listed in the item | written as `layer.digest` | None; not read. |
+| `vendor_attributes` | key listed; contents not recorded | `purl`, `namespace`, `matcher`, `fix_state`, `grype_id` | None; not read. |
+| `preferred_cvss` | key names `score_v3`, `score_v2`, `vector_v3`, `vector_v2`; selection rule not recorded | the same key names; first v3.x and first v2.x; CVSS 4.x ignored; left out when none | A Grype finding with only a v4 score has no `preferred_cvss`. |
+| `package` | key listed; how it is filled is not recorded | `artifact.name`, the installed package name | Whether it equals Trivy's string for the same flaw is UNVERIFIED 3. |
+| `scanner` object | `name`, `vendor`, `version` stored with the report; the values are not recorded | `Grype`, `Anchore`, the Grype version (empty if unreadable) | None; stored as the snapshot. |
 
-**Merge consequences** (rules in [cve-lifecycle.md](cve-lifecycle.md), "Merged view", unchanged):
+**Severity.** Verified (2026-11-07): Harbor's own scale is `None`, `Unknown`, `Negligible`, `Low`, `Medium`, `High`, `Critical`, in title case (`severity.go:22-45`). The adapter emits only `Critical`, `High`, `Medium`, `Low`, `Negligible` and `Unknown`; it matches the Grype value case-insensitively and writes any other value, or an empty one, as `Unknown` (`mapper.go:92-109`; `mapper_test.go:64-76`). It never emits `None`. HarborGate stores five values ([cve-lifecycle.md](cve-lifecycle.md)). Compare case-insensitively, then store upper-case:
 
-- The merge key is the exact CVE id plus the exact package name. A Grype finding from adapter B has package `''`, so it never merges with a Trivy finding that has a package. The same CVE then shows as two findings, one per scanner, each with scanner count 1. Decided (2026-11-07, delegated, #224): the merge rule is not changed for this. Reason: a rule that merges `''` with any package would wrongly join unrelated packages. The way to get one finding is an adapter that fills `package` (adapter A).
-- A Grype `GHSA-...` id (adapter B always, adapter A when no related CVE exists) never merges with a Trivy `CVE-...` id for the same flaw.
-- Package names may differ between the two scanners for the same flaw. See UNVERIFIED 3.
+| Value the adapter emits | Stored by HarborGate | Source of the rule |
+| --- | --- | --- |
+| `Critical` | `CRITICAL` | same name |
+| `High` | `HIGH` | same name |
+| `Medium` | `MEDIUM` | same name |
+| `Low` | `LOW` | same name |
+| `Negligible` | `LOW` | Decided (2026-11-07, user, #224 d19) |
+| `Unknown` | `UNKNOWN` | same name |
+| any other value, `None`, or empty (the adapter does not emit these) | `UNKNOWN` | guard; Harbor defines `Unknown` as "a priority that the scanner did not recognize" (`severity.go:27-29`) |
 
-**Required tests** (Decided 2026-11-07, delegated, #224). Fixtures are real responses captured from Harbor, as for Trivy ("Vulnerability report endpoint"), one per adapter in use; until a capture exists, the fixtures are built from the field table above and marked synthetic in the file. Cases: (a) an adapter A style report with every field; (b) an adapter B style report with empty `package`, empty `version`, no `fix_version`, a `GHSA-` id and a v2 vector in `vector_v3`; (c) `Negligible` becomes `LOW`, and an unknown string becomes `UNKNOWN`; (d) the body keyed by the v1.1 MIME type is read, and an empty object is "not yet"; (e) a Trivy and a Grype report of one digest merge on id and package, and a Grype finding with package `''` stays separate.
+- Effect of d19 (user): a `Negligible` finding counts as `LOW` for `min_issue_severity`, shows with the Low label, and takes part in the merged "highest severity" as `LOW`. No sixth stored value is added, so the schema, the labels and the threshold list do not change.
+- The adapter's own comment says Harbor remaps `Negligible` to `None` when it aggregates (`model.go:43`). Harbor's `ParseSeverityVersion3` does that for CVSS v3 ratings (`severity.go:75-89`). Whether the per-item report that HarborGate reads still carries `Negligible` is UNVERIFIED 2. If Harbor returns `None` for it, the guard row above applies and the finding is `UNKNOWN`, not `LOW`.
+- Follow-up, not done in this change (scope is this file only): the "Severity values stored" paragraph in [cve-lifecycle.md](cve-lifecycle.md) still says `Negligible` maps to `UNKNOWN`. It must be changed to `LOW` to match d19.
+
+**Merge consequences** (rules in [cve-lifecycle.md](cve-lifecycle.md), "Merged view", unchanged; user, #224 d20):
+
+- The merge key is the exact CVE id plus the exact package name. This adapter fills `package` from `artifact.name`, so a Grype finding merges with a Trivy finding when both strings are equal, and the finding then has scanner count 2.
+- With `SCANNER_PREFER_CVE` on (default), a `GHSA-...` match is reported under its related CVE id, so the ids line up with Trivy's. A non-CVE id that remains (no related CVE, or the setting off) never merges with a `CVE-...` id for the same flaw.
+- Package names may differ between the two scanners for the same flaw. The rule stays exact (d20); no normalisation. See UNVERIFIED 3.
+
+**Timing facts for the report wait** (d15 is unchanged: the ceiling stays 5 minutes, and a report not ready in time retries on the existing backoff). The adapter's default scan timeout is 5 minutes (`internal/config/config.go:33,58`), it runs 2 scans at once by default and holds further scans as pending (`config.go:42-44,64`; `server.go:289-306`), and it drops finished jobs after 1 hour (`config.go:34,59`). The deployment may override these (`charts/.../values.yaml:33,43`). The author reports a first scan of about 40 seconds including the database download (`README.md:186-187`; `docs/ARCHITECTURE.md:140-142`); that is the author's figure, not measured here.
+
+**Required tests** (Decided 2026-11-07, delegated, #224). Fixtures are real responses captured from Harbor, as for Trivy ("Vulnerability report endpoint"); until a capture exists, the fixture is built from the field table above and marked synthetic in the file. Cases: (a) a report with every field the adapter writes; (b) an item with a non-CVE id, no `fix_version`, no `cwe_ids`, no `preferred_cvss`, no `layer`, no `status` and no `artifact_digests` reads without error; (c) each of the six severity values and a case variant maps as in the table, `Negligible` becomes `LOW`, and `None`, an empty string and an unlisted string become `UNKNOWN`; (d) the body keyed by the v1.1 MIME type is read, and an empty object is "not yet"; (e) an item with a `score_v2` and no `score_v3` reads, and no v3 value is invented; (f) a Trivy and a Grype report of one digest merge on id and package into one finding with count 2, and the same CVE with different package strings stays two findings.
 
 **UNVERIFIED** (the user answers or runs the check):
 
-1. UNVERIFIED: to confirm against live Harbor: "Which Grype adapter is registered in your Harbor (image repository and tag: adapter A `TechPrototyper/harbor-scanner-grype`, adapter B `hamster513/harbor-scanner-grype`, or another), what does its `GET /api/v1/metadata` return for `scanner.version`, and is B's optional risk calculation (`risk-config.yaml`, which replaces the Grype severity with a computed one) switched on?" This fixes the adapter version range, which source cannot.
-2. UNVERIFIED: to confirm against live Harbor: "For one image scanned by Grype, what does `GET .../additions/vulnerabilities` return: is the key exactly `application/vnd.security.vulnerability.report; version=1.1`, do the items carry a non-empty `package` and `version`, which `id` kinds occur (`CVE-`, `GHSA-`), and which `severity` strings occur (is `Negligible` present)?" The answer is the fixture for the reader.
-3. UNVERIFIED: to confirm against live Harbor: "For the same image and the same CVE, do Trivy and Grype give the same `package` string (for example for Debian or Alpine packages whose source and binary names differ)?" If not, the exact-match merge key lists them as two findings; the rule stays until this is answered.
-4. UNVERIFIED: to confirm against live Harbor: "In a webhook payload and in `with_scan_overview`, what are `scan_overview[<mime>].scanner.name` and `.vendor` for a Grype scan, and does that name equal the registration `name` that call 1 returns?" The adapters report `Grype` and `Anchore`, but a registration name is chosen by the Harbor admin, and the webhook name match compares with the registration name ("Webhook and poll jobs"). If they differ, the name match fails and the event is noted `scanner not recognised`.
+1. UNVERIFIED: to confirm against live Harbor: "Which image tag of `ghcr.io/nrosier/harbor-scanner-grype` is registered in your Harbor, what does its `GET /api/v1/metadata` return for `scanner.version` (the image pins Grype `v0.112.0`; is the string `0.112.0` or `v0.112.0`, or empty), and is `SCANNER_PREFER_CVE` set to `false` in your deployment?" Source cannot answer this: the version string comes from `grype version -o json` at run time, and the deployment environment is not in the repository.
+2. UNVERIFIED: to confirm against live Harbor: "For one image scanned by Grype, what does `GET .../additions/vulnerabilities` return: is the key exactly `application/vnd.security.vulnerability.report; version=1.1`, do the items carry a non-empty `package` and `version`, which `id` kinds occur (`CVE-`, `GHSA-`, other), and is an item with a Negligible rating returned as `Negligible`, as `None`, or not at all?" The answer is the fixture for the reader.
+3. UNVERIFIED: to confirm against live Harbor: "For the same image and the same CVE, do Trivy and Grype give the same `package` string (for example for Debian or Alpine packages whose source and binary names differ; the Grype adapter writes the installed package name, `artifact.name`)?" If not, the exact-match merge key lists them as two findings; the rule stays until this is answered.
+4. UNVERIFIED: to confirm against live Harbor: "In a webhook payload and in `with_scan_overview`, what are `scan_overview[<mime>].scanner.name` and `.vendor` for a Grype scan, and does that name equal the registration `name` that call 1 returns?" The adapter reports `Grype` and `Anchore` (`main.go:83`), but a registration name is chosen by the Harbor admin, and the webhook name match compares with the registration name ("Webhook and poll jobs"). If they differ, the name match fails and the event is noted `scanner not recognised`.
 
 ### Open questions for the user
 
