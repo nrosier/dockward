@@ -2,6 +2,26 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
+## 0.13.0 - 2026-11-08
+
+### Added
+- Scanner reports: HarborGate stores one report per mapping, image digest and Harbor scanner, and merges them into one finding per CVE and package. SARIF results carry `harborgate/scannerCount` and `harborgate/scannerNames`, and issue bodies carry a "Found by N scanner(s)" line (#224, PR #235, PR #236, PR #237, PR #238).
+- Scan launch with a chosen scanner: `GET /api/v1/mappings/:id/scanners` and `POST /api/v1/mappings/:id/tags/:tag/scan` run a scan with one Harbor scanner and restore the project's previous scanner afterwards (#224, PR #236, PR #237).
+- `GET /api/v1/mappings/:id/tags/:tag/scans` returns the per-scanner scan state of a tag (#224, PR #238).
+- `GET /api/v1/mappings/:id/tags` returns the tracked tags of a mapping with last scan time and open CVE count (#224, PR #240).
+- Scans card on the mapping edit page: one row per tracked tag, the report state per scanner, and a Scan button with a scanner picker (#224, PR #239, PR #240).
+- Scheduled scans run once per enabled scanner, and a webhook from another scanner fetches that scanner's report (#224, PR #238).
+- Newest-digest CVE view: the CVE list and the dashboard count only the tags of each mapping's newest scanned digest. The CVE detail page lists older tags as "Older tag, not counted" (#196, PR #241).
+
+### Changed
+- Docker images are pushed to GHCR only on `v*` tags. A `v*` tag publishes `X.Y.Z`, `X.Y` and `latest`; `latest` moves to each release. Pushes to `main` push nothing, and the `sha-<7 hex>` tag is dropped (#227, PR #223).
+- A CVE issue closes only when every enabled scanner has a report for the newest digest and none reports the CVE (#224, PR #237).
+- The `Affected tags:` line of an issue lists every tracked tag that still reports the CVE (#196, PR #241).
+- A scanner removed from Harbor has its reports deleted, and the findings, SARIF and issues follow (#224, PR #238).
+- Migration 0009 adds `harbor_scanners` and `scanner_reports`; existing reports become the `unknown` scanner until the next normal sync (#224, PR #235).
+- Migration 0010 adds the `newest_digest_tags` view (#196, PR #241).
+- Specs for scanner reports, the newest-digest view, the security scanning workflow and the Grype reader were added or updated (#224, #196, #227, PRs #225 to #234).
+
 ## 0.12.5 - 2026-11-07
 
 ### Added
