@@ -296,7 +296,13 @@ Decided (2026-11-07, user, #224 d11): a scan with a chosen scanner is one `scann
 
 ### Open questions for the user
 
-See the PR. They are not decided here: 1. whether an unset project scanner may be pinned to the system default on restore; 2. whether an issue should wait until all known scanners have scanned the newest digest ([cve-lifecycle.md](cve-lifecycle.md)); 3. the Scans card design ([frontend.md](frontend.md)); 4. the wait ceiling.
+Each is OPEN: and is not decided here.
+
+1. OPEN: Harbor cannot clear a project's scanner setting. A project that had none ends up with the system default pinned on it after the first switch. Is that acceptable, or should HarborGate refuse to switch a project that has no scanner of its own set? (Needs call 1 to tell which, which Harbor does not expose: the response is the same for a set and an unset scanner.)
+2. OPEN: when one scanner has a clean report for the newest digest and another has not scanned it yet, the issue closes on the first. Should an issue wait until every enabled scanner has a report for the newest digest?
+3. OPEN: which Harbor scanner adapters will be used? The design reads each scanner's report under one MIME type; a scanner that returns another format is not readable (see [architecture.md](architecture.md)). Which MIME type does the second scanner use, and does its report use `fix_version`, `package` and `preferred_cvss` as the Trivy adapter does?
+4. OPEN: the Scans card needs a design approval before build (see [frontend.md](frontend.md)).
+5. OPEN: the 5-minute report-wait ceiling and the 5-minute scan cooldown are reused from existing rules, not measured. Is a scan with a large scanner done within 5 minutes? A longer scan fails the attempt and retries on the 8-attempt backoff with a new switch each time.
 
 ### Live checks (UNVERIFIED)
 

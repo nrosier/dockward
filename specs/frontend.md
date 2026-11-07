@@ -107,6 +107,53 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 - The app never moves a target from one mapping to another.
 - Project webhook proposal (Decided 2026-11-06, user, #179): after Save mapping succeeds, the form proposes creating the project webhook only when the response has `project_webhook_exists: false`. Catalog keys: `mapping.projectWebhook.propose` ("Harbor project {project} has no project webhook yet. One webhook covers every repository in this project.") and `mapping.projectWebhook.create` ("Create project webhook"). It names the Harbor project and no repository. When `project_webhook_exists` is `true`, no proposal is shown. Decided (2026-11-06, user, #179): the proposal is an inline banner on the saved-mapping result, with the "Create project webhook" button. It is not a modal and does not block the user; the user can dismiss it. Placement (2026-11-07, delegated, #179): after a create, the banner is at the top of the mapping-created screen, above the shown-once values; after an edit save, it is below the form actions, and the edit page stays open instead of returning to the list. With `project_webhook_exists: true`, an edit save returns to the list as before.
 
+## Tag scans on the mapping page (#224)
+
+Decided (2026-11-07, user, #224 d1, d8, d12): each tag has a Scan button on the mapping page, and a scanner picker appears there only when Harbor has more than one enabled scanner. The picker lists scanners by name. Nothing is stored as a default scanner.
+
+- Placement (Decided 2026-11-07, delegated, #224): a "Scans" card on the mapping edit page (`/mappings/:id`), below Scheduled scan, with one row per tracked tag (the tag set of the CVE view, up to 10). Reason: the user said "the mapping page, per tag", and the edit page is the mapping's page today. OPEN: the visual design needs the user's approval before building (CLAUDE.md, design before build). Only the contract is decided here: the parts are existing ones (Card, table row, select, button), no new visual.
+- Row: tag, last scan date, and one line per scanner that has a report for the tag's digest: scanner name, state pill (queued, running, waiting for report, ok, failed) and the reason when failed. A tag whose digest has no report shows "Not scanned".
+- Scan button: with `scanner_choice` `available`, the button opens the scanner picker (a select, no preselected value, the button stays disabled until one is chosen, which is the "user must choose" rule). With `single`, one click starts the scan with no prompt. With `unavailable`, one click starts a scan with the project's current scanner, and the card shows `mapping.scan.noScannerAccess`.
+- Switch notice (Decided 2026-11-07, delegated, #224): while `switch` is not null, a banner on the card shows `mapping.scan.switchActive`, and `mapping.scan.restorePending` while the restore is waiting. A failed restore shows `mapping.scan.restoreFailed` with a link to the Sync jobs page. Reason: other Harbor users of the project are affected, so the state must be visible.
+- Errors from the start route use catalog text chosen by `code`: `409` shows `mapping.scan.alreadyRunning` or `mapping.scan.restoreWaiting`; `429` shows `mapping.scan.cooldown`. Any other error shows the fixed generic text.
+- CVE list and per-CVE view: a column "Found by" shows the scanner count and names (`cves.scanners.count`: "{count, plural, one {1 scanner} other {# scanners}}", and the names joined by ", "), with a filter by scanner. A finding from one scanner shows "1 scanner" and its name. The per-CVE tag table adds the scanner names per tag.
+- Sync jobs page: the `scanner_scan` and `scanner_restore` kinds show their scanner name and the fixed notes ([integrations.md](integrations.md)).
+- Catalog keys (all in `frontend/src/i18n/en.json`, parity kept; Decided 2026-11-07, user, #224, English text delegated):
+
+  | Key | English text |
+  | --- | --- |
+  | `mapping.scan.title` | Scans |
+  | `mapping.scan.button` | Scan |
+  | `mapping.scan.chooseScanner` | Choose a scanner |
+  | `mapping.scan.start` | Start scan |
+  | `mapping.scan.notScanned` | Not scanned |
+  | `mapping.scan.noScannerAccess` | HarborGate cannot list the Harbor scanners. Grant the robot account Scanner Read and Scanner Create to choose one. The scan uses the project's current scanner. |
+  | `mapping.scan.queued` | Scan queued |
+  | `mapping.scan.state.queued` | Queued |
+  | `mapping.scan.state.running` | Running |
+  | `mapping.scan.state.waiting` | Waiting for the report |
+  | `mapping.scan.state.ok` | Done |
+  | `mapping.scan.state.failed` | Failed |
+  | `mapping.scan.switchActive` | The Harbor project scanner is set to {scanner} for a scan. It is restored when the scan ends. |
+  | `mapping.scan.restorePending` | Waiting to restore the Harbor project scanner. |
+  | `mapping.scan.restoreFailed` | The Harbor project scanner could not be restored. Check the Sync jobs page. |
+  | `mapping.scan.alreadyRunning` | A scan with this scanner is already in progress. |
+  | `mapping.scan.restoreWaiting` | The Harbor project scanner is waiting to be restored. Try again when it has been. |
+  | `mapping.scan.cooldown` | A scan was started a moment ago. Try again in a few minutes. |
+  | `cves.scanners.count` | {count, plural, one {1 scanner} other {# scanners}} |
+  | `cves.scanners.foundBy` | Found by |
+  | `cves.scanner.unknown` | Unknown scanner |
+  | `cves.scanner.filter` | Scanner |
+  | `sync.note.scannerForbidden` | Harbor refused to switch the project scanner. Grant the robot account Scanner Read and Scanner Create. |
+  | `sync.note.scannerGone` | The scanner is no longer in Harbor. |
+  | `sync.note.scannerFailed` | The scanner failed the scan. |
+  | `sync.note.restoreFailed` | The Harbor project scanner could not be restored. |
+  | `sync.note.previousScannerGone` | The previous scanner is no longer in Harbor. |
+  | `sync.note.scannerChangedElsewhere` | The project scanner was changed by someone else, so it was left as it is. |
+  | `sync.note.scannerUnmatched` | The scanner is not recognised. |
+
+  `sync.note.scanForbidden` is existing ([integrations.md](integrations.md)). The Sync jobs page and the mapping card show the same text for the same note.
+
 ## Settings rows (decided)
 
 - Stacked layout: label, then optional help text, then the control, in one column.
