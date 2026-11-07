@@ -115,6 +115,13 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             post(api::mappings::rotate_auth_secret),
         )
         .route("/api/v1/mappings/{id}/pull", post(api::mappings::pull))
+        // Scanner list: 60 per minute per user. Tag scan: 1 per 5 minutes per (mapping, tag,
+        // scanner). Both declared in `services::scanner_launch` (`specs/api.md`).
+        .route("/api/v1/mappings/{id}/scanners", get(api::scanners::list))
+        .route(
+            "/api/v1/mappings/{id}/tags/{tag}/scan",
+            post(api::scanners::scan),
+        )
         .route(
             "/api/v1/mappings/{id}/cves",
             get(api::cves::list_for_mapping),
@@ -616,6 +623,7 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         harbor_fetch: api::state::HarborFetchHandle::outbound(settings.allow_private_harbor)
             .map_err(|_| "could not build the Harbor client")?,
         pull_limiter: api::mappings::new_pull_limiter(),
+        scanner_launch: Default::default(),
         pickers: services::pickers::PickerState::outbound(
             settings.allow_private_harbor,
             github.clone(),
@@ -877,6 +885,7 @@ mod tests {
             )),
             harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
             pull_limiter: crate::api::mappings::new_pull_limiter(),
+            scanner_launch: Default::default(),
             pickers: crate::services::pickers::PickerState::outbound(false, Default::default())
                 .unwrap(),
             github: Default::default(),
@@ -1979,6 +1988,7 @@ mod tests {
             )),
             harbor_fetch,
             pull_limiter: api::mappings::new_pull_limiter(),
+            scanner_launch: Default::default(),
             github: pickers.github_target(),
             pickers,
         };

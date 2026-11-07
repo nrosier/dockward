@@ -213,6 +213,8 @@ pub struct AppState {
     /// Manual scan pulls per mapping: 1 per 5 minutes, in memory (`specs/security.md`,
     /// Hardening). Keyed by mapping id.
     pub pull_limiter: RateLimiter,
+    /// The scanner list cache and the tag scan limits (`specs/api.md`, "Scanners and tag scans").
+    pub scanner_launch: crate::services::scanner_launch::ScannerLaunchState,
     /// The mapping picker transport, per-user limit, list cache and upstream rate-limit
     /// blocks (`specs/api.md`, Pickers). Router tests inject a fake transport.
     pub pickers: crate::services::pickers::PickerState,

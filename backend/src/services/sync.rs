@@ -39,7 +39,7 @@ use crate::services::harbor_client::{
 };
 use crate::services::issue_lifecycle::{self, IssueApi};
 use crate::services::resolve::{self, JobKind};
-use crate::services::{findings, ids, sarif, scanner_scan, scheduled_scan};
+use crate::services::{findings, ids, merged_view, sarif, scanner_scan, scheduled_scan};
 use crate::worker::{JobHandler, JobOutcome, now_secs};
 
 /// Waits between processing polls: 5 s, then 10 s, then every 15 s.
@@ -67,6 +67,10 @@ struct Payload {
     tag: String,
     #[serde(default)]
     trigger: Option<String>,
+    /// Set by the job a scanner scan queues after it stored a report (#224, step 8). The job then
+    /// reads the merged stored reports of the digest, not Harbor's current-scanner report.
+    #[serde(default)]
+    scanner_uuid: Option<String>,
 }
 
 /// What [`SyncHandler::read_and_convert`] returns: the encoded SARIF (`None` when over the
@@ -578,6 +582,14 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
     /// Reads and parses the Trivy report from Harbor. `NotYet` and a `404` fail the job for
     /// backoff.
     async fn fetch_report(&self, context: &Context) -> Flow<Value> {
+        if context
+            .payload
+            .scanner_uuid
+            .as_deref()
+            .is_some_and(|uuid| !uuid.is_empty())
+        {
+            return self.merged_report(context).await;
+        }
         let mapping = &context.mapping;
         let base = base_for_join(&mapping.harbor_base_url).map_err(database)?;
         let report_url = vulnerabilities_url(
@@ -600,6 +612,25 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
             ReportState::Ready(report) => Ok(report),
             ReportState::NotYet => Err(failed(MSG_NOT_YET)),
         }
+    }
+
+    /// The merged view of the stored scanner reports of the digest, as a report (#224 d2, d6): one
+    /// item per (CVE id, package), with the scanners that found it. A digest with no stored report
+    /// fails the job for backoff, like a report Harbor does not have yet.
+    async fn merged_report(&self, context: &Context) -> Flow<Value> {
+        let mapping = &context.mapping;
+        let merged = merged_view::load(
+            &self.pool,
+            &mapping.id,
+            &mapping.harbor_base_url,
+            &context.payload.digest,
+        )
+        .await
+        .map_err(database)?;
+        if merged.scanners.is_empty() {
+            return Err(failed(MSG_NOT_YET));
+        }
+        Ok(merged_view::to_report(&merged.findings))
     }
 
     /// One Harbor GET. `404` on the report is the backoff case, a `404` on an artifact is final; any other non-200 fails.
@@ -763,12 +794,21 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
                     report_db::finish(&self.pool, report_id, "success", None, self.clock.now())
                         .await
                         .map_err(database)?;
+                    // `cve_findings` has one row per CVE id; a merged report has one item per
+                    // (CVE id, package), so the first package of each id is kept (#224).
+                    let per_cve;
+                    let for_findings = if context.payload.scanner_uuid.is_some() {
+                        per_cve = merged_view::first_per_cve(vuln_report);
+                        &per_cve
+                    } else {
+                        vuln_report
+                    };
                     let applied = findings::apply_scan(
                         &self.pool,
                         &mapping.id,
                         &mapping.harbor_repository,
                         &context.payload.tag,
-                        vuln_report,
+                        for_findings,
                         self.clock.now(),
                     )
                     .await
@@ -1228,6 +1268,69 @@ mod tests {
             applied[0],
             ("CVE-2026-0001".to_owned(), "CRITICAL".to_owned())
         );
+    }
+
+    /// A sync job queued after a scanner report was stored reads the merged stored reports, not
+    /// Harbor: the CVE both scanners found is one finding, and the upload happens once (#224).
+    #[tokio::test]
+    async fn a_scanner_sync_uploads_the_merged_stored_reports() {
+        let fx = Fixture::new("merged-sync").await;
+        for (uuid, name, cves) in [
+            ("u-1", "Grype", vec!["CVE-2026-0001", "CVE-2026-0002"]),
+            ("u-2", "Trivy", vec!["CVE-2026-0001"]),
+        ] {
+            let id = ids::new_id().unwrap();
+            let findings: Vec<crate::db::scanner_reports::NewScannerFinding<'_>> = cves
+                .iter()
+                .map(|cve| crate::db::scanner_reports::NewScannerFinding {
+                    cve_id: cve,
+                    package: "openssl",
+                    version: Some("1"),
+                    fixed_in_version: None,
+                    severity: "HIGH",
+                    cvss_v3: None,
+                    description: None,
+                })
+                .collect();
+            let mut tx = fx.pool.begin().await.unwrap();
+            crate::db::scanner_reports::replace_report(
+                &mut tx,
+                &crate::db::scanner_reports::NewScannerReport {
+                    id: &id,
+                    mapping_id: "m1",
+                    image_digest: "sha256:aaaa",
+                    scanner_uuid: uuid,
+                    scanner_name: Some(name),
+                    scanner_vendor: None,
+                    scanner_version: None,
+                    image_push_time: None,
+                    stored_at: 1,
+                },
+                &findings,
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+        let payload = r#"{"repo_full_name":"proj/app","digest":"sha256:aaaa","tag":"v1","scanner_uuid":"u-2","trigger":"manual"}"#;
+        let mut job = fx.job();
+        job.payload = payload.to_owned();
+        let harbor = ok_harbor();
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+        let outcome = fx.handler(&harbor, &scanner).run(job).await;
+        assert_eq!(outcome, JobOutcome::Done);
+        assert_eq!(scanner.uploads(), 1);
+        assert!(
+            lock(&harbor.report_headers).is_empty(),
+            "the report came from the stored reports, not from Harbor"
+        );
+        let applied: Vec<String> = sqlx::query_scalar(
+            "SELECT cve_id FROM cve_findings WHERE image_tag = 'v1' ORDER BY cve_id",
+        )
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!(applied, ["CVE-2026-0001", "CVE-2026-0002"]);
     }
 
     /// A scheduled scan (#191) records only the CVE ids that are not in the last stored result

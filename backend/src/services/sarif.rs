@@ -17,6 +17,10 @@ pub const SARIF_SCHEMA: &str =
 /// The fingerprint key. The value is stable across image rebuilds and tags.
 pub const FINGERPRINT_KEY: &str = "harborgate/v1";
 
+/// The result property keys for the scanner count and names.
+pub const SCANNER_COUNT_KEY: &str = "harborgate/scannerCount";
+pub const SCANNER_NAMES_KEY: &str = "harborgate/scannerNames";
+
 /// Upper-cases a Trivy severity (`Critical` becomes `CRITICAL`). Unknown values map to
 /// `UNKNOWN`, so a new Trivy severity cannot break the converter.
 pub fn normalize_severity(value: &str) -> &'static str {
@@ -55,6 +59,31 @@ pub fn fingerprint(vuln_id: &str, package: &str) -> String {
 /// The trailing `/` keeps the whole path as the category (`specs/integrations.md`).
 pub fn automation_id(project: &str, repository: &str) -> String {
     format!("harborgate/{project}/{repository}/")
+}
+
+/// The result property bag for a merged finding (#224 d6): `harborgate/scannerCount` (an integer,
+/// at least 1) and `harborgate/scannerNames` (unique names, in the merged-view order). A finding
+/// with no `scanner_names` list (a plain Harbor report) has none. The keys use the `harborgate/`
+/// prefix, like the fingerprint key, as SARIF 2.1.0 section 3.8.1 advises for custom properties.
+fn scanner_properties(vuln: &Value) -> Option<Value> {
+    let names: Vec<&str> = vuln
+        .get("scanner_names")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    let count = vuln
+        .get("scanner_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(names.len() as u64)
+        .max(1);
+    Some(json!({
+        SCANNER_COUNT_KEY: count,
+        SCANNER_NAMES_KEY: names,
+    }))
 }
 
 /// Converts the report. `project` and `repository` name the Harbor repository. Returns the
@@ -110,7 +139,7 @@ pub fn convert(report: &Value, project: &str, repository: &str) -> Result<Value,
         } else {
             format!("Fixed in {fix}.")
         };
-        results.push(json!({
+        let mut result = json!({
             "ruleId": id,
             "message": {
                 "text": format!("{id} in {package} {version} ({severity}). {fix_text}")
@@ -122,7 +151,11 @@ pub fn convert(report: &Value, project: &str, repository: &str) -> Result<Value,
                 }
             }],
             "partialFingerprints": { FINGERPRINT_KEY: fingerprint(id, package) }
-        }));
+        });
+        if let Some(properties) = scanner_properties(vuln) {
+            result["properties"] = properties;
+        }
+        results.push(result);
     }
 
     Ok(json!({
@@ -360,6 +393,46 @@ mod tests {
     fn empty_report_validates_against_the_sarif_schema() {
         let empty = json!({ "vulnerabilities": [] });
         assert_schema_valid(&convert(&empty, "proj", "app").unwrap());
+    }
+
+    /// A merged report has one item per (CVE, package) with the scanners that found it. The SARIF
+    /// has one result per item (never one per scanner), carries the two scanner properties, and
+    /// validates against the SARIF 2.1.0 schema (#224 d6).
+    #[test]
+    fn merged_findings_give_one_result_each_with_scanner_properties() {
+        let merged = json!({
+            "vulnerabilities": [
+                {
+                    "id": "CVE-2026-0001", "package": "openssl", "version": "1.0",
+                    "severity": "HIGH", "fix_version": "1.1",
+                    "scanner_names": ["Grype", "Trivy"], "scanner_count": 2
+                },
+                {
+                    "id": "CVE-2026-0001", "package": "libssl", "version": "1.0",
+                    "severity": "HIGH", "scanner_names": ["Trivy"], "scanner_count": 1
+                },
+                { "id": "CVE-2026-0002", "package": "zlib", "severity": "LOW" }
+            ]
+        });
+        let doc = convert(&merged, "proj", "app").unwrap();
+        assert_schema_valid(&doc);
+        let results = doc["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 3, "one result per CVE and package");
+        assert_eq!(results[0]["properties"][SCANNER_COUNT_KEY], 2);
+        assert_eq!(
+            results[0]["properties"][SCANNER_NAMES_KEY],
+            json!(["Grype", "Trivy"])
+        );
+        assert_eq!(results[1]["properties"][SCANNER_COUNT_KEY], 1);
+        assert!(
+            results[2].get("properties").is_none(),
+            "a plain finding has no scanner properties"
+        );
+        // The fingerprint does not depend on the scanners, so existing alerts stay.
+        assert_eq!(
+            results[0]["partialFingerprints"][FINGERPRINT_KEY],
+            fingerprint("CVE-2026-0001", "openssl")
+        );
     }
 
     #[test]

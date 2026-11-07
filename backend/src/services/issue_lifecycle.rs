@@ -10,7 +10,7 @@
 //! The token is only passed on to the GitHub client. Nothing here logs it, an error value,
 //! or a response body: every log line and error message is fixed text.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 
 use sqlx::SqlitePool;
@@ -19,11 +19,13 @@ use crate::auth::crypto::DerivedKey;
 use crate::db::credentials as credential_db;
 use crate::db::github_issues::{self as issue_db, FindingRow, IssueRow, NewIssue};
 use crate::db::mappings::{self as mapping_db, MappingRow};
+use crate::db::scanner_reports as scanner_db;
 use crate::error::AppError;
 use crate::services::credentials::decrypt_token;
 use crate::services::github_issues::{self, GithubIssues, IssueRef};
 use crate::services::github_scanning::ScanError;
 use crate::services::ids;
+use crate::services::merged_view::{self, ScannerRef};
 
 /// The longest issue title GitHub takes, in characters. GitHub's own validation answer is
 /// `title is too long (maximum is 256 characters)`; the REST page for creating an issue
@@ -128,6 +130,27 @@ pub trait IssueApi: Send + Sync + 'static {
         number: u64,
         now: i64,
     ) -> impl Future<Output = Result<bool, ScanError>> + Send;
+
+    /// The body of an issue.
+    fn body(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        now: i64,
+    ) -> impl Future<Output = Result<String, ScanError>> + Send;
+
+    /// Replaces the body of an issue.
+    fn set_body(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        body: &str,
+        now: i64,
+    ) -> impl Future<Output = Result<(), ScanError>> + Send;
 }
 
 impl IssueApi for GithubIssues {
@@ -223,6 +246,29 @@ impl IssueApi for GithubIssues {
     ) -> Result<bool, ScanError> {
         GithubIssues::is_open(self, token, owner, repo, number, now).await
     }
+
+    async fn body(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        now: i64,
+    ) -> Result<String, ScanError> {
+        GithubIssues::body(self, token, owner, repo, number, now).await
+    }
+
+    async fn set_body(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        body: &str,
+        now: i64,
+    ) -> Result<(), ScanError> {
+        GithubIssues::set_body(self, token, owner, repo, number, body, now).await
+    }
 }
 
 /// How a [`reconcile`] run ended.
@@ -312,6 +358,9 @@ struct CveView {
     tags: Vec<String>,
     /// Description of the most recently scanned open row.
     description: Option<String>,
+    /// The scanners that report the CVE on the newest digest, in the merged-view order. Empty when
+    /// the digest has no stored scanner report (#224).
+    scanners: Vec<ScannerRef>,
 }
 
 /// The view of a CVE from its rows, or `None` when no tracked tag reports it (no `open` row).
@@ -341,6 +390,7 @@ fn summarize(cve_id: &str, rows: &[FindingRow]) -> Option<CveView> {
         fixed_in: latest.fixed_in_version.clone(),
         tags,
         description: latest.description.clone(),
+        scanners: Vec::new(),
     })
 }
 
@@ -398,7 +448,11 @@ fn issue_text(view: &CveView, mapping: &MappingRow) -> String {
         .map(|tag| format!("`{}`", plain(tag)))
         .collect();
     body.push_str(&format!("\nAffected tags: {}\n", tags.join(", ")));
-    body
+    // The `Found by` line goes right after the table (#224 d2).
+    match merged_view::found_by_line(&view.scanners) {
+        Some(line) => github_issues::with_found_by(&body, &line).unwrap_or(body),
+        None => body,
+    }
 }
 
 /// True for an id that is safe in the marker line and the route: 1 to 128 bytes of ASCII
@@ -590,6 +644,38 @@ impl<G: IssueApi> Ctx<'_, G> {
         Ok(())
     }
 
+    /// Sets the `Found by` line of an open issue to the scanners that report the CVE now, with a
+    /// PATCH on the body, only when the line differs (`specs/integrations.md`, "GitHub issues").
+    /// Nothing is read or sent when no scanner is known, so a mapping that has no stored scanner
+    /// report makes the same GitHub calls as before.
+    async fn refresh_found_by(
+        &self,
+        row: &IssueRow,
+        scanners: &[ScannerRef],
+    ) -> Result<(), Failure> {
+        let Some(line) = merged_view::found_by_line(scanners) else {
+            return Ok(());
+        };
+        let number = to_number(row.github_issue_number)?;
+        let body = self
+            .gh
+            .body(self.token, self.owner(), self.repo(), number, self.now)
+            .await?;
+        if let Some(next) = github_issues::with_found_by(&body, &line) {
+            self.gh
+                .set_body(
+                    self.token,
+                    self.owner(),
+                    self.repo(),
+                    number,
+                    &next,
+                    self.now,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn find_row(&self, cve_id: &str) -> Result<Option<IssueRow>, AppError> {
         let mut conn = self
             .pool
@@ -612,7 +698,8 @@ impl<G: IssueApi> Ctx<'_, G> {
         let siblings =
             issue_db::sibling_mappings(&mut conn, &self.mapping.id, self.owner(), self.repo())
                 .await?;
-        for (id, harbor_repository) in siblings {
+        for sibling in siblings {
+            let (id, harbor_repository) = (sibling.id, sibling.harbor_repository);
             let rows = issue_db::findings_for_cve(&mut conn, &id, cve_id).await?;
             if rows.is_empty() {
                 continue;
@@ -734,6 +821,14 @@ impl<G: IssueApi> Ctx<'_, G> {
             row
         };
         let reported = view.is_some();
+        let view = view.map(|mut view| {
+            view.scanners = rules.scanners.get(cve_id).cloned().unwrap_or_default();
+            view
+        });
+        let view_scanners: Vec<ScannerRef> = view
+            .as_ref()
+            .map(|view| view.scanners.clone())
+            .unwrap_or_default();
         match (existing, view) {
             // (a) Reported, eligible, and no issue yet: adopt or create. Skipped when
             // `auto_create_issues` is off.
@@ -756,8 +851,17 @@ impl<G: IssueApi> Ctx<'_, G> {
                         self.store_status(&row, "open").await?;
                     }
                 } else {
-                    let comment = format!("CVE is back in scan {}", rules.scan_label);
+                    let comment = match merged_view::names_text(&view_scanners) {
+                        Some(names) => {
+                            format!(
+                                "CVE is back in scan {}, found by {names}.",
+                                rules.scan_label
+                            )
+                        }
+                        None => format!("CVE is back in scan {}", rules.scan_label),
+                    };
                     self.reopen(&row, &comment).await?;
+                    self.refresh_found_by(&row, &view_scanners).await?;
                 }
             }
             // (c) The row is open: read the GitHub state first. The row is shared by every
@@ -767,13 +871,18 @@ impl<G: IssueApi> Ctx<'_, G> {
                 let reported = reported || self.reported_elsewhere(cve_id).await?;
                 if self.github_is_open(&row).await? {
                     // Open on both sides. When the newest digest no longer reports the CVE:
-                    // comment, then close.
+                    // comment, then close. An enabled scanner with no report for the newest
+                    // digest holds the issue open (#224 d14).
                     if !reported {
-                        let comment = format!(
-                            "No tracked tag reports this CVE since scan {}.",
-                            rules.scan_label
-                        );
-                        self.close(&row, &comment).await?;
+                        if !rules.close_blocked {
+                            let comment = format!(
+                                "No scanner reports this CVE since scan {}.",
+                                rules.scan_label
+                            );
+                            self.close(&row, &comment).await?;
+                        }
+                    } else {
+                        self.refresh_found_by(&row, &view_scanners).await?;
                     }
                 } else if reported {
                     // Closed by hand while the CVE is still reported: honour it.
@@ -805,6 +914,66 @@ struct Rules<'a> {
     /// Image tags of the newest scanned digest, or `None` when the mapping has no successful
     /// report (then every tracked tag counts).
     newest_tags: Option<Vec<String>>,
+    /// The scanners that report each CVE on the newest digest (#224).
+    scanners: HashMap<String, Vec<ScannerRef>>,
+    /// True while an enabled scanner has no report for the newest digest of this mapping or of a
+    /// mapping that shares the GitHub repository. No issue closes then (#224 d14).
+    close_blocked: bool,
+}
+
+/// What the stored scanner reports say for one mapping (#224): the scanners per CVE on the newest
+/// digest, and whether a close must wait. A digest with no stored scanner report (one that was
+/// synced the old way) has no scanners, so nothing changes for it.
+async fn scanner_state(
+    pool: &SqlitePool,
+    mapping: &MappingRow,
+) -> Result<(HashMap<String, Vec<ScannerRef>>, bool), AppError> {
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    let newest =
+        issue_db::newest_digest(&mut conn, &mapping.id, &mapping.harbor_repository).await?;
+    let mut blocked = false;
+    if let Some(digest) = &newest {
+        blocked = scanner_db::enabled_scanners_without_report(
+            &mut conn,
+            &mapping.harbor_base_url,
+            &mapping.id,
+            digest,
+        )
+        .await?
+            > 0;
+    }
+    let siblings = issue_db::sibling_mappings(
+        &mut conn,
+        &mapping.id,
+        &mapping.github_owner,
+        &mapping.github_repo,
+    )
+    .await?;
+    for sibling in siblings {
+        if blocked {
+            break;
+        }
+        if let Some(digest) =
+            issue_db::newest_digest(&mut conn, &sibling.id, &sibling.harbor_repository).await?
+        {
+            blocked = scanner_db::enabled_scanners_without_report(
+                &mut conn,
+                &sibling.harbor_base_url,
+                &sibling.id,
+                &digest,
+            )
+            .await?
+                > 0;
+        }
+    }
+    drop(conn);
+    let mut by_cve = HashMap::new();
+    if let Some(digest) = newest {
+        let merged =
+            merged_view::load(pool, &mapping.id, &mapping.harbor_base_url, &digest).await?;
+        by_cve = merged_view::scanners_by_cve(&merged);
+    }
+    Ok((by_cve, blocked))
 }
 
 /// Makes the GitHub issues of `mapping` follow its findings. `scan_label` names the scan in
@@ -827,6 +996,7 @@ pub async fn reconcile<G: IssueApi>(
                 .await?,
         )
     };
+    let (scanners, close_blocked) = scanner_state(pool, mapping).await?;
     let mut by_cve: BTreeMap<String, Vec<FindingRow>> = BTreeMap::new();
     for row in rows {
         by_cve.entry(row.cve_id.clone()).or_default().push(row);
@@ -837,6 +1007,8 @@ pub async fn reconcile<G: IssueApi>(
         scan_label,
         accepted,
         newest_tags,
+        scanners,
+        close_blocked,
     };
     let ctx = Ctx {
         pool,
@@ -1232,6 +1404,9 @@ pub(crate) mod test_support {
                             if let Some(title) = body.get("title").and_then(Value::as_str) {
                                 issue.title = title.to_owned();
                             }
+                            if let Some(text) = body.get("body").and_then(Value::as_str) {
+                                issue.body = text.to_owned();
+                            }
                         }
                         Ok(reply(200, json!({})))
                     }
@@ -1377,6 +1552,29 @@ pub(crate) mod test_support {
             now: i64,
         ) -> Result<bool, ScanError> {
             github_issues::is_open_with(&*self.0, token, owner, repo, number, now).await
+        }
+
+        async fn body(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            now: i64,
+        ) -> Result<String, ScanError> {
+            github_issues::body_with(&*self.0, token, owner, repo, number, now).await
+        }
+
+        async fn set_body(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            body: &str,
+            now: i64,
+        ) -> Result<(), ScanError> {
+            github_issues::set_body_with(&*self.0, token, owner, repo, number, body, now).await
         }
     }
 }
@@ -2024,6 +2222,209 @@ mod tests {
         assert_eq!(fx.issues().await[0].2, "open");
     }
 
+    /// Registers a Harbor scanner for the fixture's Harbor base URL.
+    async fn scanner(fx: &Fixture, uuid: &str, name: &str, disabled: bool) {
+        scanner_db::upsert_scanner(
+            &fx.pool,
+            &scanner_db::HarborScannerUpsert {
+                harbor_base_url: "https://harbor.example.com",
+                uuid,
+                name,
+                vendor: None,
+                version: None,
+                disabled,
+                seen_at: 1,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Stores one scanner report of digest `digest` with the given (CVE, package) findings.
+    async fn scanner_report(
+        fx: &Fixture,
+        digest: &str,
+        uuid: &str,
+        name: &str,
+        cves: &[(&str, &str)],
+    ) {
+        let id = ids::new_id().unwrap();
+        let findings: Vec<scanner_db::NewScannerFinding<'_>> = cves
+            .iter()
+            .map(|(cve, package)| scanner_db::NewScannerFinding {
+                cve_id: cve,
+                package,
+                version: Some("1.0"),
+                fixed_in_version: None,
+                severity: "CRITICAL",
+                cvss_v3: None,
+                description: None,
+            })
+            .collect();
+        let mut tx = fx.pool.begin().await.unwrap();
+        scanner_db::replace_report(
+            &mut tx,
+            &scanner_db::NewScannerReport {
+                id: &id,
+                mapping_id: "m1",
+                image_digest: digest,
+                scanner_uuid: uuid,
+                scanner_name: Some(name),
+                scanner_vendor: None,
+                scanner_version: None,
+                image_push_time: None,
+                stored_at: 1,
+            },
+            &findings,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    /// The merged CVE found by two scanners gets one issue whose body says so, and the line is
+    /// refreshed (one PATCH of the body) when the scanner set changes.
+    #[tokio::test]
+    async fn the_issue_body_names_the_scanner_count_and_names() {
+        let fx = Fixture::new("found-by", "CRITICAL", true).await;
+        scanner(&fx, "u-1", "Grype", false).await;
+        scanner(&fx, "u-2", "Trivy", false).await;
+        fx.report("v1", "sha256:new", 100).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        scanner_report(
+            &fx,
+            "sha256:new",
+            "u-1",
+            "Grype",
+            &[("CVE-2026-0001", "openssl")],
+        )
+        .await;
+        scanner_report(
+            &fx,
+            "sha256:new",
+            "u-2",
+            "Trivy",
+            &[("CVE-2026-0001", "openssl")],
+        )
+        .await;
+
+        fx.reconcile("proj/app:v1").await;
+
+        let created = fx.github.creates();
+        assert_eq!(created.len(), 1);
+        let body = created[0]["body"].as_str().unwrap();
+        assert!(
+            body.contains("\nFound by 2 scanners: `Grype`, `Trivy`\n"),
+            "{body}"
+        );
+        assert!(body.starts_with("<!-- harborgate:CVE-2026-0001 -->"));
+
+        // One scanner stops reporting: the line is refreshed on the next scan.
+        scanner_report(&fx, "sha256:new", "u-1", "Grype", &[]).await;
+        fx.reconcile("proj/app:v1").await;
+        let patched = fx.github.with(|state| state.issues[0].body.clone());
+        assert!(patched.contains("Found by 1 scanner: `Trivy`"), "{patched}");
+        assert_eq!(patched.matches("Found by ").count(), 1);
+    }
+
+    /// d14: the issue stays open while one scanner still reports the CVE, stays open while an
+    /// enabled scanner has no report for the newest digest, and closes only when every enabled
+    /// scanner has reported and none reports the CVE.
+    #[tokio::test]
+    async fn closes_only_when_every_enabled_scanner_reports_clean() {
+        let fx = Fixture::new("d14", "CRITICAL", true).await;
+        scanner(&fx, "u-1", "Grype", false).await;
+        scanner(&fx, "u-2", "Trivy", false).await;
+        scanner(&fx, "u-3", "Disabled", true).await;
+        fx.report("v1", "sha256:old", 100).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        scanner_report(
+            &fx,
+            "sha256:old",
+            "u-1",
+            "Grype",
+            &[("CVE-2026-0001", "openssl")],
+        )
+        .await;
+        scanner_report(
+            &fx,
+            "sha256:old",
+            "u-2",
+            "Trivy",
+            &[("CVE-2026-0001", "openssl")],
+        )
+        .await;
+        fx.reconcile("proj/app:v1").await;
+        assert_eq!(fx.issues().await[0].2, "open");
+
+        // A newer digest. The CVE is gone from the findings, but only Trivy has reported on it.
+        fx.report("v2", "sha256:new", 200).await;
+        fx.fix("v1", "CVE-2026-0001").await;
+        scanner_report(&fx, "sha256:new", "u-2", "Trivy", &[]).await;
+        fx.reconcile("proj/app:v2").await;
+        assert_eq!(
+            fx.issues().await[0].2,
+            "open",
+            "Grype has not reported on the newest digest: a partial result never closes"
+        );
+
+        // Grype reports clean too (the disabled scanner is not waited for): the issue closes.
+        scanner_report(&fx, "sha256:new", "u-1", "Grype", &[]).await;
+        fx.reconcile("proj/app:v2").await;
+        assert_eq!(fx.issues().await[0].2, "closed");
+        let writes = fx.github.writes();
+        let comment = writes
+            .iter()
+            .find(|(_, path, _)| path.ends_with("/comments"))
+            .unwrap();
+        assert_eq!(
+            comment.2["body"],
+            "No scanner reports this CVE since scan proj/app:v2."
+        );
+    }
+
+    /// A scanner that still reports the CVE keeps the issue open even though another is clean.
+    #[tokio::test]
+    async fn stays_open_while_one_scanner_still_reports() {
+        let fx = Fixture::new("d3", "CRITICAL", true).await;
+        scanner(&fx, "u-1", "Grype", false).await;
+        scanner(&fx, "u-2", "Trivy", false).await;
+        fx.report("v1", "sha256:new", 100).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        scanner_report(
+            &fx,
+            "sha256:new",
+            "u-1",
+            "Grype",
+            &[("CVE-2026-0001", "openssl")],
+        )
+        .await;
+        scanner_report(
+            &fx,
+            "sha256:new",
+            "u-2",
+            "Trivy",
+            &[("CVE-2026-0001", "openssl")],
+        )
+        .await;
+        fx.reconcile("proj/app:v1").await;
+
+        scanner_report(&fx, "sha256:new", "u-2", "Trivy", &[]).await;
+        // Findings still list the CVE because Grype reports it.
+        fx.reconcile("proj/app:v1").await;
+        assert_eq!(fx.issues().await[0].2, "open");
+        assert!(
+            !fx.github
+                .writes()
+                .iter()
+                .any(|(_, p, _)| p.ends_with("/comments")),
+            "no close comment"
+        );
+    }
+
     #[tokio::test]
     async fn closes_when_no_tag_reports() {
         let fx = Fixture::new("closes", "CRITICAL", true).await;
@@ -2041,7 +2442,7 @@ mod tests {
         assert_eq!(writes[1].1, "repos/octo/app/issues/1/comments");
         assert_eq!(
             writes[1].2["body"],
-            "No tracked tag reports this CVE since scan proj/app:v2."
+            "No scanner reports this CVE since scan proj/app:v2."
         );
         assert_eq!(writes[2].0, "PATCH");
         assert_eq!(writes[2].2["state"], "closed");
@@ -2334,6 +2735,31 @@ mod tests {
             now: i64,
         ) -> Result<bool, ScanError> {
             self.inner.is_open(token, owner, repo, number, now).await
+        }
+
+        async fn body(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            now: i64,
+        ) -> Result<String, ScanError> {
+            self.inner.body(token, owner, repo, number, now).await
+        }
+
+        async fn set_body(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            body: &str,
+            now: i64,
+        ) -> Result<(), ScanError> {
+            self.inner
+                .set_body(token, owner, repo, number, body, now)
+                .await
         }
     }
 

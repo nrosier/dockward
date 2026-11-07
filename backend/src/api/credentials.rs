@@ -654,6 +654,7 @@ mod tests {
             )),
             harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
             pull_limiter: crate::api::mappings::new_pull_limiter(),
+            scanner_launch: Default::default(),
             pickers: crate::services::pickers::PickerState::outbound(false, Default::default())
                 .unwrap(),
             github: Default::default(),

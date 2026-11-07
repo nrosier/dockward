@@ -13,6 +13,7 @@ pub mod mappings;
 pub mod oidc;
 pub mod pickers;
 pub mod project_webhooks;
+pub mod scanners;
 #[allow(dead_code)] // Shared by the extractor and the routes.
 pub mod state;
 pub mod static_files;

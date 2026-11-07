@@ -109,6 +109,26 @@ pub async fn mark_closed_manually(conn: &mut SqliteConnection, id: &str) -> Resu
     .map_err(|_| AppError::InternalError)
 }
 
+/// The newest scanned digest of the mapping's repository, or `None` when the mapping has no
+/// successful report. The same choice as [`newest_digest_tags`].
+pub async fn newest_digest(
+    conn: &mut SqliteConnection,
+    mapping_id: &str,
+    repo: &str,
+) -> Result<Option<String>, AppError> {
+    sqlx::query_scalar!(
+        r#"SELECT image_digest AS "image_digest!" FROM sync_reports
+           WHERE mapping_id = ? AND harbor_repository = ? AND sarif_status = 'success'
+           ORDER BY image_push_time IS NULL, image_push_time DESC, synced_at DESC, rowid DESC
+           LIMIT 1"#,
+        mapping_id,
+        repo
+    )
+    .fetch_optional(conn)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
 /// The image tags of the newest scanned digest of the mapping's repository, or `None` when
 /// the mapping has no successful report. The newest digest is the one with the latest
 /// `image_push_time` among successful reports (a report without a push time ranks below any
@@ -224,16 +244,25 @@ pub async fn findings_for_cve(
     .map_err(|_| AppError::InternalError)
 }
 
-/// The other mappings that target the same GitHub repository as `mapping_id`, as
-/// `(id, harbor_repository)`. They share its `github_issues` rows (#185).
+/// A mapping that targets the same GitHub repository as another one (#185).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiblingMapping {
+    pub id: String,
+    pub harbor_base_url: String,
+    pub harbor_repository: String,
+}
+
+/// The other mappings that target the same GitHub repository as `mapping_id`. They share its
+/// `github_issues` rows (#185).
 pub async fn sibling_mappings(
     conn: &mut SqliteConnection,
     mapping_id: &str,
     owner: &str,
     repo: &str,
-) -> Result<Vec<(String, String)>, AppError> {
+) -> Result<Vec<SiblingMapping>, AppError> {
     let rows = sqlx::query!(
-        r#"SELECT id AS "id!", harbor_repository AS "harbor_repository!" FROM repo_mappings
+        r#"SELECT id AS "id!", harbor_base_url AS "harbor_base_url!",
+                  harbor_repository AS "harbor_repository!" FROM repo_mappings
            WHERE github_owner = ? AND github_repo = ? AND id <> ?
            ORDER BY id"#,
         owner,
@@ -245,7 +274,11 @@ pub async fn sibling_mappings(
     .map_err(|_| AppError::InternalError)?;
     Ok(rows
         .into_iter()
-        .map(|row| (row.id, row.harbor_repository))
+        .map(|row| SiblingMapping {
+            id: row.id,
+            harbor_base_url: row.harbor_base_url,
+            harbor_repository: row.harbor_repository,
+        })
         .collect())
 }
 

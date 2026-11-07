@@ -87,6 +87,9 @@ struct Payload {
     scanner_uuid: Option<String>,
     #[serde(default)]
     fetch_only: bool,
+    /// Who started the scan: `manual`, `schedule` or `webhook`. It goes on to the sync job.
+    #[serde(default)]
+    trigger: Option<String>,
 }
 
 type Flow<T> = Result<T, JobOutcome>;
@@ -345,7 +348,7 @@ async fn scan_steps<H: HarborFetch, C: Clock>(
     }
 
     // Step 5: store the report of the chosen scanner.
-    fetch_and_store(pool, harbor, clock, session, &digest, chosen).await?;
+    fetch_and_store(pool, harbor, clock, session, &digest, chosen, payload).await?;
     Ok(Pass::Finish(JobOutcome::Done))
 }
 
@@ -599,6 +602,7 @@ async fn fetch_and_store<H: HarborFetch, C: Clock>(
     session: &Session,
     digest: &str,
     chosen: &str,
+    payload: &Payload,
 ) -> Flow<()> {
     let mapping = &session.mapping;
     let url = vulnerabilities_url(
@@ -632,6 +636,10 @@ async fn fetch_and_store<H: HarborFetch, C: Clock>(
         version: report_scanner_text(&report, "version"),
     };
     let findings = report_findings(&report);
+    let sync = SyncAfterStore {
+        tag: &payload.tag,
+        trigger: sync_trigger(payload.trigger.as_deref()),
+    };
     store_report(
         pool,
         mapping,
@@ -639,9 +647,27 @@ async fn fetch_and_store<H: HarborFetch, C: Clock>(
         chosen,
         &snapshot,
         &findings,
+        &sync,
         clock.now(),
     )
     .await
+}
+
+/// The sync job queued with the store (step 8): the tag and the trigger it carries.
+struct SyncAfterStore<'a> {
+    tag: &'a str,
+    trigger: &'a str,
+}
+
+/// The trigger of the sync job. Only the known triggers pass; any other value is `manual`, so a
+/// payload cannot put free text on a job row.
+fn sync_trigger(trigger: Option<&str>) -> &'static str {
+    match trigger {
+        Some("schedule") => "schedule",
+        Some("webhook") => "webhook",
+        Some("poll") => "poll",
+        _ => "manual",
+    }
 }
 
 /// The scanner snapshot stored with a report: the report's own `scanner` object.
@@ -713,6 +739,7 @@ fn text_field(value: &Value, key: &str) -> Option<String> {
 
 /// Stores the report of (mapping, digest, scanner) in one transaction. A new scan by the same
 /// scanner replaces its own report, and no other scanner's report is touched.
+#[allow(clippy::too_many_arguments)]
 async fn store_report(
     pool: &SqlitePool,
     mapping: &MappingRow,
@@ -720,6 +747,7 @@ async fn store_report(
     scanner_uuid: &str,
     snapshot: &ScannerSnapshot,
     findings: &[ReadFinding],
+    sync: &SyncAfterStore<'_>,
     now: i64,
 ) -> Flow<()> {
     let report_id = ids::new_id().map_err(|_| failed(MSG_INTERNAL))?;
@@ -750,10 +778,45 @@ async fn store_report(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|_| database())?;
-    scanner_db::replace_report(&mut tx, &report, &rows)
-        .await
-        .map_err(|_| database())?;
-    tx.commit().await.map_err(|_| database())
+    let written: Result<(), AppError> = async {
+        scanner_db::replace_report(&mut tx, &report, &rows).await?;
+        queue_sync_after_store(&mut tx, mapping, digest, scanner_uuid, sync, now).await
+    }
+    .await;
+    match written {
+        Ok(()) => tx.commit().await.map_err(|_| database()),
+        Err(_) => {
+            let _ = tx.rollback().await;
+            Err(database())
+        }
+    }
+}
+
+/// Step 8: queues the sync job that uploads the SARIF of the stored reports and runs the issue
+/// rules, in the transaction of the store. It is deduped like the resolve job's (no `queued` or
+/// `running` job for the same mapping, digest and tag): a job that exists already reads the stored
+/// reports when it runs, so it picks this report up.
+async fn queue_sync_after_store(
+    tx: &mut sqlx::SqliteConnection,
+    mapping: &MappingRow,
+    digest: &str,
+    scanner_uuid: &str,
+    sync: &SyncAfterStore<'_>,
+    now: i64,
+) -> Result<(), AppError> {
+    if sync_jobs::has_pending_pair(tx, &mapping.id, digest, sync.tag).await? {
+        return Ok(());
+    }
+    let id = ids::new_id()?;
+    let payload = json!({
+        "repo_full_name": format!("{}/{}", mapping.harbor_project, mapping.harbor_repository),
+        "digest": digest,
+        "tag": sync.tag,
+        "scanner_uuid": scanner_uuid,
+        "trigger": sync.trigger,
+    })
+    .to_string();
+    sync_jobs::enqueue_in(tx, &id, &mapping.id, &payload, now).await
 }
 
 /// Step 6, after the scan steps. Returns `None` when the lock was released or handed to a restore
