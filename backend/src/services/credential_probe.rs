@@ -244,12 +244,17 @@ struct RawGithub {
 }
 
 impl OutboundGithubProbe {
-    async fn send(&self, path: &str, token: &[u8]) -> Result<RawGithub, AppError> {
-        let url = self
-            .target
+    /// The URL of `path` under the live GitHub API base (`specs/integrations.md`, "GitHub
+    /// base URL"). It is read on every request, so an admin change applies at once.
+    fn request_url(&self, path: &str) -> Result<Url, AppError> {
+        self.target
             .current()
             .api_url(path)
-            .ok_or(AppError::InternalError)?;
+            .ok_or(AppError::InternalError)
+    }
+
+    async fn send(&self, path: &str, token: &[u8]) -> Result<RawGithub, AppError> {
+        let url = self.request_url(path)?;
         let token = std::str::from_utf8(token).map_err(|_| AppError::InternalError)?;
         let sent = self
             .client
@@ -734,5 +739,48 @@ mod tests {
         let check = harbor_check(200);
         assert_eq!(check.name, "harbor_robot");
         assert!(check.detail.contains("human account"));
+    }
+
+    /// #184: every GitHub credential test request (first repository, repository, code
+    /// scanning, issues) goes to `https://api.github.com` while the setting is empty, and to
+    /// the custom API base with its path once the admin sets one, with no rebuild of the probe.
+    /// Clearing the setting returns to the default.
+    #[test]
+    fn credential_test_requests_follow_the_configured_base_url() {
+        use crate::services::github_url::GithubUrls;
+        let target = GithubTarget::default();
+        let probe = OutboundGithubProbe::new(target.clone()).unwrap();
+        let paths = [
+            GITHUB_FIRST_REPO_PATH.to_owned(),
+            github_repo_path("octo", "app"),
+            github_code_scanning_path("octo", "app"),
+            github_issues_path("octo", "app"),
+        ];
+        let urls = |probe: &OutboundGithubProbe| -> Vec<String> {
+            paths
+                .iter()
+                .map(|path| probe.request_url(path).unwrap().to_string())
+                .collect()
+        };
+
+        for url in urls(&probe) {
+            assert!(url.starts_with("https://api.github.com/"), "{url}");
+        }
+
+        target.set(GithubUrls::from_stored("https://ghes.example.com/api/v3", "").unwrap());
+        let custom = urls(&probe);
+        for url in &custom {
+            assert!(url.starts_with("https://ghes.example.com/api/v3/"), "{url}");
+        }
+        assert_eq!(
+            custom[0],
+            "https://ghes.example.com/api/v3/user/repos?per_page=1"
+        );
+        assert_eq!(custom[1], "https://ghes.example.com/api/v3/repos/octo/app");
+
+        target.set(GithubUrls::from_stored("", "").unwrap());
+        for url in urls(&probe) {
+            assert!(url.starts_with("https://api.github.com/"), "{url}");
+        }
     }
 }
