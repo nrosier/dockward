@@ -289,4 +289,89 @@ mod tests {
         assert_eq!(left, 0);
         Ok(())
     }
+
+    /// Migration 0007 (#185) rebuilds `repo_mappings` without `UNIQUE (github_owner,
+    /// github_repo)`. Rows written under 0006 and their child rows survive, a second mapping
+    /// with the same GitHub target is accepted, and the Harbor uniqueness and the cascades
+    /// still hold.
+    #[tokio::test]
+    async fn migration_0007_keeps_rows_and_drops_the_github_uniqueness() -> Result<(), AppError> {
+        let options = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let migrator = sqlx::migrate!("./migrations");
+        migrator
+            .run_to(6, &pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        seed_mapping(&pool).await?;
+        let insert = |id: &'static str, harbor_repo: &'static str| {
+            sqlx::query(
+                "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+                 VALUES (?, 'user-1', 'cred-harbor', 'cred-gh', 'https://harbor.example.com', 'proj', ?, 'shared-owner', 'shared-repo', ?, 'sh')",
+            )
+            .bind(id)
+            .bind(harbor_repo)
+            .bind(format!("th-{id}"))
+        };
+        insert("mx1", "one")
+            .execute(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        // Under 0006 the GitHub target is still unique.
+        assert!(insert("mx2", "two").execute(&pool).await.is_err());
+        sqlx::query(
+            "INSERT INTO sync_jobs (id, mapping_id, payload) VALUES ('job-1', 'mx1', '{}')",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        let (mappings_before,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM repo_mappings")
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+
+        migrator
+            .run(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+
+        let (mappings_after,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM repo_mappings")
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        assert_eq!(mappings_after, mappings_before, "every mapping row is kept");
+        let (jobs,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sync_jobs")
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        assert_eq!(jobs, 1, "the rebuild did not cascade into child rows");
+        let (fk,): (i64,) = sqlx::query_as("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        assert_eq!(fk, 1, "foreign keys are back on");
+        // The second GitHub target now succeeds; the Harbor duplicate is still refused.
+        insert("mx2", "two")
+            .execute(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        assert!(insert("mx3", "one").execute(&pool).await.is_err());
+        // The cascade still works on the rebuilt table.
+        sqlx::query("DELETE FROM repo_mappings WHERE id = 'mx1'")
+            .execute(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let (jobs_left,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sync_jobs")
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        assert_eq!(jobs_left, 0);
+        Ok(())
+    }
 }

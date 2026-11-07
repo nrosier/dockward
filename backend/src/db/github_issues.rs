@@ -224,6 +224,31 @@ pub async fn findings_for_cve(
     .map_err(|_| AppError::InternalError)
 }
 
+/// The other mappings that target the same GitHub repository as `mapping_id`, as
+/// `(id, harbor_repository)`. They share its `github_issues` rows (#185).
+pub async fn sibling_mappings(
+    conn: &mut SqliteConnection,
+    mapping_id: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<Vec<(String, String)>, AppError> {
+    let rows = sqlx::query!(
+        r#"SELECT id AS "id!", harbor_repository AS "harbor_repository!" FROM repo_mappings
+           WHERE github_owner = ? AND github_repo = ? AND id <> ?
+           ORDER BY id"#,
+        owner,
+        repo,
+        mapping_id
+    )
+    .fetch_all(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.id, row.harbor_repository))
+        .collect())
+}
+
 /// CVE ids of the mapping with an active acceptance: not revoked, and with no expiry or an
 /// expiry after `now`.
 pub async fn accepted_cves(

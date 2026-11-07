@@ -168,16 +168,13 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
     setValues((current) => ({ ...current, [key]: value }));
   };
 
-  // The user's own mappings, for the duplicate-target check before submit.
+  // The user's own mappings, for the duplicate Harbor repository check before submit. A
+  // GitHub repository used by another mapping is allowed (#185).
   const own = useQuery({
     queryKey: ["mappings", "own"],
     queryFn: () => api<Page<MappingListItem>>("GET", "/mappings?page_size=200"),
   });
   const others = (own.data?.items ?? []).filter((item) => item.id !== mapping?.id);
-  const githubClash = others.find(
-    (item) => values.githubOwner.trim() !== "" && values.githubRepo.trim() !== "" &&
-      same(item.github_owner, values.githubOwner) && same(item.github_repo, values.githubRepo),
-  );
   const harborClash = others.find(
     (item) => values.harborProject.trim() !== "" && values.harborRepository.trim() !== "" &&
       same(item.harbor_project, values.harborProject) && same(item.harbor_repository, values.harborRepository),
@@ -235,7 +232,7 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
     values.defaultBranch,
   ].every((value) => value.trim() !== "");
   const changed = mapping === undefined || Object.keys(changedFields(initial, values)).length > 0;
-  const canSave = !readOnly && filled && changed && githubClash === undefined && harborClash === undefined && !save.isPending;
+  const canSave = !readOnly && filled && changed && harborClash === undefined && !save.isPending;
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -327,9 +324,6 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
           <GitHubRepositoryField
             credentialId={values.githubCredId === "" ? undefined : values.githubCredId}
             value={githubText}
-            error={
-              githubClash === undefined ? undefined : t("mappings.form.duplicate", { name: mappingName(githubClash) })
-            }
             onText={(text) => {
               const slash = text.indexOf("/");
               setGithubText(text);
