@@ -20,6 +20,9 @@ pub struct OpenCount {
 
 /// Open CVEs by severity, per mapping. `mapping_id` `Some` limits the result to that mapping.
 ///
+/// Only the rows of the newest-digest tags count (#196, decision 21; the `newest_digest_tags`
+/// view, migration 0010). A CVE open only on an older tag is not counted.
+///
 /// Implements the spec bullets (`specs/cve-lifecycle.md`, Dashboard counts): "Open CVEs by
 /// severity: distinct `cve_id` in the mapping with at least one tracked-tag row at
 /// `status = 'open'` and no active acceptance, grouped by severity", and "If the same CVE has
@@ -42,6 +45,8 @@ pub async fn open_by_mapping(
                            WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 ELSE 1 END) AS sev_rank
                FROM cve_findings f
                JOIN repo_mappings m ON m.id = f.mapping_id
+               JOIN newest_digest_tags nd
+                    ON nd.mapping_id = f.mapping_id AND nd.image_tag = f.image_tag
                WHERE f.status = 'open' AND (?1 IS NULL OR m.user_id = ?1)
                  AND (?3 IS NULL OR f.mapping_id = ?3)
                GROUP BY f.mapping_id, f.cve_id
@@ -80,7 +85,9 @@ pub async fn open_by_mapping(
         .collect())
 }
 
-/// Fixed CVEs: distinct `cve_id` per mapping where every tracked-tag row is `fixed`.
+/// Fixed CVEs: distinct `cve_id` per mapping where every newest-digest-tag row is `fixed`
+/// (#196, decisions 21 and 23): rows of older tags are not read, so a CVE that only an older
+/// digest had as `fixed` adds nothing.
 ///
 /// Implements the spec bullet (`specs/cve-lifecycle.md`, Dashboard counts): "Fixed CVEs:
 /// distinct `cve_id` in the mapping where every tracked-tag row is `fixed`". The acceptance
@@ -91,6 +98,8 @@ pub async fn fixed_cves(pool: &SqlitePool, user_id: Option<&str>) -> Result<i64,
                SELECT f.mapping_id, f.cve_id
                FROM cve_findings f
                JOIN repo_mappings m ON m.id = f.mapping_id
+               JOIN newest_digest_tags nd
+                    ON nd.mapping_id = f.mapping_id AND nd.image_tag = f.image_tag
                WHERE (?1 IS NULL OR m.user_id = ?1)
                GROUP BY f.mapping_id, f.cve_id
                HAVING SUM(CASE WHEN f.status = 'open' THEN 1 ELSE 0 END) = 0

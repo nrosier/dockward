@@ -43,9 +43,10 @@ function cve(over: Partial<CveDetail>): CveDetail {
     tracked_tags: 10,
     github_issue_number: null,
     github_issue_status: null,
-    tags: [{ image_tag: "1.42.0", status: "open", last_scan_at: "2026-11-03T14:58:00Z", fixed_in_version: "v0.31.0" }],
+    tags: [{ image_tag: "1.42.0", status: "open", last_scan_at: "2026-11-03T14:58:00Z", fixed_in_version: "v0.31.0", newest_digest: true }],
     acceptance: null,
     description: "Misuse may cause an authorization bypass.",
+    older_tags_only: false,
     ...over,
   };
 }
@@ -69,6 +70,32 @@ const url = "/cves/m1%3ACVE-2026-0001";
 describe("CveDetailPage", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("shows the older-tags line and marks older tags when only older tags are open", async () => {
+    stub(
+      cve({
+        status: "fixed",
+        open_tags: 0,
+        older_tags_only: true,
+        tags: [
+          { image_tag: "0.4", status: "open", last_scan_at: null, fixed_in_version: null, newest_digest: false },
+          { image_tag: "0.4.2", status: "open", last_scan_at: null, fixed_in_version: null, newest_digest: false },
+          { image_tag: "latest", status: "fixed", last_scan_at: null, fixed_in_version: null, newest_digest: true },
+        ],
+      }),
+    );
+    renderWithRoutes(routes, url);
+    expect(await screen.findByText(t("cves.detail.olderTagsOnly", { tags: "0.4, 0.4.2" }))).toBeInTheDocument();
+    expect(screen.getAllByText(t("cves.detail.olderTag"))).toHaveLength(2);
+  });
+
+  it("shows no older-tags line when the newest digest reports the CVE", async () => {
+    stub(cve({}));
+    renderWithRoutes(routes, url);
+    await screen.findByText("1.42.0");
+    expect(screen.queryByText(/Open on older tags only/)).toBeNull();
+    expect(screen.queryByText(t("cves.detail.olderTag"))).toBeNull();
   });
 
   it("hides Create issue when the CVE is fixed on every tag", async () => {

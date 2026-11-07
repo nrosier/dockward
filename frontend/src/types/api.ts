@@ -95,6 +95,8 @@ export interface CveTag {
   status: "open" | "fixed";
   last_scan_at: string | null;
   fixed_in_version: string | null;
+  // True for a tag of the mapping's newest scanned digest (#196).
+  newest_digest: boolean;
 }
 
 export interface Acceptance {
@@ -111,6 +113,8 @@ export interface CveDetail extends CveSummary {
   tags: CveTag[];
   acceptance: Acceptance | null;
   description: string | null;
+  // No newest-digest row is open, but a row on an older tag is (#196).
+  older_tags_only: boolean;
 }
 
 export interface SyncReport {

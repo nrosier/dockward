@@ -354,7 +354,7 @@ struct CveView {
     package: Option<String>,
     /// Fixed-in version of the most recently scanned open row.
     fixed_in: Option<String>,
-    /// Every tag where the CVE is open.
+    /// Every tracked tag where the CVE is open, on the newest digest or not (#196, decision 25).
     tags: Vec<String>,
     /// Description of the most recently scanned open row.
     description: Option<String>,
@@ -821,8 +821,14 @@ impl<G: IssueApi> Ctx<'_, G> {
             row
         };
         let reported = view.is_some();
+        // `Affected tags:` lists every tracked tag that still reports the CVE, older ones too
+        // (#196, decision 25); the close rule above reads the newest digest only.
+        let all_tags = summarize(cve_id, rows)
+            .map(|all| all.tags)
+            .unwrap_or_default();
         let view = view.map(|mut view| {
             view.scanners = rules.scanners.get(cve_id).cloned().unwrap_or_default();
+            view.tags = all_tags;
             view
         });
         let view_scanners: Vec<ScannerRef> = view
@@ -2111,6 +2117,25 @@ mod tests {
             1,
             "the older tag keeps its own open finding"
         );
+    }
+
+    /// The issue body lists every tracked tag that still reports the CVE, an older tag too
+    /// (#196, decision 25), while the issue is created because the newest digest reports it.
+    #[tokio::test]
+    async fn affected_tags_lists_older_tags_that_still_report() {
+        let fx = Fixture::new("affected-older", "CRITICAL", true).await;
+        fx.report("v1", "sha256:old", 100).await;
+        fx.report("v2", "sha256:new", 200).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 20)
+            .await;
+        fx.reconcile("proj/app:v2").await;
+
+        let creates = fx.github.creates();
+        assert_eq!(creates.len(), 1);
+        let body = creates[0]["body"].as_str().unwrap();
+        assert!(body.contains("Affected tags: `v1`, `v2`"), "{body}");
     }
 
     /// Newest digest still reports the CVE: the issue stays open.

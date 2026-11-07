@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT f.image_tag AS \"image_tag!: String\", f.status AS \"status!: String\",\n                  f.fixed_in_version AS \"fixed_in_version?: String\",\n                  f.description AS \"description?: String\",\n                  ts.scan_at AS \"last_scan_at?: i64\"\n           FROM cve_findings f\n           LEFT JOIN (\n               SELECT image_tag, MAX(synced_at) AS scan_at\n               FROM sync_reports WHERE mapping_id = ?1 AND sarif_status = 'success'\n               GROUP BY image_tag\n           ) ts ON ts.image_tag = f.image_tag\n           WHERE f.mapping_id = ?1 AND f.cve_id = ?2\n           ORDER BY COALESCE(ts.scan_at, -1) DESC, f.last_seen_at DESC, f.id DESC\n           LIMIT 10",
+  "query": "SELECT f.image_tag AS \"image_tag!: String\", f.status AS \"status!: String\",\n                  f.fixed_in_version AS \"fixed_in_version?: String\",\n                  f.description AS \"description?: String\",\n                  ts.scan_at AS \"last_scan_at?: i64\",\n                  (nd.image_tag IS NOT NULL) AS \"newest_digest!: bool\"\n           FROM cve_findings f\n           LEFT JOIN newest_digest_tags nd\n                  ON nd.mapping_id = f.mapping_id AND nd.image_tag = f.image_tag\n           LEFT JOIN (\n               SELECT image_tag, MAX(synced_at) AS scan_at\n               FROM sync_reports WHERE mapping_id = ?1 AND sarif_status = 'success'\n               GROUP BY image_tag\n           ) ts ON ts.image_tag = f.image_tag\n           WHERE f.mapping_id = ?1 AND f.cve_id = ?2\n           ORDER BY COALESCE(ts.scan_at, -1) DESC, f.last_seen_at DESC, f.id DESC\n           LIMIT 10",
   "describe": {
     "columns": [
       {
@@ -52,6 +52,12 @@
         "ordinal": 4,
         "type_info": "Integer",
         "origin": "Expression"
+      },
+      {
+        "name": "newest_digest!: bool",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -62,8 +68,9 @@
       false,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "e6836170cc8c84a6cc7b7e87405ca804129e70ab35220b31cfae9e70286610f1"
+  "hash": "bf0ebe5a72d505e010c9a546bf59f5d3d3fad0f5afec9b4203f63e7df84f2ad2"
 }

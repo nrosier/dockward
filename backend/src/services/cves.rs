@@ -139,6 +139,8 @@ pub struct CveTag {
     /// The tag's latest successful sync, or `null` when it has none.
     pub last_scan_at: Option<String>,
     pub fixed_in_version: Option<String>,
+    /// True for a tag of the mapping's newest scanned digest (#196).
+    pub newest_digest: bool,
 }
 
 /// `GET /cves/:id` (`specs/api.md`, CVEs, `CveDetail`).
@@ -151,6 +153,9 @@ pub struct CveDetail {
     pub acceptance: Option<Acceptance>,
     /// The Harbor description from the most recently scanned tag's row, or `null`.
     pub description: Option<String>,
+    /// True when no newest-digest row of the CVE is `open` and a row on an older tag is
+    /// (#196). The UI shows the inline older-tags notice.
+    pub older_tags_only: bool,
 }
 
 fn valid_cve_id(id: &str) -> bool {
@@ -382,6 +387,7 @@ pub async fn list(
         limit: paging.page_size,
         offset: paging.offset(),
         now,
+        include_older: 0,
     };
     let rows = db::list_cves(pool, &filter).await?;
     let total = db::count_cves(pool, &filter).await?;
@@ -403,6 +409,7 @@ fn to_tag(row: &CveTagRow) -> Result<CveTag, AppError> {
         status: row.status.clone(),
         last_scan_at: row.last_scan_at.map(time::rfc3339).transpose()?,
         fixed_in_version: row.fixed_in_version.clone(),
+        newest_digest: row.newest_digest,
     })
 }
 
@@ -433,6 +440,8 @@ pub async fn detail(
         limit: 1,
         offset: 0,
         now,
+        // The detail route reaches older tags (#196): a CVE only they report is `fixed` here.
+        include_older: 1,
     };
     let row = db::list_cves(pool, &filter)
         .await?
@@ -441,6 +450,12 @@ pub async fn detail(
         .ok_or(AppError::NotFound)?;
     let summary = CveSummary::from_row(row)?;
     let tag_rows = db::cve_tags(pool, mapping_id, cve_id).await?;
+    let older_tags_only = !tag_rows
+        .iter()
+        .any(|row| row.newest_digest && row.status == "open")
+        && tag_rows
+            .iter()
+            .any(|row| !row.newest_digest && row.status == "open");
     let description = tag_rows.first().and_then(|row| row.description.clone());
     let tags = tag_rows.iter().map(to_tag).collect::<Result<Vec<_>, _>>()?;
     let acceptance = {
@@ -464,6 +479,7 @@ pub async fn detail(
         tags,
         acceptance,
         description,
+        older_tags_only,
     })
 }
 
