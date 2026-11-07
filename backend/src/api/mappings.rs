@@ -21,6 +21,7 @@ use crate::services::dashboard::{self, OpenCves};
 use crate::services::mappings::{self, Created, ListQuery, Mapping, MappingPatch, NewMapping};
 use crate::services::pagination::Page;
 use crate::services::poller;
+use crate::services::project_webhooks;
 use crate::services::sessions::AuthUser;
 use crate::services::sync_jobs::{self, LastSync};
 use crate::worker::now_secs;
@@ -123,7 +124,19 @@ pub async fn list(
     Ok(Json(with_list_extras(&state.pool, page, now_secs()).await?))
 }
 
-/// `POST /api/v1/mappings`. Returns `201` with the mapping and the two values shown once.
+/// A save response (create or update) plus `project_webhook_exists` (#179): `true` when a
+/// project webhook is stored for the saved mapping's Harbor base URL and project, whoever
+/// owns it. It carries no id, owner, URL, or secret. No `Debug`: `T` may hold shown-once
+/// values.
+#[derive(Serialize)]
+pub struct Saved<T: Serialize> {
+    #[serde(flatten)]
+    pub inner: T,
+    pub project_webhook_exists: bool,
+}
+
+/// `POST /api/v1/mappings`. Returns `201` with the mapping, the two values shown once, and
+/// `project_webhook_exists`.
 pub async fn create(
     State(state): State<AppState>,
     user: AuthUser,
@@ -143,17 +156,29 @@ pub async fn create(
         input,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(created)).into_response())
+    let mapping = &created.mapping;
+    let project_webhook_exists = project_webhooks::exists_for(
+        &state.pool,
+        &mapping.harbor_base_url,
+        &mapping.harbor_project,
+    )
+    .await?;
+    let saved = Saved {
+        inner: created,
+        project_webhook_exists,
+    };
+    Ok((StatusCode::CREATED, Json(saved)).into_response())
 }
 
 /// `PUT /api/v1/mappings/:id`. Takes any subset of the create fields. Returns `200` with
-/// the updated mapping. Owner only. The webhook token and auth secret are not changed.
+/// the updated mapping and `project_webhook_exists`. Owner only. The webhook token and auth
+/// secret are not changed.
 pub async fn update(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
     body: axum::body::Bytes,
-) -> Result<Json<Mapping>, AppError> {
+) -> Result<Json<Saved<Mapping>>, AppError> {
     let patch: MappingPatch = parse_body(&body)?;
     let actor = actor_of(&user);
     let github_probe = OutboundGithubProbe::new(state.github.clone())?;
@@ -171,7 +196,13 @@ pub async fn update(
         patch,
     )
     .await?;
-    Ok(Json(updated))
+    let base = updated.harbor_base_url.clone();
+    let project = updated.harbor_project.clone();
+    let project_webhook_exists = project_webhooks::exists_for(&state.pool, &base, &project).await?;
+    Ok(Json(Saved {
+        inner: updated,
+        project_webhook_exists,
+    }))
 }
 
 /// `GET /api/v1/mappings/:id`.
@@ -624,5 +655,24 @@ mod tests {
         );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The save response flattens the inner object and adds `project_webhook_exists` only
+    /// (#179): no project webhook id, owner, URL, or secret.
+    #[test]
+    fn saved_flattens_and_adds_only_the_flag() {
+        let saved = Saved {
+            inner: serde_json::json!({ "mapping": { "id": "m1" }, "webhook_url": "u" }),
+            project_webhook_exists: false,
+        };
+        let value = serde_json::to_value(&saved).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "mapping": { "id": "m1" },
+                "webhook_url": "u",
+                "project_webhook_exists": false
+            })
+        );
     }
 }

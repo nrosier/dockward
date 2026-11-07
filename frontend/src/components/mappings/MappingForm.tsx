@@ -3,7 +3,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
 import { t } from "../../i18n";
 import { ApiError, api } from "../../lib/api";
-import type { Credential, IssueSeverity, Mapping, MappingCreated, MappingListItem, Page } from "../../types/api";
+import type { Credential, IssueSeverity, Mapping, MappingCreated, MappingListItem, MappingSaved, Page } from "../../types/api";
 import { Button, buttonClass } from "../ui/Button";
 import { Card } from "../ui/Card";
 import { Tooltip } from "../ui/Tooltip";
@@ -146,9 +146,11 @@ interface MappingFormProps {
   readOnly?: boolean;
   // Called with the create response. The caller keeps it in component state only.
   onCreated: (created: MappingCreated) => void;
+  // Called with the update response; the caller decides where to go next (#179).
+  onUpdated?: (saved: MappingSaved) => void;
 }
 
-export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFormProps) {
+export function MappingForm({ mapping, readOnly = false, onCreated, onUpdated }: MappingFormProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const initial = initialValues(mapping);
@@ -199,12 +201,17 @@ export function MappingForm({ mapping, readOnly = false, onCreated }: MappingFor
         onCreated(created);
         return;
       }
-      await api("PUT", `/mappings/${encodeURIComponent(mapping.id)}`, changedFields(initial, values));
+      const saved = await api<MappingSaved>("PUT", `/mappings/${encodeURIComponent(mapping.id)}`, changedFields(initial, values));
+      await queryClient.invalidateQueries({ queryKey: ["mappings"] });
+      if (onUpdated === undefined) {
+        void navigate("/mappings");
+      } else {
+        onUpdated(saved);
+      }
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["mappings"] });
-      if (mapping !== undefined) {
-        void navigate("/mappings");
+      if (mapping === undefined) {
+        await queryClient.invalidateQueries({ queryKey: ["mappings"] });
       }
     },
     // Fixed catalog text chosen by the error code and detail, never the server message

@@ -1,8 +1,10 @@
 import { TriangleAlert } from "lucide-react";
+import { useState } from "react";
 import { t } from "../../i18n";
 import { buttonClass } from "../ui/Button";
 import { Panel } from "./Panel";
 import { CopyField } from "../ui/CopyField";
+import { ProjectWebhookProposal } from "./ProjectWebhookProposal";
 
 interface ShownOnceProps {
   // `created` after a create, `rotated` after a rotation.
@@ -12,14 +14,18 @@ interface ShownOnceProps {
   githubTarget: string;
   webhookUrl?: string;
   authSecret?: string;
+  // After a create (#179): the saved mapping's id and whether its Harbor project has a
+  // project webhook. Undefined after a rotation, which shows no proposal.
+  project?: { mappingId: string; webhookExists: boolean };
   onDone: () => void;
 }
 
 // The webhook URL and auth secret, shown once. The values come in as props from
 // the page's component state. They are never written to the query cache, the
 // URL, localStorage, or the console.
-export function ShownOnce({ kind, harborProject, harborName, githubTarget, webhookUrl, authSecret, onDone }: ShownOnceProps) {
+export function ShownOnce({ kind, harborProject, harborName, githubTarget, webhookUrl, authSecret, project, onDone }: ShownOnceProps) {
   const both = webhookUrl !== undefined && authSecret !== undefined;
+  const [proposalOpen, setProposalOpen] = useState(true);
   return (
     <>
       <div className="flex flex-col gap-1.5">
@@ -30,6 +36,15 @@ export function ShownOnce({ kind, harborProject, harborName, githubTarget, webho
           {harborName} → <span className="font-mono text-[13px]">{githubTarget}</span>
         </p>
       </div>
+
+      {project === undefined || project.webhookExists || !proposalOpen ? null : (
+        <ProjectWebhookProposal mappingId={project.mappingId} harborProject={harborProject} onDismiss={() => setProposalOpen(false)} />
+      )}
+      {project?.webhookExists === true ? (
+        <p className="rounded-[10px] border border-accent/40 bg-accent/10 px-4 py-3.5 text-[13px]">
+          {t("mapping.projectWebhook.exists", { project: harborProject })}
+        </p>
+      ) : null}
 
       <div role="alert" className="flex gap-3 rounded-[10px] border border-high/50 bg-high/10 px-4 py-3.5">
         <TriangleAlert aria-hidden="true" size={18} className="mt-0.5 shrink-0 text-high-ink" />
