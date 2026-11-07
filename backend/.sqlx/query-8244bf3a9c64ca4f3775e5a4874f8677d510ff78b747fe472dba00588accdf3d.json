@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO scanner_findings\n                (report_id, cve_id, package, version, fixed_in_version, severity, cvss_v3,\n                 description)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "8244bf3a9c64ca4f3775e5a4874f8677d510ff78b747fe472dba00588accdf3d"
+}

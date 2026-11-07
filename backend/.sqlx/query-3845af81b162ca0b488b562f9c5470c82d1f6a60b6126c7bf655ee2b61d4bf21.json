@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO project_scanner_locks\n            (harbor_base_url, harbor_project, job_id, mapping_id, chosen_scanner_uuid,\n             previous_scanner_uuid, state, acquired_at, wait_started_at)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)\n         ON CONFLICT (harbor_base_url, harbor_project) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "3845af81b162ca0b488b562f9c5470c82d1f6a60b6126c7bf655ee2b61d4bf21"
+}

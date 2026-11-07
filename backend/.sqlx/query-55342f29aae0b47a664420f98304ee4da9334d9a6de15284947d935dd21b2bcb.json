@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM project_scanner_locks\n         WHERE harbor_base_url = ? AND harbor_project = ? AND job_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "55342f29aae0b47a664420f98304ee4da9334d9a6de15284947d935dd21b2bcb"
+}
