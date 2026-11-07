@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM scanner_reports\n         WHERE mapping_id = ? AND image_digest = ? AND scanner_uuid = 'unknown'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "c395566358ddbc9a6a1530589e0a36d2d53cb0d535ace1de90a66b38893f2471"
+}

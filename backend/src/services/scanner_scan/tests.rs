@@ -14,6 +14,7 @@ use crate::auth::crypto::{self, credentials_key, encrypt as seal};
 use crate::config;
 use crate::db;
 use crate::services::harbor_client::{HarborReply, TRIVY_REPORT_MIME};
+use crate::services::ids;
 use crate::services::sync::Clock;
 
 const ROOT: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -550,6 +551,337 @@ async fn a_stored_report_queues_one_sync_job() {
     .await
     .unwrap();
     assert_eq!(count, 1, "deduped like the resolve job's");
+    pool.close().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The two jobs a scheduled run queues (one per scanner) run one at a time on a project: while
+/// the first waits for its report and holds the lock, the second is deferred and switches nothing.
+/// Once the first has stored its report and released the lock, the second runs.
+#[tokio::test]
+async fn a_scheduled_run_scans_one_scanner_at_a_time() {
+    let (pool, dir) = fixture("scheduled-serial").await;
+    let harbor = FakeHarbor::new(PREVIOUS);
+    harbor.set_overview(&["Running", "Success"]);
+    for (id, uuid) in [("j-trivy", PREVIOUS), ("j-grype", CHOSEN)] {
+        let payload = format!(
+            r#"{{"kind":"scanner_scan","repo_full_name":"proj/app","tag":"v1","scanner_uuid":"{uuid}","trigger":"schedule"}}"#
+        );
+        enqueue(&pool, id, &payload).await;
+    }
+
+    let first = run(&pool, &harbor, "j-trivy", 2_000).await;
+    assert!(matches!(first, JobOutcome::Deferred { .. }), "{first:?}");
+    let held = lock_row(&pool).await.map(|row| row.job_id);
+    assert_eq!(held.as_deref(), Some("j-trivy"));
+
+    let puts = harbor.put_count();
+    let second = run(&pool, &harbor, "j-grype", 2_001).await;
+    assert!(matches!(second, JobOutcome::Deferred { .. }), "{second:?}");
+    assert_eq!(harbor.put_count(), puts, "no switch while the lock is held");
+
+    // The first job finishes: its report is stored and the lock is released.
+    assert_eq!(
+        run(&pool, &harbor, "j-trivy", 2_010).await,
+        JobOutcome::Done
+    );
+    assert!(lock_row(&pool).await.is_none());
+
+    // Now the second takes the lock, switches, stores its report and restores.
+    assert_eq!(
+        run(&pool, &harbor, "j-grype", 2_020).await,
+        JobOutcome::Done
+    );
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT scanner_uuid FROM scanner_reports WHERE mapping_id = 'm1' ORDER BY scanner_uuid",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, vec![CHOSEN.to_owned(), PREVIOUS.to_owned()]);
+    assert!(lock_row(&pool).await.is_none());
+    pool.close().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn seed_report(pool: &SqlitePool, uuid: &str, name: Option<&str>, cve: &str) {
+    let id = ids::new_id().unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    scanner_db::replace_report(
+        &mut tx,
+        &crate::db::scanner_reports::NewScannerReport {
+            id: &id,
+            mapping_id: "m1",
+            image_digest: DIGEST,
+            scanner_uuid: uuid,
+            scanner_name: name,
+            scanner_vendor: None,
+            scanner_version: None,
+            image_push_time: None,
+            stored_at: 1,
+        },
+        &[crate::db::scanner_reports::NewScannerFinding {
+            cve_id: cve,
+            package: "p",
+            version: None,
+            fixed_in_version: None,
+            severity: "HIGH",
+            cvss_v3: None,
+            description: None,
+        }],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+async fn report_uuids(pool: &SqlitePool) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT scanner_uuid FROM scanner_reports WHERE mapping_id = 'm1' ORDER BY scanner_uuid",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+fn registration(uuid: &str, name: &str) -> ScannerRegistration {
+    ScannerRegistration {
+        uuid: uuid.to_owned(),
+        name: name.to_owned(),
+        vendor: None,
+        version: None,
+        disabled: false,
+    }
+}
+
+/// A chosen scan never replaces the `unknown` report: both are kept, so an old report is not
+/// counted as another scanner's and its CVEs are not dropped.
+#[tokio::test]
+async fn a_chosen_scan_never_replaces_the_unknown_report() {
+    let (pool, dir) = fixture("keep-unknown").await;
+    seed_report(&pool, "unknown", None, "CVE-2026-9000").await;
+    let harbor = FakeHarbor::new(PREVIOUS);
+    enqueue(&pool, "j-keep", &scan_payload(CHOSEN)).await;
+    assert_eq!(run(&pool, &harbor, "j-keep", 2_000).await, JobOutcome::Done);
+    assert_eq!(
+        report_uuids(&pool).await,
+        vec!["unknown".to_owned(), CHOSEN.to_owned()]
+    );
+    pool.close().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A webhook-queued fetch-only job reads a report that is final, stores it for that scanner, and
+/// leaves the other scanner's report alone.
+#[tokio::test]
+async fn a_fetch_only_job_stores_the_named_scanners_report_and_not_the_others() {
+    let (pool, dir) = fixture("fetch-only").await;
+    seed_report(&pool, PREVIOUS, Some("Trivy"), "CVE-2026-9000").await;
+    let harbor = FakeHarbor::new(PREVIOUS);
+    let payload = format!(
+        r#"{{"kind":"scanner_scan","repo_full_name":"proj/app","tag":"v1","scanner_uuid":"{CHOSEN}","fetch_only":true,"trigger":"webhook"}}"#
+    );
+    enqueue(&pool, "j-fetch", &payload).await;
+    assert_eq!(
+        run(&pool, &harbor, "j-fetch", 2_000).await,
+        JobOutcome::Done
+    );
+    assert_eq!(
+        report_uuids(&pool).await,
+        vec![CHOSEN.to_owned(), PREVIOUS.to_owned()]
+    );
+    let kept: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM scanner_findings sf JOIN scanner_reports sr ON sr.id = sf.report_id
+         WHERE sr.scanner_uuid = ? AND sf.cve_id = 'CVE-2026-9000'",
+    )
+    .bind(PREVIOUS)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, 1, "the other scanner's findings are untouched");
+    let posts = lock(&harbor.calls).iter().filter(|c| c.0 == "POST").count();
+    assert_eq!(posts, 0, "a fetch-only job never starts a scan");
+    pool.close().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A complete scanner list that no longer has a scanner marks it `removed_at`, deletes its reports,
+/// recomputes the tag's findings from the reports that remain, and queues one sync job. A list cut
+/// short, or an empty one, removes nothing.
+#[tokio::test]
+async fn a_scanner_missing_from_a_complete_list_is_removed_with_its_reports() {
+    let (pool, dir) = fixture("removed").await;
+    sqlx::query(
+        "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest,
+            vulnerability_summary, sarif_status, synced_at)
+         VALUES ('r1', 'm1', 'app', 'v1', ?, '{}', 'success', 1)",
+    )
+    .bind(DIGEST)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let both = Candidates {
+        scanners: vec![
+            registration("uuid-a", "Trivy"),
+            registration("uuid-b", "Grype"),
+        ],
+        complete: true,
+    };
+    scanner_store::apply_candidates(&pool, BASE, &both, 100)
+        .await
+        .unwrap();
+    seed_report(&pool, "uuid-a", Some("Trivy"), "CVE-2026-0001").await;
+    seed_report(&pool, "uuid-b", Some("Grype"), "CVE-2026-0002").await;
+    // The tag's findings as the last merged sync left them: both CVEs open.
+    for (id, cve) in [("f1", "CVE-2026-0001"), ("f2", "CVE-2026-0002")] {
+        sqlx::query(
+            "INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, package, severity, status)
+             VALUES (?, 'm1', 'app', 'v1', ?, 'p', 'HIGH', 'open')",
+        )
+        .bind(id)
+        .bind(cve)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Not complete, or empty: nothing is removed.
+    for list in [
+        Candidates {
+            scanners: vec![registration("uuid-a", "Trivy")],
+            complete: false,
+        },
+        Candidates {
+            scanners: Vec::new(),
+            complete: true,
+        },
+    ] {
+        let removed = scanner_store::apply_candidates(&pool, BASE, &list, 150)
+            .await
+            .unwrap();
+        assert_eq!(removed, 0);
+    }
+    assert_eq!(report_uuids(&pool).await.len(), 2);
+
+    // Complete, without Grype.
+    let only_a = Candidates {
+        scanners: vec![registration("uuid-a", "Trivy")],
+        complete: true,
+    };
+    let removed = scanner_store::apply_candidates(&pool, BASE, &only_a, 200)
+        .await
+        .unwrap();
+    assert_eq!(removed, 1);
+
+    let rows = scanner_db::list_scanners(&pool, BASE).await.unwrap();
+    let b = rows.iter().find(|row| row.uuid == "uuid-b").unwrap();
+    assert_eq!(b.removed_at, Some(200));
+    let a = rows.iter().find(|row| row.uuid == "uuid-a").unwrap();
+    assert_eq!(a.removed_at, None);
+    assert_eq!(report_uuids(&pool).await, vec!["uuid-a".to_owned()]);
+
+    // The tag's findings now follow the remaining report: Grype's CVE is fixed.
+    let status: Vec<(String, String)> = sqlx::query_as(
+        "SELECT cve_id, status FROM cve_findings WHERE image_tag = 'v1' ORDER BY cve_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        status,
+        vec![
+            ("CVE-2026-0001".to_owned(), "open".to_owned()),
+            ("CVE-2026-0002".to_owned(), "fixed".to_owned()),
+        ]
+    );
+    let syncs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sync_jobs WHERE status = 'queued' AND json_extract(payload, '$.kind') IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        syncs, 1,
+        "one sync job lets the SARIF and the issues follow"
+    );
+
+    // Listing the scanner again clears removed_at.
+    scanner_store::apply_candidates(&pool, BASE, &both, 300)
+        .await
+        .unwrap();
+    let rows = scanner_db::list_scanners(&pool, BASE).await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.uuid == "uuid-b")
+            .unwrap()
+            .removed_at,
+        None
+    );
+    pool.close().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `GET .../scans`: the state of each scanner for a tag, from the database only.
+#[tokio::test]
+async fn the_scans_list_shows_each_scanner_with_its_state_and_note() {
+    use crate::services::tag_scans;
+    let (pool, dir) = fixture("scans-list").await;
+    let both = Candidates {
+        scanners: vec![
+            registration("uuid-a", "Trivy"),
+            registration("uuid-b", "Grype"),
+        ],
+        complete: true,
+    };
+    scanner_store::apply_candidates(&pool, BASE, &both, 100)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest,
+            vulnerability_summary, sarif_status, synced_at)
+         VALUES ('r1', 'm1', 'app', 'v1', ?, '{}', 'success', 1)",
+    )
+    .bind(DIGEST)
+    .execute(&pool)
+    .await
+    .unwrap();
+    seed_report(&pool, "uuid-a", Some("Trivy"), "CVE-2026-0001").await;
+    // Grype's job failed with a fixed message.
+    let payload = scan_payload("uuid-b");
+    enqueue(&pool, "j-failed", &payload).await;
+    sqlx::query("UPDATE sync_jobs SET status = 'failed', last_error = ? WHERE id = 'j-failed'")
+        .bind(MSG_SCANNER_FAILED)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut conn = pool.acquire().await.unwrap();
+    let mapping = mapping_db::find_by_id(&mut conn, "m1")
+        .await
+        .unwrap()
+        .unwrap();
+    drop(conn);
+    let items = tag_scans::list(&pool, &mapping, "v1").await.unwrap();
+    let view: Vec<(&str, &str, &str, Option<&str>)> = items
+        .iter()
+        .map(|item| {
+            (
+                item.scanner_uuid.as_str(),
+                item.scanner_name.as_str(),
+                item.state,
+                item.note,
+            )
+        })
+        .collect();
+    assert_eq!(
+        view,
+        vec![
+            ("uuid-b", "Grype", "failed", Some("sync.note.scannerFailed")),
+            ("uuid-a", "Trivy", "ok", None),
+        ]
+    );
+    assert_eq!(items[0].job_id.as_deref(), Some("j-failed"));
+    assert!(tag_scans::list(&pool, &mapping, "bad tag").await.is_err());
     pool.close().await;
     let _ = std::fs::remove_dir_all(&dir);
 }

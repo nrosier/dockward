@@ -22,6 +22,7 @@ use zeroize::Zeroizing;
 use crate::auth::crypto::DerivedKey;
 use crate::db::credentials::{self as credential_db, CredentialRow};
 use crate::db::mappings::{self as mapping_db, MappingRow};
+use crate::db::scanner_reports as scanner_db;
 use crate::db::sync_jobs::ClaimedJob;
 use crate::db::sync_reports::{self as report_db, NewReport};
 use crate::error::AppError;
@@ -39,7 +40,9 @@ use crate::services::harbor_client::{
 };
 use crate::services::issue_lifecycle::{self, IssueApi};
 use crate::services::resolve::{self, JobKind};
-use crate::services::{findings, ids, merged_view, sarif, scanner_scan, scheduled_scan};
+use crate::services::{
+    findings, ids, merged_view, sarif, scanner_scan, scanner_store, scheduled_scan,
+};
 use crate::worker::{JobHandler, JobOutcome, now_secs};
 
 /// Waits between processing polls: 5 s, then 10 s, then every 15 s.
@@ -54,6 +57,9 @@ pub(crate) const MSG_DATABASE: &str = "the database could not be read or written
 pub(crate) const MSG_INTERNAL: &str = "an internal error stopped this job; it will be retried";
 const MSG_DECRYPT: &str = "a stored credential could not be decrypted";
 const MSG_NOT_YET: &str = "Harbor report not available yet";
+/// The note of a webhook job whose scanner matches no registration. Catalog key
+/// `sync.note.scannerUnmatched`.
+pub const NOTE_SCANNER_UNMATCHED: &str = "scanner not recognised";
 const MSG_TOO_LARGE: &str = "SARIF over 10 MB compressed";
 const MSG_PENDING: &str = "GitHub processing still pending";
 
@@ -71,6 +77,10 @@ struct Payload {
     /// reads the merged stored reports of the digest, not Harbor's current-scanner report.
     #[serde(default)]
     scanner_uuid: Option<String>,
+    /// The scanner name of the webhook event (#224 d10). Absent for a poll job and an event with no
+    /// scan overview.
+    #[serde(default)]
+    scanner_name: Option<String>,
 }
 
 /// What [`SyncHandler::read_and_convert`] returns: the encoded SARIF (`None` when over the
@@ -388,11 +398,25 @@ struct Context {
     harbor_secret: Zeroizing<Vec<u8>>,
     github_token: Zeroizing<Vec<u8>>,
     payload: Payload,
+    /// True once this job's report is read from the stored scanner reports (the merged view), not
+    /// from Harbor's current-scanner report (#224).
+    merged: bool,
+}
+
+impl Context {
+    fn reads_merged(&self) -> bool {
+        self.merged
+            || self
+                .payload
+                .scanner_uuid
+                .as_deref()
+                .is_some_and(|uuid| !uuid.is_empty())
+    }
 }
 
 impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C, I> {
     async fn execute(&self, job: &ClaimedJob) -> Flow<()> {
-        let context = self.load(job).await?;
+        let mut context = self.load(job).await?;
 
         let existing = report_db::find_pending_for_job(&self.pool, &job.id)
             .await
@@ -401,7 +425,9 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
             && let Some(sarif_id) = &report.github_sarif_id
         {
             // A retry after a pending wait: poll the same upload, never upload twice. The
-            // Harbor report is fetched again only if GitHub reports `Complete`.
+            // report is read again only if GitHub reports `Complete`. If the first attempt stored
+            // the scanner reports, the retry reads them too.
+            context.merged = self.has_stored_reports(&context).await?;
             return self
                 .wait_for_processing(&context, &report.id, sarif_id, None)
                 .await;
@@ -409,6 +435,8 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
 
         let (sarif_b64, summary, revision, branch, vuln_report, push_time) =
             self.read_and_convert(&context).await?;
+        // The report is the merged view of the stored scanner reports from here on.
+        context.merged = true;
 
         // A pending report left by an earlier attempt that never uploaded is reused.
         let report_id = match existing {
@@ -507,6 +535,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
             job_id: job.id.clone(),
             mapping,
             payload,
+            merged: false,
         })
     }
 
@@ -566,7 +595,13 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
         .map_err(|e| permanent_validation(e, "the image source label does not match"))?;
         let branch = branch_for(&labels, &mapping.default_branch);
 
-        let report = self.fetch_report(context).await?;
+        // A job from a webhook, a poll or a resolve fan-out reads Harbor's report for the project's
+        // current scanner and stores it under that scanner (#224). A job a scanner scan queued
+        // reads the stored reports instead. Either way the report used below is the merged view.
+        if !context.reads_merged() {
+            self.ingest_current_report(context).await?;
+        }
+        let report = self.merged_report(context).await?;
 
         let document = sarif::convert(&report, &mapping.harbor_project, &mapping.harbor_repository)
             .map_err(|_| failed("the Harbor report could not be converted to SARIF"))?;
@@ -582,14 +617,146 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
     /// Reads and parses the Trivy report from Harbor. `NotYet` and a `404` fail the job for
     /// backoff.
     async fn fetch_report(&self, context: &Context) -> Flow<Value> {
-        if context
-            .payload
-            .scanner_uuid
-            .as_deref()
-            .is_some_and(|uuid| !uuid.is_empty())
-        {
+        if context.reads_merged() {
             return self.merged_report(context).await;
         }
+        self.fetch_harbor_report(context).await
+    }
+
+    /// Whether the mapping has a stored scanner report for this job's digest.
+    async fn has_stored_reports(&self, context: &Context) -> Flow<bool> {
+        let reports = scanner_db::reports_for_digest(
+            &self.pool,
+            &context.mapping.id,
+            &context.payload.digest,
+        )
+        .await
+        .map_err(database)?;
+        Ok(!reports.is_empty())
+    }
+
+    /// Reads Harbor's report for the project's current scanner and stores it under that scanner
+    /// (#224 d10, `specs/integrations.md`, "Webhook and poll jobs").
+    ///
+    /// - Call 1 gives the current scanner. A `403` (no Scanner Read) stores the report under the
+    ///   unknown scanner.
+    /// - An event that names another scanner stores nothing here: a registered scanner of that name
+    ///   gets a fetch-only `scanner_scan` job, and this job ends `done`. A name no registration
+    ///   matches (after one refresh of the scanner list) ends `done` with `scanner not recognised`.
+    /// - Otherwise the report is stored under the current scanner. The first such store replaces the
+    ///   digest's migrated `unknown` report.
+    async fn ingest_current_report(&self, context: &Context) -> Flow<()> {
+        let mapping = &context.mapping;
+        let current = scanner_scan::current_scanner(
+            &self.pool,
+            &self.harbor,
+            &self.clock,
+            mapping,
+            &context.harbor_username,
+            &context.harbor_secret,
+        )
+        .await?;
+        let identity = match current {
+            None => scanner_store::Identity::Unknown,
+            Some(current) => {
+                if let Some(event_name) = context
+                    .payload
+                    .scanner_name
+                    .as_deref()
+                    .filter(|name| *name != current.name)
+                {
+                    return self
+                        .delegate_to_event_scanner(context, event_name, &current.uuid)
+                        .await;
+                }
+                scanner_store::Identity::Known {
+                    uuid: current.uuid,
+                    name: current.name,
+                }
+            }
+        };
+        let report = self.fetch_harbor_report(context).await?;
+        scanner_store::store_normal(
+            &self.pool,
+            &mapping.id,
+            &context.payload.digest,
+            &identity,
+            &report,
+            self.clock.now(),
+        )
+        .await
+        .map_err(database)
+    }
+
+    /// The event came from a scanner other than the project's current one. Always ends the job:
+    /// `Err(Done)` after queueing the fetch, or `Err(DoneWithNote)` when no registration matches.
+    async fn delegate_to_event_scanner(
+        &self,
+        context: &Context,
+        event_name: &str,
+        current_uuid: &str,
+    ) -> Flow<()> {
+        let mapping = &context.mapping;
+        let mut matched = self
+            .registered_scanners_named(mapping, event_name, current_uuid)
+            .await?;
+        if matched.is_empty() {
+            // One refresh by call 2, then match again. A refusal leaves the name unmatched.
+            scanner_scan::refresh_scanners(
+                &self.pool,
+                &self.harbor,
+                &self.clock,
+                mapping,
+                &context.harbor_username,
+                &context.harbor_secret,
+            )
+            .await?;
+            matched = self
+                .registered_scanners_named(mapping, event_name, current_uuid)
+                .await?;
+        }
+        // Names are not known to be unique (UNVERIFIED): two matches are ambiguous, and a report is
+        // never fetched under a guessed scanner.
+        let [uuid] = matched.as_slice() else {
+            return Err(JobOutcome::DoneWithNote(NOTE_SCANNER_UNMATCHED.to_owned()));
+        };
+        scanner_scan::queue_fetch_only(
+            &self.pool,
+            mapping,
+            &context.payload.tag,
+            uuid,
+            self.clock.now(),
+        )
+        .await
+        .map_err(database)?;
+        Err(JobOutcome::Done)
+    }
+
+    /// The UUIDs of the enabled, not removed scanners of this Harbor whose name equals `name`
+    /// (case-sensitive), leaving out the project's current scanner.
+    async fn registered_scanners_named(
+        &self,
+        mapping: &MappingRow,
+        name: &str,
+        current_uuid: &str,
+    ) -> Flow<Vec<String>> {
+        let rows = scanner_db::list_scanners(&self.pool, &mapping.harbor_base_url)
+            .await
+            .map_err(database)?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| {
+                row.name == name
+                    && !row.disabled
+                    && row.removed_at.is_none()
+                    && row.uuid != current_uuid
+            })
+            .map(|row| row.uuid)
+            .collect())
+    }
+
+    /// The Harbor half of [`Self::fetch_report`]: the report of the project's current scanner.
+    async fn fetch_harbor_report(&self, context: &Context) -> Flow<Value> {
         let mapping = &context.mapping;
         let base = base_for_join(&mapping.harbor_base_url).map_err(database)?;
         let report_url = vulnerabilities_url(
@@ -797,7 +964,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
                     // `cve_findings` has one row per CVE id; a merged report has one item per
                     // (CVE id, package), so the first package of each id is kept (#224).
                     let per_cve;
-                    let for_findings = if context.payload.scanner_uuid.is_some() {
+                    let for_findings = if context.reads_merged() {
                         per_cve = merged_view::first_per_cve(vuln_report);
                         &per_cve
                     } else {
@@ -939,9 +1106,22 @@ mod tests {
         report: (u16, Vec<u8>),
         urls: Mutex<Vec<String>>,
         report_headers: Mutex<Vec<(String, String)>>,
+        /// The project's current scanner (uuid, name), answered to call 1. `None` is a `403`.
+        current: Mutex<Option<(String, String)>>,
+        /// The body of the scanner list, answered to call 2. `None` is a `403`.
+        candidates: Mutex<Option<String>>,
+        /// How many scanner list reads were made.
+        candidate_reads: AtomicUsize,
     }
 
     impl FakeHarbor {
+        /// Gives the robot Scanner Read (the current scanner) and Create (the list).
+        fn with_scanners(self, current: (&str, &str), candidates: &str) -> Arc<Self> {
+            *lock(&self.current) = Some((current.0.to_owned(), current.1.to_owned()));
+            *lock(&self.candidates) = Some(candidates.to_owned());
+            Arc::new(self)
+        }
+
         fn new(artifact: &str, report: (u16, &str)) -> Self {
             Self {
                 artifact: (200, artifact.as_bytes().to_vec()),
@@ -949,6 +1129,9 @@ mod tests {
                 report: (report.0, report.1.as_bytes().to_vec()),
                 urls: Mutex::new(Vec::new()),
                 report_headers: Mutex::new(Vec::new()),
+                current: Mutex::new(None),
+                candidates: Mutex::new(None),
+                candidate_reads: AtomicUsize::new(0),
             }
         }
 
@@ -965,6 +1148,24 @@ mod tests {
             _secret: &[u8],
             extra_headers: &[(&str, &str)],
         ) -> Result<HarborReply, AppError> {
+            // The robot of these tests has no Scanner permissions (`403`), so the report is stored
+            // under the unknown scanner. The scanner calls are not counted with the others.
+            if url.path().ends_with("/scanner/candidates") {
+                self.candidate_reads.fetch_add(1, Ordering::SeqCst);
+                return Ok(match lock(&self.candidates).clone() {
+                    Some(body) => HarborReply::new(200, body.into_bytes()),
+                    None => HarborReply::new(403, Vec::new()),
+                });
+            }
+            if url.path().ends_with("/scanner") {
+                return Ok(match lock(&self.current).clone() {
+                    Some((uuid, name)) => HarborReply::new(
+                        200,
+                        format!(r#"{{"uuid":"{uuid}","name":"{name}"}}"#).into_bytes(),
+                    ),
+                    None => HarborReply::new(403, Vec::new()),
+                });
+            }
             lock(&self.urls).push(url.path().to_owned());
             if url.path().ends_with("/additions/vulnerabilities") {
                 for (name, value) in extra_headers {
@@ -1268,6 +1469,190 @@ mod tests {
             applied[0],
             ("CVE-2026-0001".to_owned(), "CRITICAL".to_owned())
         );
+    }
+
+    fn scanner_list(entries: &[(&str, &str)]) -> String {
+        let items: Vec<Value> = entries
+            .iter()
+            .map(|(uuid, name)| json!({"uuid": uuid, "name": name, "disabled": false}))
+            .collect();
+        Value::Array(items).to_string()
+    }
+
+    fn event_payload(scanner_name: Option<&str>) -> String {
+        let mut payload =
+            json!({"repo_full_name": "proj/app", "digest": "sha256:aaaa", "tag": "v1"});
+        if let Some(name) = scanner_name {
+            payload["scanner_name"] = json!(name);
+        }
+        payload.to_string()
+    }
+
+    async fn stored_scanners(fx: &Fixture) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT scanner_uuid FROM scanner_reports WHERE mapping_id = 'm1' ORDER BY scanner_uuid",
+        )
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn seed_report(fx: &Fixture, uuid: &str, name: Option<&str>, cve: &str) {
+        let id = ids::new_id().unwrap();
+        let mut tx = fx.pool.begin().await.unwrap();
+        crate::db::scanner_reports::replace_report(
+            &mut tx,
+            &crate::db::scanner_reports::NewScannerReport {
+                id: &id,
+                mapping_id: "m1",
+                image_digest: "sha256:aaaa",
+                scanner_uuid: uuid,
+                scanner_name: name,
+                scanner_vendor: None,
+                scanner_version: None,
+                image_push_time: None,
+                stored_at: 1,
+            },
+            &[crate::db::scanner_reports::NewScannerFinding {
+                cve_id: cve,
+                package: "p",
+                version: None,
+                fixed_in_version: None,
+                severity: "HIGH",
+                cvss_v3: None,
+                description: None,
+            }],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    /// A webhook from the project's current scanner stores that scanner's report under its UUID.
+    #[tokio::test]
+    async fn a_webhook_from_the_current_scanner_stores_its_report() {
+        let fx = Fixture::new("hook-current").await;
+        let list = scanner_list(&[("uuid-a", "Trivy"), ("uuid-b", "Grype")]);
+        let harbor = FakeHarbor::new(&good_artifact(), (200, &report_body()))
+            .with_scanners(("uuid-a", "Trivy"), &list);
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+        let mut job = fx.job();
+        job.payload = event_payload(Some("Trivy"));
+        assert_eq!(
+            fx.handler(&harbor, &scanner).run(job).await,
+            JobOutcome::Done
+        );
+        assert_eq!(stored_scanners(&fx).await, vec!["uuid-a".to_owned()]);
+        assert_eq!(scanner.uploads(), 1);
+    }
+
+    /// A webhook from scanner B while A is the project's scanner stores nothing itself: it queues a
+    /// fetch-only `scanner_scan` job for B, and A's report is untouched.
+    #[tokio::test]
+    async fn a_webhook_from_another_scanner_queues_a_fetch_only_job_and_keeps_the_others_report() {
+        let fx = Fixture::new("hook-other").await;
+        seed_report(&fx, "uuid-a", Some("Trivy"), "CVE-2026-9000").await;
+        let list = scanner_list(&[("uuid-a", "Trivy"), ("uuid-b", "Grype")]);
+        let harbor = FakeHarbor::new(&good_artifact(), (200, &report_body()))
+            .with_scanners(("uuid-a", "Trivy"), &list);
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![]);
+        let mut job = fx.job();
+        job.payload = event_payload(Some("Grype"));
+        assert_eq!(
+            fx.handler(&harbor, &scanner).run(job).await,
+            JobOutcome::Done
+        );
+
+        assert_eq!(
+            scanner.uploads(),
+            0,
+            "nothing is uploaded for another scanner"
+        );
+        assert_eq!(
+            lock(&harbor.report_headers).len(),
+            0,
+            "no report is read under the wrong scanner"
+        );
+        assert_eq!(stored_scanners(&fx).await, vec!["uuid-a".to_owned()]);
+        let queued: Vec<String> = sqlx::query_scalar(
+            "SELECT payload FROM sync_jobs WHERE json_extract(payload, '$.kind') = 'scanner_scan'",
+        )
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!(queued.len(), 1);
+        let payload: Value = serde_json::from_str(&queued[0]).unwrap();
+        assert_eq!(payload["scanner_uuid"], "uuid-b");
+        assert_eq!(payload["fetch_only"], true);
+        assert_eq!(payload["trigger"], "webhook");
+        assert_eq!(payload["tag"], "v1");
+    }
+
+    /// A webhook naming a scanner no registration matches stores nothing, makes one list refresh,
+    /// and ends done with the fixed note.
+    #[tokio::test]
+    async fn a_webhook_from_an_unknown_scanner_is_done_with_a_note() {
+        let fx = Fixture::new("hook-unmatched").await;
+        let list = scanner_list(&[("uuid-a", "Trivy")]);
+        let harbor = FakeHarbor::new(&good_artifact(), (200, &report_body()))
+            .with_scanners(("uuid-a", "Trivy"), &list);
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![]);
+        let mut job = fx.job();
+        job.payload = event_payload(Some("Mystery"));
+        let outcome = fx.handler(&harbor, &scanner).run(job).await;
+        assert_eq!(
+            outcome,
+            JobOutcome::DoneWithNote(NOTE_SCANNER_UNMATCHED.to_owned())
+        );
+        assert!(stored_scanners(&fx).await.is_empty());
+        assert_eq!(harbor.candidate_reads.load(Ordering::SeqCst), 1);
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sync_jobs WHERE json_extract(payload, '$.kind') = 'scanner_scan'",
+        )
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!(queued, 0);
+    }
+
+    /// The first normal sync with a known scanner replaces the migrated `unknown` report of the
+    /// digest.
+    #[tokio::test]
+    async fn the_first_known_scanner_sync_replaces_the_unknown_report() {
+        let fx = Fixture::new("replace-unknown").await;
+        seed_report(&fx, "unknown", None, "CVE-2026-9000").await;
+        let list = scanner_list(&[("uuid-a", "Trivy")]);
+        let harbor = FakeHarbor::new(&good_artifact(), (200, &report_body()))
+            .with_scanners(("uuid-a", "Trivy"), &list);
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+        assert_eq!(
+            fx.handler(&harbor, &scanner).run(fx.job()).await,
+            JobOutcome::Done
+        );
+        assert_eq!(stored_scanners(&fx).await, vec!["uuid-a".to_owned()]);
+    }
+
+    /// Without Scanner Read the report is stored as `unknown`, and it replaces the old unknown one.
+    #[tokio::test]
+    async fn a_sync_without_scanner_read_keeps_one_unknown_report() {
+        let fx = Fixture::new("keep-unknown").await;
+        seed_report(&fx, "unknown", None, "CVE-2026-9000").await;
+        let harbor = ok_harbor();
+        let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![Ok(Processing::Complete)]);
+        assert_eq!(
+            fx.handler(&harbor, &scanner).run(fx.job()).await,
+            JobOutcome::Done
+        );
+        assert_eq!(stored_scanners(&fx).await, vec!["unknown".to_owned()]);
+        let cves: Vec<String> = sqlx::query_scalar(
+            "SELECT sf.cve_id FROM scanner_findings sf JOIN scanner_reports sr ON sr.id = sf.report_id
+             WHERE sr.scanner_uuid = 'unknown' ORDER BY sf.cve_id",
+        )
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap();
+        assert!(cves.contains(&"CVE-2026-0001".to_owned()));
+        assert!(!cves.contains(&"CVE-2026-9000".to_owned()), "replaced");
     }
 
     /// A sync job queued after a scanner report was stored reads the merged stored reports, not
@@ -1718,19 +2103,21 @@ mod tests {
         // Random base64 characters barely compress, so the SARIF stays over 10 MB gzipped.
         const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
-        let description: String = (0..16_000_000)
-            .map(|_| {
-                state = state
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407);
-                char::from(ALPHABET[((state >> 33) % 64) as usize])
+        // A stored description is capped at 4,000 characters, so the size comes from many findings.
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            char::from(ALPHABET[((state >> 33) % 64) as usize])
+        };
+        let items: Vec<serde_json::Value> = (0..4_500)
+            .map(|n| {
+                let description: String = (0..4_000).map(|_| next()).collect();
+                json!({"id": format!("CVE-2026-{n:05}"), "package": "p", "version": "1",
+                       "severity": "High", "description": description})
             })
             .collect();
-        let report = json!({TRIVY_REPORT_MIME: {"vulnerabilities": [
-            {"id": "CVE-2026-0001", "package": "p", "version": "1", "severity": "High",
-             "description": description}
-        ]}})
-        .to_string();
+        let report = json!({TRIVY_REPORT_MIME: {"vulnerabilities": items}}).to_string();
         let fx = Fixture::new("large").await;
         let harbor = Arc::new(FakeHarbor::new(&good_artifact(), (200, &report)));
         let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![]);

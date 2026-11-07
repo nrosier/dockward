@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE harbor_scanners SET removed_at = ?\n         WHERE harbor_base_url = ? AND removed_at IS NULL\n           AND uuid NOT IN (SELECT value FROM json_each(?))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "6a5764e19c09463cee1cd5e6392bb49f0d60a2ea32c726964342dbe0ec73fcf0"
+}

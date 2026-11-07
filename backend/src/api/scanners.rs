@@ -6,6 +6,7 @@
 //! - `GET /mappings/:id/scanners`: 60 per minute per user, in memory, after the tenancy check.
 //! - `POST /mappings/:id/tags/:tag/scan`: one scan per (mapping, tag, scanner) per 5 minutes, in
 //!   memory, after the tenancy check. Over it: `429` with `Retry-After`.
+//! - `GET /mappings/:id/tags/:tag/scans`: no limit. It reads only the database (`specs/api.md`).
 
 use axum::{
     Json,
@@ -23,6 +24,7 @@ use crate::services::audit::Actor;
 use crate::services::poller;
 use crate::services::scanner_launch;
 use crate::services::sessions::AuthUser;
+use crate::services::tag_scans;
 use crate::worker::now_secs;
 
 /// The `POST .../scan` body. Both members are optional.
@@ -55,6 +57,25 @@ pub async fn list(
     {
         Ok(list) => Json(list).into_response(),
         Err(fail) => fail_response(fail),
+    }
+}
+
+/// `GET /api/v1/mappings/:id/tags/:tag/scans`. The owner or any admin. Reads only the database:
+/// it makes no Harbor call and has no rate limit (`specs/api.md`). Another tenant's mapping is
+/// `404`.
+pub async fn scans(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((id, tag)): Path<(String, String)>,
+) -> Response {
+    let is_admin = user.role == Role::Admin;
+    let mapping = match poller::find_pullable(&state.pool, &user.id, is_admin, &id).await {
+        Ok(mapping) => mapping,
+        Err(error) => return error.into_response(),
+    };
+    match tag_scans::list(&state.pool, &mapping, &tag).await {
+        Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
+        Err(error) => error.into_response(),
     }
 }
 

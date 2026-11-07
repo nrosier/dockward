@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT sr.mapping_id AS \"mapping_id!\", sr.image_digest AS \"image_digest!\"\n           FROM scanner_reports AS sr\n           JOIN repo_mappings AS m ON m.id = sr.mapping_id\n           WHERE m.harbor_base_url = ?\n             AND sr.scanner_uuid IN (SELECT value FROM json_each(?))",
+  "describe": {
+    "columns": [
+      {
+        "name": "mapping_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scanner_reports",
+            "name": "mapping_id"
+          }
+        }
+      },
+      {
+        "name": "image_digest!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scanner_reports",
+            "name": "image_digest"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "4ec7e837f1c4b8e4c6406dc27fd80312a1143a52340d057af9d942ccf14f407b"
+}

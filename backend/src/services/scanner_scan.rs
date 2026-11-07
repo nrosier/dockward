@@ -23,15 +23,12 @@
 //! row, a log or an alert.
 
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use sqlx::SqlitePool;
 
 use crate::auth::crypto::DerivedKey;
 use crate::db::mappings::{self as mapping_db, MappingRow};
-use crate::db::scanner_reports::{
-    self as scanner_db, HarborScannerUpsert, NewProjectLock, NewScannerFinding, NewScannerReport,
-    ProjectScannerLockRow,
-};
+use crate::db::scanner_reports::{self as scanner_db, NewProjectLock, ProjectScannerLockRow};
 use crate::db::sync_jobs::{self, ClaimedJob};
 use crate::error::AppError;
 use crate::services::credentials::base_for_join;
@@ -45,6 +42,9 @@ use crate::services::harbor_client::{
 use crate::services::ids;
 use crate::services::poller::harbor_login;
 use crate::services::resolve::{self, body_or_outcome};
+use crate::services::scanner_store::{
+    self, Candidates, ReadFinding, ReportKey, ScannerSnapshot, report_findings,
+};
 use crate::services::sync::{Clock, HarborFetch, MSG_DATABASE, MSG_GONE, MSG_INTERNAL};
 use crate::worker::{JobOutcome, now_secs};
 
@@ -429,34 +429,53 @@ async fn upsert_scanners(
     scanners: &[ScannerRegistration],
     now: i64,
 ) -> Flow<()> {
-    for scanner in scanners {
-        scanner_db::upsert_scanner(
-            pool,
-            &HarborScannerUpsert {
-                harbor_base_url: &session.mapping.harbor_base_url,
-                uuid: &scanner.uuid,
-                name: &scanner.name,
-                vendor: scanner.vendor.as_deref(),
-                version: scanner.version.as_deref(),
-                disabled: scanner.disabled,
-                seen_at: now,
-            },
-        )
-        .await
-        .map_err(|_| database())?;
-    }
-    Ok(())
+    scanner_store::apply_candidates(
+        pool,
+        &session.mapping.harbor_base_url,
+        &Candidates {
+            scanners: scanners.to_vec(),
+            complete: false,
+        },
+        now,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|_| database())
 }
 
 /// Call 2: every registration the robot can see (`GET .../scanner/candidates`), up to the page cap.
-/// It needs Scanner Create (#224 d12). A `403` is the switch refusal, which retries.
+/// It needs Scanner Create (#224 d12). A `403` is the switch refusal, which retries. A complete
+/// list also marks the scanners Harbor no longer has as removed (`scanner_store::apply_candidates`).
 async fn list_scanners<H: HarborFetch, C: Clock>(
     pool: &SqlitePool,
     harbor: &H,
     clock: &C,
     session: &Session,
 ) -> Flow<Vec<ScannerRegistration>> {
+    let Some(candidates) = read_candidates(harbor, clock, session).await? else {
+        return Err(failed(MSG_SWITCH_FORBIDDEN));
+    };
+    scanner_store::apply_candidates(
+        pool,
+        &session.mapping.harbor_base_url,
+        &candidates,
+        clock.now(),
+    )
+    .await
+    .map_err(|_| database())?;
+    Ok(candidates.scanners)
+}
+
+/// Reads every page of call 2. `None` is a `403` (the robot has no Scanner Create). The list is
+/// complete when it ended on a short page, so a list cut at the page cap never marks a scanner as
+/// removed.
+async fn read_candidates<H: HarborFetch, C: Clock>(
+    harbor: &H,
+    clock: &C,
+    session: &Session,
+) -> Flow<Option<Candidates>> {
     let mut all = Vec::new();
+    let mut complete = false;
     for page in 1..=SCANNER_MAX_PAGES {
         let url = scanner_candidates_url(&session.base, &session.mapping.harbor_project, page)
             .map_err(|_| failed(MSG_BAD_NAMES))?;
@@ -469,16 +488,163 @@ async fn list_scanners<H: HarborFetch, C: Clock>(
             )
             .await
             .map_err(|_| failed(MSG_UNREACHABLE))?;
+        if reply.status == 403 {
+            return Ok(None);
+        }
         let body = checked_body(reply, clock.now(), MSG_SWITCH_FORBIDDEN)?;
         let scanners = parse_scanner_list(&body).map_err(|_| failed(MSG_UNREADABLE))?;
         let last_page = scanners.len() < SCANNER_PAGE_SIZE as usize;
         all.extend(scanners);
         if last_page {
+            complete = true;
             break;
         }
     }
-    upsert_scanners(pool, session, &all, clock.now()).await?;
-    Ok(all)
+    Ok(Some(Candidates {
+        scanners: all,
+        complete,
+    }))
+}
+
+/// A session built from the parts a caller outside this module already holds.
+fn borrowed_session(
+    mapping: &MappingRow,
+    username: &str,
+    secret: &[u8],
+) -> Result<Session, JobOutcome> {
+    Ok(Session {
+        mapping: mapping.clone(),
+        username: username.to_owned(),
+        secret: zeroize::Zeroizing::new(secret.to_vec()),
+        base: base_for_join(&mapping.harbor_base_url).map_err(|_| failed(MSG_INTERNAL))?,
+    })
+}
+
+/// The enabled scanners of the mapping's Harbor project, for a scheduled run and for a webhook
+/// name refresh (call 2). The read is stored (`harbor_scanners`), and a complete list marks the
+/// scanners Harbor no longer has as removed and drops their reports. `None` is a `403`: the robot
+/// cannot list scanners, so the caller keeps the single-scanner behaviour.
+pub(crate) async fn refresh_scanners<H: HarborFetch, C: Clock>(
+    pool: &SqlitePool,
+    harbor: &H,
+    clock: &C,
+    mapping: &MappingRow,
+    username: &str,
+    secret: &[u8],
+) -> Flow<Option<Vec<ScannerRegistration>>> {
+    let session = borrowed_session(mapping, username, secret)?;
+    let Some(candidates) = read_candidates(harbor, clock, &session).await? else {
+        return Ok(None);
+    };
+    scanner_store::apply_candidates(pool, &mapping.harbor_base_url, &candidates, clock.now())
+        .await
+        .map_err(|_| database())?;
+    Ok(Some(candidates.scanners))
+}
+
+/// Call 1 for a caller outside this module: the project's current scanner, stored in
+/// `harbor_scanners`. `None` is a `403`: the robot has no Scanner Read (`specs/integrations.md`,
+/// "Webhook and poll jobs"), and the report is stored under the unknown scanner.
+pub(crate) async fn current_scanner<H: HarborFetch, C: Clock>(
+    pool: &SqlitePool,
+    harbor: &H,
+    clock: &C,
+    mapping: &MappingRow,
+    username: &str,
+    secret: &[u8],
+) -> Flow<Option<ScannerRegistration>> {
+    let session = borrowed_session(mapping, username, secret)?;
+    let url = project_scanner_url(&session.base, &mapping.harbor_project)
+        .map_err(|_| failed(MSG_BAD_NAMES))?;
+    let reply = harbor
+        .fetch(&url, username, secret, &[PROJECT_NAME_HEADER])
+        .await
+        .map_err(|_| failed(MSG_UNREACHABLE))?;
+    if reply.status == 403 {
+        return Ok(None);
+    }
+    let body = checked_body(reply, clock.now(), MSG_SWITCH_FORBIDDEN)?;
+    let scanner = parse_scanner(&body).map_err(|_| failed(MSG_UNREADABLE))?;
+    upsert_scanners(pool, &session, std::slice::from_ref(&scanner), clock.now()).await?;
+    Ok(Some(scanner))
+}
+
+/// Queues one fetch-only `scanner_scan` job for a scanner matched from a webhook event, unless one
+/// for the same (mapping, tag, scanner) is already `queued` or `running` (#224 d10). A fetch-only
+/// job never starts a scan (`specs/integrations.md`, "Webhook and poll jobs").
+pub(crate) async fn queue_fetch_only(
+    pool: &SqlitePool,
+    mapping: &MappingRow,
+    tag: &str,
+    scanner_uuid: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    let payload = json!({
+        "kind": "scanner_scan",
+        "repo_full_name": format!("{}/{}", mapping.harbor_project, mapping.harbor_repository),
+        "tag": tag,
+        "scanner_uuid": scanner_uuid,
+        "fetch_only": true,
+        "trigger": "webhook",
+    })
+    .to_string();
+    queue_scanner_jobs(
+        pool,
+        mapping,
+        &[(tag.to_owned(), scanner_uuid.to_owned(), payload)],
+        None,
+        now,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Inserts `scanner_scan` jobs (tag, scanner, payload) in one `BEGIN IMMEDIATE` transaction, each
+/// deduped by (mapping, tag, scanner) against `queued` and `running` jobs. With `finish` the
+/// queuing job is marked `done` in the same transaction, guarded on `status = 'running'`, so a retry
+/// after a crash cannot queue twice. Returns `false` when that guard changed no row (nothing was
+/// written), else `true`.
+pub(crate) async fn queue_scanner_jobs(
+    pool: &SqlitePool,
+    mapping: &MappingRow,
+    jobs: &[(String, String, String)],
+    finish: Option<&str>,
+    now: i64,
+) -> Result<bool, AppError> {
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| AppError::InternalError)?;
+    let written: Result<bool, AppError> = async {
+        if let Some(job_id) = finish
+            && sync_jobs::finish_running_in(&mut tx, job_id, now).await? == 0
+        {
+            return Ok(false);
+        }
+        for (tag, scanner_uuid, payload) in jobs {
+            if sync_jobs::has_pending_scanner_scan(&mut tx, &mapping.id, tag, scanner_uuid).await? {
+                continue;
+            }
+            let id = ids::new_id()?;
+            sync_jobs::enqueue_in(&mut tx, &id, &mapping.id, payload, now).await?;
+        }
+        Ok(true)
+    }
+    .await;
+    match written {
+        Ok(true) => {
+            tx.commit().await.map_err(|_| AppError::InternalError)?;
+            Ok(true)
+        }
+        Ok(false) => {
+            let _ = tx.rollback().await;
+            Ok(false)
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
 }
 
 /// Before a switch, the chosen scanner must be listed and enabled. A missing or disabled one is
@@ -630,11 +796,7 @@ async fn fetch_and_store<H: HarborFetch, C: Clock>(
         ReportState::Ready(report) => report,
         ReportState::NotYet => return Err(failed(MSG_NOT_YET)),
     };
-    let snapshot = ScannerSnapshot {
-        name: report_scanner_text(&report, "name"),
-        vendor: report_scanner_text(&report, "vendor"),
-        version: report_scanner_text(&report, "version"),
-    };
+    let snapshot = ScannerSnapshot::from_report(&report, None);
     let findings = report_findings(&report);
     let sync = SyncAfterStore {
         tag: &payload.tag,
@@ -670,75 +832,9 @@ fn sync_trigger(trigger: Option<&str>) -> &'static str {
     }
 }
 
-/// The scanner snapshot stored with a report: the report's own `scanner` object.
-struct ScannerSnapshot {
-    name: Option<String>,
-    vendor: Option<String>,
-    version: Option<String>,
-}
-
-fn report_scanner_text(report: &Value, key: &str) -> Option<String> {
-    text_field(report.get("scanner")?, key)
-}
-
-/// One finding read from the report, ready to store.
-struct ReadFinding {
-    cve_id: String,
-    package: String,
-    version: Option<String>,
-    fixed_in_version: Option<String>,
-    severity: &'static str,
-    cvss_v3: Option<f64>,
-    description: Option<String>,
-}
-
-/// Reads the vulnerability items of a Trivy report into findings, one per (CVE id, package), as the
-/// table key requires. An item with no id is skipped.
-fn report_findings(report: &Value) -> Vec<ReadFinding> {
-    let mut seen = std::collections::HashSet::new();
-    report
-        .get("vulnerabilities")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|item| {
-            let cve_id = text_field(item, "id")?;
-            let package = text_field(item, "package").unwrap_or_default();
-            if !seen.insert((cve_id.clone(), package.clone())) {
-                return None;
-            }
-            Some(ReadFinding {
-                cve_id,
-                package,
-                version: text_field(item, "version"),
-                fixed_in_version: text_field(item, "fix_version"),
-                severity: crate::services::sarif::normalize_severity(
-                    item.get("severity")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Unknown"),
-                ),
-                cvss_v3: item
-                    .pointer("/preferred_cvss/score_v3")
-                    .and_then(Value::as_f64),
-                description: text_field(item, "description")
-                    .map(|text| text.chars().take(4_000).collect()),
-            })
-        })
-        .collect()
-}
-
-/// A non-empty string member, or `None`.
-fn text_field(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
-}
-
 /// Stores the report of (mapping, digest, scanner) in one transaction. A new scan by the same
-/// scanner replaces its own report, and no other scanner's report is touched.
+/// scanner replaces its own report, and no other scanner's report is touched. A chosen scan never
+/// replaces the `unknown` report (`specs/integrations.md`, "Webhook and poll jobs").
 #[allow(clippy::too_many_arguments)]
 async fn store_report(
     pool: &SqlitePool,
@@ -750,36 +846,24 @@ async fn store_report(
     sync: &SyncAfterStore<'_>,
     now: i64,
 ) -> Flow<()> {
-    let report_id = ids::new_id().map_err(|_| failed(MSG_INTERNAL))?;
-    let rows: Vec<NewScannerFinding<'_>> = findings
-        .iter()
-        .map(|finding| NewScannerFinding {
-            cve_id: &finding.cve_id,
-            package: &finding.package,
-            version: finding.version.as_deref(),
-            fixed_in_version: finding.fixed_in_version.as_deref(),
-            severity: finding.severity,
-            cvss_v3: finding.cvss_v3,
-            description: finding.description.as_deref(),
-        })
-        .collect();
-    let report = NewScannerReport {
-        id: &report_id,
-        mapping_id: &mapping.id,
-        image_digest: digest,
-        scanner_uuid,
-        scanner_name: snapshot.name.as_deref(),
-        scanner_vendor: snapshot.vendor.as_deref(),
-        scanner_version: snapshot.version.as_deref(),
-        image_push_time: None,
-        stored_at: now,
-    };
     let mut tx = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|_| database())?;
     let written: Result<(), AppError> = async {
-        scanner_db::replace_report(&mut tx, &report, &rows).await?;
+        scanner_store::write_report(
+            &mut tx,
+            &ReportKey {
+                mapping_id: &mapping.id,
+                digest,
+                scanner_uuid,
+            },
+            snapshot,
+            findings,
+            false,
+            now,
+        )
+        .await?;
         queue_sync_after_store(&mut tx, mapping, digest, scanner_uuid, sync, now).await
     }
     .await;
