@@ -344,6 +344,14 @@ mod tests {
             .unwrap();
         }
         sqlx::query(
+            "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest,
+                                       vulnerability_summary, sarif_status)
+             VALUES ('rep-m1-v1', 'm1', 'm1', 'v1', 'sha256:00', '{}', 'success')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
             "INSERT INTO sync_jobs (id, mapping_id, status, attempts, payload, created_at, updated_at)
              VALUES ('job-1', 'm1', 'failed', 8, '{}', 1000, 5000)",
         )

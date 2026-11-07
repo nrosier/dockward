@@ -3925,10 +3925,10 @@ mod tests {
         pool.close().await;
         // Migration 2 is removed; migrations 3 (project webhooks, #132), 4 (picker hidden
         // items, #126), 5 (project webhook rotated_at, #145), 6 (newest-digest close, #196)
-        // 7 (many mappings per GitHub repository, #185), 8 (scan schedule, #191) and 9 (scanner
-        // reports, #224) are still applied.
+        // 7 (many mappings per GitHub repository, #185), 8 (scan schedule, #191), 9 (scanner
+        // reports, #224) and 10 (newest-digest tags view, #196) are still applied.
         assert!(
-            before == (vec![1, 3, 4, 5, 6, 7, 8, 9], 0),
+            before == (vec![1, 3, 4, 5, 6, 7, 8, 9, 10], 0),
             "the setup did not remove migration 2"
         );
 
@@ -4333,6 +4333,15 @@ mod tests {
              VALUES ('rf1', 'rm1', 'app', 'v1', 'CVE-2026-0001', 'CRITICAL', 'open'),
                     ('rf2', 'rm1', 'app', 'v2', 'CVE-2026-0001', 'HIGH', 'open'),
                     ('rf3', 'rm1', 'app', 'v3', 'CVE-2026-0001', 'LOW', 'fixed')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest, vulnerability_summary, sarif_status)
+             VALUES ('rr1', 'rm1', 'app', 'v1', 'sha256:00', '{}', 'success'),
+                    ('rr2', 'rm1', 'app', 'v2', 'sha256:00', '{}', 'success'),
+                    ('rr3', 'rm1', 'app', 'v3', 'sha256:00', '{}', 'success')",
         )
         .execute(&pool)
         .await

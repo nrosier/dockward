@@ -558,6 +558,21 @@ mod tests {
     async fn store(state: &AppState, finding: &db::findings::Finding<'_>) {
         let mut conn = state.pool.acquire().await.unwrap();
         db::findings::upsert(&mut conn, finding).await.unwrap();
+        // A tag with no report yet gets a successful one on the shared digest, so it is a
+        // newest-digest tag (#196). A test that wants another digest stores its report first.
+        sqlx::query(
+            "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest,
+                                       vulnerability_summary, sarif_status, synced_at)
+             SELECT ?1, ?2, ?2, ?3, 'sha256:00', '{}', 'success', ?4
+             WHERE NOT EXISTS (SELECT 1 FROM sync_reports WHERE mapping_id = ?2 AND image_tag = ?3)",
+        )
+        .bind(crate::services::ids::new_id().unwrap_or_default())
+        .bind(finding.mapping_id)
+        .bind(finding.image_tag)
+        .bind(finding.now)
+        .execute(&state.pool)
+        .await
+        .unwrap();
     }
 
     /// Marks one tag row `fixed`.
@@ -999,6 +1014,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Stores a successful report for a tag on a digest with a push time, before its findings.
+    async fn report_on(state: &AppState, mapping: &str, tag: &str, digest: &str, pushed: i64) {
+        sqlx::query(
+            "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest,
+                                       vulnerability_summary, sarif_status, synced_at, image_push_time)
+             VALUES (?, ?, ?, ?, ?, '{}', 'success', ?, ?)",
+        )
+        .bind(crate::services::ids::new_id().unwrap_or_default())
+        .bind(mapping)
+        .bind(mapping)
+        .bind(tag)
+        .bind(digest)
+        .bind(pushed)
+        .bind(pushed)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    }
+
+    /// The walley case (#196): `latest` is the newest digest and clean, `0.4` is older and
+    /// still open. The list and its total skip the CVE, the tag filter on the older tag matches
+    /// nothing, and the detail route still shows the older tag, marked older.
+    #[tokio::test]
+    async fn a_cve_open_only_on_an_older_tag_is_not_listed_but_stays_in_the_tag_table() {
+        let (state, dir, _, _) = setup("older-only").await;
+        report_on(&state, "m1", "0.4", "sha256:old", 1000).await;
+        report_on(&state, "m1", "latest", "sha256:new", 2000).await;
+        seen(&state, "m1", "0.4", "CVE-2026-0001", "CRITICAL", 100).await;
+
+        for page in [
+            by_mapping(&state, &user("u1"), "m1", "").await.unwrap(),
+            all_cves(&state, &user("u1"), "").await.unwrap(),
+            by_mapping(&state, &user("u1"), "m1", "tag=0.4")
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(page.total, 0);
+            assert!(page.items.is_empty());
+        }
+
+        let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        assert_eq!(detail.summary.status, "fixed");
+        assert_eq!(detail.summary.open_tags, 0);
+        assert_eq!(detail.summary.tracked_tags, 1);
+        assert!(detail.older_tags_only);
+        assert_eq!(detail.tags.len(), 1);
+        assert_eq!(detail.tags[0].image_tag, "0.4");
+        assert_eq!(detail.tags[0].status, "open");
+        assert!(!detail.tags[0].newest_digest);
+
+        // The newest digest reports it: listed, open, and no older-only notice.
+        seen(&state, "m1", "latest", "CVE-2026-0001", "HIGH", 200).await;
+        let page = by_mapping(&state, &user("u1"), "m1", "").await.unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(item(&page, "CVE-2026-0001").status, "open");
+        assert_eq!(item(&page, "CVE-2026-0001").severity, "HIGH");
+        let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        assert!(!detail.older_tags_only);
+        assert_eq!(detail.tags.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn timestamps_are_rfc3339_utc() {
         let (state, dir, _, _) = setup("read-time").await;
@@ -1028,6 +1105,10 @@ mod tests {
 
         // A tag with no successful sync has no last scan date.
         seen(&state, "m1", "v2", "CVE-2026-0001", "CRITICAL", AT + 5).await;
+        sqlx::query("DELETE FROM sync_reports WHERE mapping_id = 'm1' AND image_tag = 'v2'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
         let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
         let unscanned = detail
             .tags

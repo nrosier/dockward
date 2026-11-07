@@ -239,6 +239,9 @@ pub struct CveListFilter<'a> {
     pub offset: i64,
     /// Unix seconds. An acceptance is active while its expiry is after this.
     pub now: i64,
+    /// `1` also reads the rows of older tags, for the detail route only (#196): a CVE with no
+    /// newest-digest row then comes back as `fixed`. `0` is the list view.
+    pub include_older: i64,
 }
 
 /// A list filter as one JSON array for `json_each`, or `None` for an empty list (no filter).
@@ -303,7 +306,8 @@ pub async fn list_cves(
                GROUP BY mapping_id, image_tag
            ),
            tracked AS (
-               SELECT mapping_id, MIN(10, COUNT(*)) AS n FROM tag_scans GROUP BY mapping_id
+               SELECT mapping_id, MIN(10, COUNT(*)) AS n FROM newest_digest_tags
+               GROUP BY mapping_id
            ),
            tag_rows AS (
                SELECT f.mapping_id AS mapping_id, f.cve_id AS cve_id, f.image_tag AS image_tag,
@@ -312,15 +316,20 @@ pub async fn list_cves(
                       f.status AS status,
                       CASE f.severity WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4
                            WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 ELSE 1 END AS sev_rank,
+                      (nd.image_tag IS NOT NULL) AS nd,
                       ROW_NUMBER() OVER (
                           PARTITION BY f.mapping_id, f.cve_id
-                          ORDER BY COALESCE(ts.scan_at, -1) DESC, f.last_seen_at DESC, f.id DESC
+                          ORDER BY (nd.image_tag IS NOT NULL) DESC, COALESCE(ts.scan_at, -1) DESC,
+                                   f.last_seen_at DESC, f.id DESC
                       ) AS rn
                FROM cve_findings f
                JOIN repo_mappings m ON m.id = f.mapping_id
                LEFT JOIN tag_scans ts
                     ON ts.mapping_id = f.mapping_id AND ts.image_tag = f.image_tag
+               LEFT JOIN newest_digest_tags nd
+                    ON nd.mapping_id = f.mapping_id AND nd.image_tag = f.image_tag
                WHERE (?1 IS NULL OR m.user_id = ?1)
+                 AND (?17 = 1 OR nd.image_tag IS NOT NULL)
                  AND (?2 IS NULL OR f.mapping_id = ?2)
                  AND (?3 IS NULL OR f.cve_id = ?3)
                  AND (?15 IS NULL OR m.harbor_project = ?15)
@@ -330,11 +339,15 @@ pub async fn list_cves(
                  AND instr(CAST(f.cve_id AS BLOB), x'00') = 0
            ),
            summary AS (
-               SELECT mapping_id, cve_id, MAX(sev_rank) AS sev_rank,
-                      MAX(CASE WHEN status = 'open' THEN sev_rank END) AS open_rank,
-                      MIN(first_seen_at) AS first_seen_at, MAX(last_seen_at) AS last_seen_at,
-                      COUNT(DISTINCT CASE WHEN status = 'open' THEN image_tag END) AS open_tags,
-                      MAX(status = 'open') AS any_open,
+               SELECT mapping_id, cve_id,
+                      COALESCE(MAX(CASE WHEN nd THEN sev_rank END), MAX(sev_rank)) AS sev_rank,
+                      MAX(CASE WHEN nd AND status = 'open' THEN sev_rank END) AS open_rank,
+                      MIN(first_seen_at) AS first_seen_at,
+                      COALESCE(MAX(CASE WHEN nd THEN last_seen_at END), MAX(last_seen_at))
+                          AS last_seen_at,
+                      COUNT(DISTINCT CASE WHEN nd AND status = 'open' THEN image_tag END)
+                          AS open_tags,
+                      MAX(nd AND status = 'open') AS any_open,
                       MAX(CASE WHEN rn = 1 THEN package END) AS package,
                       MAX(CASE WHEN rn = 1 THEN fixed_in_version END) AS fixed_in_version
                FROM tag_rows
@@ -349,7 +362,10 @@ pub async fn list_cves(
                            END AS open_severity,
                       CASE WHEN s.any_open = 1 THEN 'open' ELSE 'fixed' END AS status,
                       s.package AS package, s.fixed_in_version AS fixed_in_version,
-                      s.first_seen_at AS first_seen_at, s.last_seen_at AS last_seen_at,
+                      (SELECT MIN(af.first_seen_at) FROM cve_findings af
+                       WHERE af.mapping_id = s.mapping_id AND af.cve_id = s.cve_id)
+                          AS first_seen_at,
+                      s.last_seen_at AS last_seen_at,
                       s.open_tags AS open_tags, COALESCE(t.n, 0) AS tracked_tags,
                       gi.github_issue_url AS github_issue_url,
                       gi.github_issue_number AS github_issue_number,
@@ -387,6 +403,8 @@ pub async fn list_cves(
              AND (?13 IS NULL OR package = ?13)
              AND (?14 IS NULL OR EXISTS (
                   SELECT 1 FROM cve_findings tf
+                  JOIN newest_digest_tags tn
+                       ON tn.mapping_id = tf.mapping_id AND tn.image_tag = tf.image_tag
                   WHERE tf.mapping_id = items.mapping_id AND tf.cve_id = items.cve_id
                     AND tf.image_tag = ?14))
            ORDER BY
@@ -415,7 +433,8 @@ pub async fn list_cves(
         filter.package,
         filter.tag,
         filter.harbor_project,
-        filter.harbor_repository
+        filter.harbor_repository,
+        filter.include_older
     )
     .fetch_all(pool)
     .await
@@ -464,6 +483,8 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
                       ) AS rn
                FROM cve_findings f
                JOIN repo_mappings m ON m.id = f.mapping_id
+               JOIN newest_digest_tags nd
+                    ON nd.mapping_id = f.mapping_id AND nd.image_tag = f.image_tag
                WHERE (?1 IS NULL OR m.user_id = ?1)
                  AND (?2 IS NULL OR f.mapping_id = ?2)
                  AND (?3 IS NULL OR f.cve_id = ?3)
@@ -533,6 +554,8 @@ pub struct CveTagRow {
     pub description: Option<String>,
     /// The tag's latest successful `sync_reports.synced_at`.
     pub last_scan_at: Option<i64>,
+    /// True for a tag of the mapping's newest scanned digest (#196).
+    pub newest_digest: bool,
 }
 
 /// The mapping's tags that report the CVE, most recently scanned first, at most 10. The
@@ -548,8 +571,11 @@ pub async fn cve_tags(
         r#"SELECT f.image_tag AS "image_tag!: String", f.status AS "status!: String",
                   f.fixed_in_version AS "fixed_in_version?: String",
                   f.description AS "description?: String",
-                  ts.scan_at AS "last_scan_at?: i64"
+                  ts.scan_at AS "last_scan_at?: i64",
+                  (nd.image_tag IS NOT NULL) AS "newest_digest!: bool"
            FROM cve_findings f
+           LEFT JOIN newest_digest_tags nd
+                  ON nd.mapping_id = f.mapping_id AND nd.image_tag = f.image_tag
            LEFT JOIN (
                SELECT image_tag, MAX(synced_at) AS scan_at
                FROM sync_reports WHERE mapping_id = ?1 AND sarif_status = 'success'

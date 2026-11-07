@@ -72,6 +72,10 @@ export default function CveDetailPage() {
   const openIssue = cve.github_issue_status === "open";
   const conflict = createIssue.error instanceof ApiError && createIssue.error.status === 409;
   const acceptance = cve.acceptance;
+  // Inline notice with the older tags that report the CVE (#196, decision 24).
+  const olderTags = cve.older_tags_only
+    ? cve.tags.filter((tag) => !tag.newest_digest && tag.status === "open").map((tag) => tag.image_tag)
+    : [];
   const acceptanceUrl = safeHttpsUrl(cve.github_issue_url);
 
   return (
@@ -89,6 +93,9 @@ export default function CveDetailPage() {
               <SeverityPill severity={cve.severity} />
               <CveStatusPill cve={cve} />
             </div>
+            {olderTags.length === 0 ? null : (
+              <p className="text-[13px] text-muted">{t("cves.detail.olderTagsOnly", { tags: olderTags.join(", ") })}</p>
+            )}
             {cve.description === null ? null : <p className="max-w-160 text-text/85">{cve.description}</p>}
           </div>
           <div className="flex flex-wrap items-center gap-2.5">
@@ -202,7 +209,10 @@ export default function CveDetailPage() {
             <tbody>
               {cve.tags.map((tag) => (
                 <tr key={tag.image_tag}>
-                  <td className={`${TD} font-mono text-[13px]`}>{tag.image_tag}</td>
+                  <td className={`${TD} font-mono text-[13px]`}>
+                    {tag.image_tag}
+                    {tag.newest_digest ? null : <span className="ml-2 font-sans text-muted">{t("cves.detail.olderTag")}</span>}
+                  </td>
                   <td className={TD}>
                     <Pill kind={tag.status === "fixed" ? "fixed" : "open"} />
                   </td>

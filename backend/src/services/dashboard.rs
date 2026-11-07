@@ -186,6 +186,27 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+        // The tag has a successful report on the newest digest unless a test stored one.
+        report(pool, mapping, tag, "sha256:new", 2000).await;
+    }
+
+    /// A successful report for a tag, once per (mapping, tag). The newest digest of a mapping is
+    /// the one with the latest push time (#196).
+    async fn report(pool: &SqlitePool, mapping: &str, tag: &str, digest: &str, pushed: i64) {
+        sqlx::query(
+            "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest,
+                                       vulnerability_summary, sarif_status, image_push_time)
+             SELECT ?1, ?2, ?2, ?3, ?4, '{}', 'success', ?5
+             WHERE NOT EXISTS (SELECT 1 FROM sync_reports WHERE mapping_id = ?2 AND image_tag = ?3)",
+        )
+        .bind(format!("rep-{mapping}-{tag}"))
+        .bind(mapping)
+        .bind(tag)
+        .bind(digest)
+        .bind(pushed)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     async fn accept(pool: &SqlitePool, mapping: &str, cve: &str, expires_at: Option<i64>) {
@@ -213,6 +234,41 @@ mod tests {
         for tag in ["v1", "v2", "v3"] {
             finding(&pool, "m1", tag, "CVE-2026-0001", "CRITICAL", "open").await;
         }
+        assert_eq!(
+            open_totals(&pool, Some("u1")).await,
+            OpenCves::of(1, 0, 0, 0, 0)
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The walley case (#196): `latest` is the newest digest and is clean, `0.4` is an older
+    /// digest that still reports CVEs. The mapping has zero open CVEs. A CVE that only the
+    /// older digest had as `fixed` adds nothing to the fixed count (decision 23).
+    #[tokio::test]
+    async fn walley_latest_clean_and_old_tag_open_counts_zero() {
+        let (pool, dir) = fresh_pool("walley").await;
+        seed(&pool, "u1", &[("m1", "app")]).await;
+        report(&pool, "m1", "0.4", "sha256:old", 1000).await;
+        report(&pool, "m1", "latest", "sha256:new", 2000).await;
+        finding(&pool, "m1", "0.4", "CVE-2026-0001", "CRITICAL", "open").await;
+        finding(&pool, "m1", "0.4", "CVE-2026-0002", "HIGH", "fixed").await;
+
+        assert_eq!(
+            open_totals(&pool, Some("u1")).await,
+            OpenCves::of(0, 0, 0, 0, 0)
+        );
+        assert!(
+            db::open_by_mapping(&pool, None, Some("m1"), NOW)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(db::fixed_cves(&pool, Some("u1")).await.unwrap(), 0);
+
+        // A newer digest that reports the CVE brings it back.
+        report(&pool, "m1", "0.5", "sha256:newer", 3000).await;
+        finding(&pool, "m1", "0.5", "CVE-2026-0001", "CRITICAL", "open").await;
         assert_eq!(
             open_totals(&pool, Some("u1")).await,
             OpenCves::of(1, 0, 0, 0, 0)
