@@ -413,6 +413,35 @@ fn to_tag(row: &CveTagRow) -> Result<CveTag, AppError> {
     })
 }
 
+/// One tag of `GET /mappings/:id/tags`. Names and counts only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MappingTag {
+    pub image_tag: String,
+    pub last_scan_at: String,
+    pub open_cves: i64,
+}
+
+/// `GET /mappings/:id/tags`: the CVE view's tag set of the mapping, most recently scanned
+/// first, at most 10. Another tenant's mapping and an unknown one are both `404`.
+pub async fn mapping_tags(
+    pool: &SqlitePool,
+    reader: &Reader<'_>,
+    mapping_id: &str,
+) -> Result<Vec<MappingTag>, AppError> {
+    check_mapping(pool, reader, mapping_id).await?;
+    db::tracked_tags(pool, mapping_id)
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok(MappingTag {
+                image_tag: row.image_tag,
+                last_scan_at: time::rfc3339(row.last_scan_at)?,
+                open_cves: row.open_cves,
+            })
+        })
+        .collect()
+}
+
 /// `GET /cves/:id`. `id` is `<mapping_id>:<cve_id>`. A malformed id, another tenant's
 /// mapping, and a CVE the mapping has no row for are all `404`.
 pub async fn detail(

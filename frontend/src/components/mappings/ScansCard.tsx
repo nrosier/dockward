@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Link } from "react-router";
 import { t, type MessageKey } from "../../i18n";
 import { ApiError, api } from "../../lib/api";
-import type { Mapping, Page, ScannerList, SyncJob, TagScan, TagScanState } from "../../types/api";
+import type { Mapping, MappingTag, ScannerList, TagScan, TagScanState } from "../../types/api";
 import { Time } from "../syncjobs/Time";
 import { Button } from "../ui/Button";
 import { Pill, type PillKind } from "../ui/Pill";
@@ -12,8 +12,6 @@ import { Panel } from "./Panel";
 import { LINK, TABLE, TD, TH } from "./styles";
 import { TableScroll } from "./TableScroll";
 
-// The spec's tag limit for the Scans card ("the tag set of the CVE view, up to 10").
-const TAG_LIMIT = 10;
 const RESTORE_FAILED_NOTE = "sync.note.restoreFailed";
 
 type ShownState = Exclude<TagScanState, "none">;
@@ -196,29 +194,20 @@ function SwitchBanners({ list, restoreFailed }: { list: ScannerList; restoreFail
 }
 
 // "Scans" card of the mapping page (#224, specs/frontend.md "Tag scans on the mapping page").
-// Owner and admins only; the caller decides who sees it. The API has no tag list route, so the
-// tags are those of the mapping's finished sync jobs with a stored report (the tracked set is
-// derived from the same reports), newest first, up to 10.
+// Owner and admins only; the caller decides who sees it. The tags come from
+// GET /mappings/:id/tags: the CVE view's tag set, newest scan first, up to 10.
 export function ScansCard({ mapping }: { mapping: Mapping }) {
   const id = encodeURIComponent(mapping.id);
   const scanners = useQuery({
     queryKey: ["mapping-scanners", mapping.id],
     queryFn: () => api<ScannerList>("GET", `/mappings/${id}/scanners`),
   });
-  const jobs = useQuery({
+  const tags = useQuery({
     queryKey: ["mapping-scan-tags", mapping.id],
-    queryFn: () =>
-      api<Page<SyncJob>>("GET", `/sync-jobs?mapping_id=${id}&status=done&sort=created_at&order=desc&page_size=200`),
+    queryFn: () => api<{ items: MappingTag[] }>("GET", `/mappings/${id}/tags`),
   });
 
-  const rows: { tag: string; lastScan: string | null }[] = [];
-  for (const job of jobs.data?.items ?? []) {
-    const tag = job.image.tag;
-    if (tag === null || job.report === null || rows.length >= TAG_LIMIT || rows.some((row) => row.tag === tag)) {
-      continue;
-    }
-    rows.push({ tag, lastScan: job.report.synced_at });
-  }
+  const rows = (tags.data?.items ?? []).map((item) => ({ tag: item.image_tag, lastScan: item.last_scan_at }));
 
   // A failed restore shows on the scan notes of the tags. Read only while a switch exists.
   const restoreFailed = useQuery({
@@ -238,7 +227,7 @@ export function ScansCard({ mapping }: { mapping: Mapping }) {
         {t("mapping.scan.title")}
       </h2>
       <div className="mt-3 flex flex-col gap-3">
-        {scanners.isError || jobs.isError ? (
+        {scanners.isError || tags.isError ? (
           <p role="alert" className="text-crit-ink">
             {t("errors.generic")}
           </p>
@@ -249,7 +238,7 @@ export function ScansCard({ mapping }: { mapping: Mapping }) {
             {scanners.data.scanner_choice === "unavailable" ? (
               <p className="text-muted">{t("mapping.scan.noScannerAccess")}</p>
             ) : null}
-            {jobs.isSuccess && rows.length === 0 ? <p className="text-muted">{t("mapping.scan.noTags")}</p> : null}
+            {tags.isSuccess && rows.length === 0 ? <p className="text-muted">{t("mapping.scan.noTags")}</p> : null}
             {rows.length === 0 ? null : (
               <TableScroll label={t("mapping.scan.tableLabel")}>
                 <table className={TABLE}>

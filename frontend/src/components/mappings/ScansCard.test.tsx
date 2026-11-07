@@ -35,20 +35,7 @@ const TWO: ScannerList = {
 };
 const ONE: ScannerList = { scanner_choice: "single", scanners: [TWO.scanners[0]], switch: null };
 
-const JOBS = {
-  items: [
-    {
-      id: "j1",
-      mapping_id: "m1",
-      status: "done",
-      image: { repo_full_name: "platform/billing-worker", tag: "1.0", digest: "sha256:aa" },
-      report: { image_tag: "1.0", synced_at: "2026-11-06T10:00:00Z" },
-    },
-  ],
-  page: 1,
-  page_size: 200,
-  total: 1,
-};
+const TAGS = { items: [{ image_tag: "1.0", last_scan_at: "2026-11-06T10:00:00Z", open_cves: 2 }] };
 
 const SCANS: TagScan[] = [
   { scanner_uuid: "s1", scanner_name: "Trivy", state: "ok", note: null, job_id: "j1", updated_at: null },
@@ -60,7 +47,7 @@ const SCAN = "/api/v1/mappings/m1/tags/1.0/scan";
 function stub(list: ScannerList, post?: () => Response, scans: TagScan[] = SCANS) {
   return stubApi((path, init) => {
     if (path === "/api/v1/mappings/m1/scanners") return json(list);
-    if (path.startsWith("/api/v1/sync-jobs?")) return json(JOBS);
+    if (path === "/api/v1/mappings/m1/tags") return json(TAGS);
     if (path === "/api/v1/mappings/m1/tags/1.0/scans") return json({ items: scans });
     if (path === SCAN && init?.method === "POST") return post?.() ?? json({ job_id: "j9", scanner_uuid: "s1", queued: true }, 202);
     return undefined;
@@ -101,6 +88,40 @@ describe("ScansCard", () => {
     expect(screen.getByText(t("mapping.scan.state.ok"))).toBeInTheDocument();
     expect(screen.getByText(t("mapping.scan.state.failed"))).toBeInTheDocument();
     expect(screen.getByText(t("sync.note.scannerFailed"))).toBeInTheDocument();
+  });
+
+  it("takes its rows from the mapping tag route, in its order, and not from sync jobs", async () => {
+    const fetchMock = stubApi((path) => {
+      if (path === "/api/v1/mappings/m1/scanners") return json(ONE);
+      if (path === "/api/v1/mappings/m1/tags") {
+        return json({
+          items: [
+            { image_tag: "2.0", last_scan_at: "2026-11-06T10:00:00Z", open_cves: 1 },
+            { image_tag: "1.5", last_scan_at: "2026-11-01T10:00:00Z", open_cves: 0 },
+          ],
+        });
+      }
+      if (path.endsWith("/scans")) return json({ items: [] });
+      return undefined;
+    });
+    renderWithRoutes(routes, "/mappings/m1");
+    expect(await screen.findByText("2.0")).toBeInTheDocument();
+    expect(await screen.findByText("1.5")).toBeInTheDocument();
+    const shown = screen.getAllByRole("row").slice(1).map((row) => row.querySelector("td")?.textContent);
+    expect(shown).toEqual(["2.0", "1.5"]);
+    const paths = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(paths).toContain("/api/v1/mappings/m1/tags");
+    expect(paths.some((path) => path.includes("/sync-jobs"))).toBe(false);
+  });
+
+  it("shows the empty note when the tag route returns no tags", async () => {
+    stubApi((path) => {
+      if (path === "/api/v1/mappings/m1/scanners") return json(ONE);
+      if (path === "/api/v1/mappings/m1/tags") return json({ items: [] });
+      return undefined;
+    });
+    renderWithRoutes(routes, "/mappings/m1");
+    expect(await screen.findByText(t("mapping.scan.noTags"))).toBeInTheDocument();
   });
 
   it("shows Not scanned for a tag without reports", async () => {
