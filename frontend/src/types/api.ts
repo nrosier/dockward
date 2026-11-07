@@ -151,6 +151,33 @@ export interface DashboardSummary {
   recent_syncs: SyncJob[];
 }
 
+// Scanner choice and tag scans (#224, specs/api.md "Scanners and tag scans").
+export interface Scanner {
+  uuid: string;
+  name: string;
+  vendor: string | null;
+  version: string | null;
+  is_current: boolean;
+}
+
+export interface ScannerList {
+  scanner_choice: "available" | "single" | "unavailable";
+  scanners: Scanner[];
+  switch: { scanner_name: string; state: "switched" | "restore_pending" } | null;
+}
+
+export type TagScanState = "queued" | "running" | "waiting" | "ok" | "failed" | "none";
+
+export interface TagScan {
+  scanner_uuid: string;
+  scanner_name: string;
+  state: TagScanState;
+  // A `sync.note.*` catalog key, or null.
+  note: string | null;
+  job_id: string | null;
+  updated_at: string | null;
+}
+
 export interface MappingCreated {
   mapping: Mapping;
   webhook_url: string;
