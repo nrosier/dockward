@@ -2,14 +2,25 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
-## Unreleased
+## 0.12.5 - 2026-11-07
 
 ### Added
-- Scheduled Harbor scan per mapping: off by default, daily or weekly at a UTC time. HarborGate asks Harbor to scan the newest tagged image and the Sync jobs page lists only the CVEs new for that image (#191).
+- Scheduled Harbor scan per mapping: off by default, daily or weekly at a UTC time. HarborGate asks Harbor to scan the newest tagged image and the Sync jobs page lists only the CVEs new for that image (#191, PR #221).
+- Custom GitHub API and web base URL per instance, set by the admin in Settings > GitHub; the API base may carry a path such as `/api/v3`, and empty means github.com (#184, PR #206, PR #217).
+- Mappings can be sorted by Harbor source, GitHub target, open issues and last sync, with sortable column headers (#190, PR #208, PR #209).
+- After a mapping save, an inline banner proposes a project webhook when the Harbor project has none (#179, PR #219).
+- HarborGate issues carry the `areai:security` label and a severity label (none for Unknown), and are titled "<CVE id> <package>"; adopted issues are renamed and get missing labels (#192, PR #214).
 
 ### Changed
-- The Harbor robot needs Scan Create for scheduled scans; `docs/SETUP.md` lists it (#191).
-- Migration 0008 adds the scan schedule to `repo_mappings` and `cve_ids`, `new_cve_ids` to `sync_reports` (#191).
+- Several Harbor repositories may target one GitHub repository; issues are shared per GitHub repository and CVE. Migration 0007 drops the unique GitHub target rule (#185, PR #216).
+- The picker greys out Harbor repositories that are already mapped, without naming the mapping or its owner (#189, PR #220).
+- The Harbor robot needs Scan Create for scheduled scans; `docs/SETUP.md` lists it (#191, PR #221).
+- Migration 0008 adds the scan schedule to `repo_mappings` and `cve_ids`, `new_cve_ids` to `sync_reports` (#191, PR #221).
+- `docs/SETUP.md` documents the custom GitHub base URL setting (#184, PR #217).
+
+### Fixed
+- A sync or resolve job for an image deleted from Harbor is marked done with the note "artifact no longer in Harbor", not failed, with no retry or alert (#197, PR #203).
+- Saving a duplicate Harbor repository shows one fixed message and no longer names the other mapping (#180, PR #218).
 
 ## 0.12.4
 
