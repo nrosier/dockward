@@ -126,6 +126,40 @@ describe("MappingFormPage", () => {
     expect(screen.queryByText("RAW 409 detail")).not.toBeInTheDocument();
   });
 
+  it("shows the catalog duplicate text for a Harbor repository mapped by another user, naming no one", async () => {
+    const otherUser = "u-other-7f3a";
+    const otherMapping = "m-other-91c2";
+    stub({
+      create: () =>
+        json(
+          {
+            error: {
+              code: "conflict",
+              detail: "harbor_repository_mapped",
+              message: `RAW mapping ${otherMapping} of ${otherUser}`,
+            },
+          },
+          409,
+        ),
+    });
+    const { container } = renderWithRoutes(routes, "/mappings/new");
+    await fillNew("other-repo");
+    await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+    expect(await screen.findByText(t("mappings.form.harborRepositoryMapped"))).toBeInTheDocument();
+    expect(screen.queryByText(t("errors.generic"))).not.toBeInTheDocument();
+    expect(container.textContent).not.toContain(otherUser);
+    expect(container.textContent).not.toContain(otherMapping);
+  });
+
+  it("keeps the generic text for a 409 conflict without the duplicate detail", async () => {
+    stub({ create: () => json({ error: { code: "conflict", message: "the mapping changed, try again." } }, 409) });
+    renderWithRoutes(routes, "/mappings/new");
+    await fillNew("other-repo");
+    await userEvent.click(screen.getByRole("button", { name: t("mappings.form.save") }));
+    expect(await screen.findByText(t("errors.generic"))).toBeInTheDocument();
+    expect(screen.queryByText(t("mappings.form.harborRepositoryMapped"))).not.toBeInTheDocument();
+  });
+
   it("shows the webhook URL and auth secret once after create", async () => {
     stub();
     const { router } = renderWithRoutes(routes, "/mappings/new");

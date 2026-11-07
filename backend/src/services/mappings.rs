@@ -401,7 +401,9 @@ pub async fn create<P: HarborProbe, G: GithubProbe>(
         )
         .await?;
     }
-    if let Some((other_id, other_user)) = db::find_conflict(
+    // A Harbor repository is mapped once per Harbor instance, whoever owns the other
+    // mapping. The 409 never names that mapping, its owner or its id (#180).
+    if db::harbor_repository_mapped(
         &mut tx,
         &harbor_base,
         &input.harbor_project,
@@ -410,7 +412,7 @@ pub async fn create<P: HarborProbe, G: GithubProbe>(
     )
     .await?
     {
-        return Err(conflict_error(&other_id, &other_user, user_id));
+        return Err(AppError::HarborRepositoryMapped);
     }
     let row = MappingRow {
         id: id.clone(),
@@ -555,27 +557,25 @@ pub async fn update<P: HarborProbe, G: GithubProbe>(
     check_update_owners(&mut tx, user_id, &patch, &mut next).await?;
     // Only the Harbor repository is unique. A GitHub target shared with another mapping is
     // allowed (#185).
-    if harbor_changed {
-        let collision = db::find_conflict(
+    if harbor_changed
+        && db::harbor_repository_mapped(
             &mut tx,
             &next.harbor_base_url,
             &next.harbor_project,
             &next.harbor_repository,
             id,
         )
-        .await?;
-        if let Some((other_id, other_user)) = collision {
-            return Err(conflict_error(&other_id, &other_user, user_id));
-        }
+        .await?
+    {
+        return Err(AppError::HarborRepositoryMapped);
     }
 
     let written = db::update_owned(&mut tx, user_id, &next)
         .await
         .map_err(|err| match err {
-            // A UNIQUE violation is the same collision as the check above. The id of the
-            // other mapping is unknown here, so the message is the generic one.
+            // A UNIQUE violation is the same collision as the check above.
             sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
-                AppError::Conflict("this Harbor repository is already mapped.".to_owned())
+                AppError::HarborRepositoryMapped
             }
             _ => AppError::InternalError,
         })?;
@@ -690,18 +690,6 @@ async fn load_row_owned(
     db::find_owned(&mut conn, user_id, id)
         .await?
         .ok_or(AppError::NotFound)
-}
-
-/// Builds the `409` for a duplicate. The body names the other mapping only when the
-/// caller owns it. Otherwise it is generic, so another tenant's mapping is not revealed.
-fn conflict_error(other_id: &str, other_user: &str, caller: &str) -> AppError {
-    if other_user == caller {
-        AppError::Conflict(format!(
-            "another mapping ({other_id}) already uses this Harbor repository."
-        ))
-    } else {
-        AppError::Conflict("this Harbor repository is already mapped.".to_owned())
-    }
 }
 
 /// Returns one owned mapping as the API object.
@@ -1193,7 +1181,7 @@ mod tests {
             input(&h, &g, "repo", "gh2"),
         )
         .await;
-        assert!(matches!(result, Err(AppError::Conflict(_))));
+        assert!(matches!(result, Err(AppError::HarborRepositoryMapped)));
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1300,18 +1288,19 @@ mod tests {
         )
         .await
         .unwrap_err();
-        match err {
-            AppError::Conflict(message) => {
-                assert_eq!(message, "this Harbor repository is already mapped.");
-            }
-            other => panic!("expected conflict, got {other:?}"),
-        }
+        assert_eq!(err, AppError::HarborRepositoryMapped);
+        assert_eq!(
+            err.message(),
+            "This Harbor repository is already mapped on this instance."
+        );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #180: the 409 for a duplicate Harbor repository is the same fixed answer whoever
+    /// owns the other mapping. It never names that mapping's id or its owner's id.
     #[tokio::test]
-    async fn conflict_names_the_mapping_only_for_its_owner() {
+    async fn conflict_never_names_the_other_mapping_or_user() {
         let (pool, dir) = fresh_pool("names").await;
         let owner = user(&pool, "owner").await;
         let other = user(&pool, "other").await;
@@ -1329,8 +1318,7 @@ mod tests {
         .await
         .unwrap();
         let (oh, og) = creds(&pool, &other).await;
-        // The other tenant collides with the owner's mapping: the message stays generic.
-        let err = create(
+        let foreign = create(
             &pool,
             &key(),
             &READABLE,
@@ -1342,16 +1330,6 @@ mod tests {
         )
         .await
         .unwrap_err();
-        match err {
-            AppError::Conflict(message) => {
-                assert!(
-                    !message.contains(&first.mapping.id),
-                    "leaked another tenant's id"
-                );
-            }
-            other => panic!("expected conflict, got {other:?}"),
-        }
-        // The owner colliding with their own mapping may see its id.
         let own = create(
             &pool,
             &key(),
@@ -1364,9 +1342,23 @@ mod tests {
         )
         .await
         .unwrap_err();
-        match own {
-            AppError::Conflict(message) => assert!(message.contains(&first.mapping.id)),
-            other => panic!("expected conflict, got {other:?}"),
+        for err in [foreign, own] {
+            assert_eq!(err, AppError::HarborRepositoryMapped);
+            let response = axum::response::IntoResponse::into_response(err);
+            assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let text = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(
+                !text.contains(&first.mapping.id),
+                "leaked a mapping id: {text}"
+            );
+            assert!(!text.contains(&owner), "leaked the owner's id: {text}");
+            assert!(!text.contains(&other), "leaked a user id: {text}");
+            let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(json["error"]["code"], "conflict");
+            assert_eq!(json["error"]["detail"], "harbor_repository_mapped");
         }
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -1854,10 +1846,8 @@ mod tests {
         )
         .await
         .unwrap_err();
-        match own {
-            AppError::Conflict(message) => assert!(message.contains(&first)),
-            other => panic!("expected conflict, got {other:?}"),
-        }
+        assert_eq!(own, AppError::HarborRepositoryMapped);
+        assert!(!own.message().contains(&first), "leaked the mapping id");
 
         // The owner moves a mapping onto the other tenant's repository. The 409 is generic,
         // so the other tenant's mapping id is not revealed.
@@ -1873,13 +1863,11 @@ mod tests {
         )
         .await
         .unwrap_err();
-        match foreign {
-            AppError::Conflict(message) => {
-                assert!(!message.contains(&other_id), "leaked another tenant's id");
-                assert_eq!(message, "this Harbor repository is already mapped.");
-            }
-            other => panic!("expected conflict, got {other:?}"),
-        }
+        assert_eq!(foreign, AppError::HarborRepositoryMapped);
+        assert!(
+            !foreign.message().contains(&other_id),
+            "leaked another tenant's id"
+        );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2160,7 +2148,8 @@ mod tests {
         .unwrap_err();
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(matches!(err, AppError::Conflict(_)), "{err:?}");
+        // The competing row maps the same Harbor repository, so this is the duplicate 409.
+        assert_eq!(err, AppError::HarborRepositoryMapped);
         assert_eq!(err.status(), axum::http::StatusCode::CONFLICT);
     }
 

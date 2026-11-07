@@ -223,30 +223,32 @@ pub async fn delete_github_issues(
     .map_err(|_| AppError::InternalError)
 }
 
-/// Returns the id and owner of any mapping that uses the same Harbor repository on the same
-/// Harbor instance. `None` when it is free. The GitHub target is not checked: several
-/// mappings may target one GitHub repository (`specs/database.md`, #185).
-pub async fn find_conflict(
+/// True when another mapping (not `exclude_id`) already maps this Harbor repository on
+/// this Harbor instance, for any user. Returns no id or owner, so a caller cannot reveal
+/// the other mapping (#180). The GitHub target is not checked: several mappings may target
+/// one GitHub repository (`specs/database.md`, #185).
+pub async fn harbor_repository_mapped(
     conn: &mut SqliteConnection,
     harbor_base_url: &str,
     harbor_project: &str,
     harbor_repository: &str,
     exclude_id: &str,
-) -> Result<Option<(String, String)>, AppError> {
+) -> Result<bool, AppError> {
     let row = sqlx::query!(
-        r#"SELECT id AS "id!", user_id AS "user_id!" FROM repo_mappings
-           WHERE id <> ?
-             AND harbor_base_url = ? AND harbor_project = ? AND harbor_repository = ?
-           LIMIT 1"#,
+        r#"SELECT EXISTS (
+               SELECT 1 FROM repo_mappings
+               WHERE id <> ?
+                 AND harbor_base_url = ? AND harbor_project = ? AND harbor_repository = ?
+           ) AS "mapped!: bool""#,
         exclude_id,
         harbor_base_url,
         harbor_project,
         harbor_repository
     )
-    .fetch_optional(conn)
+    .fetch_one(conn)
     .await
     .map_err(|_| AppError::InternalError)?;
-    Ok(row.map(|r| (r.id, r.user_id)))
+    Ok(row.mapped)
 }
 
 /// Returns the id of the one mapping using `hash` as its webhook token digest.
