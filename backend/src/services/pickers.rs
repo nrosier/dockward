@@ -20,6 +20,7 @@ use sqlx::SqlitePool;
 use crate::api::hardening::RateLimiter;
 use crate::auth::crypto::DerivedKey;
 use crate::db::credentials::CredentialRow;
+use crate::db::mappings as mapping_db;
 use crate::db::picker_hidden::{self as db, HiddenRow};
 use crate::error::{AppError, ErrorDetail};
 use crate::services::credential_probe::{encode_segment, valid_github_name, valid_harbor_name};
@@ -134,12 +135,15 @@ pub struct HarborProject {
     pub name: String,
 }
 
-/// `{"project","repository","full_name"}`.
+/// `{"project","repository","full_name","mapped"}`. `mapped` is `true` when a mapping on the
+/// same Harbor base URL already uses this repository, for any user (#189). It is set per
+/// request from the database, never from the cache.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct HarborRepository {
     pub project: String,
     pub repository: String,
     pub full_name: String,
+    pub mapped: bool,
 }
 
 /// `{"owner","repo","full_name","private","archived"}`.
@@ -917,6 +921,7 @@ impl PickerState {
                             project: project.to_owned(),
                             full_name: full,
                             repository,
+                            mapped: false,
                         })
                     })
                     .collect();
@@ -926,11 +931,21 @@ impl PickerState {
         let Cached::Repositories(listing) = cached else {
             return Err(AppError::InternalError.into());
         };
+        // Mapped repositories stay in the list, marked, so the picker can grey them out
+        // (#189). Read now, not cached, so a new mapping shows at once.
+        let mapped: HashSet<String> =
+            mapping_db::mapped_repositories(caller.pool, &ctx.base_text, project)
+                .await?
+                .into_iter()
+                .collect();
         let items: Vec<HarborRepository> = listing
             .items
             .iter()
             .filter(|item| !hidden.contains(&item.full_name))
-            .cloned()
+            .map(|item| HarborRepository {
+                mapped: mapped.contains(&item.repository),
+                ..item.clone()
+            })
             .collect();
         Ok(page_of(
             items,

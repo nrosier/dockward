@@ -19,6 +19,9 @@ interface Props {
   repositoryValue: string;
   // Set when the repository pair is already used by another mapping.
   repositoryError?: string;
+  // The edited mapping's own `<project>/<repository>` on this credential's Harbor, which
+  // stays choosable although it is mapped (#189).
+  ownRepository?: string;
   onProjectText: (text: string) => void;
   onProject: (name: string) => void;
   onRepositoryText: (text: string) => void;
@@ -35,6 +38,7 @@ export function HarborPickers({
   projectValue,
   repositoryValue,
   repositoryError,
+  ownRepository,
   onProjectText,
   onProject,
   onRepositoryText,
@@ -134,6 +138,7 @@ export function HarborPickers({
         disabled={projectValue.trim() === ""}
         value={repositoryValue}
         error={repositoryError}
+        ownRepository={ownRepository}
         onText={onRepositoryText}
         onPick={onRepository}
       />
@@ -149,11 +154,12 @@ interface RepositoryFieldProps {
   disabled: boolean;
   value: string;
   error: string | undefined;
+  ownRepository: string | undefined;
   onText: (text: string) => void;
   onPick: (fullName: string) => void;
 }
 
-function RepositoryField({ credentialId, baseUrl, project, disabled, value, error, onText, onPick }: RepositoryFieldProps) {
+function RepositoryField({ credentialId, baseUrl, project, disabled, value, error, ownRepository, onText, onPick }: RepositoryFieldProps) {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -169,9 +175,21 @@ function RepositoryField({ credentialId, baseUrl, project, disabled, value, erro
     pageSize,
     sort: "name",
   });
-  const options: ComboOption[] = (repositories.data?.items ?? []).map((item) => ({
+  const options: ComboOption[] = (repositories.data?.items ?? []).map((item) => {
+    // A repository mapped on this Harbor instance is greyed out and cannot be picked,
+    // except the edited mapping's own one (#189).
+    const taken = item.mapped && item.full_name !== ownRepository;
+    return {
     key: item.full_name,
-    content: item.repository,
+    disabled: taken,
+    content: taken ? (
+      <span className="flex min-w-0 items-center justify-between gap-2">
+        <span className="truncate">{item.repository}</span>
+        <span className="shrink-0 font-sans text-[12px]">{t("mapping.picker.alreadyMapped")}</span>
+      </span>
+    ) : (
+      item.repository
+    ),
     onSelect: () => {
       setSearch("");
       setPage(1);
@@ -191,7 +209,8 @@ function RepositoryField({ credentialId, baseUrl, project, disabled, value, erro
         <span className="sr-only">{item.repository}</span>
       </Button>
     ),
-  }));
+    };
+  });
   return (
     <Field
       id="harbor-repository"

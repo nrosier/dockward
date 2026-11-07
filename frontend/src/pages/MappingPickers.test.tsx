@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { t } from "../i18n";
-import { json, renderWithRoutes, stubApi } from "../test/render";
+import { json, renderWithRoutes, stubApi, user } from "../test/render";
 import type { Mapping } from "../types/api";
 import MappingFormPage from "./MappingFormPage";
 
@@ -29,12 +29,15 @@ interface Opts {
   suggestion?: (url: URL) => Response;
   hide?: (body: unknown) => Response;
   extraGithub?: boolean;
+  // Signs in as the mapping owner, so the edit form is not read-only.
+  owner?: boolean;
 }
 
 function stub(opts: Opts = {}) {
   return stubApi((path, init) => {
     const url = new URL(path, "http://x");
     const p = url.pathname;
+    if (opts.owner === true && p === "/api/v1/account/me") return json({ user: user("user") });
     if (p === "/api/v1/credentials" && url.searchParams.get("service_type") === "harbor") return json(listResp([HARBOR_A, HARBOR_B]));
     if (p === "/api/v1/credentials" && url.searchParams.get("service_type") === "github") return json(listResp(opts.extraGithub === true ? [GITHUB, { ...GITHUB, id: "gc2", label: "gh-other" }] : [GITHUB]));
     if (p === "/api/v1/mappings" && (init?.method ?? "GET") === "GET") return json(listResp([]));
@@ -210,6 +213,70 @@ describe("Mapping form pickers", () => {
     await userEvent.click(within(list).getByRole("button", { name: `${t("mapping.hide.action")}library` }));
     await waitFor(() => expect(hide).toHaveBeenCalledWith({ source: "harbor", full_name: "library", harbor_base_url: HARBOR_A.base_url }));
     await waitFor(() => expect(calls(fetchMock, "harbor-projects?").length).toBeGreaterThan(before));
+  });
+
+  describe("already mapped repositories (#189)", () => {
+    const repos = () =>
+      json(page([
+        { project: "nrosier", repository: "walley", full_name: "nrosier/walley", mapped: true },
+        { project: "nrosier", repository: "astraya", full_name: "nrosier/astraya", mapped: false },
+      ]));
+
+    it("greys out a mapped repository with the note, and it cannot be picked", async () => {
+      stub({ repos });
+      renderWithRoutes(routes, "/mappings/new");
+      await pickProject("nrosier");
+      const list = await openRepositories();
+      const taken = within(list).getByRole("option", { name: new RegExp(`^walley\\s*${t("mapping.picker.alreadyMapped")}$`) });
+      expect(taken).toHaveAttribute("aria-disabled", "true");
+      expect(within(taken).getByText(t("mapping.picker.alreadyMapped"))).toBeInTheDocument();
+      await userEvent.click(taken);
+      expect(screen.getByLabelText(t("mappings.form.harborRepository"))).toHaveValue("");
+      // Not hidden: still in the list after the click.
+      expect(within(list).getByRole("option", { name: new RegExp("^walley") })).toBeInTheDocument();
+    });
+
+    it("lists an unmapped repository as before, and it can be picked", async () => {
+      stub({ repos });
+      renderWithRoutes(routes, "/mappings/new");
+      await pickProject("nrosier");
+      const list = await openRepositories();
+      const free = within(list).getByRole("option", { name: "astraya" });
+      expect(free).not.toHaveAttribute("aria-disabled");
+      expect(within(free).queryByText(t("mapping.picker.alreadyMapped"))).not.toBeInTheDocument();
+      await userEvent.click(free);
+      expect(screen.getByLabelText(t("mappings.form.harborRepository"))).toHaveValue("astraya");
+    });
+
+    it("keeps a mapped repository unpickable from the keyboard", async () => {
+      stub({ repos });
+      renderWithRoutes(routes, "/mappings/new");
+      await pickProject("nrosier");
+      await openRepositories();
+      await userEvent.keyboard("{ArrowDown}{Enter}");
+      expect(screen.getByLabelText(t("mappings.form.harborRepository"))).toHaveValue("");
+    });
+
+    it("the edit form keeps its own repository pickable, and shows its current value", async () => {
+      stub({
+        owner: true,
+        projects: () => json(page([{ name: "gone-project" }])),
+        repos: () =>
+          json(page([
+            { project: "gone-project", repository: "gone-repo", full_name: "gone-project/gone-repo", mapped: true },
+            { project: "gone-project", repository: "other", full_name: "gone-project/other", mapped: true },
+          ])),
+      });
+      renderWithRoutes(routes, "/mappings/m1");
+      expect(await screen.findByLabelText(t("mappings.form.harborRepository"))).toHaveValue("gone-repo");
+      await pickProject("gone-project");
+      const list = await openRepositories();
+      const own = within(list).getByRole("option", { name: "gone-repo" });
+      expect(own).not.toHaveAttribute("aria-disabled");
+      expect(within(list).getByRole("option", { name: new RegExp("^other") })).toHaveAttribute("aria-disabled", "true");
+      await userEvent.click(own);
+      expect(screen.getByLabelText(t("mappings.form.harborRepository"))).toHaveValue("gone-repo");
+    });
   });
 });
 

@@ -662,6 +662,7 @@
   "mapping.picker.repositoryHint": "Pick a project first. Repositories are shown without the project prefix; the saved value keeps it.",
   "mapping.picker.pageSize": "Page size",
   "mapping.picker.empty": "Nothing to show.",
+  "mapping.picker.alreadyMapped": "Already mapped",
   "mapping.picker.cut": "This list was cut at 1,000 items. Search by name to find one past the cut, or type the name in the form.",
   "mapping.picker.saved": "Saved as {value}",
   "mapping.github.title": "Pick a GitHub repository",

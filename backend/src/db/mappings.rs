@@ -223,6 +223,25 @@ pub async fn delete_github_issues(
     .map_err(|_| AppError::InternalError)
 }
 
+/// The Harbor repository names (without the project) that have a mapping on this Harbor
+/// base URL and project, for any user (#189). Names only: no id or owner.
+pub async fn mapped_repositories(
+    pool: &SqlitePool,
+    harbor_base_url: &str,
+    harbor_project: &str,
+) -> Result<Vec<String>, AppError> {
+    let rows = sqlx::query!(
+        r#"SELECT harbor_repository AS "harbor_repository!" FROM repo_mappings
+           WHERE harbor_base_url = ? AND harbor_project = ?"#,
+        harbor_base_url,
+        harbor_project
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(rows.into_iter().map(|row| row.harbor_repository).collect())
+}
+
 /// True when another mapping (not `exclude_id`) already maps this Harbor repository on
 /// this Harbor instance, for any user. Returns no id or owner, so a caller cannot reveal
 /// the other mapping (#180). The GitHub target is not checked: several mappings may target
