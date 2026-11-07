@@ -5,6 +5,7 @@ import { MappingForm } from "../components/mappings/MappingForm";
 import { ShownOnce } from "../components/mappings/ShownOnce";
 import { LINK } from "../components/mappings/styles";
 import { mappingName } from "../components/mappings/useMappings";
+import { ScansCard } from "../components/mappings/ScansCard";
 import { PullScans } from "../components/mappings/PullScans";
 import { ProjectWebhookProposal } from "../components/mappings/ProjectWebhookProposal";
 import { WebhookCard, type Rotated } from "../components/mappings/WebhookCard";
@@ -117,7 +118,14 @@ export default function MappingFormPage() {
         <p className="text-muted">{mappingName(mapping)}</p>
       </div>
       {canPull ? <PullScans key={`pull-${mapping.id}`} mapping={mapping} /> : null}
-      <MappingForm key={mapping.id} mapping={mapping} readOnly={!owned} onCreated={() => undefined} onUpdated={onUpdated} />
+      <MappingForm
+        key={mapping.id}
+        mapping={mapping}
+        readOnly={!owned}
+        onCreated={() => undefined}
+        onUpdated={onUpdated}
+        belowScan={canPull ? <ScansCard key={`scans-${mapping.id}`} mapping={mapping} /> : undefined}
+      />
       {/* Below the form actions, where Save was clicked. */}
       {proposal === null ? null : (
         <div className="flex flex-col gap-2">

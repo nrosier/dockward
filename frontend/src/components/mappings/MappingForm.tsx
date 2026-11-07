@@ -173,9 +173,11 @@ interface MappingFormProps {
   onCreated: (created: MappingCreated) => void;
   // Called with the update response; the caller decides where to go next (#179).
   onUpdated?: (saved: MappingSaved) => void;
+  // A card shown below Scheduled scan, before the form actions (the Scans card, #224).
+  belowScan?: ReactNode;
 }
 
-export function MappingForm({ mapping, readOnly = false, onCreated, onUpdated }: MappingFormProps) {
+export function MappingForm({ mapping, readOnly = false, onCreated, onUpdated, belowScan }: MappingFormProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const initial = initialValues(mapping);
@@ -476,6 +478,8 @@ export function MappingForm({ mapping, readOnly = false, onCreated, onUpdated }:
           )}
         </Card>
       </fieldset>
+
+      {belowScan}
 
       {serverError === null ? null : (
         <p role="alert" className="text-[13px] text-crit-ink">
