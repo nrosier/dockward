@@ -21,10 +21,10 @@ Purpose: test strategy, CI workflows, dependency updates, and repo hygiene check
     - Decided (2026-11-03): `npm run lint` runs oxlint with `--deny-warnings` (correctness and suspicious categories, React hooks and jsx-a11y rules). typescript-eslint is not used, because it does not support TypeScript 7: version 8.72.1 declares the peer range `typescript >=4.8.4 <6.1.0`.
 - `codeql.yml` (name "CodeQL"): static analysis with the CodeQL action for `rust`, `javascript-typescript`, and `actions`. Decided (2026-11-03): Rust was added, with `build-mode: none`.
 - `dependency-review.yml` (name "Dependency review"): dependency-review action on pull requests.
-- `docker.yml` (name "Docker"): on push to `main`, `v*` tags, and pull requests.
+- `docker.yml` (name "Docker"): on `v*` tags and pull requests.
   - Pull requests: build the image locally and scan it with Trivy (fail on CRITICAL or HIGH). Nothing is pushed.
-  - Push to `main` and `v*` tags: Decided (2026-11-03): build once and push to GHCR by digest only (untagged), with provenance `mode=max` and an SBOM. Scan that digest with Trivy (fail on CRITICAL or HIGH; upload SARIF to code scanning). Then add the tags from [deployment.md](deployment.md) to the same digest with `docker buildx imagetools create`, sign the digest with cosign (keyless), and attest build provenance. The published image is the scanned image.
-  - Image labels (`org.opencontainers.image.*`) come from `docker/metadata-action`, with `flavor: latest=false` so a `v*` tag does not add `latest`.
+  - Pushes happen only on `v*` tags (Decided 2026-11-07, user, via dialogue). A push to `main` publishes nothing. On a `v*` tag: Decided (2026-11-03): build once and push to GHCR by digest only (untagged), with provenance `mode=max` and an SBOM. Scan that digest with Trivy (fail on CRITICAL or HIGH; upload SARIF to code scanning). Then add the tags from [deployment.md](deployment.md) to the same digest with `docker buildx imagetools create`, sign the digest with cosign (keyless), and attest build provenance. The published image is the scanned image.
+  - Image labels (`org.opencontainers.image.*`) come from `docker/metadata-action`, with `flavor: latest=false`; `latest` comes from an explicit tag rule that is enabled on `v*` tags.
 - `scorecard.yml` (name "OpenSSF Scorecard"): scorecard action.
 - `secret-scan.yml` (name "Secret scan"): gitleaks action.
 - All workflows set token permissions to empty by default, and each job grants only what it needs. All actions are pinned to commit SHAs.
