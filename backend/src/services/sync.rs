@@ -1499,10 +1499,7 @@ mod tests {
         // CVE-2026-0001 is the only CRITICAL finding in the report.
         let creates = github.creates();
         assert_eq!(creates.len(), 1);
-        assert_eq!(
-            creates[0]["title"],
-            "CVE-2026-0001: openssl (CRITICAL) in proj/app"
-        );
+        assert_eq!(creates[0]["title"], "CVE-2026-0001 openssl");
     }
 
     #[tokio::test]

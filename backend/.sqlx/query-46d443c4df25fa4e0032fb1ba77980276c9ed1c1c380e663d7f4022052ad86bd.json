@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT cve_id AS \"cve_id!\", image_tag AS \"image_tag!\", package,\n                  severity AS \"severity!\", fixed_in_version, status AS \"status!\", last_seen_at\n           FROM cve_findings WHERE mapping_id = ? AND cve_id = ?\n           ORDER BY image_tag",
+  "query": "SELECT cve_id AS \"cve_id!\", image_tag AS \"image_tag!\", package,\n                  severity AS \"severity!\", fixed_in_version, status AS \"status!\", last_seen_at,\n                  description\n           FROM cve_findings WHERE mapping_id = ? AND cve_id = ?\n           ORDER BY image_tag",
   "describe": {
     "columns": [
       {
@@ -79,6 +79,17 @@
             "name": "last_seen_at"
           }
         }
+      },
+      {
+        "name": "description",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "description"
+          }
+        }
       }
     ],
     "parameters": {
@@ -91,8 +102,9 @@
       false,
       true,
       false,
+      true,
       true
     ]
   },
-  "hash": "1c9af11fd298ea36f6bd277a413d4949d0d950f44ede5a4b665713c05758d046"
+  "hash": "46d443c4df25fa4e0032fb1ba77980276c9ed1c1c380e663d7f4022052ad86bd"
 }

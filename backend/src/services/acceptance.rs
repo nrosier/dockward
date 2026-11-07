@@ -573,6 +573,8 @@ mod tests {
                         number: 1,
                         body: String::new(),
                         open: status == "open",
+                        title: String::new(),
+                        labels: Vec::new(),
                     })
             });
         }

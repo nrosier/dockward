@@ -181,6 +181,7 @@ pub struct FindingRow {
     /// `open` or `fixed`.
     pub status: String,
     pub last_seen_at: Option<i64>,
+    pub description: Option<String>,
 }
 
 /// Every finding of the mapping, one row per tag and CVE.
@@ -191,7 +192,8 @@ pub async fn findings_for_mapping(
     sqlx::query_as!(
         FindingRow,
         r#"SELECT cve_id AS "cve_id!", image_tag AS "image_tag!", package,
-                  severity AS "severity!", fixed_in_version, status AS "status!", last_seen_at
+                  severity AS "severity!", fixed_in_version, status AS "status!", last_seen_at,
+                  description
            FROM cve_findings WHERE mapping_id = ?
            ORDER BY cve_id, image_tag"#,
         mapping_id
@@ -210,7 +212,8 @@ pub async fn findings_for_cve(
     sqlx::query_as!(
         FindingRow,
         r#"SELECT cve_id AS "cve_id!", image_tag AS "image_tag!", package,
-                  severity AS "severity!", fixed_in_version, status AS "status!", last_seen_at
+                  severity AS "severity!", fixed_in_version, status AS "status!", last_seen_at,
+                  description
            FROM cve_findings WHERE mapping_id = ? AND cve_id = ?
            ORDER BY image_tag"#,
         mapping_id,
