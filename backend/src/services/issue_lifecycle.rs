@@ -55,6 +55,7 @@ pub trait IssueApi: Send + Sync + 'static {
         now: i64,
     ) -> impl Future<Output = Result<Vec<IssueRef>, ScanError>> + Send;
 
+    #[allow(clippy::too_many_arguments)]
     fn create(
         &self,
         token: &[u8],
@@ -62,8 +63,41 @@ pub trait IssueApi: Send + Sync + 'static {
         repo: &str,
         title: &str,
         body: &str,
+        labels: &[&str],
         now: i64,
     ) -> impl Future<Output = Result<IssueRef, ScanError>> + Send;
+
+    /// Creates the labels that are missing in the repository.
+    fn ensure_labels(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        labels: &[&str],
+        now: i64,
+    ) -> impl Future<Output = Result<(), ScanError>> + Send;
+
+    /// Adds labels to an issue.
+    fn add_labels(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        labels: &[&str],
+        now: i64,
+    ) -> impl Future<Output = Result<(), ScanError>> + Send;
+
+    /// Changes the title of an issue.
+    fn retitle(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        title: &str,
+        now: i64,
+    ) -> impl Future<Output = Result<(), ScanError>> + Send;
 
     fn comment(
         &self,
@@ -114,9 +148,45 @@ impl IssueApi for GithubIssues {
         repo: &str,
         title: &str,
         body: &str,
+        labels: &[&str],
         now: i64,
     ) -> Result<IssueRef, ScanError> {
-        GithubIssues::create(self, token, owner, repo, title, body, now).await
+        GithubIssues::create(self, token, owner, repo, title, body, labels, now).await
+    }
+
+    async fn ensure_labels(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        labels: &[&str],
+        now: i64,
+    ) -> Result<(), ScanError> {
+        GithubIssues::ensure_labels(self, token, owner, repo, labels, now).await
+    }
+
+    async fn add_labels(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        labels: &[&str],
+        now: i64,
+    ) -> Result<(), ScanError> {
+        GithubIssues::add_labels(self, token, owner, repo, number, labels, now).await
+    }
+
+    async fn retitle(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        title: &str,
+        now: i64,
+    ) -> Result<(), ScanError> {
+        GithubIssues::retitle(self, token, owner, repo, number, title, now).await
     }
 
     async fn comment(
@@ -240,6 +310,8 @@ struct CveView {
     fixed_in: Option<String>,
     /// Every tag where the CVE is open.
     tags: Vec<String>,
+    /// Description of the most recently scanned open row.
+    description: Option<String>,
 }
 
 /// The view of a CVE from its rows, or `None` when no tracked tag reports it (no `open` row).
@@ -268,6 +340,7 @@ fn summarize(cve_id: &str, rows: &[FindingRow]) -> Option<CveView> {
         package: latest.package.clone(),
         fixed_in: latest.fixed_in_version.clone(),
         tags,
+        description: latest.description.clone(),
     })
 }
 
@@ -276,22 +349,15 @@ fn plain(text: &str) -> String {
     text.replace(['\r', '\n', '`'], " ").trim().to_owned()
 }
 
-/// `<CVE-ID>: <package> (<SEVERITY>) in <harbor_project>/<harbor_repository>`.
-fn issue_title(view: &CveView, mapping: &MappingRow) -> String {
+/// `<CVE id> <package>` and nothing else.
+fn issue_title(view: &CveView) -> String {
     let package = view
         .package
         .as_deref()
         .map(plain)
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| UNKNOWN_PACKAGE.to_owned());
-    let title = format!(
-        "{}: {} ({}) in {}/{}",
-        plain(&view.cve_id),
-        package,
-        view.severity,
-        mapping.harbor_project,
-        mapping.harbor_repository
-    );
+    let title = format!("{} {}", plain(&view.cve_id), package);
     title.chars().take(MAX_TITLE_CHARS).collect()
 }
 
@@ -304,6 +370,7 @@ fn issue_text(view: &CveView, mapping: &MappingRow) -> String {
         &code_span(view.package.as_deref().unwrap_or(UNKNOWN_PACKAGE)),
         view.fixed_in.as_deref(),
         &harbor,
+        view.description.as_deref(),
     );
     let tags: Vec<String> = view
         .tags
@@ -396,16 +463,24 @@ impl<G: IssueApi> Ctx<'_, G> {
             .as_deref()
             .and_then(|issues| github_issues::find_marked(issues, &view.cve_id))
             .cloned();
+        let labels = github_issues::issue_labels(view.severity);
         let issue = match adopted {
-            Some(issue) => issue,
+            Some(issue) => {
+                self.fix_adopted(&issue, view, &labels).await?;
+                issue
+            }
             None => {
+                self.gh
+                    .ensure_labels(self.token, self.owner(), self.repo(), &labels, self.now)
+                    .await?;
                 self.gh
                     .create(
                         self.token,
                         self.owner(),
                         self.repo(),
-                        &issue_title(view, self.mapping),
+                        &issue_title(view),
                         &issue_text(view, self.mapping),
+                        &labels,
                         self.now,
                     )
                     .await?
@@ -449,6 +524,50 @@ impl<G: IssueApi> Ctx<'_, G> {
             status: "open".to_owned(),
             closed_manually: false,
         }))
+    }
+
+    /// An adopted issue gets the new title when its own differs, and the labels it lacks.
+    /// The marker and the body are not touched.
+    async fn fix_adopted(
+        &self,
+        issue: &IssueRef,
+        view: &CveView,
+        labels: &[&str],
+    ) -> Result<(), Failure> {
+        let title = issue_title(view);
+        if issue.title != title {
+            self.gh
+                .retitle(
+                    self.token,
+                    self.owner(),
+                    self.repo(),
+                    issue.number,
+                    &title,
+                    self.now,
+                )
+                .await?;
+        }
+        let missing: Vec<&str> = labels
+            .iter()
+            .copied()
+            .filter(|wanted| !issue.labels.iter().any(|have| have == wanted))
+            .collect();
+        if !missing.is_empty() {
+            self.gh
+                .ensure_labels(self.token, self.owner(), self.repo(), &missing, self.now)
+                .await?;
+            self.gh
+                .add_labels(
+                    self.token,
+                    self.owner(),
+                    self.repo(),
+                    issue.number,
+                    &missing,
+                    self.now,
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     async fn find_row(&self, cve_id: &str) -> Result<Option<IssueRow>, AppError> {
@@ -881,11 +1000,15 @@ pub(crate) mod test_support {
         pub number: u64,
         pub body: String,
         pub open: bool,
+        pub title: String,
+        pub labels: Vec<String>,
     }
 
     #[derive(Default)]
     pub struct State {
         pub issues: Vec<Issue>,
+        /// Labels that exist in the repository.
+        pub repo_labels: Vec<String>,
         /// `(method, path, body)` of every request, in order.
         pub log: Vec<(&'static str, String, Value)>,
         pub rate_limited: bool,
@@ -927,13 +1050,13 @@ pub(crate) mod test_support {
             })
         }
 
-        /// `(method, path, body)` of every request that is not a list.
+        /// `(method, path, body)` of every request that is not a list or a label creation.
         pub fn writes(&self) -> Vec<(&'static str, String, Value)> {
             self.with(|state| {
                 state
                     .log
                     .iter()
-                    .filter(|(method, _, _)| *method != "GET")
+                    .filter(|(method, path, _)| *method != "GET" && path != "repos/octo/app/labels")
                     .cloned()
                     .collect()
             })
@@ -970,6 +1093,8 @@ pub(crate) mod test_support {
                         "number": issue.number,
                         "html_url": format!("https://github.com/octo/app/issues/{}", issue.number),
                         "body": issue.body,
+                        "title": issue.title,
+                        "labels": issue.labels.iter().map(|l| json!({"name": l})).collect::<Vec<_>>(),
                         "state": if issue.open { "open" } else { "closed" },
                     })
                 };
@@ -998,25 +1123,76 @@ pub(crate) mod test_support {
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_owned();
+                        let title = body
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        let labels = body
+                            .get("labels")
+                            .and_then(Value::as_array)
+                            .map(|l| l.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                            .unwrap_or_default();
                         state.issues.push(Issue {
                             number,
                             body: text,
                             open: true,
+                            title,
+                            labels,
                         });
                         let created = state.issues.last().map(issue_json).unwrap_or(Value::Null);
                         Ok(reply(201, created))
+                    }
+                    ("POST", "repos/octo/app/labels") => {
+                        let name = body
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        if state.repo_labels.contains(&name) {
+                            return Ok(reply(
+                                422,
+                                json!({"errors": [{"resource": "Label", "code": "already_exists", "field": "name"}]}),
+                            ));
+                        }
+                        state.repo_labels.push(name);
+                        Ok(reply(201, json!({})))
+                    }
+                    ("POST", labels) if labels.ends_with("/labels") => {
+                        let number: Option<u64> = labels
+                            .trim_end_matches("/labels")
+                            .rsplit('/')
+                            .next()
+                            .and_then(|n| n.parse().ok());
+                        let added: Vec<String> = body
+                            .get("labels")
+                            .and_then(Value::as_array)
+                            .map(|l| l.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                            .unwrap_or_default();
+                        if let Some(issue) = state.issues.iter_mut().find(|i| Some(i.number) == number) {
+                            for label in added {
+                                if !issue.labels.contains(&label) {
+                                    issue.labels.push(label);
+                                }
+                            }
+                        }
+                        Ok(reply(200, json!([])))
                     }
                     ("POST", _) => Ok(reply(201, json!({}))),
                     (_, _) => {
                         let number: Option<u64> =
                             path.rsplit('/').next().and_then(|last| last.parse().ok());
-                        let open = body.get("state").and_then(Value::as_str) == Some("open");
                         if let Some(issue) = state
                             .issues
                             .iter_mut()
                             .find(|issue| Some(issue.number) == number)
                         {
-                            issue.open = open;
+                            if let Some(state_text) = body.get("state").and_then(Value::as_str) {
+                                issue.open = state_text == "open";
+                            }
+                            if let Some(title) = body.get("title").and_then(Value::as_str) {
+                                issue.title = title.to_owned();
+                            }
                         }
                         Ok(reply(200, json!({})))
                     }
@@ -1088,9 +1264,45 @@ pub(crate) mod test_support {
             repo: &str,
             title: &str,
             body: &str,
+            labels: &[&str],
             now: i64,
         ) -> Result<IssueRef, ScanError> {
-            github_issues::create_with(&*self.0, token, owner, repo, title, body, now).await
+            github_issues::create_with(&*self.0, token, owner, repo, title, body, labels, now).await
+        }
+
+        async fn ensure_labels(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            labels: &[&str],
+            now: i64,
+        ) -> Result<(), ScanError> {
+            github_issues::ensure_labels_with(&*self.0, token, owner, repo, labels, now).await
+        }
+
+        async fn add_labels(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            labels: &[&str],
+            now: i64,
+        ) -> Result<(), ScanError> {
+            github_issues::add_labels_with(&*self.0, token, owner, repo, number, labels, now).await
+        }
+
+        async fn retitle(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            title: &str,
+            now: i64,
+        ) -> Result<(), ScanError> {
+            github_issues::retitle_with(&*self.0, token, owner, repo, number, title, now).await
         }
 
         async fn comment(
@@ -1229,6 +1441,21 @@ mod tests {
             package: &str,
             at: i64,
         ) {
+            self.finding_full(mapping_id, tag, cve, severity, package, None, at)
+                .await;
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn finding_full(
+            &self,
+            mapping_id: &str,
+            tag: &str,
+            cve: &str,
+            severity: &str,
+            package: &str,
+            description: Option<&str>,
+            at: i64,
+        ) {
             let mut conn = self.pool.acquire().await.unwrap();
             db::findings::upsert(
                 &mut conn,
@@ -1241,7 +1468,7 @@ mod tests {
                     package: Some(package),
                     severity,
                     fixed_in_version: None,
-                    description: None,
+                    description,
                     now: at,
                 },
             )
@@ -1314,16 +1541,16 @@ mod tests {
 
         let creates = fx.github.creates();
         assert_eq!(creates.len(), 1);
-        assert_eq!(creates[0]["labels"], serde_json::json!(["harborgate"]));
+        assert_eq!(
+            creates[0]["labels"],
+            serde_json::json!(["harborgate", "areai:security", "critical"])
+        );
         let body = creates[0]["body"].as_str().unwrap();
         assert_eq!(
             body.lines().next(),
             Some("<!-- harborgate:CVE-2026-0001 -->")
         );
-        assert_eq!(
-            creates[0]["title"],
-            "CVE-2026-0001: openssl (CRITICAL) in proj/app"
-        );
+        assert_eq!(creates[0]["title"], "CVE-2026-0001 openssl");
         assert!(body.contains("`v1`"));
         assert_eq!(
             fx.issues().await,
@@ -1410,6 +1637,148 @@ mod tests {
             fx.issues().await,
             vec![("CVE-2026-0001".to_owned(), 1, "open".to_owned())]
         );
+    }
+
+    #[tokio::test]
+    async fn created_issue_has_labels_and_the_cve_title() {
+        let fx = Fixture::new("labels-high", "HIGH", true).await;
+        fx.finding_pkg("m1", "v1", "CVE-2024-1", "HIGH", "openssl", 10)
+            .await;
+        fx.reconcile("proj/app:v1").await;
+
+        let creates = fx.github.creates();
+        assert_eq!(creates.len(), 1);
+        assert_eq!(
+            creates[0]["labels"],
+            serde_json::json!(["harborgate", "areai:security", "high"])
+        );
+        assert_eq!(creates[0]["title"], "CVE-2024-1 openssl");
+    }
+
+    #[tokio::test]
+    async fn unknown_cve_gets_no_severity_label() {
+        let fx = Fixture::new("labels-unknown", "HIGH", true).await;
+        fx.finding("m1", "v1", "CVE-2024-2", "UNKNOWN", 10).await;
+        let mapping = fx.mapping("m1").await;
+        create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2024-2", 1_000)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fx.github.creates()[0]["labels"],
+            serde_json::json!(["harborgate", "areai:security"])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_label_is_created_and_an_existing_one_is_not_again() {
+        let fx = Fixture::new("labels-ensure", "HIGH", true).await;
+        fx.github.with(|state| {
+            state.repo_labels = vec!["harborgate".to_owned(), "high".to_owned()];
+        });
+        fx.finding("m1", "v1", "CVE-2024-3", "HIGH", 10).await;
+        fx.reconcile("proj/app:v1").await;
+
+        let writes = fx.github.with(|state| state.log.clone());
+        let label_posts: Vec<&str> = writes
+            .iter()
+            .filter(|(_, path, _)| path == "repos/octo/app/labels")
+            .filter_map(|(_, _, body)| body["name"].as_str())
+            .collect();
+        // Every label is asked for once; the repository ends with each exactly once.
+        assert_eq!(label_posts, vec!["harborgate", "areai:security", "high"]);
+        let repo_labels = fx.github.with(|state| state.repo_labels.clone());
+        assert_eq!(repo_labels, vec!["harborgate", "high", "areai:security"]);
+        // The create comes after the labels exist.
+        let create_at = writes
+            .iter()
+            .position(|(_, path, _)| path == "repos/octo/app/issues")
+            .unwrap();
+        let last_label_at = writes
+            .iter()
+            .rposition(|(_, path, _)| path == "repos/octo/app/labels")
+            .unwrap();
+        assert!(last_label_at < create_at);
+    }
+
+    #[tokio::test]
+    async fn an_adopted_issue_with_the_old_title_is_renamed_and_keeps_its_marker() {
+        let fx = Fixture::new("adopt-rename", "CRITICAL", true).await;
+        let marker = "<!-- harborgate:CVE-2024-4 -->\n\nold body";
+        fx.github.with(|state| {
+            state.issues.push(test_support::Issue {
+                number: 1,
+                body: marker.to_owned(),
+                open: true,
+                title: "CVE-2024-4: openssl (CRITICAL) in proj/app".to_owned(),
+                labels: vec!["harborgate".to_owned()],
+            });
+        });
+        fx.finding("m1", "v1", "CVE-2024-4", "CRITICAL", 10).await;
+        fx.reconcile("proj/app:v1").await;
+
+        assert!(fx.github.creates().is_empty());
+        let writes = fx.github.writes();
+        let rename = writes
+            .iter()
+            .find(|(method, path, _)| *method == "PATCH" && path == "repos/octo/app/issues/1")
+            .unwrap();
+        assert_eq!(rename.2, serde_json::json!({"title": "CVE-2024-4 openssl"}));
+        fx.github.with(|state| {
+            assert_eq!(state.issues[0].title, "CVE-2024-4 openssl");
+            assert_eq!(state.issues[0].body, marker);
+            assert!(
+                state.issues[0]
+                    .labels
+                    .contains(&"areai:security".to_owned())
+            );
+            assert!(state.issues[0].labels.contains(&"critical".to_owned()));
+        });
+
+        // A second adoption with the right title sends no rename.
+        let fx2 = Fixture::new("adopt-same", "CRITICAL", true).await;
+        fx2.github.with(|state| {
+            state.issues.push(test_support::Issue {
+                number: 1,
+                body: "<!-- harborgate:CVE-2024-5 -->".to_owned(),
+                open: true,
+                title: "CVE-2024-5 openssl".to_owned(),
+                labels: vec![
+                    "harborgate".to_owned(),
+                    "areai:security".to_owned(),
+                    "critical".to_owned(),
+                ],
+            });
+        });
+        fx2.finding("m1", "v1", "CVE-2024-5", "CRITICAL", 10).await;
+        fx2.reconcile("proj/app:v1").await;
+        assert!(fx2.github.writes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_body_contains_the_cve_description() {
+        let fx = Fixture::new("body-description", "HIGH", true).await;
+        fx.finding_full(
+            "m1",
+            "v1",
+            "CVE-2024-6",
+            "HIGH",
+            "openssl",
+            Some("Buffer overflow in the parser."),
+            10,
+        )
+        .await;
+        fx.finding_full("m1", "v1", "CVE-2024-7", "HIGH", "zlib", None, 10)
+            .await;
+        fx.reconcile("proj/app:v1").await;
+
+        let creates = fx.github.creates();
+        assert_eq!(creates.len(), 2);
+        let with = creates[0]["body"].as_str().unwrap();
+        assert!(with.contains("Buffer overflow in the parser."));
+        let without = creates[1]["body"].as_str().unwrap();
+        assert!(without.contains("| Package | `zlib` |"));
+        assert!(!without.contains("Description"));
     }
 
     /// Newest digest clean, an older tag still reports the CVE: the issue closes (#196).
@@ -1649,6 +2018,8 @@ mod tests {
                 number: 7,
                 body: String::new(),
                 open: true,
+                title: String::new(),
+                labels: Vec::new(),
             })
         });
         fx.fix("v1", "CVE-2026-0001").await;
@@ -1763,6 +2134,7 @@ mod tests {
             repo: &str,
             title: &str,
             body: &str,
+            labels: &[&str],
             now: i64,
         ) -> Result<IssueRef, ScanError> {
             sqlx::query(
@@ -1773,7 +2145,48 @@ mod tests {
             .await
             .map_err(|_| ScanError::Upstream("test setup failed".to_owned()))?;
             self.inner
-                .create(token, owner, repo, title, body, now)
+                .create(token, owner, repo, title, body, labels, now)
+                .await
+        }
+
+        async fn ensure_labels(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            labels: &[&str],
+            now: i64,
+        ) -> Result<(), ScanError> {
+            self.inner
+                .ensure_labels(token, owner, repo, labels, now)
+                .await
+        }
+
+        async fn add_labels(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            labels: &[&str],
+            now: i64,
+        ) -> Result<(), ScanError> {
+            self.inner
+                .add_labels(token, owner, repo, number, labels, now)
+                .await
+        }
+
+        async fn retitle(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            title: &str,
+            now: i64,
+        ) -> Result<(), ScanError> {
+            self.inner
+                .retitle(token, owner, repo, number, title, now)
                 .await
         }
 
@@ -1962,10 +2375,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(made.number, 1);
-        assert_eq!(
-            fx.github.creates()[0]["title"],
-            "CVE-2026-0004: openssl (LOW) in proj/app"
-        );
+        assert_eq!(fx.github.creates()[0]["title"], "CVE-2026-0004 openssl");
         fx.reconcile("proj/app:v1").await;
 
         assert_eq!(
@@ -2040,6 +2450,7 @@ mod tests {
             fixed_in_version: None,
             status: status.to_owned(),
             last_seen_at: Some(at),
+            description: None,
         };
         for (rows, expected) in [
             (

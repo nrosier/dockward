@@ -19,6 +19,32 @@ use crate::services::outbound::{self, OutboundClient};
 /// The label on every issue HarborGate creates.
 pub const LABEL: &str = "harborgate";
 
+/// The label that marks an issue as a security finding (`specs/integrations.md`, "GitHub
+/// issues").
+pub const SECURITY_LABEL: &str = "areai:security";
+
+/// The colour of a label HarborGate creates (no `#`).
+const LABEL_COLOR: &str = "d93f0b";
+
+/// The plain severity label for a CVE severity: `critical`, `high`, `medium` or `low`.
+/// UNKNOWN (and anything else) has none.
+pub fn severity_label(severity: &str) -> Option<&'static str> {
+    match severity {
+        "CRITICAL" => Some("critical"),
+        "HIGH" => Some("high"),
+        "MEDIUM" => Some("medium"),
+        "LOW" => Some("low"),
+        _ => None,
+    }
+}
+
+/// Every label a HarborGate issue carries for a CVE of `severity`.
+pub fn issue_labels(severity: &str) -> Vec<&'static str> {
+    let mut labels = vec![LABEL, SECURITY_LABEL];
+    labels.extend(severity_label(severity));
+    labels
+}
+
 /// The most pages `list_open_labelled` reads (100 issues each) before it gives up. It stops
 /// a bad `link` header from looping forever.
 const MAX_PAGES: usize = 100;
@@ -29,6 +55,9 @@ pub struct IssueRef {
     pub number: u64,
     pub html_url: String,
     pub body: String,
+    pub title: String,
+    /// Names of the labels on the issue.
+    pub labels: Vec<String>,
 }
 
 /// The hidden marker that must be the first line of every issue body HarborGate creates.
@@ -46,16 +75,18 @@ pub fn find_marked<'a>(issues: &'a [IssueRef], cve_id: &str) -> Option<&'a Issue
 }
 
 /// The body of a new issue: the marker on the first line, then a short Markdown table.
-/// `fixed_in` is `None` when no fixed version is known. It holds no token and no URL.
+/// `fixed_in` is `None` when no fixed version is known. `description` is the CVE description
+/// from the Harbor report; an empty or missing one adds nothing. It holds no token and no URL.
 pub fn issue_body(
     cve_id: &str,
     severity: &str,
     package: &str,
     fixed_in: Option<&str>,
     harbor_repo: &str,
+    description: Option<&str>,
 ) -> String {
     let fixed = fixed_in.unwrap_or("none yet");
-    format!(
+    let mut body = format!(
         "{}\n\n| Field | Value |\n| --- | --- |\n| CVE | {} |\n| Severity | {} |\n| Package | {} |\n| Fixed in | {} |\n| Harbor repository | {} |\n",
         marker(cve_id),
         cell(cve_id),
@@ -63,7 +94,29 @@ pub fn issue_body(
         cell(package),
         cell(fixed),
         cell(harbor_repo),
-    )
+    );
+    if let Some(text) = description.map(str::trim).filter(|text| !text.is_empty()) {
+        body.push_str("\nDescription:\n\n");
+        body.push_str(&fenced(text));
+    }
+    body
+}
+
+/// Text in a code fence longer than any backtick run inside it, so Harbor text cannot
+/// mention a user, add a link, or close the block.
+fn fenced(text: &str) -> String {
+    let mut longest = 0;
+    let mut run = 0;
+    for c in text.chars() {
+        if c == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    let fence = "`".repeat((longest + 1).max(3));
+    format!("{fence}text\n{text}\n{fence}\n")
 }
 
 /// Makes a value safe inside one Markdown table cell: no pipe and no line break.
@@ -94,10 +147,32 @@ fn parse_issue(item: &Value) -> Result<IssueRef, ScanError> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
+    let title = item
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let labels = item
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| {
+                    label
+                        .as_str()
+                        .or_else(|| label.get("name").and_then(Value::as_str))
+                })
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(IssueRef {
         number,
         html_url,
         body,
+        title,
+        labels,
     })
 }
 
@@ -148,7 +223,9 @@ pub async fn list_open_labelled_with<H: ScanHttp>(
     ))
 }
 
-/// Creates an issue with the `harborgate` label and returns it.
+/// Creates an issue with `labels` and returns it. The labels must exist (see
+/// [`ensure_labels_with`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn create_with<H: ScanHttp>(
     http: &H,
     token: &[u8],
@@ -156,16 +233,90 @@ pub async fn create_with<H: ScanHttp>(
     repo: &str,
     title: &str,
     body: &str,
+    labels: &[&str],
     now: i64,
 ) -> Result<IssueRef, ScanError> {
     check_names(owner, repo)?;
     let path = format!("repos/{owner}/{repo}/issues");
-    let payload = json!({"title": title, "body": body, "labels": [LABEL]});
+    let payload = json!({"title": title, "body": body, "labels": labels});
     let response = http.post(&path, token, &payload).await?;
     if response.status != 201 {
         return Err(classify(&response, now));
     }
     parse_issue(&response.body)
+}
+
+/// Creates each label in the repository. A label that already exists (`422` with
+/// `already_exists`) counts as done, so nothing is duplicated.
+pub async fn ensure_labels_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    labels: &[&str],
+    now: i64,
+) -> Result<(), ScanError> {
+    check_names(owner, repo)?;
+    let path = format!("repos/{owner}/{repo}/labels");
+    for label in labels {
+        let payload = json!({"name": label, "color": LABEL_COLOR});
+        let response = http.post(&path, token, &payload).await?;
+        match response.status {
+            201 => {}
+            422 if already_exists(&response.body) => {}
+            _ => return Err(classify(&response, now)),
+        }
+    }
+    Ok(())
+}
+
+/// True when a GitHub validation answer says the resource already exists.
+fn already_exists(body: &Value) -> bool {
+    body.get("errors")
+        .and_then(Value::as_array)
+        .is_some_and(|errors| {
+            errors
+                .iter()
+                .any(|e| e.get("code").and_then(Value::as_str) == Some("already_exists"))
+        })
+}
+
+/// Adds labels to an issue. Labels already on it stay; none is removed.
+pub async fn add_labels_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    number: u64,
+    labels: &[&str],
+    now: i64,
+) -> Result<(), ScanError> {
+    check_names(owner, repo)?;
+    let path = format!("repos/{owner}/{repo}/issues/{number}/labels");
+    let response = http.post(&path, token, &json!({"labels": labels})).await?;
+    if response.status != 200 {
+        return Err(classify(&response, now));
+    }
+    Ok(())
+}
+
+/// Changes the title of an issue.
+pub async fn retitle_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    number: u64,
+    title: &str,
+    now: i64,
+) -> Result<(), ScanError> {
+    check_names(owner, repo)?;
+    let path = format!("repos/{owner}/{repo}/issues/{number}");
+    let response = http.patch(&path, token, &json!({"title": title})).await?;
+    if response.status != 200 {
+        return Err(classify(&response, now));
+    }
+    Ok(())
 }
 
 /// Adds a comment to an issue.
@@ -267,6 +418,7 @@ impl GithubIssues {
     }
 
     /// Creates a labelled issue. See [`create_with`].
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         token: &[u8],
@@ -274,9 +426,48 @@ impl GithubIssues {
         repo: &str,
         title: &str,
         body: &str,
+        labels: &[&str],
         now: i64,
     ) -> Result<IssueRef, ScanError> {
-        create_with(&self.http(), token, owner, repo, title, body, now).await
+        create_with(&self.http(), token, owner, repo, title, body, labels, now).await
+    }
+
+    /// Creates the labels that are missing. See [`ensure_labels_with`].
+    pub async fn ensure_labels(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        labels: &[&str],
+        now: i64,
+    ) -> Result<(), ScanError> {
+        ensure_labels_with(&self.http(), token, owner, repo, labels, now).await
+    }
+
+    /// Adds labels to an issue. See [`add_labels_with`].
+    pub async fn add_labels(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        labels: &[&str],
+        now: i64,
+    ) -> Result<(), ScanError> {
+        add_labels_with(&self.http(), token, owner, repo, number, labels, now).await
+    }
+
+    /// Changes an issue title. See [`retitle_with`].
+    pub async fn retitle(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        title: &str,
+        now: i64,
+    ) -> Result<(), ScanError> {
+        retitle_with(&self.http(), token, owner, repo, number, title, now).await
     }
 
     /// Comments on an issue. See [`comment_with`].
@@ -414,6 +605,8 @@ mod tests {
             number,
             html_url: format!("https://github.com/octo/app/issues/{number}"),
             body: body.to_owned(),
+            title: String::new(),
+            labels: Vec::new(),
         }
     }
 
@@ -559,8 +752,9 @@ mod tests {
             b"token",
             "octo",
             "app",
-            "CVE-2026-1 in libfoo",
+            "CVE-2026-1 libfoo",
             "<!-- harborgate:CVE-2026-1 -->",
+            &issue_labels("HIGH"),
             1000,
         )
         .await
@@ -571,9 +765,44 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, "POST");
         assert_eq!(sent[0].1, "repos/octo/app/issues");
-        assert_eq!(sent[0].2["labels"], json!(["harborgate"]));
-        assert_eq!(sent[0].2["title"], "CVE-2026-1 in libfoo");
+        assert_eq!(
+            sent[0].2["labels"],
+            json!(["harborgate", "areai:security", "high"])
+        );
+        assert_eq!(sent[0].2["title"], "CVE-2026-1 libfoo");
         assert_eq!(sent[0].2["body"], "<!-- harborgate:CVE-2026-1 -->");
+    }
+
+    #[test]
+    fn unknown_severity_has_no_severity_label() {
+        assert_eq!(
+            issue_labels("UNKNOWN"),
+            vec!["harborgate", "areai:security"]
+        );
+        assert_eq!(severity_label("LOW"), Some("low"));
+    }
+
+    #[tokio::test]
+    async fn an_existing_label_is_success_and_other_errors_are_not() {
+        let exists = reply(
+            422,
+            json!({"errors": [{"resource": "Label", "code": "already_exists", "field": "name"}]}),
+        );
+        let fake = Scripted::new(vec![reply(201, json!({})), exists]);
+        ensure_labels_with(&fake, b"token", "octo", "app", &["a", "b"], 1000)
+            .await
+            .unwrap();
+        let sent = fake.sent();
+        assert_eq!(sent[0].1, "repos/octo/app/labels");
+        assert_eq!(sent[0].2["name"], "a");
+        assert_eq!(sent[1].2["name"], "b");
+
+        let other = Scripted::new(vec![reply(422, json!({"errors": [{"code": "invalid"}]}))]);
+        assert!(
+            ensure_labels_with(&other, b"token", "octo", "app", &["a"], 1000)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -628,7 +857,7 @@ mod tests {
         };
         let fake = Scripted::new(vec![secondary]);
         assert_eq!(
-            create_with(&fake, b"token", "octo", "app", "t", "b", 1000).await,
+            create_with(&fake, b"token", "octo", "app", "t", "b", &[], 1000).await,
             Err(ScanError::RateLimited { until: 1030 })
         );
     }
@@ -649,6 +878,7 @@ mod tests {
             "libfoo",
             Some("1.2.4"),
             "library/app",
+            None,
         );
         assert_eq!(body.lines().next(), Some("<!-- harborgate:CVE-2026-1 -->"));
         assert!(body.contains("| Severity | CRITICAL |"));
@@ -664,8 +894,31 @@ mod tests {
     }
 
     #[test]
+    fn body_carries_the_description_in_a_fence() {
+        let body = issue_body(
+            "CVE-2026-1",
+            "HIGH",
+            "p",
+            None,
+            "a/b",
+            Some("A flaw ``` @bob"),
+        );
+        assert!(body.contains("A flaw ``` @bob"));
+        assert!(body.contains("````text\n"));
+        let none = issue_body("CVE-2026-1", "HIGH", "p", None, "a/b", Some(""));
+        assert!(!none.contains("Description"));
+    }
+
+    #[test]
     fn body_cells_cannot_break_the_table() {
-        let body = issue_body("CVE-2026-1", "HIGH", "a|b\nc", None, "library/app");
+        let body = issue_body(
+            "CVE-2026-1",
+            "HIGH",
+            "a|b\nc",
+            None,
+            "library/app",
+            Some("  "),
+        );
         assert!(body.contains("| Package | a\\|b c |"));
         assert!(body.contains("| Fixed in | none yet |"));
     }

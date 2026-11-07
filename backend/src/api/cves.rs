@@ -334,13 +334,18 @@ mod tests {
         assert_eq!(
             titles,
             [
-                "CVE-2026-0010: openssl (LOW) in proj/m1",
-                "CVE-2026-0011: openssl (UNKNOWN) in proj/m1",
-                "CVE-2026-0012: openssl (LOW) in proj/m1",
+                "CVE-2026-0010 openssl",
+                "CVE-2026-0011 openssl",
+                "CVE-2026-0012 openssl",
             ]
         );
-        for body in &creates {
-            assert_eq!(body["labels"], serde_json::json!(["harborgate"]));
+        let expected = [
+            serde_json::json!(["harborgate", "areai:security", "low"]),
+            serde_json::json!(["harborgate", "areai:security"]),
+            serde_json::json!(["harborgate", "areai:security", "low"]),
+        ];
+        for (body, labels) in creates.iter().zip(expected) {
+            assert_eq!(body["labels"], labels);
             assert!(
                 body["body"]
                     .as_str()
