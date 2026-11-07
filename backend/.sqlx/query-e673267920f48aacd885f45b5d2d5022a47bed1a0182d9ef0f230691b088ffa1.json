@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!\", user_id AS \"user_id!\" FROM repo_mappings\n           WHERE id <> ?\n             AND ((harbor_base_url = ? AND harbor_project = ? AND harbor_repository = ?)\n               OR (github_owner = ? AND github_repo = ?))\n           LIMIT 1",
+  "query": "SELECT id AS \"id!\", user_id AS \"user_id!\" FROM repo_mappings\n           WHERE id <> ?\n             AND harbor_base_url = ? AND harbor_project = ? AND harbor_repository = ?\n           LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -27,12 +27,12 @@
       }
     ],
     "parameters": {
-      "Right": 6
+      "Right": 4
     },
     "nullable": [
       true,
       false
     ]
   },
-  "hash": "7f674af362b31459d6ee558a8e7c343662510b0225f5dd4d7d7cc910827dda25"
+  "hash": "e673267920f48aacd885f45b5d2d5022a47bed1a0182d9ef0f230691b088ffa1"
 }

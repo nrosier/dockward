@@ -96,13 +96,24 @@ describe("MappingFormPage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("blocks save and shows the duplicate GitHub target under the repository field", async () => {
+  it("allows a GitHub repository that another mapping already targets", async () => {
     stub();
     renderWithRoutes(routes, "/mappings/new");
     await fillNew("Billing");
     const message = t("mappings.form.duplicate", { name: "platform/billing-worker" });
+    expect(screen.queryByText(message)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(t("mappings.form.githubRepository"))).not.toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("button", { name: t("mappings.form.save") })).toBeEnabled();
+  });
+
+  it("blocks save and shows the duplicate Harbor repository under the repository field", async () => {
+    stub();
+    renderWithRoutes(routes, "/mappings/new");
+    await userEvent.type(await screen.findByLabelText(t("mappings.form.harborProject")), "platform");
+    await userEvent.type(screen.getByLabelText(t("mappings.form.harborRepository")), "billing-worker");
+    await userEvent.type(screen.getByLabelText(t("mappings.form.githubRepository")), "example-org/other");
+    const message = t("mappings.form.duplicate", { name: "platform/billing-worker" });
     expect(await screen.findByText(message)).toBeInTheDocument();
-    expect(screen.getByLabelText(t("mappings.form.githubRepository"))).toHaveAttribute("aria-invalid", "true");
     expect(screen.getByRole("button", { name: t("mappings.form.save") })).toBeDisabled();
   });
 

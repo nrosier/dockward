@@ -188,6 +188,20 @@ mod tests {
         );
     }
 
+    /// #185: the category is `harborgate/<project>/<repository>`, one per Harbor repository,
+    /// so two mappings on one GitHub repository upload under two different categories.
+    #[test]
+    fn category_is_per_harbor_repository() {
+        let category = |id: &str| id.rsplit_once('/').map(|(c, _)| c.to_owned()).unwrap();
+        let api = convert(&report(), "proj", "api").unwrap();
+        let web = convert(&report(), "proj", "web").unwrap();
+        let api_id = api["runs"][0]["automationDetails"]["id"].as_str().unwrap();
+        let web_id = web["runs"][0]["automationDetails"]["id"].as_str().unwrap();
+        assert_eq!(category(api_id), "harborgate/proj/api");
+        assert_eq!(category(web_id), "harborgate/proj/web");
+        assert_ne!(category(api_id), category(web_id));
+    }
+
     #[test]
     fn cvss_v3_score_is_used_when_present() {
         let doc = convert(&report(), "proj", "app").unwrap();

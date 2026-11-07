@@ -344,6 +344,26 @@ fn summarize(cve_id: &str, rows: &[FindingRow]) -> Option<CveView> {
     })
 }
 
+/// The view of a CVE as the newest scanned digest reports it: only the rows of `newest_tags`
+/// count, or every row when the mapping has no successful report (`None`).
+fn reported_in(
+    cve_id: &str,
+    rows: &[FindingRow],
+    newest_tags: Option<&[String]>,
+) -> Option<CveView> {
+    match newest_tags {
+        Some(tags) => {
+            let scoped: Vec<FindingRow> = rows
+                .iter()
+                .filter(|row| tags.contains(&row.image_tag))
+                .cloned()
+                .collect();
+            summarize(cve_id, &scoped)
+        }
+        None => summarize(cve_id, rows),
+    }
+}
+
 /// Text kept on one line: no line break, no backtick.
 fn plain(text: &str) -> String {
     text.replace(['\r', '\n', '`'], " ").trim().to_owned()
@@ -579,6 +599,32 @@ impl<G: IssueApi> Ctx<'_, G> {
         issue_db::find(&mut conn, self.owner(), self.repo(), cve_id).await
     }
 
+    /// True when another mapping that targets the same GitHub repository reports `cve_id`:
+    /// a tag of its newest scanned digest has the CVE `open` (every tracked tag when it has
+    /// no successful report). The issue is shared (#185), so it closes only when no mapping
+    /// of the repository reports the CVE (`specs/cve-lifecycle.md`).
+    async fn reported_elsewhere(&self, cve_id: &str) -> Result<bool, AppError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let siblings =
+            issue_db::sibling_mappings(&mut conn, &self.mapping.id, self.owner(), self.repo())
+                .await?;
+        for (id, harbor_repository) in siblings {
+            let rows = issue_db::findings_for_cve(&mut conn, &id, cve_id).await?;
+            if rows.is_empty() {
+                continue;
+            }
+            let newest = issue_db::newest_digest_tags(&mut conn, &id, &harbor_repository).await?;
+            if reported_in(cve_id, &rows, newest.as_deref()).is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Reopens the issue of a closed row, marks the row `open`, then comments.
     async fn reopen(&self, row: &IssueRow, comment: &str) -> Result<(), Failure> {
         let number = to_number(row.github_issue_number)?;
@@ -674,17 +720,7 @@ impl<G: IssueApi> Ctx<'_, G> {
         rules: &Rules<'_>,
         listed: &mut Option<Vec<IssueRef>>,
     ) -> Result<(), Failure> {
-        let view = match &rules.newest_tags {
-            Some(tags) => {
-                let scoped: Vec<FindingRow> = rows
-                    .iter()
-                    .filter(|row| tags.contains(&row.image_tag))
-                    .cloned()
-                    .collect();
-                summarize(cve_id, &scoped)
-            }
-            None => summarize(cve_id, rows),
-        };
+        let view = reported_in(cve_id, rows, rules.newest_tags.as_deref());
         let existing = {
             let mut conn = self
                 .pool
@@ -724,8 +760,11 @@ impl<G: IssueApi> Ctx<'_, G> {
                     self.reopen(&row, &comment).await?;
                 }
             }
-            // (c) The row is open: read the GitHub state first.
+            // (c) The row is open: read the GitHub state first. The row is shared by every
+            // mapping of the GitHub repository (#185), so the CVE counts as reported when
+            // another of them reports it.
             (Some(row), _) if row.status == "open" => {
+                let reported = reported || self.reported_elsewhere(cve_id).await?;
                 if self.github_is_open(&row).await? {
                     // Open on both sides. When the newest digest no longer reports the CVE:
                     // comment, then close.
@@ -1603,6 +1642,74 @@ mod tests {
         );
     }
 
+    /// #185: one issue is shared by two mappings on the same GitHub repository. It stays
+    /// open while either reports the CVE, survives the delete of one mapping, and closes only
+    /// when no remaining mapping reports it.
+    #[tokio::test]
+    async fn shared_issue_stays_open_while_another_mapping_reports_the_cve() {
+        let fx = Fixture::new("shared", "CRITICAL", true).await;
+        // A second mapping, another Harbor repository, the same GitHub repository octo/app.
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash, auto_create_issues, min_issue_severity)
+             VALUES ('m2', 'u1', 'c1', 'c2', 'https://harbor.example.com', 'proj', 'web', 'octo', 'app', 'hash-token-m2', 'hash-secret-m2', 1, 'CRITICAL')",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.finding("m2", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.reconcile("proj/app:v1").await;
+        let m2 = fx.mapping("m2").await;
+        reconcile(&fx.pool, &fx.gh, TOKEN, &m2, "proj/web:v1", 1_000)
+            .await
+            .unwrap();
+        assert_eq!(fx.github.creates().len(), 1, "one shared issue");
+        let number = fx.issues().await[0].1;
+
+        // m1 no longer reports the CVE; m2 still does, so the shared issue stays open.
+        fx.fix("v1", "CVE-2026-0001").await;
+        sqlx::query("UPDATE cve_findings SET status = 'open' WHERE mapping_id = 'm2'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        fx.reconcile("proj/app:v2").await;
+        assert_eq!(
+            fx.issues().await,
+            vec![("CVE-2026-0001".to_owned(), number, "open".to_owned())]
+        );
+
+        // m1 is deleted through the mapping delete rule: the shared row survives, still open.
+        let mut conn = fx.pool.acquire().await.unwrap();
+        mapping_db::delete_github_issues(&mut conn, "m1", "octo", "app")
+            .await
+            .unwrap();
+        drop(conn);
+        sqlx::query("DELETE FROM repo_mappings WHERE id = 'm1'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            fx.issues().await,
+            vec![("CVE-2026-0001".to_owned(), number, "open".to_owned())]
+        );
+        reconcile(&fx.pool, &fx.gh, TOKEN, &m2, "proj/web:v2", 1_000)
+            .await
+            .unwrap();
+        assert_eq!(fx.issues().await[0].2, "open");
+
+        // The last mapping stops reporting it: now the issue closes.
+        sqlx::query("UPDATE cve_findings SET status = 'fixed' WHERE mapping_id = 'm2'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        reconcile(&fx.pool, &fx.gh, TOKEN, &m2, "proj/web:v3", 1_000)
+            .await
+            .unwrap();
+        assert_eq!(fx.issues().await[0].2, "closed");
+    }
+
     #[tokio::test]
     async fn readopts_after_mapping_delete_and_recreate() {
         let fx = Fixture::new("readopt", "CRITICAL", true).await;
@@ -1613,7 +1720,7 @@ mod tests {
 
         // The mapping is deleted: its issue rows go with it, and GitHub is not changed.
         let mut conn = fx.pool.acquire().await.unwrap();
-        mapping_db::delete_github_issues(&mut conn, "octo", "app")
+        mapping_db::delete_github_issues(&mut conn, "m1", "octo", "app")
             .await
             .unwrap();
         drop(conn);

@@ -406,8 +406,6 @@ pub async fn create<P: HarborProbe, G: GithubProbe>(
         &harbor_base,
         &input.harbor_project,
         &input.harbor_repository,
-        &input.github_owner,
-        &input.github_repo,
         &id,
     )
     .await?
@@ -555,16 +553,14 @@ pub async fn update<P: HarborProbe, G: GithubProbe>(
     // patch does not name is kept.
     let (mut next, _) = apply_patch(&locked, &patch)?;
     check_update_owners(&mut tx, user_id, &patch, &mut next).await?;
-    let target_changed =
-        harbor_changed || patch.github_owner.is_some() || patch.github_repo.is_some();
-    if target_changed {
+    // Only the Harbor repository is unique. A GitHub target shared with another mapping is
+    // allowed (#185).
+    if harbor_changed {
         let collision = db::find_conflict(
             &mut tx,
             &next.harbor_base_url,
             &next.harbor_project,
             &next.harbor_repository,
-            &next.github_owner,
-            &next.github_repo,
             id,
         )
         .await?;
@@ -579,9 +575,7 @@ pub async fn update<P: HarborProbe, G: GithubProbe>(
             // A UNIQUE violation is the same collision as the check above. The id of the
             // other mapping is unknown here, so the message is the generic one.
             sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
-                AppError::Conflict(
-                    "this Harbor repository or GitHub target is already mapped.".to_owned(),
-                )
+                AppError::Conflict("this Harbor repository is already mapped.".to_owned())
             }
             _ => AppError::InternalError,
         })?;
@@ -703,10 +697,10 @@ async fn load_row_owned(
 fn conflict_error(other_id: &str, other_user: &str, caller: &str) -> AppError {
     if other_user == caller {
         AppError::Conflict(format!(
-            "another mapping ({other_id}) already uses this Harbor repository or GitHub target."
+            "another mapping ({other_id}) already uses this Harbor repository."
         ))
     } else {
-        AppError::Conflict("this Harbor repository or GitHub target is already mapped.".to_owned())
+        AppError::Conflict("this Harbor repository is already mapped.".to_owned())
     }
 }
 
@@ -820,14 +814,29 @@ pub async fn delete(
     let mapping = db::find_owned(&mut tx, user_id, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    // Open GitHub issues are left on GitHub. Their numbers are listed in the audit
-    // entry so the operator can close them (`specs/api.md`, Mappings).
-    let open = db::open_issue_numbers(&mut tx, &mapping.github_owner, &mapping.github_repo).await?;
+    // Open GitHub issues are left on GitHub. The issue rows are shared by every mapping of
+    // the GitHub repository (#185): only the rows no other mapping reports are removed, and
+    // their open numbers are listed in the audit entry so the operator can close them
+    // (`specs/api.md`, Mappings). Rows another mapping still reports stay, and that mapping's
+    // syncs keep managing them.
+    let open = db::open_issue_numbers(
+        &mut tx,
+        &mapping.id,
+        &mapping.github_owner,
+        &mapping.github_repo,
+    )
+    .await?;
     let removed = db::delete_owned(&mut tx, user_id, id).await?;
     if removed == 0 {
         return Err(AppError::NotFound);
     }
-    db::delete_github_issues(&mut tx, &mapping.github_owner, &mapping.github_repo).await?;
+    db::delete_github_issues(
+        &mut tx,
+        &mapping.id,
+        &mapping.github_owner,
+        &mapping.github_repo,
+    )
+    .await?;
     let details = serde_json::json!({ "open_issue_numbers": open });
     audit::record(
         &mut tx,
@@ -1189,11 +1198,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #185: two mappings with different Harbor repositories may target one GitHub
+    /// repository, from the same user or another one. Both are created (`201`).
     #[tokio::test]
-    async fn duplicate_github_target_is_a_conflict() {
-        let (pool, dir) = fresh_pool("dup-github").await;
+    async fn two_harbor_repositories_may_target_one_github_repository() {
+        let (pool, dir) = fresh_pool("many-to-one").await;
         let owner = user(&pool, "owner").await;
+        let other = user(&pool, "other").await;
         let (h, g) = creds(&pool, &owner).await;
+        let (oh, og) = creds(&pool, &other).await;
+        let mut ids = Vec::new();
+        for (who, hc, gc, repo) in [
+            (&owner, &h, &g, "repo1"),
+            (&owner, &h, &g, "repo2"),
+            (&other, &oh, &og, "repo3"),
+        ] {
+            let created = create(
+                &pool,
+                &key(),
+                &READABLE,
+                &GH_READY,
+                &actor(who),
+                who,
+                PUBLIC,
+                input(hc, gc, repo, "gh"),
+            )
+            .await
+            .unwrap();
+            ids.push(created.mapping.id);
+        }
+        let targets: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM repo_mappings WHERE github_owner = 'owner' AND github_repo = 'gh'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(targets, 3);
+        // Moving a mapping onto a GitHub target another mapping uses is allowed too.
+        let (h3, g3) = creds(&pool, &owner).await;
+        let moved = create(
+            &pool,
+            &key(),
+            &READABLE,
+            &GH_READY,
+            &actor(&owner),
+            &owner,
+            PUBLIC,
+            input(&h3, &g3, "repo4", "elsewhere"),
+        )
+        .await
+        .unwrap();
+        update_with(
+            &pool,
+            Probes {
+                harbor: &READABLE,
+                github: &GH_READY,
+            },
+            &owner,
+            &moved.mapping.id,
+            MappingPatch {
+                github_repo: Some("gh".to_owned()),
+                ..no_change()
+            },
+        )
+        .await
+        .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #185: the same Harbor repository twice is still `409`, with fixed text that names
+    /// the Harbor repository rule and not the other tenant's mapping.
+    #[tokio::test]
+    async fn same_harbor_repository_twice_is_a_conflict_with_fixed_text() {
+        let (pool, dir) = fresh_pool("dup-harbor-text").await;
+        let owner = user(&pool, "owner").await;
+        let other = user(&pool, "other").await;
+        let (h, g) = creds(&pool, &owner).await;
+        let (oh, og) = creds(&pool, &other).await;
         create(
             &pool,
             &key(),
@@ -1202,22 +1284,28 @@ mod tests {
             &actor(&owner),
             &owner,
             PUBLIC,
-            input(&h, &g, "repo1", "gh"),
+            input(&h, &g, "repo", "gh1"),
         )
         .await
         .unwrap();
-        let result = create(
+        let err = create(
             &pool,
             &key(),
             &READABLE,
             &GH_READY,
-            &actor(&owner),
-            &owner,
+            &actor(&other),
+            &other,
             PUBLIC,
-            input(&h, &g, "repo2", "gh"),
+            input(&oh, &og, "repo", "gh2"),
         )
-        .await;
-        assert!(matches!(result, Err(AppError::Conflict(_))));
+        .await
+        .unwrap_err();
+        match err {
+            AppError::Conflict(message) => {
+                assert_eq!(message, "this Harbor repository is already mapped.");
+            }
+            other => panic!("expected conflict, got {other:?}"),
+        }
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1613,6 +1701,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #185: deleting one of two mappings on a GitHub repository keeps the shared issue row
+    /// (still `open`) while the other mapping reports the CVE, and the audit lists only the
+    /// open numbers whose rows were removed.
+    #[tokio::test]
+    async fn delete_keeps_shared_issue_row_while_another_mapping_reports_it() {
+        let (pool, dir) = fresh_pool("delete-shared").await;
+        let owner = user(&pool, "owner").await;
+        let (h, g) = creds(&pool, &owner).await;
+        let mut ids = Vec::new();
+        for repo in ["repo1", "repo2"] {
+            let created = create(
+                &pool,
+                &key(),
+                &READABLE,
+                &GH_READY,
+                &actor(&owner),
+                &owner,
+                PUBLIC,
+                input(&h, &g, repo, "gh"),
+            )
+            .await
+            .unwrap();
+            ids.push(created.mapping.id);
+        }
+        // Issue 7 is reported by both mappings, issue 9 only by the one being deleted.
+        issue(&pool, "gh", 7, "open").await;
+        issue(&pool, "gh", 9, "open").await;
+        for (n, (mapping, cve)) in [
+            (&ids[0], "CVE-2026-0007"),
+            (&ids[1], "CVE-2026-0007"),
+            (&ids[0], "CVE-2026-0009"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, severity, status)
+                 VALUES (?, ?, 'r', 'v1', ?, 'CRITICAL', 'open')",
+            )
+            .bind(format!("f{n}"))
+            .bind(mapping)
+            .bind(cve)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        delete(&pool, &actor(&owner), &owner, &ids[0])
+            .await
+            .unwrap();
+
+        let left: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT github_issue_number, status FROM github_issues ORDER BY github_issue_number",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(left, vec![(7, "open".to_owned())]);
+        let details: String =
+            sqlx::query_scalar("SELECT details FROM audit_log WHERE action = 'mapping.delete'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&details).unwrap();
+        assert_eq!(value["open_issue_numbers"], serde_json::json!([9]));
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A mapping for `owner` with the given Harbor repository and GitHub repo. Returns its id.
     async fn mapping_for(pool: &SqlitePool, owner: &str, repo: &str, gh_repo: &str) -> String {
         let (h, g) = creds(pool, owner).await;
@@ -1719,10 +1876,7 @@ mod tests {
         match foreign {
             AppError::Conflict(message) => {
                 assert!(!message.contains(&other_id), "leaked another tenant's id");
-                assert_eq!(
-                    message,
-                    "this Harbor repository or GitHub target is already mapped."
-                );
+                assert_eq!(message, "this Harbor repository is already mapped.");
             }
             other => panic!("expected conflict, got {other:?}"),
         }

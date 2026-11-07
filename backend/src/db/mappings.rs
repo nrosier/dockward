@@ -166,36 +166,56 @@ pub async fn delete_owned(
     .map_err(|_| AppError::InternalError)
 }
 
-/// Lists the GitHub issue numbers still open for a GitHub repository. These are the
-/// `github_issues` rows that the mapping delete removes and reports.
+/// Lists the GitHub issue numbers still open that the delete of `mapping_id` removes: open
+/// `github_issues` rows of the GitHub repository that no other mapping of that repository
+/// reports with an `open` finding. These are the numbers the `mapping.delete` audit lists.
 pub async fn open_issue_numbers(
     conn: &mut SqliteConnection,
+    mapping_id: &str,
     github_owner: &str,
     github_repo: &str,
 ) -> Result<Vec<i64>, AppError> {
     sqlx::query_scalar!(
-        r#"SELECT github_issue_number AS "number!: i64" FROM github_issues
-           WHERE github_owner = ? AND github_repo = ? AND status = 'open'
-           ORDER BY github_issue_number"#,
+        r#"SELECT gi.github_issue_number AS "number!: i64" FROM github_issues gi
+           WHERE gi.github_owner = ? AND gi.github_repo = ? AND gi.status = 'open'
+             AND NOT EXISTS (
+                 SELECT 1 FROM cve_findings f
+                 JOIN repo_mappings m ON m.id = f.mapping_id
+                 WHERE m.id <> ? AND m.github_owner = gi.github_owner
+                   AND m.github_repo = gi.github_repo
+                   AND f.cve_id = gi.cve_id AND f.status = 'open')
+           ORDER BY gi.github_issue_number"#,
         github_owner,
-        github_repo
+        github_repo,
+        mapping_id
     )
     .fetch_all(conn)
     .await
     .map_err(|_| AppError::InternalError)
 }
 
-/// Deletes the `github_issues` rows for one GitHub repository. The mapping owns them
-/// alone, because one mapping per repository is enforced (`specs/database.md`).
+/// Deletes the `github_issues` rows of a GitHub repository that no other mapping of that
+/// repository reports with an `open` finding. Rows are shared by every mapping that targets
+/// the repository (`specs/database.md`, #185), so a row still reported elsewhere stays.
+/// Nothing is changed on GitHub. Run it before the mapping row is deleted.
 pub async fn delete_github_issues(
     conn: &mut SqliteConnection,
+    mapping_id: &str,
     github_owner: &str,
     github_repo: &str,
 ) -> Result<u64, AppError> {
     sqlx::query!(
-        "DELETE FROM github_issues WHERE github_owner = ? AND github_repo = ?",
+        "DELETE FROM github_issues
+         WHERE github_owner = ? AND github_repo = ?
+           AND NOT EXISTS (
+               SELECT 1 FROM cve_findings f
+               JOIN repo_mappings m ON m.id = f.mapping_id
+               WHERE m.id <> ? AND m.github_owner = github_issues.github_owner
+                 AND m.github_repo = github_issues.github_repo
+                 AND f.cve_id = github_issues.cve_id AND f.status = 'open')",
         github_owner,
-        github_repo
+        github_repo,
+        mapping_id
     )
     .execute(conn)
     .await
@@ -203,29 +223,25 @@ pub async fn delete_github_issues(
     .map_err(|_| AppError::InternalError)
 }
 
-/// Returns the id of any mapping that uses the same Harbor repository on the same
-/// Harbor instance, or the same GitHub target. `None` when neither is taken.
+/// Returns the id and owner of any mapping that uses the same Harbor repository on the same
+/// Harbor instance. `None` when it is free. The GitHub target is not checked: several
+/// mappings may target one GitHub repository (`specs/database.md`, #185).
 pub async fn find_conflict(
     conn: &mut SqliteConnection,
     harbor_base_url: &str,
     harbor_project: &str,
     harbor_repository: &str,
-    github_owner: &str,
-    github_repo: &str,
     exclude_id: &str,
 ) -> Result<Option<(String, String)>, AppError> {
     let row = sqlx::query!(
         r#"SELECT id AS "id!", user_id AS "user_id!" FROM repo_mappings
            WHERE id <> ?
-             AND ((harbor_base_url = ? AND harbor_project = ? AND harbor_repository = ?)
-               OR (github_owner = ? AND github_repo = ?))
+             AND harbor_base_url = ? AND harbor_project = ? AND harbor_repository = ?
            LIMIT 1"#,
         exclude_id,
         harbor_base_url,
         harbor_project,
-        harbor_repository,
-        github_owner,
-        github_repo
+        harbor_repository
     )
     .fetch_optional(conn)
     .await
