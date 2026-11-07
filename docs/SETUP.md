@@ -149,7 +149,12 @@ Treat the webhook URL and the auth secret as secrets. Anyone who has the URL can
 
 Do these steps once for each repository HarborGate will write to.
 
-In Admin > Settings, leave the GitHub URL empty to use github.com. Set a custom GitHub host only for GitHub Enterprise Server.
+**GitHub address (optional).** In Admin > Settings > GitHub, leave both fields empty to use github.com. An empty value means github.com, so an existing install needs no change. The setting is for the whole HarborGate instance and only an admin can change it.
+
+- **API base URL:** the full API base, as an `https` address. For GitHub Enterprise Server enter the host with `/api/v3`, for example `https://ghes.example.com/api/v3`. For GHE.com enter `https://api.SUBDOMAIN.ghe.com` (no path). It must not contain a user name, password, port, query, or fragment.
+- **Web URL:** the host only, for example `https://ghes.example.com`. HarborGate uses it to check the `org.opencontainers.image.source` label (see section 6).
+- Any other value is refused with the message "Enter an https address with a host, for example https://ghes.example.com." and nothing is saved.
+- The addresses are stored in the database (not as secrets) and are shown on this page. The credential test and the mapping pickers use them as soon as you save. Tokens are never shown or logged.
 
 ### 4a. Create a fine-grained personal access token
 
@@ -246,7 +251,7 @@ LABEL io.github.nrosier.harborgate.branch="<branch>"
 ```
 
 - `org.opencontainers.image.revision` (required): the full commit SHA. If it is missing, the sync is marked `failed` with a clear error. HarborGate does not guess the SHA.
-- `org.opencontainers.image.source` (recommended): the repository URL. When present, it must match the mapping's GitHub target, `https://github.com/<owner>/<repo>`. The comparison ignores case and a trailing `/` or `.git`. On a mismatch the sync is marked `failed`, and nothing is uploaded. When the label is absent, the sync proceeds.
+- `org.opencontainers.image.source` (recommended): the repository URL. When present, it must match the mapping's GitHub target, `https://github.com/<owner>/<repo>` (or `<web URL>/<owner>/<repo>` when a custom web URL is set). The comparison ignores case and a trailing `/` or `.git`. On a mismatch the sync is marked `failed`, and nothing is uploaded. When the label is absent, the sync proceeds.
 - `io.github.nrosier.harborgate.branch` (optional): the branch name. When present, HarborGate uses it as the target branch. When absent, HarborGate uses the mapping's default branch. HarborGate does not read `org.opencontainers.image.ref.name` for the branch, because the OCI image spec defines that key as the name of a reference, typically a tag, not a branch.
 
 In a CI pipeline you can pass the values at build time, for example `docker build --label org.opencontainers.image.revision=$GIT_SHA ...`. Use placeholders in examples only, and never hardcode a real SHA in the Dockerfile.
