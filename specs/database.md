@@ -113,6 +113,63 @@ CREATE TABLE IF NOT EXISTS sync_reports (
 CREATE INDEX IF NOT EXISTS idx_sync_reports_digest
     ON sync_reports (mapping_id, harbor_repository, image_tag, image_digest, sarif_status);
 
+-- Harbor scanners seen by HarborGate (#224, migration 0009). Names and versions for display only.
+-- Decided (2026-11-07, user, #224 d12): the Harbor scanner registration UUID is the key; the name is shown.
+CREATE TABLE IF NOT EXISTS harbor_scanners (
+    harbor_base_url TEXT NOT NULL, -- normalized, as in repo_mappings.harbor_base_url
+    uuid TEXT NOT NULL,            -- Harbor scanner registration uuid
+    name TEXT NOT NULL,
+    vendor TEXT,
+    version TEXT,
+    disabled INTEGER NOT NULL DEFAULT 0,
+    last_seen_at INTEGER NOT NULL, -- Unix seconds of the last successful read that listed it
+    removed_at INTEGER,            -- set when a complete scanner list no longer has it
+    PRIMARY KEY (harbor_base_url, uuid)
+);
+
+-- One stored report per (mapping, image digest, scanner). A new scan by the same scanner replaces the row
+-- and its findings in one transaction (Decided 2026-11-07, user, #224 d2, d9). No run history is kept.
+CREATE TABLE IF NOT EXISTS scanner_reports (
+    id TEXT PRIMARY KEY,
+    mapping_id TEXT NOT NULL REFERENCES repo_mappings(id) ON DELETE CASCADE,
+    image_digest TEXT NOT NULL,
+    scanner_uuid TEXT NOT NULL,    -- a Harbor registration uuid, or the literal 'unknown' (see "Decisions")
+    scanner_name TEXT,             -- snapshot from the report's scanner object; NULL for 'unknown'
+    scanner_vendor TEXT,
+    scanner_version TEXT,
+    image_push_time INTEGER,       -- Unix milliseconds, as sync_reports.image_push_time (#196)
+    stored_at INTEGER NOT NULL,    -- Unix seconds; the retention clock
+    UNIQUE (mapping_id, image_digest, scanner_uuid)
+);
+
+-- The findings of one stored report, one row per (CVE id, package).
+CREATE TABLE IF NOT EXISTS scanner_findings (
+    report_id TEXT NOT NULL REFERENCES scanner_reports(id) ON DELETE CASCADE,
+    cve_id TEXT NOT NULL,
+    package TEXT NOT NULL DEFAULT '', -- '' when the scanner gives no package; the merge key uses it as is
+    version TEXT,
+    fixed_in_version TEXT,
+    severity TEXT NOT NULL CHECK (severity IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN')),
+    cvss_v3 REAL,                    -- preferred_cvss.score_v3, for the SARIF security-severity
+    description TEXT,                -- at most 4,000 characters, as cve_findings.description
+    PRIMARY KEY (report_id, cve_id, package)
+);
+
+-- One scanner switch per Harbor project at a time (Decided 2026-11-07, user, #224 d11). Rules: backend.md.
+CREATE TABLE IF NOT EXISTS project_scanner_locks (
+    harbor_base_url TEXT NOT NULL,
+    harbor_project TEXT NOT NULL,
+    job_id TEXT NOT NULL REFERENCES sync_jobs(id) ON DELETE CASCADE, -- the job that holds the lock
+    mapping_id TEXT REFERENCES repo_mappings(id) ON DELETE SET NULL, -- whose credential the restore uses
+    chosen_scanner_uuid TEXT NOT NULL,
+    previous_scanner_uuid TEXT,      -- NULL when Harbor reported none; nothing to restore then
+    state TEXT NOT NULL CHECK (state IN ('switched', 'restore_pending')),
+    acquired_at INTEGER NOT NULL,
+    wait_started_at INTEGER,         -- Unix seconds of the first report poll; the 5-minute ceiling counts from it
+    PRIMARY KEY (harbor_base_url, harbor_project)
+);
+CREATE INDEX IF NOT EXISTS idx_scanner_reports_digest ON scanner_reports (mapping_id, image_digest);
+
 -- Tracked GitHub Issues (one open or closed issue per repo and CVE)
 -- Rows are never deleted by tag cleanup or retention. The rows are owned by the single mapping for that GitHub repository. A mapping delete removes them. See "Decisions".
 CREATE TABLE IF NOT EXISTS github_issues (
@@ -301,6 +358,7 @@ Decided (2026-11-03) for `restore.run`: the offline restore command appends one 
 - `retention.run`
 - `sync_job.retry` (manual retry of a failed sync job; `details` is `{"job_id","mapping_id"}`; Decided (2026-11-03, delegated))
 - `log.level_change` (application log level change; `details` is `{"old","new"}`, each one of `info`, `debug`, `trace`; target `log_level`; the automatic revert to `info` uses the actor `system`. Decided (2026-11-05, user, #136). The application log itself is an in-memory buffer and has no table; see [security.md](security.md), "Application log")
+- `mapping.scan` (a scan of one tag started from the mapping page; `details` is `{"mapping_id","tag","scanner_uuid"}`, ids and the tag only; Decided (2026-11-07, delegated, #224))
 - `mapping.pull` (manual scan pull from Harbor for one mapping; `details` is `{"mapping_id","queued"}`, the number of jobs queued, and no values; Decided (2026-11-05, user, #131))
 
 No value is added for the mapping pickers (Decided 2026-11-05, #126, issue "Auditing"): listing, suggesting, hiding, and restoring write no audit row, because hiding is a user preference. A mapping saved from a picked value or a suggestion writes `mapping.create` or `mapping.update` as before.
@@ -314,7 +372,7 @@ Source: none external. The list follows the audit examples in [frontend.md](fron
 - **Credentials:** `user_credentials.encrypted_token` is AES-256-GCM encrypted in the "v1:" format. Never store plaintext tokens.
 - **Audit:** `audit_log.details` never contains tokens or key material. Every accept and un-accept is audited.
 - **Sync jobs:** `sync_jobs.payload` holds the validated event only. It never contains tokens or header secrets.
-- **Retention:** `sync_reports` and related logs are kept 90 days. `sync_jobs` is kept 90 days (Decided 2026-11-03). `job_runs` is kept 90 days (Decided 2026-11-03). `alert_deliveries` is kept 30 days (Decided 2026-11-03). `audit_log` is kept 365 days. See [cve-lifecycle.md](cve-lifecycle.md) for the per-tag limit.
+- **Retention:** `sync_reports` and related logs (including `scanner_reports`, see Decisions) are kept 90 days. `sync_jobs` is kept 90 days (Decided 2026-11-03). `job_runs` is kept 90 days (Decided 2026-11-03). `alert_deliveries` is kept 30 days (Decided 2026-11-03). `audit_log` is kept 365 days. See [cve-lifecycle.md](cve-lifecycle.md) for the per-tag limit.
 - Decided (2026-11-03, delegated): `CHECK` constraints on enumerated TEXT columns (`sync_jobs.status`, `github_issues.status`, `cve_findings.status` and `severity`, `repo_mappings.min_issue_severity`, `alert_channels.kind`, `job_runs.job_kind` and `job_runs.status`). Source: SQLite CREATE TABLE documentation, CHECK constraints (https://www.sqlite.org/lang_createtable.html). The index `idx_sync_reports_digest` is Decided (2026-11-03, delegated) for the polling dedupe lookup; no external source.
 - Decided (2026-11-05, user, #129): showing, filtering and manually logging every severity needs no constraint change and no migration. `cve_findings.severity` already allows all five values (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `UNKNOWN`), and the findings were always stored at every severity. `repo_mappings.min_issue_severity` keeps `CHECK (min_issue_severity IN ('CRITICAL', 'HIGH'))`, because it governs automatic issues only and the user decided automatic issues stay CRITICAL and HIGH. Manual logging at any severity reads no column that has a severity constraint, and the `github_issues` table has no severity column. The issue body of #129 assumed a constraint change; the decision recorded on the issue made it unnecessary.
 - Decided (2026-11-05, user, #126): `picker_hidden_items` holds one row per user, source, and full name, and for harbor source also per Harbor base URL, enforced by the two partial unique indexes in the table definition; a repeated hide is a no-op that returns the existing row. Decided (2026-11-05, user, #126): a hidden Harbor name is hidden only on the Harbor base URL it was hidden on, so the table stores `harbor_base_url` (the credential's `base_url`, NULL for github source) and no credential id. The `CHECK` ties `harbor_base_url` to `source`. `ON DELETE CASCADE` on `user_id` removes a deleted user's rows (the user deletion order is unchanged, because no other table references this one); `source` has a `CHECK` like the other enumerated columns; the table is not covered by retention, because rows are user-managed and capped at 1,000 per user by the application ([integrations.md](integrations.md), "Hide and restore"). The table is included in backups like every other table. Picker lists themselves are never stored: the 5-minute cache is in memory.
@@ -334,6 +392,16 @@ Source: none external. The list follows the audit examples in [frontend.md](fron
 - Decided: `sync_reports.sync_job_id` links each report to its job (nullable, `ON DELETE SET NULL`). The overall sync status is `sync_jobs.status`, not a column on this table (Decided 2026-11-03, see Decisions section).
 - Decided: `sync_reports.image_digest` is NOT NULL. Polling skips an image whose digest already has a successful sync for that mapping and tag. "Successful" means `sync_jobs.status = 'done'` and `sarif_status = 'success'` on the linked report (Decided 2026-11-03, see Decisions section). Decided (2026-11-05, user, #132): fan-out from a resolve job does not use this success rule. It skips a tag only when a `queued` or `running` sync job for the same mapping, digest and tag exists, so a rescan re-syncs a synced tag.
 - Decided (2026-11-07, #191): migration 0008 adds the scan schedule to `repo_mappings` (`scan_schedule` default `off`, `scan_minute`, `scan_weekday`, `scan_last_slot`) and the CVE id lists to `sync_reports` (`cve_ids`, `new_cve_ids`). Existing mappings get the schedule off; existing reports keep NULL lists. A scan job is a `sync_jobs` row whose payload is `{"kind":"scan","repo_full_name","trigger":"schedule"}`; the sync job it queues carries `"trigger":"schedule"`. No other table changes. Rules in [integrations.md](integrations.md), "Scheduled scan".
+- Decided (2026-11-07, user, #224 d2, d9, d12): migration 0009 adds `harbor_scanners`, `scanner_reports`, `scanner_findings` and `project_scanner_locks` (schema above). Nothing is added to `sync_reports` or `cve_findings`; `cve_findings` stays one row per (mapping, repository, tag, CVE) and is recomputed from the union of the digest's scanner reports ([cve-lifecycle.md](cve-lifecycle.md)).
+- Decided (2026-11-07, user, #224 d2): the storage rule is one report per (image digest, scanner UUID), scoped to the mapping. The older rule "one report per digest" in this file means `sync_reports`, which stays one row per processed (digest, tag) sync and is the SARIF upload record, not the findings store. A scan by a different scanner never replaces another scanner's `scanner_reports` row. Repeat scans of one digest by the same scanner replace its row and findings (d9).
+- **Migration 0009, existing rows** (Decided 2026-11-07, delegated, #224; no Harbor call is possible in a migration, so no row can be given a real scanner UUID):
+  1. For each (mapping, `image_digest`) with at least one `sync_reports` row at `sarif_status = 'success'`, insert one `scanner_reports` row with `scanner_uuid = 'unknown'`, `scanner_name` NULL, `image_push_time` and `stored_at` from the latest such `sync_reports` row (`synced_at`).
+  2. For that digest's latest successful tag, copy its `cve_findings` rows with `status = 'open'` into `scanner_findings` (cve id, package, fixed-in version, severity, description; version and CVSS NULL). Fixed rows are not copied.
+  3. Reports with no `cve_findings` (a clean image) get a `scanner_reports` row and no findings.
+  4. `harbor_scanners` and `project_scanner_locks` start empty.
+  The first normal sync of a digest that has a readable current scanner replaces the `unknown` row ([integrations.md](integrations.md), "Scanner reports and scan launch"). So the single-scanner case keeps working: before and after the migration the digest has one report, issues and counts do not change, and with Scanner Read the report is named from the next sync. Without Scanner Read it stays `unknown`, counts as one scanner, and the issue body omits the "Found by" line ([integrations.md](integrations.md), "GitHub issues"). The migration is reversible only by dropping the four tables.
+- Decided (2026-11-07, delegated, #224): retention. `scanner_reports` rows follow the 90-day rule by `stored_at`; they are also deleted when the tag pruning or retention leaves no `sync_reports` row for (mapping, digest), and with the mapping. A scanner removed from Harbor has its reports deleted ([integrations.md](integrations.md)). `harbor_scanners` rows are not deleted by retention (names only; at most a handful per Harbor).
+- Decided (2026-11-07, delegated, #224): a stored `scanner_findings` row is the scanner's own view. The merged view is never stored; it is a query over `scanner_findings` joined to `scanner_reports` for one (mapping, digest), grouped by (`cve_id`, `package`).
 - Decided (2026-11-05, user, #132): a resolve job is a `sync_jobs` row whose payload JSON is `{"kind":"resolve","repo_full_name","digest"}` with no `tag`. A payload with no `kind` is a sync job. No schema change and no migration: `payload` is already free JSON, and `kind` is read from it as `trigger` is.
 - Decided (2026-11-06, user, #179): the mapping-save project webhook check reads `project_webhooks` through `UNIQUE (harbor_base_url, harbor_project)`. No schema change and no migration.
 - Decided (2026-11-03, delegated): `user_credentials.username` (nullable) and `user_credentials.expires_at` (nullable) are added for the Harbor robot account. Harbor robot accounts expire after 30 days by default. Source: Harbor robot account documentation, https://goharbor.io/docs/latest/administration/robot-accounts/ (fetched in this session; the default expiry text is confirmed). The expiry is configurable through the `robot_token_duration` system setting (Harbor API swagger, `robot_token_duration`, "robot account token duration in days"). The Harbor robot username form is `<prefix><name>` for system robots and `<prefix><project>+<name>` for project robots, with the configurable prefix defaulting to `robot$` (verified (2026-11-03) in `src/controller/robot/controller.go`).

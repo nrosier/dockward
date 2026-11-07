@@ -4,7 +4,7 @@ This guide explains how an operator configures Harbor, GitHub, and HarborGate so
 
 ## 1. Overview
 
-HarborGate is a security relay. When Harbor finishes scanning an image, it sends a webhook to HarborGate. HarborGate fetches the vulnerability report for that image from the Harbor REST API, converts the Trivy results to SARIF 2.1.0, and uploads the SARIF to the GitHub code-scanning API for the repository that matches the image. For `CRITICAL` and `HIGH` findings it can also open one GitHub issue per CVE per repository. An issue closes automatically with a comment when no tag of the image still reports the CVE. If any tag still reports it, the issue stays open. If a closed CVE reappears in a later scan, HarborGate reopens the same issue and comments.
+HarborGate is a security relay. When Harbor finishes scanning an image, it sends a webhook to HarborGate. HarborGate fetches the vulnerability report for that image from the Harbor REST API, converts the Trivy results to SARIF 2.1.0, and uploads the SARIF to the GitHub code-scanning API for the repository that matches the image. For `CRITICAL` and `HIGH` findings it can also open one GitHub issue per CVE per repository. An issue closes automatically with a comment when no scanner reports the CVE in the newest scanned image. If any scanner still reports it there, the issue stays open. If a closed CVE reappears in a later scan, HarborGate reopens the same issue and comments.
 
 The flow is:
 
@@ -89,8 +89,18 @@ Do these steps for each Harbor project that HarborGate will map. Use a project a
 | Artifact Addition: Read | Read the vulnerability report (`GET .../artifacts/{reference}/additions/vulnerabilities`) |
 | Tag: List | List the tags of an artifact (`GET .../artifacts/{reference}/tags`). Required (live test 2026-11-06: without it, the tags endpoint returned `403` for a digest tagged `latest`) |
 | Scan: Create | Start a vulnerability scan of an artifact (`POST .../artifacts/{reference}/scan`). Required for a mapping's scheduled scan (#191). Harbor checks Scan Create for this call (`src/server/v2.0/handler/scan.go`, checked 2026-11-07). Decided 2026-11-06 (user, #191): granted to the robot in Harbor. |
+| Scanner: Read | Read the project's current scanner (`GET /projects/{project}/scanner`) and learn scanner names. Optional: needed to scan with a chosen scanner and to name reports (#224). Harbor checks Scanner Read (`src/server/v2.0/handler/project.go`, checked 2026-11-07). |
+| Scanner: Create | List the scanners Harbor offers to the project (`GET /projects/{project}/scanner/candidates`) and set the project's scanner (`PUT /projects/{project}/scanner`). Optional: needed to choose a scanner for a scan (#224). Harbor checks Scanner Create for both calls (same file, checked 2026-11-07). |
 
-In the robot's permission list these appear as the resources **Repository**, **Artifact**, **Artifact Addition**, **Tag**, and **Scan**. **Repository**, **Artifact** and **Artifact Addition** use the actions **List** and **Read** as in the table, **Tag** uses only **List**, and **Scan** uses only **Create**. Do not grant anything else: no Repository Pull or Push, no Scan Read or Stop, no other create, delete, or tag create or delete permissions, and no project or system administration. Decided 2026-11-06 (user, #191): the earlier "do not grant Scan" rule is replaced by the Scan row above. A mapping whose schedule is off never calls the scan endpoint, so a robot without Scan still works for webhooks and polling; only its scheduled scans fail, with "Harbor refused to start the scan".
+In the robot's permission list these appear as the resources **Repository**, **Artifact**, **Artifact Addition**, **Tag**, **Scan**, and **Scanner**. **Repository**, **Artifact** and **Artifact Addition** use the actions **List** and **Read** as in the table, **Tag** uses only **List**, **Scan** uses only **Create**, and **Scanner** uses **Read** and **Create**. Do not grant anything else: no Repository Pull or Push, no Scan Read or Stop, no Scanner List, Update or Delete, no other create, delete, or tag create or delete permissions, and no project or system administration. Decided 2026-11-06 (user, #191): the earlier "do not grant Scan" rule is replaced by the Scan row above. A mapping whose schedule is off never calls the scan endpoint, so a robot without Scan still works for webhooks and polling; only its scheduled scans fail, with "Harbor refused to start the scan".
+
+**Choosing a scanner for a scan (#224, decided 2026-11-07, user).** Harbor's scan call cannot choose a scanner; it uses the project's scanner. To scan with a scanner you choose, HarborGate sets that scanner on the Harbor project, starts the scan, waits for the report, and sets the previous scanner back. This needs Scanner Read and Scanner Create. Without them HarborGate still scans with the project's current scanner and shows reports from Harbor as "Unknown scanner". Know before you grant them:
+
+- While a scan with a chosen scanner runs, other people who use the Harbor project see the chosen scanner in Harbor, and scans that Harbor starts in that time (scan on push, a manual scan) use it. HarborGate keeps the report of each scanner separately, so they are not lost.
+- Scans on one Harbor project run one at a time.
+- HarborGate always puts the previous scanner back. If it cannot, it raises the sync-failed alert and keeps a warning on the mapping page until it succeeds. If you change the project scanner in Harbor during a scan, HarborGate leaves your change alone.
+- Harbor has no call to remove a project's scanner setting. A project that used Harbor's default scanner without a setting of its own ends up with that default set on the project after the first switch. Later changes of the system default no longer move it.
+- A robot that can set the project scanner can make the project scan with any registered scanner. Grant it only to a robot for this project.
 
 Verification status (2026-11-03, updated 2026-11-05):
 - Each endpoint's permission check was read in the Harbor source (`src/server/v2.0/handler/artifact.go`): listing artifacts needs Artifact List, reading an artifact needs Artifact Read, and the vulnerabilities addition needs Artifact Addition Read. The scan overview comes with the artifact read, so Scan Read is not needed. HarborGate never pulls an image, so Repository Pull is not needed.
@@ -142,8 +152,8 @@ Treat the webhook URL and the auth secret as secrets. Anyone who has the URL can
 ### 3d. Enable scanning on the project
 
 1. In Harbor, open the project `<project>`, go to the **Configuration** tab, and under **Vulnerability scanning** check **Automatically scan images on push**. Save.
-2. Confirm that the scanner for the project is Trivy, and that a newly pushed image is scanned. Harbor shows the results on the artifact's **Vulnerabilities** view.
-3. HarborGate only converts Trivy output. Other scanners are not supported (per the project specification).
+2. Confirm that the project has a scanner (Trivy by default), and that a newly pushed image is scanned. Harbor shows the results on the artifact's **Vulnerabilities** view.
+3. HarborGate converts the report of every scanner Harbor runs for the project (#224). With more than one scanner, it keeps one report per scanner and shows a CVE found by several scanners once, with the scanner count and names. See section 3a for scanning with a chosen scanner.
 
 ## 4. GitHub Setup
 

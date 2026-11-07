@@ -12,6 +12,7 @@ Purpose: the single home for alert rules. Covers admin-configured email (SMTP) a
 ## Triggers
 
 - A sync fails.
+  - Decided (2026-11-07, user, #224 d4, d11): a `scanner_scan` job that ends `failed` and a `scanner_restore` job that ends `failed` each raise this alert, with a fixed `error` string from [integrations.md](integrations.md), "Failure and messages". The dedupe key is `sync_failed:<sync_job_id>` as for other jobs. A failed scanner does not stop the other scanners' jobs, so one scan with two scanners can raise one alert for the failed one. A failed restore is the more serious case: the Harbor project keeps the wrong scanner until it is fixed. Decided (2026-11-07, delegated, #224): the alert `text` for a failed restore names the Harbor project and says the scanner was not restored; it holds no URL or token.
   - Decided (2026-11-06, user, #197): a sync or resolve job that ends `done` with `artifact no longer in Harbor` (the image was deleted) is final, not failed, and does not raise this alert.
 - A new CRITICAL CVE appears.
 
