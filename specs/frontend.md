@@ -47,7 +47,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
   - Admin Settings shows its four sections as a row of pill links under the tabs. Each section has its own URL.
   - Alert channels: saved config is never returned, so editing a channel means entering its whole config again. The edit form says so.
   - Per-CVE view: "Create issue" shows for a CVE of any severity that is open on at least one tag (Changed 2026-11-05, user, #129; until then CRITICAL and HIGH only), and is disabled while an open issue exists or an active acceptance exists. When `open_severity` is LOW or UNKNOWN, the button first asks for confirmation in a dialog; CRITICAL and HIGH stay one click (MEDIUM too, see [integrations.md](integrations.md)). A GitHub rate limit shows one clear message and is not retried in a loop. The changed button needs design approval before it is built.
-  - CVE list (Decided 2026-11-05, user, #129): the default view shows every severity. Filters: severity (multi-select), status (open, fixed, accepted), package, tag, Harbor project and Harbor repository. They map to the query parameters in [api.md](api.md), CVEs. The filter bar needs design approval before it is built. CVE status uses an OPEN pill (neutral) and an ACCEPTED pill (accent).
+  - CVE list (Decided 2026-11-05, user, #129): the default view shows every severity. Filters: severity (multi-select), status (open, fixed, accepted), package, tag, Harbor project and Harbor repository. They map to the query parameters in [api.md](api.md), CVEs. The filter bar needs design approval before it is built. CVE status uses an OPEN pill (neutral) and an ACCEPTED pill (accent). Decided (2026-11-07, user, #196, decisions 21 and 22): the list shows the CVEs of the newest scanned digest of each mapping only. A CVE that is open only on an older tag is not listed. The `tag` filter offers the newest-digest tags only. Rules: [cve-lifecycle.md](cve-lifecycle.md), "Tracking per tag".
   - Accept risk is a modal dialog (Radix Dialog).
   - Add credential: the primary button is "Save and test". It saves the credential, then calls `POST /credentials/:id/test` and shows the check results on the same page, with "Test again" and "Done". The API has no route that tests an unsaved credential.
   - Sync job Trigger shows `webhook` or `poll` ([api.md](api.md), Sync jobs). A retry keeps the job's trigger. Decided (2026-11-07, #191): `schedule` shows "Schedule". A finished scheduled sync shows, under its image, "New vulnerabilities: <ids>" or "No new vulnerabilities" (catalog keys `syncJobs.newVulns`, `syncJobs.noNewVulns`), from `report.new_cve_ids`. The fixed scan notes and the Scan refusal show as catalog text (`sync.note.noTaggedImage`, `sync.note.scanAlreadyRunning`, `sync.note.scanForbidden`).
@@ -93,6 +93,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 ## Dashboard (decided)
 
 - Summary counts: open CVEs by severity (CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN; every severity since 2026-11-05, user, #129), fixed CVEs, open GitHub issues, failed syncs.
+- Decided (2026-11-07, user, #196, decisions 21 and 22): the CVE counts (open by severity, fixed) follow the newest scanned digest of each mapping, the same view as the CVE list. A CVE open only on an older tag adds nothing to them. The same holds for the Open CVEs column of the mapping list. Rules: [cve-lifecycle.md](cve-lifecycle.md), "Dashboard counts". No layout changes, so no new design is needed.
 - Below the counts: recent syncs with status and time. Failed rows have a retry action.
 
 ## Mapping form (decided)
@@ -165,7 +166,16 @@ Decided (2026-11-07, user, #224 d1, d8, d12): each tag has a Scan button on the 
 - A detail page for one CVE, linkable by URL.
 - Header: CVE id, severity pill, status pill, package, first seen date, link to the GitHub issue, and an "Accept risk" action.
 - Decided (2026-11-03): the manual-issue button sits in this header, next to the GitHub issue link. It calls `POST /api/v1/cves/{id}/issue`.
-- Below the header: a table with one row per tracked tag (up to 10). Columns: tag, status, last scan date, fixed-in version when known.
+- Below the header: a table with one row per tracked tag that reports this CVE (up to 10). Columns: tag, status, last scan date, fixed-in version when known.
+- Decided (2026-11-07, user, #196, decisions 21 and 22): this table is where the rows of older tags stay visible. A row for a tag of the newest scanned digest has no marker. A row for any other tag shows the pill text `cves.detail.olderTag`. The header status is the status in the newest-digest view, so a CVE that only older tags report shows `fixed`. In that case a notice with `cves.detail.olderTagsOnly` is shown above the table, and the Accept risk action and the manual-issue button follow the rules they already have ([api.md](api.md), CVEs). The page is reached by its URL; the CVE list does not link to it.
+- Catalog keys for this change (Decided 2026-11-07, English text delegated, #196; parity kept in `frontend/src/i18n/en.json`):
+
+  | Key | English text |
+  | --- | --- |
+  | `cves.detail.olderTag` | Older tag, not counted |
+  | `cves.detail.olderTagsOnly` | Only older tags report this CVE. The newest scan does not, so it is not in the CVE list and not counted on the Dashboard. |
+
+- OPEN (2026-11-07, #196): the notice and the tag marker are new UI. Their design needs the user's approval before they are built (CLAUDE.md, design before build). Only the contract above is decided.
 
 ## Admin (decided)
 
