@@ -38,6 +38,12 @@ export function ProjectWebhookProposal({ mappingId, harborProject, onDismiss }: 
     },
   });
 
+  const dismiss = (
+    <Button variant="small" onClick={onDismiss}>
+      {values === null ? t("mapping.projectWebhook.dismiss") : t("projectWebhook.shownOnce.done")}
+    </Button>
+  );
+
   let body;
   if (values !== null) {
     body = (
@@ -57,10 +63,16 @@ export function ProjectWebhookProposal({ mappingId, harborProject, onDismiss }: 
           </label>
           <CopyField id="proposal-auth-secret" value={values.authSecret} label={t("projectWebhook.shownOnce.authSecret")} />
         </div>
+        <div className="flex">{dismiss}</div>
       </>
     );
   } else if (conflict) {
-    body = <p className="text-[13px]">{t("mapping.projectWebhook.exists", { project: harborProject })}</p>;
+    body = (
+      <>
+        <p className="text-[13px]">{t("mapping.projectWebhook.exists", { project: harborProject })}</p>
+        <div className="flex">{dismiss}</div>
+      </>
+    );
   } else {
     body = (
       <>
@@ -70,10 +82,11 @@ export function ProjectWebhookProposal({ mappingId, harborProject, onDismiss }: 
             {t("errors.generic")}
           </p>
         ) : null}
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button variant="primary" disabled={create.isPending} onClick={() => create.mutate()}>
             {create.isPending ? t("mapping.projectWebhook.creating") : t("mapping.projectWebhook.create")}
           </Button>
+          <Button onClick={onDismiss}>{t("mapping.projectWebhook.dismiss")}</Button>
         </div>
       </>
     );
@@ -85,19 +98,6 @@ export function ProjectWebhookProposal({ mappingId, harborProject, onDismiss }: 
       className="flex flex-col gap-3 rounded-[10px] border border-accent/40 bg-accent/10 px-4 py-3.5"
     >
       {body}
-      {values === null ? (
-        <div className="flex">
-          <Button variant="small" onClick={onDismiss}>
-            {t("mapping.projectWebhook.dismiss")}
-          </Button>
-        </div>
-      ) : (
-        <div className="flex">
-          <Button variant="small" onClick={onDismiss}>
-            {t("projectWebhook.shownOnce.done")}
-          </Button>
-        </div>
-      )}
     </section>
   );
 }

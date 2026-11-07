@@ -116,6 +116,9 @@ export default function MappingFormPage() {
         <PageTitle title={t("page.mappingEdit")} />
         <p className="text-muted">{mappingName(mapping)}</p>
       </div>
+      {canPull ? <PullScans key={`pull-${mapping.id}`} mapping={mapping} /> : null}
+      <MappingForm key={mapping.id} mapping={mapping} readOnly={!owned} onCreated={() => undefined} onUpdated={onUpdated} />
+      {/* Below the form actions, where Save was clicked. */}
       {proposal === null ? null : (
         <div className="flex flex-col gap-2">
           <output className="text-[13px] text-ok-ink">{t("mapping.projectWebhook.saved")}</output>
@@ -127,8 +130,6 @@ export default function MappingFormPage() {
           />
         </div>
       )}
-      {canPull ? <PullScans key={`pull-${mapping.id}`} mapping={mapping} /> : null}
-      <MappingForm key={mapping.id} mapping={mapping} readOnly={!owned} onCreated={() => undefined} onUpdated={onUpdated} />
       {owned ? (
         <WebhookCard mapping={mapping} onRotated={onRotated} onDeleted={() => void navigate("/mappings")} />
       ) : null}
