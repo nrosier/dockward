@@ -218,7 +218,7 @@ export default function CvesPage() {
                   const mapping = mappings.get(cve.mapping_id);
                   return (
                     <tr key={cve.id}>
-                      <td className={TD}>
+                      <td className={`${TD} whitespace-nowrap`}>
                         <Link to={`/cves/${encodeURIComponent(cve.id)}`} className={`font-mono text-[13px] ${LINK}`}>
                           {cve.cve_id}
                         </Link>
