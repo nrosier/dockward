@@ -37,6 +37,7 @@ pub const ACTIONS: &[&str] = &[
     "key.rotate",
     "retention.run",
     "sync_job.retry",
+    "sync_job.purge",
     "log.level_change",
 ];
 

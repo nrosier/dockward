@@ -156,6 +156,14 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             get(api::project_webhooks::unmatched),
         )
         .route("/api/v1/sync-jobs", get(api::sync_jobs::list))
+        .route(
+            "/api/v1/sync-jobs/failed-count",
+            get(api::sync_jobs::failed_count),
+        )
+        .route(
+            "/api/v1/sync-jobs/purge-failed",
+            post(api::sync_jobs::purge_failed),
+        )
         .route("/api/v1/sync-jobs/{id}", get(api::sync_jobs::get))
         .route("/api/v1/sync-jobs/{id}/retry", post(api::sync_jobs::retry))
         .route("/api/v1/dashboard/summary", get(api::dashboard::summary))
@@ -4636,6 +4644,172 @@ mod tests {
         assert_eq!(owner_status, StatusCode::OK);
         assert_eq!(retried["status"], "queued");
         assert!(retried["created_at"].as_str().unwrap().ends_with('Z'));
+    }
+
+    /// The purge routes: no session is `401`, a POST without a CSRF token is `403`
+    /// `csrf_invalid` and deletes nothing, `scope=all` is admin only (`403` for a user),
+    /// another scope is `400`, and the owner's purge returns `{"deleted"}` and a count of 0.
+    #[tokio::test]
+    async fn sync_job_purge_routes_check_csrf_session_and_scope() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, pool, dir) = test_router("purge-route").await;
+        let mut conn = pool.acquire().await.unwrap();
+        for id in ["owner-1", "other-2"] {
+            db::users::insert_local(&mut conn, id, id, None, "h", "user")
+                .await
+                .unwrap();
+        }
+        db::users::insert_local(&mut conn, "admin-1", "admin-1", None, "h", "admin")
+            .await
+            .unwrap();
+        drop(conn);
+        sqlx::query(
+            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
+             VALUES ('pc1', 'owner-1', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
+                    ('pc2', 'owner-1', 'github', 'g', NULL, NULL, 'v1:fake')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
+             VALUES ('pm1', 'owner-1', 'pc1', 'pc2', 'https://harbor.example.com', 'proj', 'app', 'octo', 'app', 'h1', 'h2')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sync_jobs (id, mapping_id, status, attempts, payload, created_at, updated_at)
+             VALUES ('pj-1', 'pm1', 'failed', 8, '{}', 1000, 2000),
+                    ('pj-2', 'pm1', 'queued', 0, '{}', 1000, 2000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let key = auth::crypto::csrf_key(
+            &config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap(),
+        )
+        .unwrap();
+        let csrf = auth::csrf::issue(&key).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let owner = format!("{}; {csrf_cookie}", session_cookie("owner-1", "user", 0));
+        let other = format!("{}; {csrf_cookie}", session_cookie("other-2", "user", 0));
+        let admin = format!("{}; {csrf_cookie}", session_cookie("admin-1", "admin", 0));
+        let request = |method: &str, uri: &str, cookie: Option<&str>, token: Option<&str>| {
+            let mut builder = with_peer(Request::builder().method(method).uri(uri));
+            if let Some(cookie) = cookie {
+                builder = builder.header("cookie", cookie);
+            }
+            if let Some(token) = token {
+                builder = builder.header("x-csrf-token", token);
+            }
+            builder.body(Body::empty()).unwrap()
+        };
+        let purge = "/api/v1/sync-jobs/purge-failed";
+        let count = "/api/v1/sync-jobs/failed-count";
+        let body_of = |response: axum::response::Response| async move {
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+
+        let no_session = router
+            .clone()
+            .oneshot(request("GET", count, None, None))
+            .await
+            .unwrap();
+        let no_csrf = router
+            .clone()
+            .oneshot(request("POST", purge, Some(&owner), None))
+            .await
+            .unwrap();
+        let user_all = router
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/sync-jobs/purge-failed?scope=all",
+                Some(&other),
+                Some(&csrf),
+            ))
+            .await
+            .unwrap();
+        let bad_scope = router
+            .clone()
+            .oneshot(request(
+                "GET",
+                "/api/v1/sync-jobs/failed-count?scope=mine",
+                Some(&owner),
+                None,
+            ))
+            .await
+            .unwrap();
+        let admin_own = router
+            .clone()
+            .oneshot(request("GET", count, Some(&admin), None))
+            .await
+            .unwrap();
+        let admin_own = body_of(admin_own).await;
+        let admin_all = router
+            .clone()
+            .oneshot(request(
+                "GET",
+                "/api/v1/sync-jobs/failed-count?scope=all",
+                Some(&admin),
+                None,
+            ))
+            .await
+            .unwrap();
+        let admin_all = body_of(admin_all).await;
+        let owner_count = router
+            .clone()
+            .oneshot(request("GET", count, Some(&owner), None))
+            .await
+            .unwrap();
+        let owner_count = body_of(owner_count).await;
+        let other_purge = router
+            .clone()
+            .oneshot(request("POST", purge, Some(&other), Some(&csrf)))
+            .await
+            .unwrap();
+        let other_purge = body_of(other_purge).await;
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let owner_purge = router
+            .clone()
+            .oneshot(request("POST", purge, Some(&owner), Some(&csrf)))
+            .await
+            .unwrap();
+        let owner_status = owner_purge.status();
+        let owner_purge = body_of(owner_purge).await;
+        let after: Vec<String> = sqlx::query_scalar("SELECT id FROM sync_jobs")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(no_session.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(no_csrf.status(), StatusCode::FORBIDDEN);
+        assert_eq!(user_all.status(), StatusCode::FORBIDDEN);
+        assert_eq!(bad_scope.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(admin_own["count"], 0);
+        assert_eq!(admin_all["count"], 1);
+        assert_eq!(owner_count["count"], 1);
+        assert_eq!(other_purge["deleted"], 0);
+        assert_eq!(
+            remaining, 2,
+            "a non-owner purge and a CSRF-less POST delete nothing"
+        );
+        assert_eq!(owner_status, StatusCode::OK);
+        assert_eq!(owner_purge["deleted"], 1);
+        assert_eq!(after, ["pj-2"]);
     }
 
     /// The application log routes: no session is `401`, a regular user is `403` on

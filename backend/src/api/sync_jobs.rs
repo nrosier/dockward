@@ -53,6 +53,48 @@ pub async fn list(
     Ok(Json(sync_jobs::list(&state.pool, &user.id, &query).await?))
 }
 
+/// Reads the purge `scope` query: none is the caller's own mappings, `all` is admin only.
+fn purge_scope(user: &AuthUser, scope: Option<&str>) -> Result<bool, AppError> {
+    match scope {
+        None => Ok(false),
+        Some("all") if user.role == Role::Admin => Ok(true),
+        Some("all") => Err(AppError::Forbidden),
+        Some(_) => Err(AppError::InvalidRequest("scope must be all.".to_owned())),
+    }
+}
+
+/// Query for the purge routes.
+#[derive(Debug, Deserialize)]
+pub struct PurgeParams {
+    pub scope: Option<String>,
+}
+
+/// `GET /api/v1/sync-jobs/failed-count`: what a purge would delete now.
+pub async fn failed_count(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Query(params): Query<PurgeParams>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let all_users = purge_scope(&user, params.scope.as_deref())?;
+    let count = sync_jobs::failed_count(&state.pool, &user.id, all_users).await?;
+    Ok(Json(serde_json::json!({ "count": count })))
+}
+
+/// `POST /api/v1/sync-jobs/purge-failed`: deletes the caller's failed jobs.
+pub async fn purge_failed(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Query(params): Query<PurgeParams>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let all_users = purge_scope(&user, params.scope.as_deref())?;
+    let actor = Actor {
+        user_id: Some(user.id.clone()),
+        username: user.username.clone(),
+    };
+    let deleted = sync_jobs::purge_failed(&state.pool, &actor, all_users).await?;
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
 /// `GET /api/v1/sync-jobs/:id`. An admin reads any job; a user reads only their own.
 pub async fn get(
     State(state): State<AppState>,
