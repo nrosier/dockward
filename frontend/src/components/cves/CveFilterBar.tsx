@@ -1,42 +1,63 @@
-import { X } from "lucide-react";
-import { useEffect, useState } from "react";
-import { t, type MessageKey } from "../../i18n";
+import { useEffect, useState, type ReactNode } from "react";
+import { t } from "../../i18n";
 import {
   SEVERITIES,
   STATUSES,
-  toUrlParams,
   type CveFilterState,
+  type HasIssue,
   type SeverityValue,
   type StatusValue,
-  type TextFilter,
 } from "../../lib/cveFilters";
-import { MappingFilter } from "../mappings/MappingFilter";
+import type { MappingListItem, MappingTag } from "../../types/api";
+import { Combobox } from "../ui/Combobox";
 import { INPUT } from "../mappings/styles";
-import { Button } from "../ui/Button";
-import type { MappingListItem } from "../../types/api";
 import { mappingName } from "../mappings/useMappings";
 
 const DEBOUNCE_MS = 300;
-const TOGGLE =
-  "min-h-8 cursor-pointer px-3 text-[12.5px] font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
-const LABEL = "mb-1.5 block text-xs text-muted";
+const GROUP_LABEL = "mr-0.5 text-[11px] font-semibold tracking-[0.06em] text-muted uppercase";
 
-// A text box that reports its value 300 ms after the last keystroke.
-function DebouncedInput({
-  id,
-  label,
-  placeholder,
-  value,
-  onCommit,
-  type = "text",
-}: {
-  id: string;
-  label: string;
-  placeholder: string;
-  value: string;
-  onCommit: (value: string) => void;
-  type?: "text" | "search";
-}) {
+// Filled with the tone when on, an outline when off. The dot is hollow when off, so the
+// state is not colour alone.
+const TONE: Record<string, string> = {
+  CRITICAL: "text-crit-ink bg-crit/12 border-crit/45",
+  HIGH: "text-high-ink bg-high/12 border-high/45",
+  MEDIUM: "text-med-ink bg-med/10 border-med/40",
+  LOW: "text-low-ink bg-low/12 border-low/45",
+  accepted: "text-accent bg-accent/15 border-accent/45",
+  fixed: "text-ok-ink bg-ok/12 border-ok/45",
+  neutral: "text-text bg-text/10 border-text",
+};
+
+function FilterPill({ on, tone, label, onClick }: { on: boolean; tone: string; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      onClick={onClick}
+      className={`inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-full border px-[11px] text-[11px] leading-none font-semibold tracking-[0.05em] whitespace-nowrap uppercase focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+        on ? (TONE[tone] ?? TONE.neutral) : "border-muted bg-transparent text-muted"
+      }`}
+    >
+      <span aria-hidden="true" className={`size-1.5 rounded-full ${on ? "bg-current" : "border border-current"}`} />
+      {label}
+    </button>
+  );
+}
+
+function Group({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- a fieldset cannot sit in this wrapping flex row with the visible label
+    <div role="group" aria-label={label} className="flex flex-wrap items-center gap-2">
+      <span aria-hidden="true" className={GROUP_LABEL}>
+        {label}
+      </span>
+      <div className="flex flex-wrap gap-1.5">{children}</div>
+    </div>
+  );
+}
+
+// The search box reports its value 300 ms after the last keystroke. Clear reports at once.
+function SearchField({ value, onCommit }: { value: string; onCommit: (value: string) => void }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => {
     setDraft(value);
@@ -50,179 +71,154 @@ function DebouncedInput({
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- onCommit is recreated each render and only reads current params
   }, [draft, value]);
   return (
-    <div>
-      <label htmlFor={id} className={LABEL}>
-        {label}
-      </label>
+    <div className="relative">
       <input
-        id={id}
-        type={type}
+        type="search"
+        aria-label={t("cves.filter.search")}
         value={draft}
-        placeholder={placeholder}
+        placeholder={t("cves.filter.searchPlaceholder")}
         onChange={(event) => setDraft(event.target.value)}
-        className={INPUT}
+        className={`${INPUT} pr-24 [&::-webkit-search-cancel-button]:hidden`}
       />
-    </div>
-  );
-}
-
-// A multi-select: a group of toggle buttons. The last pressed one stays on.
-function Toggles<T extends string>({
-  label,
-  options,
-  selected,
-  onChange,
-}: {
-  label: string;
-  options: Array<{ value: T; label: string }>;
-  selected: T[];
-  onChange: (next: T[]) => void;
-}) {
-  return (
-    <div>
-      <p className={LABEL}>{label}</p>
-      <fieldset aria-label={label} className="m-0 inline-flex min-w-0 flex-wrap overflow-hidden rounded-lg border border-muted p-0">
-        {options.map((option) => {
-          const on = selected.includes(option.value);
-          return (
-            <button
-              key={option.value}
-              type="button"
-              aria-pressed={on}
-              onClick={() => {
-                const next = on ? selected.filter((value) => value !== option.value) : [...selected, option.value];
-                if (next.length > 0) {
-                  onChange(options.map((o) => o.value).filter((value) => next.includes(value)));
-                }
-              }}
-              className={`${TOGGLE} ${on ? "bg-surface-2 text-text" : "bg-transparent text-muted"}`}
-            >
-              {option.label}
-            </button>
-          );
-        })}
-      </fieldset>
+      {draft === "" ? null : (
+        <button
+          type="button"
+          onClick={() => {
+            setDraft("");
+            onCommit("");
+          }}
+          className="absolute top-[3px] right-1 min-h-[30px] cursor-pointer rounded-lg border border-border bg-surface-2 px-2.5 text-[12.5px] font-medium text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
+          {t("cves.filter.clear")}
+        </button>
+      )}
     </div>
   );
 }
 
 interface CveFilterBarProps {
   state: CveFilterState;
-  q: string;
   mappings: MappingListItem[];
+  // Tracked tags of the chosen mapping, when one is chosen.
+  tags: MappingTag[];
   // Sets or clears (value "") the URL parameters named in the patch.
   onChange: (patch: Record<string, string>) => void;
-  onClearAll: () => void;
 }
 
-const TEXT_FIELDS: Array<{ name: TextFilter; label: MessageKey; placeholder: MessageKey }> = [
-  { name: "package", label: "cves.filter.package", placeholder: "cves.filter.packagePlaceholder" },
-  { name: "tag", label: "cves.filter.tag", placeholder: "cves.filter.tagPlaceholder" },
-  { name: "harbor_project", label: "cves.filter.project", placeholder: "cves.filter.projectPlaceholder" },
-  { name: "harbor_repository", label: "cves.filter.repository", placeholder: "cves.filter.repositoryPlaceholder" },
-];
+function toggle<T extends string>(selected: T[], value: T, all: readonly T[]): T[] {
+  const next = selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value];
+  return all.filter((item) => next.includes(item));
+}
 
-export function CveFilterBar({ state, q, mappings, onChange, onClearAll }: CveFilterBarProps) {
-  const urlValues = toUrlParams(state);
-  const chips: Array<{ key: string; text: string; clear: string[] }> = [];
-  if (q !== "") {
-    chips.push({ key: "q", text: t("cves.filter.chip.q", { value: q }), clear: ["q"] });
+export function CveFilterBar({ state, mappings, tags, onChange }: CveFilterBarProps) {
+  const projects = Array.from(new Set(mappings.map((mapping) => mapping.harbor_project))).sort();
+  const repositories = Array.from(
+    new Set(
+      mappings
+        .filter((mapping) => state.project === "" || mapping.harbor_project === state.project)
+        .map((mapping) => mapping.harbor_repository),
+    ),
+  ).sort();
+
+  function pickSeverity(value: SeverityValue) {
+    onChange({ severity: toggle(state.severities, value, SEVERITIES).join(",") });
   }
-  if ("severity" in urlValues) {
-    chips.push({ key: "severity", text: t("cves.filter.chip.severity", { value: state.severities.join(", ") }), clear: ["severity"] });
-  }
-  if ("status" in urlValues) {
-    const value = state.statuses.map((status) => t(`cves.status.${status}`)).join(", ");
-    chips.push({ key: "status", text: t("cves.filter.chip.status", { value }), clear: ["status"] });
-  }
-  for (const field of TEXT_FIELDS) {
-    if (state.text[field.name] !== "") {
-      chips.push({
-        key: field.name,
-        text: t(`cves.filter.chip.${field.name}`, { value: state.text[field.name] }),
-        clear: [field.name],
-      });
+  function pickStatus(value: StatusValue) {
+    const next = toggle(state.statuses, value, STATUSES);
+    // The last Status pill stays on; Open alone is the default and leaves the URL.
+    if (next.length > 0) {
+      onChange({ status: next.join(",") === "open" ? "" : next.join(",") });
     }
   }
-  if (state.mappingId !== "") {
-    const mapping = mappings.find((item) => item.id === state.mappingId);
-    chips.push({
-      key: "mapping_id",
-      text: t("cves.filter.chip.mapping_id", { value: mapping === undefined ? state.mappingId : mappingName(mapping) }),
-      clear: ["mapping_id"],
-    });
+  function pickIssue(value: Exclude<HasIssue, "">) {
+    onChange({ has_issue: state.hasIssue === value ? "" : value });
+  }
+  function pickProject(project: string) {
+    // A repository that is not in the chosen project is cleared with it.
+    const stillFits =
+      state.repository === "" ||
+      project === "" ||
+      mappings.some((mapping) => mapping.harbor_project === project && mapping.harbor_repository === state.repository);
+    onChange({ project, ...(stillFits ? {} : { repository: "" }) });
   }
 
   return (
-    <search aria-label={t("cves.filter.group")} className="flex flex-col gap-3 rounded-[10px] border border-border bg-surface p-5">
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(10rem,1fr))] gap-4">
-        <Toggles<SeverityValue>
-          label={t("cves.filter.severity")}
-          options={SEVERITIES.map((value) => ({ value, label: value }))}
-          selected={state.severities}
-          onChange={(next) => onChange({ severity: next.length === SEVERITIES.length ? "" : next.join(",") })}
-        />
-        <Toggles<StatusValue>
-          label={t("cves.filter.status")}
-          options={STATUSES.map((value) => ({ value, label: t(`cves.status.${value}`) }))}
-          selected={state.statuses}
-          onChange={(next) => onChange({ status: next.join(",") === "open" ? "" : next.join(",") })}
-        />
-        <DebouncedInput
-          id="cve-q"
-          type="search"
-          label={t("cves.filter.search")}
-          placeholder={t("cves.filter.searchPlaceholder")}
-          value={q}
-          onCommit={(value) => onChange({ q: value })}
-        />
-        {TEXT_FIELDS.map((field) => (
-          <DebouncedInput
-            key={field.name}
-            id={`cve-${field.name}`}
-            label={t(field.label)}
-            placeholder={t(field.placeholder)}
-            value={state.text[field.name]}
-            onCommit={(value) => onChange({ [field.name]: value })}
-          />
-        ))}
-        <div>
-          <MappingFilterLabeled value={state.mappingId} mappings={mappings} onChange={(value) => onChange({ mapping_id: value })} />
-        </div>
-      </div>
-      {chips.length === 0 ? null : (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-muted">{t("cves.filter.active", { n: chips.length })}</span>
-          {chips.map((chip) => (
-            <span
-              key={chip.key}
-              className="inline-flex min-h-7 items-center gap-1.5 rounded-full border border-border bg-text/5 pr-1 pl-3 text-[12.5px]"
-            >
-              {chip.text}
-              <button
-                type="button"
-                aria-label={t("cves.filter.remove", { filter: chip.text })}
-                onClick={() => onChange(Object.fromEntries(chip.clear.map((name) => [name, ""])))}
-                className="inline-flex size-5 cursor-pointer items-center justify-center rounded-full text-muted hover:text-text focus-visible:outline-2 focus-visible:outline-accent"
-              >
-                <X aria-hidden="true" size={12} />
-              </button>
-            </span>
+    <search aria-label={t("cves.filter.group")} className="flex flex-col gap-3 rounded-[10px] border border-border bg-surface px-4 py-3.5">
+      <SearchField value={state.q} onCommit={(value) => onChange({ q: value })} />
+      <div className="flex flex-col gap-3 min-[1024px]:flex-row min-[1024px]:flex-wrap min-[1024px]:gap-x-7">
+        <Group label={t("cves.filter.severity")}>
+          {SEVERITIES.map((value) => (
+            <FilterPill
+              key={value}
+              on={state.severities.includes(value)}
+              tone={value}
+              label={value}
+              onClick={() => pickSeverity(value)}
+            />
           ))}
-          <Button variant="small" onClick={onClearAll}>
-            {t("cves.filter.clearAll")}
-          </Button>
-        </div>
-      )}
+        </Group>
+        <Group label={t("cves.filter.status")}>
+          {STATUSES.map((value) => (
+            <FilterPill
+              key={value}
+              on={state.statuses.includes(value)}
+              tone={value === "open" ? "neutral" : value}
+              label={t(`cves.status.${value}`)}
+              onClick={() => pickStatus(value)}
+            />
+          ))}
+        </Group>
+        <Group label={t("cves.filter.issue")}>
+          <FilterPill
+            on={state.hasIssue === "true"}
+            tone="neutral"
+            label={t("cves.filter.hasIssue")}
+            onClick={() => pickIssue("true")}
+          />
+          <FilterPill
+            on={state.hasIssue === "false"}
+            tone="neutral"
+            label={t("cves.filter.noIssue")}
+            onClick={() => pickIssue("false")}
+          />
+        </Group>
+      </div>
+      <div className="grid grid-cols-1 gap-3 min-[1024px]:grid-cols-4">
+        <Combobox
+          id="cve-project"
+          label={t("cves.filter.project")}
+          value={state.project}
+          options={projects.map((project) => ({ value: project, label: project }))}
+          allLabel={t("cves.filter.allProjects")}
+          onChange={pickProject}
+        />
+        <Combobox
+          id="cve-repository"
+          label={t("cves.filter.repository")}
+          value={state.repository}
+          options={repositories.map((repository) => ({ value: repository, label: repository }))}
+          allLabel={t("cves.filter.allRepositories")}
+          onChange={(repository) => onChange({ repository })}
+        />
+        <Combobox
+          id="cve-tag"
+          label={t("cves.filter.tag")}
+          value={state.tag}
+          options={tags.map((tag) => ({ value: tag.image_tag, label: tag.image_tag }))}
+          allLabel={t("cves.filter.allTags")}
+          allowCustom
+          onChange={(tag) => onChange({ tag })}
+        />
+        <Combobox
+          id="cve-mapping"
+          label={t("cves.filter.mapping")}
+          value={state.mapping}
+          options={mappings.map((mapping) => ({ value: mapping.id, label: mappingName(mapping) }))}
+          allLabel={t("cves.filter.allMappings")}
+          allAsValue
+          onChange={(mapping) => onChange({ mapping })}
+        />
+      </div>
     </search>
-  );
-}
-
-function MappingFilterLabeled(props: { value: string; mappings: MappingListItem[]; onChange: (value: string) => void }) {
-  return (
-    <>
-      <p className={LABEL}>{t("mappings.filter.label")}</p>
-      <MappingFilter id="cve-mapping" {...props} />
-    </>
   );
 }

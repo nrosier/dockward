@@ -78,6 +78,14 @@ pub struct ListParams {
     pub harbor_repository: Option<String>,
     pub mapping_id: Option<String>,
     pub scope: Option<String>,
+    /// #257: `true` or `false`.
+    pub has_issue: Option<String>,
+    /// #257: the new name of `harbor_project`; wins when both are sent.
+    pub project: Option<String>,
+    /// #257: the new name of `harbor_repository`; wins when both are sent.
+    pub repository: Option<String>,
+    /// #257: the new name of `mapping_id`; wins when both are sent.
+    pub mapping: Option<String>,
 }
 
 /// One CVE of one mapping (`specs/api.md`, CVEs, `CveSummary`).
@@ -215,6 +223,15 @@ struct Filters {
     tag: Option<String>,
     harbor_project: Option<String>,
     harbor_repository: Option<String>,
+    has_issue: Option<i64>,
+}
+
+/// The value of a renamed parameter: the new name when it is non-empty, else the old one.
+fn renamed<'a>(new: Option<&'a str>, old: Option<&'a str>) -> Option<&'a str> {
+    match new {
+        Some(value) if !value.is_empty() => Some(value),
+        _ => old,
+    }
 }
 
 /// A comma-separated list of known values, each kept once in the order of `known`. An
@@ -279,6 +296,18 @@ fn parse_filters(params: &ListParams) -> Result<Filters, AppError> {
             ));
         }
     };
+    // #257: `status` decides when it is sent; `accepted` only applies without it.
+    let accepted = if statuses.is_empty() { accepted } else { None };
+    let has_issue = match params.has_issue.as_deref() {
+        None => None,
+        Some("true") => Some(1),
+        Some("false") => Some(0),
+        Some(_) => {
+            return Err(AppError::InvalidRequest(
+                "has_issue must be true or false.".to_owned(),
+            ));
+        }
+    };
     let q = match params.q.as_deref() {
         None | Some("") => None,
         Some(text) if text.chars().count() > MAX_Q_CHARS => {
@@ -301,8 +330,18 @@ fn parse_filters(params: &ListParams) -> Result<Filters, AppError> {
         q,
         package: parse_text(params.package.as_deref(), "package")?,
         tag: parse_text(params.tag.as_deref(), "tag")?,
-        harbor_project: parse_text(params.harbor_project.as_deref(), "harbor_project")?,
-        harbor_repository: parse_text(params.harbor_repository.as_deref(), "harbor_repository")?,
+        harbor_project: parse_text(
+            renamed(params.project.as_deref(), params.harbor_project.as_deref()),
+            "project",
+        )?,
+        harbor_repository: parse_text(
+            renamed(
+                params.repository.as_deref(),
+                params.harbor_repository.as_deref(),
+            ),
+            "repository",
+        )?,
+        has_issue,
     })
 }
 
@@ -339,7 +378,7 @@ pub async fn list(
     let params = params?;
     let mapping_id = match path_mapping {
         Some(mapping_id) => Some(mapping_id),
-        None => match params.mapping_id.as_deref() {
+        None => match renamed(params.mapping.as_deref(), params.mapping_id.as_deref()) {
             Some(mapping_id) => {
                 check_mapping(pool, reader, mapping_id).await?;
                 Some(mapping_id)
@@ -382,6 +421,7 @@ pub async fn list(
         tag: filters.tag.as_deref(),
         harbor_project: filters.harbor_project.as_deref(),
         harbor_repository: filters.harbor_repository.as_deref(),
+        has_issue: filters.has_issue,
         sort: &paging.sort,
         sort_sign: if paging.ascending { 1 } else { -1 },
         limit: paging.page_size,
@@ -464,6 +504,7 @@ pub async fn detail(
         tag: None,
         harbor_project: None,
         harbor_repository: None,
+        has_issue: None,
         sort: "cve_id",
         sort_sign: 1,
         limit: 1,
@@ -618,7 +659,23 @@ mod tests {
         .unwrap();
         assert_eq!(good.severities, ["HIGH"]);
         assert_eq!(good.statuses, ["open"]);
-        assert_eq!(good.accepted, Some(0));
+        // #257: `status` decides, so `accepted` is dropped when both are sent.
+        assert_eq!(good.accepted, None);
+        let only_accepted = parse_filters(&ListParams {
+            accepted: Some("true".to_owned()),
+            has_issue: Some("false".to_owned()),
+            ..ListParams::default()
+        })
+        .unwrap();
+        assert_eq!(only_accepted.accepted, Some(1));
+        assert_eq!(only_accepted.has_issue, Some(0));
+        assert!(matches!(
+            parse_filters(&ListParams {
+                has_issue: Some("1".to_owned()),
+                ..ListParams::default()
+            }),
+            Err(AppError::InvalidRequest(_))
+        ));
         assert_eq!(good.q.as_deref(), Some("openssl"));
         assert_eq!(
             good.package.as_deref(),

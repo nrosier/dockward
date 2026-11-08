@@ -68,7 +68,9 @@ describe("DashboardPage", () => {
     expect(within(screen.getByRole("link", { name: new RegExp(t("pill.fixed")) })).getByText("41")).toBeInTheDocument();
     const accepted = screen.getByText(t("dashboard.acceptedCves")).parentElement as HTMLElement;
     expect(accepted).toHaveTextContent("2");
-    expect(within(accepted).queryByRole("link")).toBeNull();
+    // The Accepted and Issues cards open the CVE list with their filters (#257).
+    expect(accepted.closest("a")).toHaveAttribute("href", "/cves?accepted=true");
+    expect(screen.getByText(t("dashboard.openIssues")).closest("a")).toHaveAttribute("href", "/cves?has_issue=true");
     const fixedEl = screen.getByRole("link", { name: new RegExp(t("pill.fixed")) });
     const issuesEl = screen.getByText(t("dashboard.openIssues"));
     const follows = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);

@@ -99,51 +99,56 @@ export default function DashboardPage() {
           kind="critical"
           count={data.open_cves.critical}
           label={t("dashboard.openCves")}
-          to={`/cves?severity=CRITICAL&status=open${scopeQuery}`}
+          to={`/cves?severity=CRITICAL&status=open`}
         />
         <CountCard
           kind="high"
           count={data.open_cves.high}
           label={t("dashboard.openCves")}
-          to={`/cves?severity=HIGH&status=open${scopeQuery}`}
+          to={`/cves?severity=HIGH&status=open`}
         />
         <CountCard
           kind="medium"
           count={data.open_cves.medium}
           label={t("dashboard.openCves")}
-          to={`/cves?severity=MEDIUM&status=open${scopeQuery}`}
+          to={`/cves?severity=MEDIUM&status=open`}
         />
         <CountCard
           kind="low"
           count={data.open_cves.low}
           label={t("dashboard.openCves")}
-          to={`/cves?severity=LOW&status=open${scopeQuery}`}
+          to={`/cves?severity=LOW&status=open`}
         />
         <CountCard
           kind="unknown"
           count={data.open_cves.unknown}
           label={t("dashboard.openCves")}
-          to={`/cves?severity=UNKNOWN&status=open${scopeQuery}`}
+          to={`/cves?severity=UNKNOWN&status=open`}
         />
         <CountCard
           kind="open"
           count={data.open_cves.total}
           label={t("dashboard.openCvesTotal")}
-          to={`/cves?status=open${scopeQuery}`}
+          to={`/cves?status=open`}
         />
         <CountCard
           kind="fixed"
           count={data.fixed_cves}
           label={t("dashboard.fixedCves")}
-          to={`/cves?status=fixed${scopeQuery}`}
+          to={`/cves?status=fixed`}
         />
-        <CountCard kind="accepted" count={data.accepted_cves} label={t("dashboard.acceptedCves")} />
-        <Card className="flex flex-col items-start gap-2.5 px-[18px] py-4">
-          <span className="inline-flex h-[22px] items-center rounded-full border border-border bg-text/5 px-[9px] text-[11px] leading-none font-semibold tracking-[0.05em] uppercase">
-            {t("dashboard.issues")}
-          </span>
-          <span className="text-[32px] leading-none font-semibold">{data.open_issues}</span>
-          <span className="text-[12.5px] text-muted">{t("dashboard.openIssues")}</span>
+        <CountCard kind="accepted" count={data.accepted_cves} label={t("dashboard.acceptedCves")} to="/cves?accepted=true" />
+        <Card className="p-0">
+          <Link
+            to="/cves?has_issue=true"
+            className="flex flex-col items-start gap-2.5 rounded-[10px] px-[18px] py-4 text-text no-underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <span className="inline-flex h-[22px] items-center rounded-full border border-border bg-text/5 px-[9px] text-[11px] leading-none font-semibold tracking-[0.05em] uppercase">
+              {t("dashboard.issues")}
+            </span>
+            <span className="text-[32px] leading-none font-semibold">{data.open_issues}</span>
+            <span className="text-[12.5px] text-muted">{t("dashboard.openIssues")}</span>
+          </Link>
         </Card>
         <CountCard
           kind="failed"
