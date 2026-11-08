@@ -1,0 +1,363 @@
+name: Security scan
+
+# Syft SBOM, Grype and Trivy, with SARIF upload to Code Scanning and a scheduled `security` issue.
+# Report only: a finding never fails a job. Spec: specs/testing-and-ci.md, "Security scanning workflow".
+# Issue logic: .github/scripts/security-scan-report.mjs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+# Deny all token permissions by default. Each job grants only what it needs.
+permissions: {}
+
+concurrency:
+  group: security-scan-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # renovate: datasource=github-releases depName=anchore/syft
+  SYFT_VERSION: v1.57.0
+  # renovate: datasource=github-releases depName=anchore/grype
+  GRYPE_VERSION: v0.121.2
+  # renovate: datasource=github-releases depName=aquasecurity/trivy
+  TRIVY_VERSION: v0.76.2
+
+jobs:
+  source:
+    name: Security scan (source)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Outputs live outside the workspace so the scanners do not read them as source.
+      - name: Prepare output directory
+        run: mkdir -p "${{ runner.temp }}/security-scan"
+
+      - name: Syft SBOM
+        id: syft
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: ${{ runner.temp }}/security-scan/sbom.cyclonedx.json
+          syft-version: ${{ env.SYFT_VERSION }}
+          upload-artifact: "false"
+          upload-release-assets: "false"
+          dependency-snapshot: "false"
+
+      - name: Upload SBOM
+        if: ${{ always() && steps.syft.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-source
+          path: ${{ runner.temp }}/security-scan/sbom.cyclonedx.json
+          if-no-files-found: error
+
+      - name: Grype
+        id: grype
+        if: ${{ always() && steps.syft.outcome == 'success' }}
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          sbom: ${{ runner.temp }}/security-scan/sbom.cyclonedx.json
+          output-format: sarif
+          output-file: ${{ runner.temp }}/security-scan/grype-results.sarif
+          fail-build: "false"
+          severity-cutoff: high
+          grype-version: ${{ env.GRYPE_VERSION }}
+
+      - name: Trivy
+        id: trivy
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          format: sarif
+          output: ${{ runner.temp }}/security-scan/trivy-results.sarif
+          exit-code: "0"
+          cache-dir: ${{ runner.temp }}/trivy-cache
+          version: ${{ env.TRIVY_VERSION }}
+
+      - name: Upload Grype SARIF
+        if: ${{ always() && steps.grype.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/security-scan/grype-results.sarif
+          category: grype-engine/source
+
+      - name: Upload Trivy SARIF
+        if: ${{ always() && steps.trivy.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/security-scan/trivy-results.sarif
+          category: trivy-engine/source
+
+      - name: Keep SARIF
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sarif-source
+          path: |
+            ${{ runner.temp }}/security-scan/grype-results.sarif
+            ${{ runner.temp }}/security-scan/trivy-results.sarif
+          if-no-files-found: warn
+
+  image:
+    name: Security scan (image)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Same inputs as the build job in docker.yml, so this is the image that ships for the commit.
+      - name: Build image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          provenance: false
+          tags: harborgate:security-scan
+          build-args: |
+            REVISION=${{ github.sha }}
+
+      - name: Prepare output directory
+        run: mkdir -p "${{ runner.temp }}/security-scan"
+
+      - name: Syft SBOM
+        id: syft
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: docker:harborgate:security-scan
+          format: cyclonedx-json
+          output-file: ${{ runner.temp }}/security-scan/sbom.cyclonedx.json
+          syft-version: ${{ env.SYFT_VERSION }}
+          upload-artifact: "false"
+          upload-release-assets: "false"
+          dependency-snapshot: "false"
+
+      - name: Upload SBOM
+        if: ${{ always() && steps.syft.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-image
+          path: ${{ runner.temp }}/security-scan/sbom.cyclonedx.json
+          if-no-files-found: error
+
+      - name: Grype
+        id: grype
+        if: ${{ always() && steps.syft.outcome == 'success' }}
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          sbom: ${{ runner.temp }}/security-scan/sbom.cyclonedx.json
+          output-format: sarif
+          output-file: ${{ runner.temp }}/security-scan/grype-results.sarif
+          fail-build: "false"
+          severity-cutoff: high
+          grype-version: ${{ env.GRYPE_VERSION }}
+
+      - name: Trivy
+        id: trivy
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          # Read only the local daemon, never a look-alike image from a registry.
+          TRIVY_IMAGE_SRC: docker
+        with:
+          scan-type: image
+          image-ref: harborgate:security-scan
+          scanners: vuln,secret,misconfig
+          format: sarif
+          output: ${{ runner.temp }}/security-scan/trivy-results.sarif
+          exit-code: "0"
+          cache-dir: ${{ runner.temp }}/trivy-cache
+          version: ${{ env.TRIVY_VERSION }}
+
+      - name: Upload Grype SARIF
+        if: ${{ always() && steps.grype.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/security-scan/grype-results.sarif
+          category: grype-engine/image
+
+      - name: Upload Trivy SARIF
+        if: ${{ always() && steps.trivy.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/security-scan/trivy-results.sarif
+          category: trivy-engine/image
+
+      - name: Keep SARIF
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sarif-image
+          path: |
+            ${{ runner.temp }}/security-scan/grype-results.sarif
+            ${{ runner.temp }}/security-scan/trivy-results.sarif
+          if-no-files-found: warn
+
+  # The published image is scanned in its own job (schedule only). One job cannot upload twice
+  # with the same tool and category, and decision 13 reuses the image categories. A failed pull
+  # skips the scans and leaves the job green (decision 15). It never feeds the issue (decision 14),
+  # so its artifact is not named sarif-*.
+  published:
+    name: Security scan (published image)
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+
+      - name: Pull published image
+        id: pull
+        env:
+          IMAGE: ghcr.io/nrosier/harborgate:latest
+        run: |
+          mkdir -p "$RUNNER_TEMP/security-scan"
+          if err=$(docker pull "$IMAGE" 2>&1 >/dev/null); then
+            echo "pulled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pulled=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Published image scan skipped"
+              echo
+              echo "Could not pull \`$IMAGE\`. The scans and uploads for it were skipped."
+              echo
+              echo '```'
+              echo "$err" | tail -n 5
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::Could not pull $IMAGE; published image scan skipped."
+          fi
+
+      - name: Grype
+        id: grype
+        if: ${{ steps.pull.outputs.pulled == 'true' }}
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: docker:ghcr.io/nrosier/harborgate:latest
+          output-format: sarif
+          output-file: ${{ runner.temp }}/security-scan/grype-results.sarif
+          fail-build: "false"
+          severity-cutoff: high
+          grype-version: ${{ env.GRYPE_VERSION }}
+
+      - name: Trivy
+        id: trivy
+        if: ${{ always() && steps.pull.outputs.pulled == 'true' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_IMAGE_SRC: docker
+        with:
+          scan-type: image
+          image-ref: ghcr.io/nrosier/harborgate:latest
+          scanners: vuln,secret,misconfig
+          format: sarif
+          output: ${{ runner.temp }}/security-scan/trivy-results.sarif
+          exit-code: "0"
+          cache-dir: ${{ runner.temp }}/trivy-cache
+          version: ${{ env.TRIVY_VERSION }}
+
+      - name: Upload Grype SARIF
+        if: ${{ always() && steps.grype.outcome == 'success' }}
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/security-scan/grype-results.sarif
+          category: grype-engine/image
+
+      - name: Upload Trivy SARIF
+        if: ${{ always() && steps.trivy.outcome == 'success' }}
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/security-scan/trivy-results.sarif
+          category: trivy-engine/image
+
+      - name: Keep SARIF
+        if: ${{ always() && steps.pull.outputs.pulled == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: published-image-sarif
+          path: |
+            ${{ runner.temp }}/security-scan/grype-results.sarif
+            ${{ runner.temp }}/security-scan/trivy-results.sarif
+          if-no-files-found: warn
+
+  report:
+    name: Security scan report
+    needs: [source, image]
+    if: ${{ always() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Download SARIF
+        if: ${{ always() }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: sarif-*
+          path: ${{ runner.temp }}/sarif
+
+      - name: Update security issue
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SARIF_DIR: ${{ runner.temp }}/sarif
+        with:
+          script: |
+            const { run } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/security-scan-report.mjs`);
+            await run({ github, context, core, sarifDir: process.env.SARIF_DIR });
