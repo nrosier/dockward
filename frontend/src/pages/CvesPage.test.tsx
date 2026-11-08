@@ -25,7 +25,17 @@ const medium: CveSummary = {
   github_issue_status: null,
 };
 
-const mapping = { id: "m1", user_id: "u1", harbor_project: "platform", harbor_repository: "api" };
+function mapping(id: string, project: string, repository: string) {
+  return {
+    id,
+    user_id: "u1",
+    harbor_project: project,
+    harbor_repository: repository,
+    github_owner: "octo",
+    github_repo: `${repository}-gh`,
+  };
+}
+const mappings = [mapping("m1", "platform", "api"), mapping("m2", "platform", "web"), mapping("m3", "data", "etl")];
 
 function row(over: Partial<CveSummary>): CveSummary {
   return { ...medium, ...over };
@@ -39,7 +49,10 @@ function stub(items: CveSummary[] = [medium], onIssue?: (path: string) => void) 
       return json({ github_issue_url: "https://github.com/o/r/issues/1", github_issue_number: 1 }, 201);
     }
     if (path.startsWith("/api/v1/cves")) return json({ items, page: 1, page_size: 50, total: items.length });
-    if (path.startsWith("/api/v1/mappings")) return json({ items: [mapping], page: 1, page_size: 200, total: 1 });
+    if (/^\/api\/v1\/mappings\/[^/?]+\/tags/.test(path)) {
+      return json({ items: [{ image_tag: "1.42.0", last_scan_at: "2026-11-08T10:00:00Z", open_cves: 3 }] });
+    }
+    if (path.startsWith("/api/v1/mappings")) return json({ items: mappings, page: 1, page_size: 200, total: 3 });
     return undefined;
   });
 }
@@ -48,52 +61,150 @@ function cvesCalls(fetchMock: ReturnType<typeof stub>): string[] {
   return fetchMock.mock.calls.map(([path]) => String(path)).filter((path) => path.startsWith("/api/v1/cves?"));
 }
 
+function lastQuery(fetchMock: ReturnType<typeof stub>): URLSearchParams {
+  return new URLSearchParams(cvesCalls(fetchMock).at(-1)?.split("?")[1]);
+}
+
+const group = (name: Parameters<typeof t>[0]) => within(screen.getByRole("group", { name: t(name) }));
+
 describe("CvesPage", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("sends every severity by default and Open as status=open&accepted=false", async () => {
+  it("sends every severity and the Open status by default, with no toggle", async () => {
     const fetchMock = stub();
     renderAt(<CvesPage />);
     await screen.findByText("CVE-2026-0002");
-    const query = new URLSearchParams(cvesCalls(fetchMock)[0].split("?")[1]);
+    const query = lastQuery(fetchMock);
     expect(query.get("severity")).toBeNull();
     expect(query.get("status")).toBe("open");
-    expect(query.get("accepted")).toBe("false");
+    expect(query.get("has_issue")).toBeNull();
+    expect(screen.queryByRole("group", { name: t("scope.label") })).not.toBeInTheDocument();
   });
 
-  it("turns the filter controls into a comma-separated query string", async () => {
+  it("sets the URL and the request when the pills are toggled", async () => {
+    const fetchMock = stub();
+    const { router } = renderAt(<CvesPage />);
+    await screen.findByText("CVE-2026-0002");
+    expect(group("cves.filter.status").getByRole("button", { name: t("cves.status.open") })).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(group("cves.filter.severity").getByRole("button", { name: "CRITICAL" }));
+    await userEvent.click(group("cves.filter.severity").getByRole("button", { name: "HIGH" }));
+    await userEvent.click(group("cves.filter.status").getByRole("button", { name: t("cves.status.accepted") }));
+    await userEvent.click(group("cves.filter.issue").getByRole("button", { name: t("cves.filter.hasIssue") }));
+    await vi.waitFor(() => {
+      const query = lastQuery(fetchMock);
+      expect(query.get("severity")).toBe("CRITICAL,HIGH");
+      expect(query.get("status")).toBe("open,accepted");
+      expect(query.get("has_issue")).toBe("true");
+    });
+    const url = new URLSearchParams(router.state.location.search);
+    expect(url.get("severity")).toBe("CRITICAL,HIGH");
+    expect(url.get("status")).toBe("open,accepted");
+    expect(url.get("has_issue")).toBe("true");
+    // Pressing the pressed Has issue pill clears the group; No issue replaces Has issue.
+    await userEvent.click(group("cves.filter.issue").getByRole("button", { name: t("cves.filter.noIssue") }));
+    expect(new URLSearchParams(router.state.location.search).get("has_issue")).toBe("false");
+    await userEvent.click(group("cves.filter.issue").getByRole("button", { name: t("cves.filter.noIssue") }));
+    expect(new URLSearchParams(router.state.location.search).get("has_issue")).toBeNull();
+  });
+
+  it("keeps the last Status pill on", async () => {
+    stub();
+    renderAt(<CvesPage />);
+    await screen.findByText("CVE-2026-0002");
+    const open = group("cves.filter.status").getByRole("button", { name: t("cves.status.open") });
+    await userEvent.click(open);
+    expect(open).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("restores the pills from the URL and from old links", async () => {
+    const fetchMock = stub();
+    renderAt(<CvesPage />, "/cves?severity=LOW&status=fixed&has_issue=false&q=glibc&tag=1.42.0");
+    await screen.findByText("CVE-2026-0002");
+    expect(group("cves.filter.severity").getByRole("button", { name: "LOW" })).toHaveAttribute("aria-pressed", "true");
+    expect(group("cves.filter.severity").getByRole("button", { name: "HIGH" })).toHaveAttribute("aria-pressed", "false");
+    expect(group("cves.filter.status").getByRole("button", { name: t("cves.status.fixed") })).toHaveAttribute("aria-pressed", "true");
+    expect(group("cves.filter.issue").getByRole("button", { name: t("cves.filter.noIssue") })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText(t("cves.filter.search"))).toHaveValue("glibc");
+    expect(lastQuery(fetchMock).get("tag")).toBe("1.42.0");
+  });
+
+  it("maps accepted=true to the Accepted pill and the dashboard cards open their filters", async () => {
+    const fetchMock = stub();
+    renderAt(<CvesPage />, "/cves?accepted=true");
+    await screen.findByText("CVE-2026-0002");
+    expect(group("cves.filter.status").getByRole("button", { name: t("cves.status.accepted") })).toHaveAttribute("aria-pressed", "true");
+    expect(group("cves.filter.status").getByRole("button", { name: t("cves.status.open") })).toHaveAttribute("aria-pressed", "false");
+    expect(lastQuery(fetchMock).get("status")).toBe("accepted");
+    expect(lastQuery(fetchMock).get("accepted")).toBeNull();
+  });
+
+  it("searches with a debounce and Clear empties the field at once", async () => {
+    const fetchMock = stub();
+    const { router } = renderAt(<CvesPage />);
+    await screen.findByText("CVE-2026-0002");
+    expect(screen.queryByRole("button", { name: t("cves.filter.clear") })).not.toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText(t("cves.filter.search")), "100%_x");
+    await vi.waitFor(() => expect(lastQuery(fetchMock).get("q")).toBe("100%_x"));
+    expect(new URLSearchParams(router.state.location.search).get("q")).toBe("100%_x");
+    await userEvent.click(screen.getByRole("button", { name: t("cves.filter.clear") }));
+    expect(screen.getByLabelText(t("cves.filter.search"))).toHaveValue("");
+    await vi.waitFor(() => expect(lastQuery(fetchMock).get("q")).toBeNull());
+  });
+
+  it("narrows the Repository options to the chosen project", async () => {
+    stub();
+    const { router } = renderAt(<CvesPage />, "/cves?repository=etl");
+    await screen.findByText("CVE-2026-0002");
+    const repository = screen.getByRole("combobox", { name: t("cves.filter.repository") });
+    await userEvent.click(repository);
+    expect(within(await screen.findByRole("listbox", { name: t("cves.filter.repository") })).getAllByRole("option").map((o) => o.textContent)).toEqual([
+      t("cves.filter.allRepositories"),
+      "api",
+      "etl",
+      "web",
+    ]);
+    await userEvent.keyboard("{Escape}");
+    // Choosing the project "platform" narrows the list and clears "etl", which is not in it.
+    const project = screen.getByRole("combobox", { name: t("cves.filter.project") });
+    await userEvent.click(project);
+    await userEvent.click(await screen.findByRole("option", { name: "platform" }));
+    expect(new URLSearchParams(router.state.location.search).get("project")).toBe("platform");
+    expect(new URLSearchParams(router.state.location.search).get("repository")).toBeNull();
+    await userEvent.click(screen.getByRole("combobox", { name: t("cves.filter.repository") }));
+    expect(within(await screen.findByRole("listbox")).getAllByRole("option").map((o) => o.textContent)).toEqual([
+      t("cves.filter.allRepositories"),
+      "api",
+      "web",
+    ]);
+  });
+
+  it("filters combobox options by typing and picks with the keyboard", async () => {
     const fetchMock = stub();
     renderAt(<CvesPage />);
     await screen.findByText("CVE-2026-0002");
-    const severity = screen.getByRole("group", { name: t("cves.filter.severity") });
-    await userEvent.click(within(severity).getByRole("button", { name: "LOW" }));
-    await userEvent.click(within(severity).getByRole("button", { name: "UNKNOWN" }));
-    const status = screen.getByRole("group", { name: t("cves.filter.status") });
-    await userEvent.click(within(status).getByRole("button", { name: t("cves.status.fixed") }));
-    await userEvent.type(screen.getByLabelText(t("cves.filter.package")), "openssl");
-    await vi.waitFor(() => {
-      const query = new URLSearchParams(cvesCalls(fetchMock).at(-1)?.split("?")[1]);
-      expect(query.get("severity")).toBe("CRITICAL,HIGH,MEDIUM");
-      expect(query.get("status")).toBe("open,fixed");
-      expect(query.get("package")).toBe("openssl");
-      expect(query.get("accepted")).toBeNull();
-    });
+    const mappingBox = screen.getByRole("combobox", { name: t("cves.filter.mapping") });
+    expect(mappingBox).toHaveValue(t("cves.filter.allMappings"));
+    await userEvent.click(mappingBox);
+    await userEvent.type(mappingBox, "etl");
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+    await vi.waitFor(() => expect(lastQuery(fetchMock).get("mapping")).toBe("m3"));
+    expect(screen.getByRole("combobox", { name: t("cves.filter.mapping") })).toHaveValue("data/etl");
   });
 
-  it("shows active-filter chips and Clear all restores the default view", async () => {
-    stub();
-    renderAt(<CvesPage />, "/cves?severity=HIGH&tag=1.42.0");
+  it("offers the tags of the chosen mapping and accepts a typed tag", async () => {
+    const fetchMock = stub();
+    renderAt(<CvesPage />, "/cves?mapping=m1");
     await screen.findByText("CVE-2026-0002");
-    expect(screen.getByText(t("cves.filter.active", { n: 2 }))).toBeInTheDocument();
-    expect(screen.getByText(t("cves.filter.chip.tag", { value: "1.42.0" }))).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: t("cves.filter.clearAll") }));
-    expect(screen.queryByText(t("cves.filter.clearAll"))).not.toBeInTheDocument();
-    expect(within(screen.getByRole("group", { name: t("cves.filter.severity") })).getByRole("button", { name: "LOW" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    const tag = screen.getByRole("combobox", { name: t("cves.filter.tag") });
+    await userEvent.click(tag);
+    await userEvent.click(await screen.findByRole("option", { name: "1.42.0" }));
+    await vi.waitFor(() => expect(lastQuery(fetchMock).get("tag")).toBe("1.42.0"));
+    await userEvent.click(screen.getByRole("combobox", { name: t("cves.filter.tag") }));
+    await userEvent.type(screen.getByRole("combobox", { name: t("cves.filter.tag") }), "9.9");
+    await userEvent.click(await screen.findByRole("option", { name: t("cves.combo.useValue", { value: "9.9" }) }));
+    await vi.waitFor(() => expect(lastQuery(fetchMock).get("tag")).toBe("9.9"));
   });
 
   it("renders all five severity pills with text labels", async () => {
@@ -109,36 +220,60 @@ describe("CvesPage", () => {
     }
   });
 
-  it("creates a MEDIUM issue in one click", async () => {
-    const onIssue = vi.fn();
-    stub([medium], onIssue);
+  it("shows Tags as n of m", async () => {
+    stub();
     renderAt(<CvesPage />);
-    await userEvent.click(await screen.findByRole("button", { name: t("cves.action.createIssue") }));
-    await vi.waitFor(() => expect(onIssue).toHaveBeenCalledWith("/api/v1/cves/m1%3ACVE-2026-0002/issue"));
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    const tr = (await screen.findByText("CVE-2026-0002")).closest("tr") as HTMLElement;
+    expect(within(tr).getByText(t("cves.tags", { open: 2, tracked: 10 }))).toBeInTheDocument();
   });
 
-  it.each(["LOW", "UNKNOWN"] as const)("asks for confirmation before a %s issue", async (severity) => {
+  it.each(["CRITICAL", "MEDIUM", "LOW"] as const)("asks for confirmation before creating a %s issue", async (severity) => {
     const onIssue = vi.fn();
     stub([row({ severity, open_severity: severity })], onIssue);
     renderAt(<CvesPage />);
     await userEvent.click(await screen.findByRole("button", { name: t("cves.action.createIssue") }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByRole("dialog", { name: t("cves.createDialog.title", { cve: "CVE-2026-0002" }) });
+    // The dialog names the GitHub repository and the CVE; nothing is created yet.
+    expect(within(dialog).getByText("octo/api-gh")).toBeInTheDocument();
+    expect(within(dialog).getByText("CVE-2026-0002")).toBeInTheDocument();
     expect(onIssue).not.toHaveBeenCalled();
     await userEvent.click(within(dialog).getByRole("button", { name: t("mappings.cancel") }));
     expect(onIssue).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: t("cves.action.createIssue") }));
-    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: t("cves.confirm.create") }));
-    await vi.waitFor(() => expect(onIssue).toHaveBeenCalledTimes(1));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: t("cves.createDialog.confirm") }));
+    await vi.waitFor(() => expect(onIssue).toHaveBeenCalledWith("/api/v1/cves/m1%3ACVE-2026-0002/issue"));
+    expect(onIssue).toHaveBeenCalledTimes(1);
   });
 
-  it("names the LOW confirmation dialog after its visible title", async () => {
-    stub([row({ severity: "LOW", open_severity: "LOW" })]);
+  it("creates nothing when the dialog is closed with Escape", async () => {
+    const onIssue = vi.fn();
+    stub([medium], onIssue);
     renderAt(<CvesPage />);
     await userEvent.click(await screen.findByRole("button", { name: t("cves.action.createIssue") }));
-    const title = t("cves.confirm.title", { cve: "CVE-2026-0002" });
-    const dialog = await screen.findByRole("dialog", { name: title });
-    expect(within(dialog).getByText(title)).toBeInTheDocument();
+    await screen.findByRole("dialog");
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(onIssue).not.toHaveBeenCalled();
+  });
+
+  it("shows View issue for a CVE with an issue, with the closed status beside the number", async () => {
+    stub([
+      row({ github_issue_number: 7, github_issue_url: "https://github.com/octo/api-gh/issues/7", github_issue_status: "closed" }),
+    ]);
+    renderAt(<CvesPage />);
+    const tr = (await screen.findByText("CVE-2026-0002")).closest("tr") as HTMLElement;
+    const view = within(tr).getByRole("link", { name: t("cves.action.viewIssue") });
+    expect(view).toHaveAttribute("href", "https://github.com/octo/api-gh/issues/7");
+    expect(within(tr).getByText("#7")).toBeInTheDocument();
+    expect(within(tr).getByText(t("cves.issue.closed"))).toBeInTheDocument();
+    expect(within(tr).queryByRole("button", { name: t("cves.action.createIssue") })).not.toBeInTheDocument();
+  });
+
+  it("disables Create issue while an acceptance is active", async () => {
+    stub([row({ accepted: true })]);
+    renderAt(<CvesPage />);
+    expect(await screen.findByRole("button", { name: t("cves.action.createIssue") })).toBeDisabled();
   });
 
   it("offers no Create issue for a CVE fixed on every tag", async () => {

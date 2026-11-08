@@ -1,23 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { CveStatusPill, SeverityPill, issueEligible } from "../components/cves/CvePills";
 import { CveFilterBar } from "../components/cves/CveFilterBar";
-import { IssueAction } from "../components/cves/IssueAction";
+import { CreateIssueDialog } from "../components/cves/CreateIssueDialog";
+import { CveStatusPill, SeverityPill, issueEligible } from "../components/cves/CvePills";
 import { safeHttpsUrl } from "../components/cves/safeUrl";
 import { PageHeader } from "../components/mappings/PageHeader";
 import { LINK, TABLE, TD, TH } from "../components/mappings/styles";
 import { TableScroll } from "../components/mappings/TableScroll";
-import { mappingName, useMappingLookup, useScopeAll } from "../components/mappings/useMappings";
+import { mappingName, useAllMappings } from "../components/mappings/useMappings";
+import { Button, buttonClass } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { currentPage, Pagination } from "../components/ui/Pagination";
-import { ScopeToggle } from "../components/ui/ScopeToggle";
 import { ErrorMessage, LoadingMessage } from "../components/ui/StatusMessage";
 import { t } from "../i18n";
 import { ApiError, api } from "../lib/api";
-import { FILTER_KEYS, parseFilters, toApiQuery } from "../lib/cveFilters";
+import { parseFilters, toApiQuery, toUrlParams } from "../lib/cveFilters";
 import { useMe } from "../lib/session";
-import type { CveSummary, Page } from "../types/api";
+import type { CveSummary, MappingTag, Page } from "../types/api";
 
 const PAGE_SIZE = 50;
 
@@ -38,24 +38,76 @@ function IssueCell({ cve }: { cve: CveSummary }) {
   );
 }
 
+// The Action column does not change with the filters. A CVE with an issue, open or closed,
+// shows View issue and never Create issue (#257, decisions 10 and 12). One without an issue
+// shows Create issue to the mapping's owner while a tag still reports it open; it is
+// disabled while an active acceptance exists.
+function ActionCell({
+  cve,
+  canCreate,
+  pending,
+  onCreate,
+}: {
+  cve: CveSummary;
+  canCreate: boolean;
+  pending: boolean;
+  onCreate: () => void;
+}) {
+  if (cve.github_issue_number !== null) {
+    const url = safeHttpsUrl(cve.github_issue_url);
+    return url === null ? null : (
+      <a href={url} target="_blank" rel="noopener noreferrer" className={buttonClass("small")}>
+        {t("cves.action.viewIssue")}
+      </a>
+    );
+  }
+  if (!canCreate || !issueEligible(cve)) {
+    return null;
+  }
+  return (
+    <Button variant="small" disabled={cve.accepted || pending} onClick={onCreate}>
+      {t("cves.action.createIssue")}
+    </Button>
+  );
+}
+
+function githubRepository(mapping: { github_owner: string; github_repo: string } | undefined): string {
+  return mapping === undefined ? "" : `${mapping.github_owner}/${mapping.github_repo}`;
+}
+
 export default function CvesPage() {
-  const scopeAll = useScopeAll();
   const me = useMe();
+  // The Mapping combobox is the only scope control (#257, decision 2), so there is no
+  // toggle: an admin reads every tenant's mappings, anyone else reads their own.
+  const scopeAll = me.data?.role === "admin";
   const queryClient = useQueryClient();
   const [params, setParams] = useSearchParams();
   const page = currentPage(params);
-  const q = params.get("q") ?? "";
   const filters = parseFilters(params);
   const order = params.get("order") === "asc" ? "asc" : "desc";
-  const mappings = useMappingLookup(scopeAll);
+  const mappingList = useAllMappings(scopeAll);
+  const mappingItems = mappingList.data?.items ?? [];
+  const mappings = new Map(mappingItems.map((item) => [item.id, item]));
   const [issueError, setIssueError] = useState<string | null>(null);
+  const [creating, setCreating] = useState<CveSummary | null>(null);
+  const tags = useQuery({
+    queryKey: ["mappings", "tags", filters.mapping],
+    queryFn: () => api<{ items: MappingTag[] }>("GET", `/mappings/${encodeURIComponent(filters.mapping)}/tags`),
+    enabled: filters.mapping !== "",
+  });
 
-  // Sets the parameters in the patch; an empty value removes one. Any change
-  // goes back to page 1.
+  // Sets the parameters in the patch; an empty value removes one. Any change goes back to
+  // page 1. Filters read from an older link are rewritten to the current names.
   function setParamsPatch(patch: Record<string, string>) {
     setParams(
       (current) => {
         const updated = new URLSearchParams(current);
+        for (const legacy of ["accepted", "harbor_project", "harbor_repository", "mapping_id"]) {
+          updated.delete(legacy);
+        }
+        for (const [name, value] of Object.entries(toUrlParams(filters))) {
+          updated.set(name, value);
+        }
         for (const [name, value] of Object.entries(patch)) {
           if (value === "") {
             updated.delete(name);
@@ -70,20 +122,10 @@ export default function CvesPage() {
     );
   }
 
-  function clearAll() {
-    setParams((current) => {
-      const updated = new URLSearchParams(current);
-      for (const name of [...FILTER_KEYS, "q", "page"]) {
-        updated.delete(name);
-      }
-      return updated;
-    });
-  }
-
   const apiQuery = toApiQuery(filters);
   const queryString = new URLSearchParams(apiQuery).toString();
   const list = useQuery({
-    queryKey: ["cves", scopeAll, page, q, queryString, order],
+    queryKey: ["cves", scopeAll, page, queryString, order],
     queryFn: () => {
       const query = new URLSearchParams({
         page: String(page),
@@ -92,9 +134,6 @@ export default function CvesPage() {
         order,
         ...apiQuery,
       });
-      if (q !== "") {
-        query.set("q", q);
-      }
       if (scopeAll) {
         query.set("scope", "all");
       }
@@ -105,25 +144,19 @@ export default function CvesPage() {
   const createIssue = useMutation({
     mutationFn: (id: string) => api("POST", `/cves/${encodeURIComponent(id)}/issue`),
     onMutate: () => setIssueError(null),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cves"] }),
-    onError: (error) => setIssueError(error instanceof ApiError ? error.message : t("cves.issue.failed")),
+    onSuccess: () => {
+      setCreating(null);
+      return queryClient.invalidateQueries({ queryKey: ["cves"] });
+    },
+    onError: (error) => {
+      setCreating(null);
+      setIssueError(error instanceof ApiError ? error.message : t("cves.issue.failed"));
+    },
   });
 
-  const header = (
-    <PageHeader title={t("page.cves")} subtitle={t("cves.subtitle")}>
-      <ScopeToggle />
-    </PageHeader>
-  );
+  const header = <PageHeader title={t("page.cves")} subtitle={t("cves.subtitle")} />;
 
-  const filterBar = (
-    <CveFilterBar
-      state={filters}
-      q={q}
-      mappings={Array.from(mappings.values())}
-      onChange={setParamsPatch}
-      onClearAll={clearAll}
-    />
-  );
+  const filterBar = <CveFilterBar state={filters} mappings={mappingItems} tags={tags.data?.items ?? []} onChange={setParamsPatch} />;
 
   if (list.isPending) {
     return (
@@ -185,7 +218,7 @@ export default function CvesPage() {
                   const mapping = mappings.get(cve.mapping_id);
                   return (
                     <tr key={cve.id}>
-                      <td className={TD}>
+                      <td className={`${TD} whitespace-nowrap`}>
                         <Link to={`/cves/${encodeURIComponent(cve.id)}`} className={`font-mono text-[13px] ${LINK}`}>
                           {cve.cve_id}
                         </Link>
@@ -199,23 +232,19 @@ export default function CvesPage() {
                       <td className={TD}>{cve.package}</td>
                       <td className={`${TD} font-mono text-[12.5px]`}>{cve.fixed_in_version ?? t("cves.unknown")}</td>
                       <td className={TD}>{mapping === undefined ? null : mappingName(mapping)}</td>
-                      <td className={`${TD} text-muted`}>
+                      <td className={`${TD} whitespace-nowrap text-muted`}>
                         {t("cves.tags", { open: cve.open_tags, tracked: cve.tracked_tags })}
                       </td>
-                      <td className={TD}>
+                      <td className={`${TD} whitespace-nowrap`}>
                         <IssueCell cve={cve} />
                       </td>
-                      <td className={TD}>
-                        {mapping !== undefined && me.data?.id === mapping.user_id && issueEligible(cve) ? (
-                          <IssueAction
-                            cve={cve}
-                            label={t("cves.action.createIssue")}
-                            variant="small"
-                            disabled={cve.accepted || cve.github_issue_status === "open"}
-                            pending={createIssue.isPending && createIssue.variables === cve.id}
-                            onCreate={() => createIssue.mutate(cve.id)}
-                          />
-                        ) : null}
+                      <td className={`${TD} whitespace-nowrap`}>
+                        <ActionCell
+                          cve={cve}
+                          canCreate={mapping !== undefined && me.data?.id === mapping.user_id}
+                          pending={createIssue.isPending && createIssue.variables === cve.id}
+                          onCreate={() => setCreating(cve)}
+                        />
                       </td>
                     </tr>
                   );
@@ -226,6 +255,13 @@ export default function CvesPage() {
         )}
         <Pagination total={list.data.total} pageSize={PAGE_SIZE} />
       </Card>
+      <CreateIssueDialog
+        cve={creating}
+        repository={creating === null ? "" : githubRepository(mappings.get(creating.mapping_id))}
+        pending={createIssue.isPending}
+        onCancel={() => setCreating(null)}
+        onConfirm={(cve) => createIssue.mutate(cve.id)}
+      />
     </>
   );
 }

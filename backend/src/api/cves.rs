@@ -1696,4 +1696,173 @@ mod tests {
         assert_eq!(json["items"][0]["open_severity"], "LOW");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// #257: the control bar parameters.
+    #[tokio::test]
+    async fn control_bar_filters() {
+        let (state, dir, _, _) = setup("read-control-bar").await;
+        seed_mapping(&state.pool, "u1", "m2", "ch", "cg", "octo", "second").await;
+        sqlx::query("UPDATE repo_mappings SET harbor_project = 'team' WHERE id = 'm2'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        seed_harbor(&state.pool, "u2", "ch2", "harbor", None).await;
+        seed_github(&state.pool, "u2", "cg2", "github").await;
+        seed_mapping(&state.pool, "u2", "m3", "ch2", "cg2", "octo", "third").await;
+
+        // m1: 1 CRITICAL open with an open issue, 2 HIGH open with a closed issue,
+        // 3 MEDIUM open and accepted, 4 LOW fixed, 5 LOW open with no issue.
+        seen_pkg(&state, "m1", "v1", "CVE-2026-0001", "CRITICAL", "glibc").await;
+        seen_pkg(&state, "m1", "v2", "CVE-2026-0001", "CRITICAL", "glibc").await;
+        seen_pkg(&state, "m1", "v1", "CVE-2026-0002", "HIGH", "zlib").await;
+        seen_pkg(&state, "m1", "v1", "CVE-2026-0003", "MEDIUM", "curl").await;
+        seen_pkg(&state, "m1", "v1", "CVE-2026-0004", "LOW", "zlib").await;
+        fix(&state, "m1", "v1", "CVE-2026-0004").await;
+        seen_pkg(&state, "m1", "v1", "CVE-2026-0005", "LOW", "per%cent_pkg").await;
+        // m2 (project `team`): one HIGH open.
+        seen_pkg(&state, "m2", "v1", "CVE-2026-0006", "HIGH", "curl").await;
+        // Another tenant: same CVE id and package, must never show.
+        seen_pkg(&state, "m3", "v1", "CVE-2026-0001", "CRITICAL", "glibc").await;
+        sqlx::query(
+            "INSERT INTO github_issues (id, github_owner, github_repo, cve_id, github_issue_number, github_issue_url, status)
+             VALUES ('g1', 'octo', 'app', 'CVE-2026-0001', 7, 'https://github.com/octo/app/issues/7', 'open'),
+                    ('g2', 'octo', 'app', 'CVE-2026-0002', 8, 'https://github.com/octo/app/issues/8', 'closed')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username)
+             VALUES ('a1', 'm1', 'CVE-2026-0003', 'accepted for the test', 'u1', 'u1')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let me = user("u1");
+        // The short ids ("m1:1") of every page of `GET /cves?<q>`; `every_page` also checks
+        // that `total` matches the items.
+        async fn ids(state: &AppState, me: &AuthUser, q: &str) -> Vec<String> {
+            let (ids, _) = every_page(state, me, q).await;
+            ids.into_iter()
+                .map(|id| id.replace("CVE-2026-000", ""))
+                .collect()
+        }
+        let none: Vec<String> = Vec::new();
+        // has_issue: open and closed issues count; the groups AND.
+        assert_eq!(ids(&state, &me, "has_issue=true").await, ["m1:1", "m1:2"]);
+        assert_eq!(
+            ids(&state, &me, "has_issue=false").await,
+            ["m1:3", "m1:4", "m1:5", "m2:6"]
+        );
+        assert_eq!(
+            ids(&state, &me, "has_issue=true&severity=HIGH").await,
+            ["m1:2"]
+        );
+        assert_eq!(
+            ids(&state, &me, "has_issue=false&status=open").await,
+            ["m1:5", "m2:6"]
+        );
+        assert_eq!(
+            ids(&state, &me, "has_issue=true&status=accepted").await,
+            none
+        );
+        // Open excludes accepted; Accepted is separate; both shows both sets.
+        assert_eq!(
+            ids(&state, &me, "status=open").await,
+            ["m1:1", "m1:2", "m1:5", "m2:6"]
+        );
+        assert_eq!(ids(&state, &me, "status=accepted").await, ["m1:3"]);
+        assert_eq!(
+            ids(&state, &me, "status=open,accepted").await,
+            ["m1:1", "m1:2", "m1:3", "m1:5", "m2:6"]
+        );
+        // OR within a group, AND across groups.
+        assert_eq!(
+            ids(&state, &me, "severity=CRITICAL,LOW&status=open").await,
+            ["m1:1", "m1:5"]
+        );
+        assert_eq!(
+            ids(&state, &me, "severity=CRITICAL,LOW&status=open,fixed").await,
+            ["m1:1", "m1:4", "m1:5"]
+        );
+        assert_eq!(
+            ids(&state, &me, "severity=HIGH&status=open&project=team").await,
+            ["m2:6"]
+        );
+        // q matches id, package, project and repository; `%` and `_` are literal.
+        assert_eq!(ids(&state, &me, "q=glibc").await, ["m1:1"]);
+        assert_eq!(ids(&state, &me, "q=team").await, ["m2:6"]);
+        assert_eq!(ids(&state, &me, "q=M2").await, ["m2:6"]);
+        assert_eq!(ids(&state, &me, "q=2026-0004").await, ["m1:4"]);
+        assert_eq!(ids(&state, &me, "q=%25").await, ["m1:5"]);
+        assert_eq!(ids(&state, &me, "q=_").await, ["m1:5"]);
+        assert_eq!(ids(&state, &me, "q=%25cve").await, none);
+        assert_eq!(
+            ids(&state, &me, "q=curl&has_issue=false").await,
+            ["m1:3", "m2:6"]
+        );
+        // New names equal the old ones, and win when both are sent.
+        assert_eq!(
+            ids(&state, &me, "project=team").await,
+            ids(&state, &me, "harbor_project=team").await
+        );
+        assert_eq!(
+            ids(&state, &me, "repository=m2").await,
+            ids(&state, &me, "harbor_repository=m2").await
+        );
+        assert_eq!(ids(&state, &me, "mapping=m2").await, ["m2:6"]);
+        assert_eq!(
+            ids(&state, &me, "mapping=m2").await,
+            ids(&state, &me, "mapping_id=m2").await
+        );
+        assert_eq!(
+            ids(&state, &me, "project=team&harbor_project=proj").await,
+            ["m2:6"]
+        );
+        assert_eq!(ids(&state, &me, "mapping=m1&mapping_id=m2").await.len(), 5);
+        assert_eq!(ids(&state, &me, "tag=v2").await, ["m1:1"]);
+        // Old accepted parameters select the Accepted and Open pills.
+        assert_eq!(
+            ids(&state, &me, "accepted=true").await,
+            ids(&state, &me, "status=accepted").await
+        );
+        assert_eq!(
+            ids(&state, &me, "accepted=false&status=open").await,
+            ids(&state, &me, "status=open").await
+        );
+        assert_eq!(
+            ids(&state, &me, "accepted=false").await,
+            ["m1:1", "m1:2", "m1:4", "m1:5", "m2:6"]
+        );
+        // `status` wins over `accepted` when both are sent.
+        assert_eq!(
+            ids(&state, &me, "status=accepted&accepted=false").await,
+            ["m1:3"]
+        );
+        // n of m: CVE 1 is open on two of the two tracked tags, CVE 2 on one of two.
+        let page = all_cves(&state, &me, "mapping=m1").await.unwrap();
+        let counts = |cve: &str| {
+            let item = item(&page, cve);
+            (item.open_tags, item.tracked_tags)
+        };
+        assert_eq!(counts("CVE-2026-0001"), (2, 2));
+        assert_eq!(counts("CVE-2026-0002"), (1, 2));
+        assert_eq!(counts("CVE-2026-0004"), (0, 2));
+        // Access: another tenant's mapping is 404 by either name; a bad has_issue is 400.
+        for q in ["mapping=m3", "mapping_id=m3", "mapping=nope"] {
+            let error = all_cves(&state, &me, q).await.unwrap_err();
+            assert_eq!(error.status(), StatusCode::NOT_FOUND, "{q}");
+        }
+        let error = all_cves(&state, &me, "has_issue=maybe").await.unwrap_err();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        // The other tenant sees only their own row; the path route ignores `mapping`.
+        assert_eq!(
+            every_page(&state, &user("u2"), "has_issue=false").await.0,
+            ["m3:CVE-2026-0001"]
+        );
+        let path = by_mapping(&state, &me, "m1", "mapping=m2").await.unwrap();
+        assert_eq!(path.total, 5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

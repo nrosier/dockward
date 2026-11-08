@@ -1,21 +1,27 @@
-// CVE list filter state, kept in the URL query string, and its mapping to the
-// GET /cves query (#129). Severity and status are comma-separated lists; the
-// text filters are exact match on the server.
+// CVE list control bar state, kept in the URL query string, and its mapping to the
+// GET /cves query (#257). Severity and status are comma-separated lists (OR inside a
+// group, AND across groups); the combobox filters take one value each.
 
 export const SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"] as const;
 export const STATUSES = ["open", "fixed", "accepted"] as const;
 export type SeverityValue = (typeof SEVERITIES)[number];
 export type StatusValue = (typeof STATUSES)[number];
-
-export const TEXT_FILTERS = ["package", "tag", "harbor_project", "harbor_repository"] as const;
-export type TextFilter = (typeof TEXT_FILTERS)[number];
+export type HasIssue = "" | "true" | "false";
 
 export interface CveFilterState {
+  q: string;
+  // Empty means every severity.
   severities: SeverityValue[];
+  // Never empty: the default is Open.
   statuses: StatusValue[];
-  text: Record<TextFilter, string>;
-  mappingId: string;
+  hasIssue: HasIssue;
+  project: string;
+  repository: string;
+  tag: string;
+  mapping: string;
 }
+
+const DEFAULT_STATUSES: StatusValue[] = ["open"];
 
 // Keeps the values the server accepts, once each, in canonical order.
 function pick<T extends string>(raw: string | null, allowed: readonly T[]): T[] {
@@ -23,57 +29,91 @@ function pick<T extends string>(raw: string | null, allowed: readonly T[]): T[] 
   return allowed.filter((value) => wanted.has(value));
 }
 
-// Default view: every severity, open CVEs only. A legacy status=all link means every status.
+// The status pills from the URL. Old links keep working: without `status`,
+// accepted=true selects Accepted and accepted=false selects Open and Fixed (the
+// CVEs that are not accepted); status=all is every status.
+function parseStatuses(params: URLSearchParams): StatusValue[] {
+  const raw = params.get("status");
+  if (raw === "all") {
+    return [...STATUSES];
+  }
+  const picked = pick(raw, STATUSES);
+  if (picked.length > 0) {
+    return picked;
+  }
+  if (raw === null) {
+    const accepted = params.get("accepted");
+    if (accepted === "true") {
+      return ["accepted"];
+    }
+    if (accepted === "false") {
+      return ["open", "fixed"];
+    }
+  }
+  return [...DEFAULT_STATUSES];
+}
+
+// The new name wins when both it and the old one are in the URL (#257, decision 9).
+function renamed(params: URLSearchParams, name: string, legacy: string): string {
+  const value = params.get(name);
+  return value !== null && value !== "" ? value : (params.get(legacy) ?? "");
+}
+
 export function parseFilters(params: URLSearchParams): CveFilterState {
-  const severities = pick(params.get("severity"), SEVERITIES);
-  const statuses = params.get("status") === "all" ? [...STATUSES] : pick(params.get("status"), STATUSES);
+  const hasIssue = params.get("has_issue");
   return {
-    severities: severities.length === 0 ? [...SEVERITIES] : severities,
-    statuses: statuses.length === 0 ? ["open"] : statuses,
-    text: {
-      package: params.get("package") ?? "",
-      tag: params.get("tag") ?? "",
-      harbor_project: params.get("harbor_project") ?? "",
-      harbor_repository: params.get("harbor_repository") ?? "",
-    },
-    mappingId: params.get("mapping_id") ?? "",
+    q: params.get("q") ?? "",
+    severities: pick(params.get("severity"), SEVERITIES),
+    statuses: parseStatuses(params),
+    hasIssue: hasIssue === "true" || hasIssue === "false" ? hasIssue : "",
+    project: renamed(params, "project", "harbor_project"),
+    repository: renamed(params, "repository", "harbor_repository"),
+    tag: params.get("tag") ?? "",
+    mapping: renamed(params, "mapping", "mapping_id"),
   };
 }
 
 // The values to put in the page URL: the defaults are left out.
 export function toUrlParams(state: CveFilterState): Record<string, string> {
   const out: Record<string, string> = {};
-  if (state.severities.length < SEVERITIES.length) {
+  if (state.q !== "") {
+    out.q = state.q;
+  }
+  if (state.severities.length > 0) {
     out.severity = state.severities.join(",");
   }
-  if (state.statuses.join(",") !== "open") {
+  if (state.statuses.join(",") !== DEFAULT_STATUSES.join(",")) {
     out.status = state.statuses.join(",");
   }
-  for (const name of TEXT_FILTERS) {
-    if (state.text[name] !== "") {
-      out[name] = state.text[name];
+  if (state.hasIssue !== "") {
+    out.has_issue = state.hasIssue;
+  }
+  for (const name of ["project", "repository", "tag", "mapping"] as const) {
+    if (state[name] !== "") {
+      out[name] = state[name];
     }
   }
-  if (state.mappingId !== "") {
-    out.mapping_id = state.mappingId;
-  }
   return out;
 }
 
-// The GET /cves filter parameters. Open alone also sends accepted=false, so an
-// accepted CVE is reached through the Accepted status.
+// The GET /cves filter parameters. Status is always sent, so the server never
+// applies its own default.
 export function toApiQuery(state: CveFilterState): Record<string, string> {
-  const out = toUrlParams(state);
-  out.status = state.statuses.join(",");
-  if (out.status === "open") {
-    out.accepted = "false";
-  }
-  return out;
+  return { ...toUrlParams(state), status: state.statuses.join(",") };
 }
 
-// How many filters differ from the default view.
-export function activeFilters(state: CveFilterState): Array<{ key: string; value: string }> {
-  return Object.entries(toUrlParams(state)).map(([key, value]) => ({ key, value }));
-}
-
-export const FILTER_KEYS = ["severity", "status", ...TEXT_FILTERS, "mapping_id"] as const;
+// Every URL parameter the filters own, including the names older links used.
+export const FILTER_KEYS = [
+  "q",
+  "severity",
+  "status",
+  "has_issue",
+  "project",
+  "repository",
+  "tag",
+  "mapping",
+  "accepted",
+  "harbor_project",
+  "harbor_repository",
+  "mapping_id",
+] as const;

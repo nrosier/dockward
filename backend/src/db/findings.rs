@@ -260,7 +260,8 @@ pub struct CveListFilter<'a> {
     pub statuses: &'a [&'a str],
     /// `Some(1)` keeps accepted CVEs, `Some(0)` the others.
     pub accepted: Option<i64>,
-    /// Lowercase ASCII text searched in the CVE id and the package.
+    /// Lowercase ASCII text searched in the CVE id, the package, and the mapping's Harbor
+    /// project and repository (#257). A literal substring, so `%` and `_` are not wildcards.
     pub q: Option<&'a str>,
     /// The summary's `package` equals this.
     pub package: Option<&'a str>,
@@ -270,6 +271,8 @@ pub struct CveListFilter<'a> {
     pub harbor_project: Option<&'a str>,
     /// The mapping's `harbor_repository` equals this.
     pub harbor_repository: Option<&'a str>,
+    /// `Some(1)` keeps CVEs with a GitHub issue row, `Some(0)` those without (#257).
+    pub has_issue: Option<i64>,
     /// `severity`, `cve_id`, `first_seen_at` or `last_seen_at`.
     pub sort: &'a str,
     /// `1` ascending, `-1` descending.
@@ -409,6 +412,8 @@ pub async fn list_cves(
                       gi.github_issue_url AS github_issue_url,
                       gi.github_issue_number AS github_issue_number,
                       gi.status AS github_issue_status,
+                      m.harbor_project AS harbor_project,
+                      m.harbor_repository AS harbor_repository,
                       EXISTS (
                           SELECT 1 FROM cve_acceptances ca
                           WHERE ca.mapping_id = s.mapping_id AND ca.cve_id = s.cve_id
@@ -435,10 +440,15 @@ pub async fn list_cves(
            WHERE (?5 IS NULL OR severity IN (SELECT value FROM json_each(?5)))
              AND (?6 IS NULL OR EXISTS (
                   SELECT 1 FROM json_each(?6) st
-                  WHERE st.value = items.status OR (st.value = 'accepted' AND items.accepted = 1)))
+                  WHERE (st.value = 'fixed' AND items.status = 'fixed')
+                     OR (st.value = 'open' AND items.status = 'open' AND items.accepted = 0)
+                     OR (st.value = 'accepted' AND items.accepted = 1)))
              AND (?7 IS NULL OR accepted = ?7)
              AND (?8 IS NULL OR instr(lower(cve_id), ?8) > 0
-                  OR instr(lower(COALESCE(package, '')), ?8) > 0)
+                  OR instr(lower(COALESCE(package, '')), ?8) > 0
+                  OR instr(lower(harbor_project), ?8) > 0
+                  OR instr(lower(harbor_repository), ?8) > 0)
+             AND (?18 IS NULL OR (?18 = 1) = (github_issue_number IS NOT NULL))
              AND (?13 IS NULL OR package = ?13)
              AND (?14 IS NULL OR EXISTS (
                   SELECT 1 FROM cve_findings tf
@@ -473,7 +483,8 @@ pub async fn list_cves(
         filter.tag,
         filter.harbor_project,
         filter.harbor_repository,
-        filter.include_older
+        filter.include_older,
+        filter.has_issue
     )
     .fetch_all(pool)
     .await
@@ -510,6 +521,8 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
         r#"WITH tag_rows AS (
                SELECT f.mapping_id AS mapping_id, f.cve_id AS cve_id, f.image_tag AS image_tag,
                       f.package AS package, f.status AS status,
+                      m.harbor_project AS harbor_project,
+                      m.harbor_repository AS harbor_repository,
                       CASE f.severity WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4
                            WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 ELSE 1 END AS sev_rank,
                       ROW_NUMBER() OVER (
@@ -539,6 +552,15 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
                            WHEN 3 THEN 'MEDIUM' WHEN 2 THEN 'LOW' ELSE 'UNKNOWN' END AS severity,
                       CASE WHEN MAX(status = 'open') = 1 THEN 'open' ELSE 'fixed' END AS status,
                       MAX(CASE WHEN rn = 1 THEN package END) AS package,
+                      MAX(harbor_project) AS harbor_project,
+                      MAX(harbor_repository) AS harbor_repository,
+                      EXISTS (
+                          SELECT 1 FROM github_issues gi
+                          JOIN repo_mappings gm ON gm.id = tag_rows.mapping_id
+                          WHERE gi.github_owner = gm.github_owner
+                            AND gi.github_repo = gm.github_repo
+                            AND gi.cve_id = tag_rows.cve_id
+                      ) AS has_issue,
                       EXISTS (
                           SELECT 1 FROM cve_acceptances ca
                           WHERE ca.mapping_id = tag_rows.mapping_id
@@ -554,10 +576,15 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
            WHERE (?5 IS NULL OR severity IN (SELECT value FROM json_each(?5)))
              AND (?6 IS NULL OR EXISTS (
                   SELECT 1 FROM json_each(?6) st
-                  WHERE st.value = items.status OR (st.value = 'accepted' AND items.accepted = 1)))
+                  WHERE (st.value = 'fixed' AND items.status = 'fixed')
+                     OR (st.value = 'open' AND items.status = 'open' AND items.accepted = 0)
+                     OR (st.value = 'accepted' AND items.accepted = 1)))
              AND (?7 IS NULL OR accepted = ?7)
              AND (?8 IS NULL OR instr(lower(cve_id), ?8) > 0
-                  OR instr(lower(COALESCE(package, '')), ?8) > 0)
+                  OR instr(lower(COALESCE(package, '')), ?8) > 0
+                  OR instr(lower(harbor_project), ?8) > 0
+                  OR instr(lower(harbor_repository), ?8) > 0)
+             AND (?13 IS NULL OR (?13 = 1) = (has_issue = 1))
              AND (?9 IS NULL OR package = ?9)
              AND (?10 IS NULL OR EXISTS (
                   SELECT 1 FROM cve_findings tf
@@ -574,7 +601,8 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
         filter.package,
         filter.tag,
         filter.harbor_project,
-        filter.harbor_repository
+        filter.harbor_repository,
+        filter.has_issue
     )
     .fetch_one(pool)
     .await
