@@ -94,6 +94,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 
 - Summary counts: open CVEs by severity (CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN; every severity since 2026-11-05, user, #129), fixed CVEs, open GitHub issues, failed syncs.
 - Decided (2026-11-07, user, #196, decisions 21 and 22): the CVE counts (open by severity, fixed) follow the newest scanned digest of each mapping, the same view as the CVE list. A CVE open only on an older tag adds nothing to them. Decided (2026-11-07, user, #196, decision 23): the fixed count follows the newest digest only too, so a CVE that only an older digest reported as fixed adds nothing to it. The same holds for the Open CVEs column of the mapping list. Rules: [cve-lifecycle.md](cve-lifecycle.md), "Dashboard counts". No layout changes, so no new design is needed.
+- Decided (2026-11-08, user, #247): the summary shows an accepted-CVE card between the Fixed card and the Issues card. It shows the number of CVEs with an active acceptance in the same scope as the other counts (newest-digest view; the admin `scope=all` toggle applies). Accepted is its own count and is not mixed into open; the open count is unchanged. The card is display only and changes no acceptance. Its text is catalog keys. The two astraya Medium acceptances stay as they are.
 - Below the counts: recent syncs with status and time. Failed rows have a retry action.
 
 ## Mapping form (decided)
