@@ -2,6 +2,16 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
+## 0.15.0 - 2026-11-08
+
+### Added
+- CVE page control bar (#257, PR #258, PR #260): one search field; severity, status and GitHub-issue pills; one row of comboboxes with Mapping as the only scope control; the Tags n of m column; a confirmation before Create issue; URL state that keeps the old parameters working; and admins see every tenant's CVEs.
+
+### Changed
+- The status=open filter excludes accepted CVEs (#257, PR #260).
+- The My Mappings / All Mappings toggle is removed; Mapping is the only scope control (#257, PR #260).
+- A spec was added for the CVE page control bar (#257, PR #258).
+
 ## 0.14.0 - 2026-11-08
 
 ### Added
