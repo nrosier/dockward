@@ -3,7 +3,8 @@
   "extends": [
     "config:recommended",
     ":pinAllExceptPeerDependencies",
-    ":semanticCommits"
+    ":semanticCommits",
+    "customManagers:githubActionsVersions"
   ],
   "pinDigests": true,
   "vulnerabilityAlerts": {
