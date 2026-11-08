@@ -50,6 +50,7 @@ The current `backend/src/main.rs` is the only implemented file. Treat the layout
   - Only `scanner_scan`, `scanner_restore` and a scan with a switch take the lock. Sync, resolve and plain scan jobs (no `scanner_uuid`) do not, and they read whatever scanner is current ([integrations.md](integrations.md), webhook rule).
 - Decided (2026-11-07, delegated, #224): the worker claims one job at a time, so "one at a time per project" holds inside one process. The lock row is still required because a deferred wait lets other jobs run between polls, and a restart in the middle of a switch has to resume it.
 - Decided (2026-11-03, delegated): manual retry (`POST /api/v1/sync-jobs/:id/retry`) sets `status` to `queued`, resets `attempts` to 0, clears `last_error`, and sets `next_attempt_at` to now. See [api.md](api.md).
+- Decided (2026-11-08, user, #243, decisions 1 to 4): a purge of failed jobs (`POST /api/v1/sync-jobs/purge-failed`) deletes `failed` rows only, in one transaction with its audit entry. The worker never claims a `failed` row, so a purge needs no lock against the worker. It skips a failed job that a `project_scanner_locks` row names, so a purge never releases the scanner lock (see "Per-project scanner lock" above). Rules: [api.md](api.md).
 
 ## Process lifecycle
 
