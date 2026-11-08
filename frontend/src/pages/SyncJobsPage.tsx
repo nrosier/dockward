@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import { useSearchParams } from "react-router";
 import { MappingFilter } from "../components/mappings/MappingFilter";
 import { PageHeader } from "../components/mappings/PageHeader";
@@ -10,6 +10,7 @@ import { mappingName, useMappingLookup, useScopeAll } from "../components/mappin
 import { ImageCell } from "../components/syncjobs/ImageCell";
 import { JobStatusPill } from "../components/syncjobs/jobPill";
 import { newVulnsText, noteText, triggerLabel } from "../components/syncjobs/labels";
+import { PurgeFailed } from "../components/syncjobs/PurgeFailed";
 import { RetryButton } from "../components/syncjobs/RetryButton";
 import { formatDateTime } from "../components/syncjobs/dates";
 import { Time } from "../components/syncjobs/Time";
@@ -57,6 +58,7 @@ export default function SyncJobsPage() {
   const status = (STATUSES as readonly string[]).includes(rawStatus) ? rawStatus : "";
   const mappingId = params.get("mapping_id") ?? "";
   const mappings = useMappingLookup(scopeAll);
+  const [purged, setPurged] = useState<number | null>(null);
 
   const list = useQuery({
     queryKey: ["sync-jobs", scopeAll, page, status, mappingId],
@@ -88,6 +90,7 @@ export default function SyncJobsPage() {
 
   const header = (
     <PageHeader title={t("page.syncJobs")} subtitle={t("syncJobs.subtitle")}>
+      <PurgeFailed scopeAll={scopeAll} onPurged={setPurged} />
       <ScopeToggle />
     </PageHeader>
   );
@@ -142,6 +145,11 @@ export default function SyncJobsPage() {
     <>
       {header}
       {filters}
+      {purged === null ? null : (
+        <output className="block text-[13px] text-muted">
+          {purged === 1 ? t("syncJobs.purge.successOne") : t("syncJobs.purge.success", { count: purged })}
+        </output>
+      )}
       <Card>
         {list.data.items.length === 0 ? (
           <p className="p-5 text-muted">{t("syncJobs.empty")}</p>
