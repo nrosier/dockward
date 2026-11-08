@@ -46,6 +46,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
     Router::new()
         .route("/healthz", get(healthz))
         .route("/assets/{*path}", get(api::static_files::asset))
+        .route("/favicon.svg", get(api::static_files::favicon))
         .route("/api/v1/auth/setup-status", get(api::auth::setup_status))
         .route("/api/v1/auth/setup", post(api::auth::setup))
         .route("/api/v1/auth/login", post(api::auth::login))
