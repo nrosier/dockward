@@ -150,6 +150,7 @@ export interface SyncJob {
 export interface DashboardSummary {
   open_cves: OpenCves;
   fixed_cves: number;
+  accepted_cves: number;
   open_issues: number;
   failed_syncs: number;
   recent_syncs: SyncJob[];

@@ -110,6 +110,7 @@
   "dashboard.openCves": "Open CVEs",
   "dashboard.openCvesTotal": "Open CVEs, all severities",
   "dashboard.fixedCves": "Fixed CVEs",
+  "dashboard.acceptedCves": "Accepted CVEs",
   "dashboard.issues": "Issues",
   "dashboard.openIssues": "Open GitHub issues",
   "dashboard.failedSyncs": "Failed syncs",

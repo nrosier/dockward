@@ -26,6 +26,7 @@ function job(over: Partial<SyncJob>): SyncJob {
 const summary: DashboardSummary = {
   open_cves: { critical: 3, high: 12, medium: 5, low: 6, unknown: 7, total: 33 },
   fixed_cves: 41,
+  accepted_cves: 2,
   open_issues: 15,
   failed_syncs: 2,
   recent_syncs: [
@@ -65,6 +66,14 @@ describe("DashboardPage", () => {
     expect(within(screen.getByRole("link", { name: new RegExp(t("pill.unknown")) })).getByText("7")).toBeInTheDocument();
     expect(within(screen.getByRole("link", { name: new RegExp(t("dashboard.openCvesTotal")) })).getByText("33")).toBeInTheDocument();
     expect(within(screen.getByRole("link", { name: new RegExp(t("pill.fixed")) })).getByText("41")).toBeInTheDocument();
+    const accepted = screen.getByText(t("dashboard.acceptedCves")).parentElement as HTMLElement;
+    expect(accepted).toHaveTextContent("2");
+    expect(within(accepted).queryByRole("link")).toBeNull();
+    const fixedEl = screen.getByRole("link", { name: new RegExp(t("pill.fixed")) });
+    const issuesEl = screen.getByText(t("dashboard.openIssues"));
+    const follows = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(follows(fixedEl, accepted)).toBe(true);
+    expect(follows(accepted, issuesEl)).toBe(true);
     expect(screen.getByText(t("dashboard.openIssues")).parentElement).toHaveTextContent("15");
     expect(within(screen.getByRole("link", { name: new RegExp(t("dashboard.failedSyncs")) })).getByText("2")).toBeInTheDocument();
     expect(screen.getByText(summary.recent_syncs[1].last_error ?? "")).toBeInTheDocument();
