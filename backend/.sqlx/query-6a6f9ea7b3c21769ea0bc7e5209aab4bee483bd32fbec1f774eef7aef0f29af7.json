@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM sync_jobs\n         WHERE mapping_id = ?1 AND json_valid(payload) AND json_extract(payload, '$.tag') = ?2\n           AND (status <> 'running' OR id = ?3)\n           AND id NOT IN (SELECT job_id FROM project_scanner_locks)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "6a6f9ea7b3c21769ea0bc7e5209aab4bee483bd32fbec1f774eef7aef0f29af7"
+}

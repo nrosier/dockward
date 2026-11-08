@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT image_digest AS \"digest!: String\" FROM sync_reports\n           WHERE mapping_id = ?1 AND harbor_repository = ?2 AND image_tag = ?3\n           UNION\n           SELECT CAST(json_extract(payload, '$.digest') AS TEXT) FROM sync_jobs\n           WHERE mapping_id = ?1 AND json_valid(payload) AND json_extract(payload, '$.tag') = ?3\n             AND json_extract(payload, '$.digest') IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "digest!: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_reports",
+            "name": "image_digest"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f3d760e43f5a2c9f50ae56e12c726380407ebd40e3402d04402ae283d19b3c44"
+}

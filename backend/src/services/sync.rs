@@ -27,6 +27,7 @@ use crate::db::sync_jobs::ClaimedJob;
 use crate::db::sync_reports::{self as report_db, NewReport};
 use crate::error::AppError;
 use crate::services::alerts::Notifier;
+use crate::services::artifact_removal;
 use crate::services::credentials::{base_for_join, decrypt_token};
 use crate::services::github_issues::GithubIssues;
 use crate::services::github_scanning::{
@@ -1017,10 +1018,13 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> JobHandler
     /// fails for good.
     async fn run(&self, job: ClaimedJob) -> JobOutcome {
         match resolve::job_kind(&job.payload) {
-            JobKind::Sync => match self.execute(&job).await {
-                Ok(()) => JobOutcome::Done,
-                Err(outcome) => outcome,
-            },
+            JobKind::Sync => {
+                let outcome = match self.execute(&job).await {
+                    Ok(()) => JobOutcome::Done,
+                    Err(outcome) => outcome,
+                };
+                artifact_removal::settle_gone(&self.pool, &job, outcome).await
+            }
             JobKind::Resolve => {
                 resolve::run(
                     &self.pool,
@@ -1042,14 +1046,15 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> JobHandler
                 .await
             }
             JobKind::ScannerScan => {
-                scanner_scan::run_job(
+                let outcome = scanner_scan::run_job(
                     &self.pool,
                     &self.credentials_key,
                     &self.harbor,
                     &self.clock,
                     &job,
                 )
-                .await
+                .await;
+                artifact_removal::settle_gone(&self.pool, &job, outcome).await
             }
             JobKind::ScannerRestore => {
                 scanner_scan::run_restore_job(
@@ -2069,18 +2074,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn artifact_404_is_done_with_the_gone_note_and_not_retried() {
+    async fn artifact_404_removes_the_tags_data_and_keeps_no_note() {
         let fx = Fixture::new("a404").await;
+        // Data of the gone tag `v1` and of another tag `v2`, and a GitHub issue row.
+        for (id, tag) in [("r1", "v1"), ("r2", "v2")] {
+            sqlx::query(
+                "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest, vulnerability_summary, sarif_status, synced_at)
+                 VALUES (?, 'm1', 'app', ?, ?, '{}', 'success', 10)",
+            )
+            .bind(id)
+            .bind(tag)
+            .bind(format!("sha256:{tag}"))
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, severity)
+                 VALUES (?, 'm1', 'app', ?, 'CVE-1', 'HIGH')",
+            )
+            .bind(format!("f-{tag}"))
+            .bind(tag)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO github_issues (id, github_owner, github_repo, cve_id, github_issue_number, github_issue_url)
+             VALUES ('gi', 'octo', 'app', 'CVE-1', 7, 'https://github.com/octo/app/issues/7')",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
         let mut fake = FakeHarbor::new(&good_artifact(), (200, "{}"));
         fake.artifact = (404, b"{}".to_vec());
         let harbor = Arc::new(fake);
         let scanner = FakeScanner::new(Ok("sarif-1".to_owned()), vec![]);
         let outcome = fx.handler(&harbor, &scanner).run(fx.job()).await;
-        assert_eq!(
-            outcome,
-            JobOutcome::DoneWithNote("artifact no longer in Harbor".to_owned())
-        );
+        assert_eq!(outcome, JobOutcome::Done);
         assert_eq!(scanner.uploads(), 0);
+        let count = |sql: &'static str| {
+            let pool = fx.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(sql)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        // The tag's findings, report and the job row are gone; no done note survives anywhere.
+        assert_eq!(
+            count("SELECT COUNT(*) FROM cve_findings WHERE image_tag = 'v1'").await,
+            0
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM sync_reports WHERE image_tag = 'v1'").await,
+            0
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM sync_jobs WHERE id = 'j1'").await,
+            0
+        );
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM sync_jobs WHERE last_error = 'artifact no longer in Harbor'"
+            )
+            .await,
+            0
+        );
+        // The other tag and the GitHub issue are untouched.
+        assert_eq!(
+            count("SELECT COUNT(*) FROM cve_findings WHERE image_tag = 'v2'").await,
+            1
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM sync_reports WHERE image_tag = 'v2'").await,
+            1
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM github_issues").await, 1);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM audit_log WHERE action = 'artifact.remove'").await,
+            1
+        );
     }
 
     #[tokio::test]

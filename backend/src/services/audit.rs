@@ -39,6 +39,7 @@ pub const ACTIONS: &[&str] = &[
     "sync_job.retry",
     "sync_job.purge",
     "log.level_change",
+    "artifact.remove",
 ];
 
 /// Key names (lowercased) that mark a value as a secret. Any key that contains
