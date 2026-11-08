@@ -108,6 +108,30 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 - The app never moves a target from one mapping to another.
 - Project webhook proposal (Decided 2026-11-06, user, #179): after Save mapping succeeds, the form proposes creating the project webhook only when the response has `project_webhook_exists: false`. Catalog keys: `mapping.projectWebhook.propose` ("Harbor project {project} has no project webhook yet. One webhook covers every repository in this project.") and `mapping.projectWebhook.create` ("Create project webhook"). It names the Harbor project and no repository. When `project_webhook_exists` is `true`, no proposal is shown. Decided (2026-11-06, user, #179): the proposal is an inline banner on the saved-mapping result, with the "Create project webhook" button. It is not a modal and does not block the user; the user can dismiss it. Placement (2026-11-07, delegated, #179): after a create, the banner is at the top of the mapping-created screen, above the shown-once values; after an edit save, it is below the form actions, and the edit page stays open instead of returning to the list. With `project_webhook_exists: true`, an edit save returns to the list as before.
 
+## Sync jobs page: purge failed jobs (#243)
+
+Decided (2026-11-08, user, #243, decisions 1 to 4): the Sync jobs page has a "Purge failed jobs" button that deletes every failed job in one action, after a confirmation that shows the count. Rules: [api.md](api.md), "Purge failed jobs". The button and dialog need design approval before they are built.
+
+- Placement (Decided (2026-11-08, spec author, #243)): in the page header, on the right, next to the "My mappings / All mappings" toggle. It is a secondary button with the destructive text colour, built from the existing Button and Radix Dialog parts. It is visible to every signed-in user, because every user can purge their own mappings' jobs. Reason: the Accept risk dialog and the Delete mapping dialog use the same parts.
+- Count: the page reads `GET /api/v1/sync-jobs/failed-count` with the same `scope` as the list (`scope=all` when an admin's toggle is on). The count is refetched after a retry, a purge, and when the toggle changes. On the Admin Failed syncs tab it is always `scope=all`.
+- Disabled state: with a count of zero, the button is disabled and cannot open the dialog. While the count loads, or if it failed to load, the button is also disabled. A failed count load shows `syncJobs.purge.countFailed` next to the button.
+- Confirmation dialog (Radix Dialog, modal, the destructive-action pattern of Delete mapping): the title names the action, the body shows the count and states the consequence, and there are two buttons, Cancel (focused by default) and a destructive confirm button that repeats the action and the count. Escape and Cancel close it without any request. The count is read when the dialog opens. While the purge request runs, both buttons are disabled.
+- No undo: the delete is permanent (decision 2), so the dialog is the only safeguard. The body says it is permanent and says what is not changed (decision 3).
+- Success: the dialog closes, the list and the count are refetched, and a status line above the table (`role="status"`) shows `syncJobs.purge.success` with the `deleted` value from the response, not the count shown in the dialog. A job kept because it holds the scanner lock stays in the list as a failed row.
+- Failure: the dialog stays open and shows `syncJobs.purge.failed` inline. Nothing is deleted. Cancel and a second attempt both work. No server text is shown, only the catalog text.
+- Catalog keys (all in `frontend/src/i18n/en.json`, parity kept; English text Decided (2026-11-08, spec author, #243)):
+
+  | Key | English text |
+  | --- | --- |
+  | `syncJobs.purge.button` | Purge failed jobs |
+  | `syncJobs.purge.title` | Purge failed jobs? |
+  | `syncJobs.purge.body` | {count, plural, one {This permanently deletes 1 failed sync job.} other {This permanently deletes # failed sync jobs.}} CVE findings, reports, GitHub issues, and alerts are not changed. |
+  | `syncJobs.purge.confirm` | {count, plural, one {Delete 1 failed job} other {Delete # failed jobs}} |
+  | `syncJobs.purge.cancel` | Cancel |
+  | `syncJobs.purge.success` | {count, plural, one {Deleted 1 failed job.} other {Deleted # failed jobs.}} |
+  | `syncJobs.purge.failed` | Purge failed. Try again. |
+  | `syncJobs.purge.countFailed` | Could not load the number of failed jobs. |
+
 ## Tag scans on the mapping page (#224)
 
 Decided (2026-11-07, user, #224 d1, d8, d12): each tag has a Scan button on the mapping page, and a scanner picker appears there only when Harbor has more than one enabled scanner. The picker lists scanners by name. Nothing is stored as a default scanner.
@@ -182,7 +206,7 @@ Decided (2026-11-07, user, #224 d1, d8, d12): each tag has a Scan button on the 
 - One Admin entry in the rail, shown to admins only.
 - Five tabs:
   - Jobs: housekeeping and sync jobs, with counts and errors. Includes cleanup and retention runs and polling runs.
-  - Failed syncs: error message and a retry action.
+  - Failed syncs: error message and a retry action. Decided (2026-11-08, user, #243, decisions 1 to 4): the tab also has the "Purge failed jobs" action below, always with `scope=all`.
   - Audit log: admin actions such as user create and delete, role changes, OIDC config changes, credential rotation.
   - Health: Harbor and GitHub reachability, token expiry, missing scopes, robot account expiry date with a warning 14 days before it lapses (Decided 2026-11-03, see [integrations.md](integrations.md)). Decided (2026-11-03, delegated): it also shows the code scanning state of each GitHub target (ready, no analysis yet, or unavailable), and the client IP HarborGate sees for the admin's own request, with its source ([api.md](api.md), "Health").
   - Settings (OIDC, Users, Alerts, Backup and restore): sections for the OIDC, Users, Alerts, and Backup and restore screens.
