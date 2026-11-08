@@ -2,6 +2,19 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
+## 0.14.0 - 2026-11-08
+
+### Added
+- Purge of failed sync jobs: a backend endpoint and a Purge failed jobs button on the Sync jobs page (#243, PR #245, PR #246).
+- Dashboard card for accepted CVEs (#247, PR #253).
+- Favicon from the HarborGate house mark (PR #248).
+- Security scanning workflow with Syft, Grype and Trivy (#227, PR #252).
+
+### Changed
+- HarborGate removes the data of artifacts Harbor deleted. When Harbor no longer has the artifact for a tag (found on a poll or pull, or by a 404 in a sync or resolve job), the tag's findings, sync reports and sync jobs are deleted, and the scanner reports too when no other tag of the mapping holds the digest. GitHub issues and uploaded SARIF are kept. This supersedes the #197 rule: the done note "artifact no longer in Harbor" is no longer written for those artifacts, and existing rows keep it (#249, PR #254).
+- No database migrations were added since 0.13.0; the latest remains 0010.
+- Specs were added for purging failed jobs, the accepted-CVE card and the removal of deleted artifacts (#243, #247, #249, PRs #244, #250, #251).
+
 ## 0.13.0 - 2026-11-08
 
 ### Added
