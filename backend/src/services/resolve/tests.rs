@@ -984,18 +984,21 @@ async fn the_covered_note_is_stored_in_last_error_by_the_worker() {
 }
 
 #[tokio::test]
-async fn a_404_on_the_digest_is_done_with_the_gone_note_and_not_retried() {
+async fn a_404_on_the_digest_removes_the_tags_at_that_digest_and_keeps_no_note() {
     let fx = Fixture::new("gone").await;
     let harbor = FakeHarbor::answering(404, SENTINEL);
     let handler = fx.handler(&harbor);
     queued_resolve(&fx).await;
     assert_eq!(step_once(&fx, &handler, 1_000).await, Step::Done);
     assert_eq!(fx.status("r1").await, "done");
-    assert_eq!(
-        last_error(&fx, "r1").await.as_deref(),
-        Some("artifact no longer in Harbor")
-    );
+    assert_eq!(last_error(&fx, "r1").await, None);
     assert!(fx.children().await.is_empty());
+    let audits: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'artifact.remove'")
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert_eq!(audits, 0, "a digest with no stored data removes nothing");
 }
 
 #[tokio::test]

@@ -25,6 +25,7 @@ use crate::db::mappings as mapping_db;
 use crate::db::sync_jobs::{self, ClaimedJob, MAX_DEFERRAL_SECS};
 use crate::error::AppError;
 use crate::services::acceptance::parse_rfc3339;
+use crate::services::artifact_removal;
 use crate::services::credentials::base_for_join;
 use crate::services::harbor_client::{
     ArtifactTag, HarborReply, artifact_url, artifacts_list_url, page_has_tagged_parent,
@@ -54,7 +55,8 @@ const MSG_NO_TAGS: &str = "digest has no tags to sync";
 /// The note kept on a child digest that a tagged index covers. Catalog key
 /// `sync.note.coveredByParent`.
 pub const NOTE_COVERED_BY_PARENT: &str = "covered by parent index";
-/// The note kept on a job whose image was deleted from Harbor after the job was queued. Catalog
+/// The note an older job kept when its image was deleted from Harbor (#197). It is no longer
+/// written (#249): a missing artifact removes its data. Rows that hold it still show the catalog
 /// key `sync.note.artifactGone`.
 pub const NOTE_ARTIFACT_GONE: &str = "artifact no longer in Harbor";
 const MSG_RATE_LIMITED: &str = "Harbor rate limit reached";
@@ -291,7 +293,7 @@ async fn resolve<H: HarborFetch, C: Clock>(
         .map_err(|_| failed(MSG_UNREACHABLE))?;
     // A 404 on the digest itself means the image was deleted after the job was queued: final.
     if reply.status == 404 {
-        return Ok(JobOutcome::DoneWithNote(NOTE_ARTIFACT_GONE.to_owned()));
+        return Ok(artifact_removal::resolve_artifact_gone(pool, &mapping, &digest).await);
     }
     let body = body_or_outcome(reply, clock.now())?;
 

@@ -5,6 +5,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePo
 pub mod acceptances;
 pub mod alert_channels;
 pub mod alert_deliveries;
+pub mod artifact_removal;
 #[allow(dead_code)] // Used by the audit writer and the admin audit list.
 pub mod audit;
 pub mod backup;

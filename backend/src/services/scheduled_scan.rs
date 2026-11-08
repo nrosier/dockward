@@ -29,6 +29,7 @@ use crate::auth::crypto::DerivedKey;
 use crate::db::mappings::{self as mapping_db, MappingRow};
 use crate::db::sync_jobs::{self, ClaimedJob};
 use crate::error::AppError;
+use crate::services::artifact_removal;
 use crate::services::credentials::base_for_join;
 use crate::services::harbor_client::{
     SCAN_REQUEST_BODY, artifact_url, newest_tagged_url, parse_artifact_digest,
@@ -36,7 +37,7 @@ use crate::services::harbor_client::{
 };
 use crate::services::ids;
 use crate::services::poller::harbor_login;
-use crate::services::resolve::{self, body_or_outcome, newest_tags};
+use crate::services::resolve::{body_or_outcome, newest_tags};
 use crate::services::scanner_scan;
 use crate::services::sync::{Clock, HarborFetch, MSG_DATABASE, MSG_GONE, MSG_INTERNAL};
 use crate::worker::{JobOutcome, now_secs};
@@ -200,9 +201,6 @@ fn scan_answer(reply: crate::services::harbor_client::HarborReply, now: i64) -> 
     match reply.status {
         200..=299 => Ok(()),
         409 => Err(JobOutcome::DoneWithNote(NOTE_SCAN_RUNNING.to_owned())),
-        404 => Err(JobOutcome::DoneWithNote(
-            resolve::NOTE_ARTIFACT_GONE.to_owned(),
-        )),
         401 => Err(failed(MSG_REJECTED)),
         403 => Err(failed(MSG_SCAN_FORBIDDEN)),
         429 => body_or_outcome(reply, now).map(|_| ()),
@@ -272,9 +270,7 @@ async fn scan<H: HarborFetch, C: Clock>(
                 .await
                 .map_err(|_| failed(MSG_UNREACHABLE))?;
             if reply.status == 404 {
-                return Ok(JobOutcome::DoneWithNote(
-                    resolve::NOTE_ARTIFACT_GONE.to_owned(),
-                ));
+                return Ok(artifact_removal::job_artifact_gone(pool, &mapping, tag, &job.id).await);
             }
             let body = body_or_outcome(reply, clock.now())?;
             let digest = parse_artifact_digest(&body).map_err(|_| failed(MSG_UNREADABLE))?;
@@ -345,6 +341,10 @@ async fn scan<H: HarborFetch, C: Clock>(
         .post_json(&url, &username, &secret, SCAN_REQUEST_BODY, &[])
         .await
         .map_err(|_| failed(MSG_UNREACHABLE))?;
+    if reply.status == 404 {
+        // The image was deleted: remove the tag's data (#249).
+        return Ok(artifact_removal::job_artifact_gone(pool, &mapping, &tag, &job.id).await);
+    }
     scan_answer(reply, clock.now())?;
 
     // One sync job for the scanned digest and its newest tag, committed with this job's done

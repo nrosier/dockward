@@ -13,6 +13,7 @@
 //! per-mapping poll, [`poll_mapping`], for one mapping on demand, so both obey one set of
 //! dedupe rules and one page cap.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use serde_json::json;
@@ -25,6 +26,7 @@ use crate::db::job_runs::{self, JobRun};
 use crate::db::mappings::{self as mapping_db, ListFilter, MappingRow};
 use crate::db::{credentials as credential_db, sync_jobs, sync_reports};
 use crate::error::AppError;
+use crate::services::artifact_removal as removal;
 use crate::services::audit::{self, Actor};
 use crate::services::credentials::{base_for_join, decrypt_token};
 use crate::services::harbor_client::{
@@ -161,6 +163,10 @@ async fn poll_mapping<H: HarborFetch>(
     let (username, secret) = harbor_login(pool, key, mapping).await?;
     let base = base_for_join(&mapping.harbor_base_url)?;
     let mut queued = 0u64;
+    // Every tag name the listing held, and whether the listing was read to its end (an empty
+    // page). Only a complete listing can show that a tag is gone (#249).
+    let mut listed: HashSet<String> = HashSet::new();
+    let mut complete = false;
     for page in 1..=MAX_PAGES {
         let url = artifacts_list_url(
             &base,
@@ -175,9 +181,11 @@ async fn poll_mapping<H: HarborFetch>(
         }
         let artifacts = parse_artifact_list_dated(&body)?;
         if artifacts.is_empty() {
+            complete = true;
             break;
         }
         for (digest, tags) in artifacts {
+            listed.extend(tags.iter().map(|tag| tag.name.clone()));
             // The same cut as the resolve job (#132): valid tag names, newest 10 by push time.
             for tag in &newest_tags(tags, MAX_TAGS_PER_DIGEST) {
                 if sync_reports::has_success(
@@ -205,6 +213,9 @@ async fn poll_mapping<H: HarborFetch>(
                 queued += 1;
             }
         }
+    }
+    if complete {
+        removal::remove_missing_tags(pool, mapping, &listed, now).await?;
     }
     Ok(queued)
 }
@@ -836,6 +847,308 @@ mod tests {
             find_pullable(&fx.pool, "an-admin", true, "missing").await,
             Err(AppError::NotFound)
         ));
+    }
+
+    /// Seeds what a synced tag leaves behind on `m1`: a success report, one finding, a done job,
+    /// a queued job, a stored scanner report with a finding, and a GitHub issue the finding
+    /// points at. Everything is dated 500, before the polls below start at 1_000.
+    async fn seed_tag(fx: &Fixture, tag: &str, digest: &str) {
+        let pool = &fx.pool;
+        sqlx::query(
+            "INSERT OR IGNORE INTO github_issues (id, github_owner, github_repo, cve_id, github_issue_number, github_issue_url)
+             VALUES ('gi', 'octo', 'app', 'CVE-1', 7, 'https://github.com/octo/app/issues/7')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest, vulnerability_summary, sarif_status, synced_at)
+             VALUES (?, 'm1', 'app', ?, ?, '{}', 'success', 500)",
+        )
+        .bind(format!("r-{tag}"))
+        .bind(tag)
+        .bind(digest)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, severity, first_seen_at, github_issue_id)
+             VALUES (?, 'm1', 'app', ?, 'CVE-1', 'HIGH', 500, 'gi')",
+        )
+        .bind(format!("f-{tag}"))
+        .bind(tag)
+        .execute(pool)
+        .await
+        .unwrap();
+        for status in ["done", "queued"] {
+            let payload =
+                format!(r#"{{"repo_full_name":"proj/app","digest":"{digest}","tag":"{tag}"}}"#);
+            let id = format!("j-{tag}-{status}");
+            sync_jobs::enqueue(pool, &id, "m1", &payload, 500)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE sync_jobs SET status = ? WHERE id = ?")
+                .bind(status)
+                .bind(&id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO scanner_reports (id, mapping_id, image_digest, scanner_uuid, stored_at)
+             VALUES (?, 'm1', ?, 'unknown', 500)",
+        )
+        .bind(format!("sr-{digest}"))
+        .bind(digest)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT OR IGNORE INTO scanner_findings (report_id, cve_id, package, severity)
+             VALUES (?, 'CVE-1', '', 'HIGH')",
+        )
+        .bind(format!("sr-{digest}"))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn count(fx: &Fixture, sql: &'static str) -> i64 {
+        sqlx::query_scalar(sql).fetch_one(&fx.pool).await.unwrap()
+    }
+
+    const ONLY_V2: &str = r#"[{"digest": "sha256:bbbb", "tags": [{"name": "v2"}]}]"#;
+
+    #[tokio::test]
+    async fn a_poll_removes_the_data_of_a_tag_gone_from_harbor_and_keeps_the_others() {
+        let fx = Fixture::new("remove-gone").await;
+        seed_tag(&fx, "v1", "sha256:aaaa").await;
+        seed_tag(&fx, "v2", "sha256:bbbb").await;
+        let harbor = FakeHarbor::with("app", 200, ONLY_V2);
+        harbor.set("other", 200, "[]");
+
+        poll_once(&fx.pool, &key(), &harbor, 1_000).await.unwrap();
+
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM cve_findings WHERE image_tag = 'v1'"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM sync_reports WHERE image_tag = 'v1'"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM sync_jobs WHERE payload LIKE '%\"v1\"%'"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM scanner_reports WHERE image_digest = 'sha256:aaaa'"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM scanner_findings WHERE report_id = 'sr-sha256:aaaa'"
+            )
+            .await,
+            0
+        );
+        // v2 is untouched.
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM cve_findings WHERE image_tag = 'v2'"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM sync_reports WHERE image_tag = 'v2'"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM sync_jobs WHERE payload LIKE '%\"v2\"%'"
+            )
+            .await,
+            2
+        );
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM scanner_reports WHERE image_digest = 'sha256:bbbb'"
+            )
+            .await,
+            1
+        );
+        // The GitHub issue row is kept, and the surviving finding still points at it.
+        assert_eq!(count(&fx, "SELECT COUNT(*) FROM github_issues").await, 1);
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM cve_findings WHERE github_issue_id = 'gi'"
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_removal_is_audited_once_with_mapping_tag_and_count_and_no_secret() {
+        let fx = Fixture::new("remove-audit").await;
+        seed_tag(&fx, "v1", "sha256:aaaa").await;
+        seed_tag(&fx, "v2", "sha256:bbbb").await;
+        let harbor = FakeHarbor::with("app", 200, ONLY_V2);
+        harbor.set("other", 200, "[]");
+
+        poll_once(&fx.pool, &key(), &harbor, 1_000).await.unwrap();
+        // A second poll finds nothing more to remove, so it writes no second row.
+        poll_once(&fx.pool, &key(), &harbor, 2_000).await.unwrap();
+
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT actor_username, target, details FROM audit_log WHERE action = 'artifact.remove'",
+        )
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "system");
+        assert_eq!(rows[0].1, "mapping:m1");
+        let details: serde_json::Value = serde_json::from_str(&rows[0].2).unwrap();
+        assert_eq!(details["mapping_id"], "m1");
+        assert_eq!(details["tag"], "v1");
+        // 2 jobs, 1 finding, 1 sync report, 1 scanner report (its finding goes by cascade).
+        assert_eq!(details["removed"], 5);
+        assert_eq!(details.as_object().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_shared_digest_keeps_the_other_tags_data() {
+        let fx = Fixture::new("remove-shared").await;
+        seed_tag(&fx, "v1", "sha256:aaaa").await;
+        seed_tag(&fx, "latest", "sha256:aaaa").await;
+        let harbor = FakeHarbor::with(
+            "app",
+            200,
+            r#"[{"digest": "sha256:aaaa", "tags": [{"name": "latest"}]}]"#,
+        );
+        harbor.set("other", 200, "[]");
+
+        poll_once(&fx.pool, &key(), &harbor, 1_000).await.unwrap();
+
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM cve_findings WHERE image_tag = 'v1'"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM sync_reports WHERE image_tag = 'v1'"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM cve_findings WHERE image_tag = 'latest'"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM sync_reports WHERE image_tag = 'latest'"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM sync_jobs WHERE payload LIKE '%latest%'"
+            )
+            .await,
+            2
+        );
+        // The digest is still under `latest`, so its stored scanner report stays.
+        assert_eq!(count(&fx, "SELECT COUNT(*) FROM scanner_reports").await, 1);
+        assert_eq!(count(&fx, "SELECT COUNT(*) FROM scanner_findings").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_incomplete_listing_removes_nothing() {
+        let fx = Fixture::new("remove-incomplete").await;
+        seed_tag(&fx, "v1", "sha256:aaaa").await;
+        let m1 = mapping(&fx, "m1").await;
+
+        // A Harbor error.
+        let harbor = FakeHarbor::with("app", 503, "down");
+        assert!(
+            pull_mapping(&fx.pool, &key(), &harbor, &owner(), &m1, 1_000)
+                .await
+                .is_err()
+        );
+        // A listing cut off by the page cap.
+        let endless = Arc::new(EndlessHarbor::default());
+        pull_mapping(&fx.pool, &key(), &endless, &owner(), &m1, 1_000)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM sync_reports WHERE image_tag = 'v1'"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM audit_log WHERE action = 'artifact.remove'"
+            )
+            .await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn data_newer_than_the_poll_is_not_taken_for_a_deleted_tag() {
+        let fx = Fixture::new("remove-fresh").await;
+        seed_tag(&fx, "v1", "sha256:aaaa").await;
+        let harbor = FakeHarbor::with("app", 200, "[]");
+        harbor.set("other", 200, "[]");
+
+        // The poll started at 400, before the tag's data (dated 500) existed.
+        poll_once(&fx.pool, &key(), &harbor, 400).await.unwrap();
+        assert_eq!(count(&fx, "SELECT COUNT(*) FROM sync_reports").await, 1);
     }
 
     /// Answers every page with one new artifact, so only the page cap stops the poll.
