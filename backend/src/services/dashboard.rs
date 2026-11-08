@@ -45,6 +45,7 @@ impl OpenCves {
 pub struct Summary {
     pub open_cves: OpenCves,
     pub fixed_cves: i64,
+    pub accepted_cves: i64,
     pub open_issues: i64,
     pub failed_syncs: i64,
     pub recent_syncs: Vec<SyncJob>,
@@ -86,6 +87,7 @@ pub async fn summary(
     Ok(Summary {
         open_cves: sum_open(&open_rows),
         fixed_cves: db::fixed_cves(pool, user_id).await?,
+        accepted_cves: db::accepted_cves(pool, user_id, now).await?,
         open_issues: db::open_issues(pool, user_id).await?,
         failed_syncs: db::failed_syncs_since(pool, user_id, now - FAILED_SYNC_WINDOW_SECS).await?,
         recent_syncs: sync_jobs::recent(pool, user_id).await?,
@@ -424,6 +426,56 @@ mod tests {
                 .unwrap(),
             2
         );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #247: the accepted count equals the active acceptances on CVEs open in scope. Expired
+    /// and revoked acceptances, fixed CVEs and other users' mappings add nothing, and the
+    /// open count is unchanged by the accepted ones.
+    #[tokio::test]
+    async fn accepted_count_matches_active_acceptances_in_scope() {
+        let (pool, dir) = fresh_pool("accepted-count").await;
+        seed(&pool, "u1", &[("m1", "app")]).await;
+        seed(&pool, "u2", &[("m2", "other")]).await;
+        for (cve, sev) in [
+            ("CVE-2026-0001", "MEDIUM"),
+            ("CVE-2026-0002", "MEDIUM"),
+            ("CVE-2026-0003", "HIGH"),
+            ("CVE-2026-0004", "HIGH"),
+            ("CVE-2026-0005", "LOW"),
+        ] {
+            finding(&pool, "m1", "v1", cve, sev, "open").await;
+        }
+        finding(&pool, "m1", "v1", "CVE-2026-0006", "HIGH", "fixed").await;
+        finding(&pool, "m2", "v1", "CVE-2026-0001", "HIGH", "open").await;
+        accept(&pool, "m1", "CVE-2026-0001", None).await;
+        accept(&pool, "m1", "CVE-2026-0002", Some(NOW + 100)).await;
+        accept(&pool, "m1", "CVE-2026-0003", Some(NOW - 1)).await;
+        accept(&pool, "m1", "CVE-2026-0004", None).await;
+        sqlx::query("UPDATE cve_acceptances SET revoked_at = ?, revoked_by = 'u1' WHERE cve_id = 'CVE-2026-0004'")
+            .bind(NOW - 5)
+            .execute(&pool)
+            .await
+            .unwrap();
+        accept(&pool, "m1", "CVE-2026-0006", None).await;
+        accept(&pool, "m2", "CVE-2026-0001", None).await;
+
+        assert_eq!(db::accepted_cves(&pool, Some("u1"), NOW).await.unwrap(), 2);
+        assert_eq!(db::accepted_cves(&pool, Some("u2"), NOW).await.unwrap(), 1);
+        assert_eq!(db::accepted_cves(&pool, None, NOW).await.unwrap(), 3);
+        // Open on m1: 0003 (expired acceptance), 0004 (revoked), 0005. None on m2.
+        assert_eq!(
+            open_totals(&pool, Some("u1")).await,
+            OpenCves::of(0, 2, 0, 1, 0)
+        );
+        assert_eq!(
+            open_totals(&pool, Some("u2")).await,
+            OpenCves::of(0, 0, 0, 0, 0)
+        );
+        let s = summary(&pool, Some("u1"), NOW).await.unwrap();
+        assert_eq!(s.accepted_cves, 2);
+        assert_eq!(s.open_cves.total, 3);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

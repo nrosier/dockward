@@ -137,6 +137,7 @@ export default function DashboardPage() {
           label={t("dashboard.fixedCves")}
           to={`/cves?status=fixed${scopeQuery}`}
         />
+        <CountCard kind="accepted" count={data.accepted_cves} label={t("dashboard.acceptedCves")} />
         <Card className="flex flex-col items-start gap-2.5 px-[18px] py-4">
           <span className="inline-flex h-[22px] items-center rounded-full border border-border bg-text/5 px-[9px] text-[11px] leading-none font-semibold tracking-[0.05em] uppercase">
             {t("dashboard.issues")}
