@@ -83,6 +83,24 @@ pub async fn asset(Path(path): Path<String>) -> Response {
     response
 }
 
+/// `GET /favicon.svg`: the tab icon from the build output. Not hashed, so cached for a day.
+pub async fn favicon() -> Response {
+    let Some(file) = Assets::get("favicon.svg") else {
+        return AppError::NotFound.into_response();
+    };
+    let mut response = file.data.into_owned().into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("image/svg+xml"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=86400"),
+    );
+    response
+}
+
 /// The router fallback. An `/api/` path or a non-`GET` request is a JSON 404. Anything
 /// else is the single-page app, so client-side routes survive a reload.
 pub async fn spa(method: Method, uri: Uri) -> Response {
