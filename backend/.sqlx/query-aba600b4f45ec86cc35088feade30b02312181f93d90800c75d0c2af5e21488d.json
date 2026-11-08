@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM sync_jobs\n         WHERE status = 'failed'\n           AND id NOT IN (SELECT job_id FROM project_scanner_locks)\n           AND (? = 1 OR mapping_id IN (SELECT id FROM repo_mappings WHERE user_id = ?))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "aba600b4f45ec86cc35088feade30b02312181f93d90800c75d0c2af5e21488d"
+}

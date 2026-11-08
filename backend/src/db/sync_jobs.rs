@@ -323,6 +323,51 @@ pub async fn reset_failed(
     .map_err(|_| AppError::InternalError)
 }
 
+/// Counts the `failed` jobs a purge would delete: in scope, and not named by a scanner lock.
+/// `all_users` covers every mapping; otherwise only the mappings of `user_id`.
+pub async fn count_purgeable_failed(
+    pool: &SqlitePool,
+    user_id: &str,
+    all_users: bool,
+) -> Result<i64, AppError> {
+    let all = i64::from(all_users);
+    let row = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n: i64" FROM sync_jobs
+         WHERE status = 'failed'
+           AND id NOT IN (SELECT job_id FROM project_scanner_locks)
+           AND (? = 1 OR mapping_id IN (SELECT id FROM repo_mappings WHERE user_id = ?))"#,
+        all,
+        user_id
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.n)
+}
+
+/// Deletes the `failed` jobs in scope that no scanner lock names, and returns the row count.
+/// The state is checked in this statement, so a job retried meanwhile is kept. It takes a
+/// connection so the caller can run the delete and its audit row in one transaction.
+pub async fn delete_purgeable_failed(
+    conn: &mut SqliteConnection,
+    user_id: &str,
+    all_users: bool,
+) -> Result<u64, AppError> {
+    let all = i64::from(all_users);
+    sqlx::query!(
+        "DELETE FROM sync_jobs
+         WHERE status = 'failed'
+           AND id NOT IN (SELECT job_id FROM project_scanner_locks)
+           AND (? = 1 OR mapping_id IN (SELECT id FROM repo_mappings WHERE user_id = ?))",
+        all,
+        user_id
+    )
+    .execute(conn)
+    .await
+    .map(|done| done.rows_affected())
+    .map_err(|_| AppError::InternalError)
+}
+
 /// The user who owns the mapping of a job. `None` when the job does not exist.
 pub async fn owner_of_job(pool: &SqlitePool, id: &str) -> Result<Option<String>, AppError> {
     let row = sqlx::query!(
