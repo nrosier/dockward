@@ -300,8 +300,9 @@ Decided (2026-11-05, user, #132): `SyncJob` also has `"kind"` (`sync` or `resolv
 
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |
-| GET | `/api/v1/dashboard/summary` | session | admin may add `scope=all` | `{"open_cves": {"critical","high","medium","low","unknown","total"}, "fixed_cves", "open_issues", "failed_syncs", "recent_syncs": [SyncJob]}` | 200, 401 |
+| GET | `/api/v1/dashboard/summary` | session | admin may add `scope=all` | `{"open_cves": {"critical","high","medium","low","unknown","total"}, "fixed_cves", "accepted_cves", "open_issues", "failed_syncs", "recent_syncs": [SyncJob]}` | 200, 401 |
 
+- Decided (2026-11-08, user, #247): `accepted_cves` is the number of distinct CVEs with an active acceptance in the same scope as `open_cves` (newest-digest view; distinct per mapping). The `open_cves` and `fixed_cves` counts are unchanged: accepted CVEs stay out of `open_cves`. Rule: [cve-lifecycle.md](cve-lifecycle.md), Dashboard counts.
 - Counting rules (distinct CVEs, current snapshot, newest scanned digest of each mapping only since 2026-11-07, user, #196) are in [cve-lifecycle.md](cve-lifecycle.md), Dashboard counts. `open_cves` of `GET /mappings` follows the same rules. `fixed_cves` also follows the newest digest only (Decided 2026-11-07, user, #196, decision 23): a CVE that only an older digest reported as fixed adds nothing to it. `recent_syncs` holds the latest 10. The 10 matches the tag limit and is Decided (2026-11-03, delegated), with no external source. Failed rows can be retried with the route above.
 
 ## Admin

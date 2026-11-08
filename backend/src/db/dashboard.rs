@@ -112,6 +112,40 @@ pub async fn fixed_cves(pool: &SqlitePool, user_id: Option<&str>) -> Result<i64,
     Ok(row.n)
 }
 
+/// Accepted CVEs (#247): distinct `cve_id` per mapping with at least one newest-digest-tag row
+/// at `status = 'open'` and an active acceptance. These are exactly the CVEs `open_by_mapping`
+/// leaves out, so an accepted CVE is never in both counts. An acceptance is active when
+/// `revoked_at IS NULL` and (`expires_at IS NULL` or `expires_at > now`).
+pub async fn accepted_cves(
+    pool: &SqlitePool,
+    user_id: Option<&str>,
+    now: i64,
+) -> Result<i64, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM (
+               SELECT f.mapping_id, f.cve_id
+               FROM cve_findings f
+               JOIN repo_mappings m ON m.id = f.mapping_id
+               JOIN newest_digest_tags nd
+                    ON nd.mapping_id = f.mapping_id AND nd.image_tag = f.image_tag
+               WHERE f.status = 'open' AND (?1 IS NULL OR m.user_id = ?1)
+                 AND EXISTS (
+                     SELECT 1 FROM cve_acceptances ca
+                     WHERE ca.mapping_id = f.mapping_id AND ca.cve_id = f.cve_id
+                       AND ca.revoked_at IS NULL
+                       AND (ca.expires_at IS NULL OR ca.expires_at > ?2)
+                 )
+               GROUP BY f.mapping_id, f.cve_id
+           )"#,
+        user_id,
+        now
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.n)
+}
+
 /// Open GitHub issues: `github_issues` rows with `status = 'open'` for the GitHub target of
 /// the user's mappings (`specs/cve-lifecycle.md`, Dashboard counts). One mapping exists per
 /// GitHub repository, so each issue row is counted once.
