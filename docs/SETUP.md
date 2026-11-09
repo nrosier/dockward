@@ -308,7 +308,7 @@ Check each item before you rely on the setup:
 
 ## Restore from a backup
 
-Restore is a command-line command that runs with HarborGate stopped. It is not an HTTP route and not in the admin UI. A backup is made in the admin UI under Settings > Backup and restore, and is written to `HARBORGATE_BACKUP_DIR` (default `/data/backups`) as `harborgate-<yyyymmddThhmmssZ>.hgbk`.
+Restore is a command-line command that runs with HarborGate stopped. It is not an HTTP route and not in the admin UI. A backup is made in the admin UI under Settings > Backup and restore, and is written to `HARBORGATE_BACKUP_DIR` (default `/data/backups`) as `harborgate-<yyyymmddThhmmssZ>.hgbk`. HarborGate creates that folder at startup (mode 0700) if it does not exist, so you do not create it yourself. If the folder already exists and is not writable, a backup fails with a clear error and HarborGate does not change its permissions.
 
 1. **Find the key.** You need the same `HARBORGATE_ENCRYPTION_KEY` that created the backup. After a key rotation, older backups need the old key. A backup made under a different key is rejected.
 2. **Stop HarborGate.** Stop the app yourself first. The command also checks that port 8080 is free in its own container and prints `stop HarborGate before restoring` if it is not. That check cannot see an app running in another container, so do not rely on it.
