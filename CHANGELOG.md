@@ -2,6 +2,11 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
+## 0.15.1 - 2026-11-09
+
+### Fixed
+- Rebuilt the image on Alpine 3.24 with zlib 1.4-r0, which fixes CVE-2026-4738 (Critical, zlib 1.3.2-r1 in the shipped image; Grype alert #73; issue #262).
+
 ## 0.15.0 - 2026-11-08
 
 ### Added
