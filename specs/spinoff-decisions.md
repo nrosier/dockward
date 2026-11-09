@@ -27,3 +27,5 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 20. Keep the GitHub SARIF, issue, CVE close/reopen, and accepted-CVE rules. Remove only the Harbor parts.
 21. Always a fresh install. No import from an existing HarborGate database.
 22. Name: decide later. `localscan` stays provisional.
+
+23. Scanner delivery: the pinned Trivy and Grype executables are copied into the app image, which stays FROM scratch and is built from their pinned releases. The app calls them by absolute path. Scanner updates are an app image rebuild (answer to open item 3, 2026-11-09).
