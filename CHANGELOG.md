@@ -2,6 +2,15 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
+## 0.16.0 - 2026-11-09
+
+### Changed
+- The runtime image is now `FROM scratch`: the static binary, the CA bundle, and `/data` and `/tmp` created in the image. It has no shell and no package manager. The healthcheck is `harborgate healthcheck`. The binary is built with `cargo auditable`, so image scans read the Rust dependencies (#269, PR #270, PR #271, PR #272).
+- The image no longer contains apk, so the zlib upgrade in 0.15.1 is no longer needed.
+
+### Fixed
+- The backup directory is created at startup with mode 0700, so a fresh install can back up without a manual step (#273, PR #274, PR #275).
+
 ## 0.15.1 - 2026-11-09
 
 ### Fixed
