@@ -76,3 +76,7 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 40. Docker Hub rate limit on an anonymous pull: the source shows a fixed catalog message that asks for a Docker Hub credential, which raises the limit. The job retries on the backoff, so a later attempt can succeed.
 41. Docker Hub credential test: the same as other hubs. The test checks a token for the repository the user names, and returns ok or the failure. It works anonymously too.
 42. If a user removes a Docker Hub credential, the source falls back to anonymous pulls and shows a note that no credential is in use. It is not blocked.
+
+43. ghcr.io credentials: classic personal access token only, with read:packages. Fine-grained tokens are not accepted for ghcr.io.
+44. Custom hubs: the admin can set a pull endpoint that differs from the stored host. The default for a custom hub is the stored host.
+45. A hub is identified by its host only. No separate display label; the host is the name shown everywhere.
