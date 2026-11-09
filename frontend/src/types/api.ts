@@ -183,6 +183,9 @@ export interface MappingTag {
 export interface TagScan {
   scanner_uuid: string;
   scanner_name: string;
+  // True when the report's scanner is not linked to a Harbor registration and
+  // scanner_name is the report's own name (#277).
+  unlinked: boolean;
   state: TagScanState;
   // A `sync.note.*` catalog key, or null.
   note: string | null;

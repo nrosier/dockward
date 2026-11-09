@@ -38,8 +38,8 @@ const ONE: ScannerList = { scanner_choice: "single", scanners: [TWO.scanners[0]]
 const TAGS = { items: [{ image_tag: "1.0", last_scan_at: "2026-11-06T10:00:00Z", open_cves: 2 }] };
 
 const SCANS: TagScan[] = [
-  { scanner_uuid: "s1", scanner_name: "Trivy", state: "ok", note: null, job_id: "j1", updated_at: null },
-  { scanner_uuid: "s2", scanner_name: "Grype", state: "failed", note: "sync.note.scannerFailed", job_id: "j2", updated_at: null },
+  { scanner_uuid: "s1", scanner_name: "Trivy", unlinked: false, state: "ok", note: null, job_id: "j1", updated_at: null },
+  { scanner_uuid: "s2", scanner_name: "Grype", unlinked: false, state: "failed", note: "sync.note.scannerFailed", job_id: "j2", updated_at: null },
 ];
 
 const SCAN = "/api/v1/mappings/m1/tags/1.0/scan";
@@ -88,6 +88,29 @@ describe("ScansCard", () => {
     expect(screen.getByText(t("mapping.scan.state.ok"))).toBeInTheDocument();
     expect(screen.getByText(t("mapping.scan.state.failed"))).toBeInTheDocument();
     expect(screen.getByText(t("sync.note.scannerFailed"))).toBeInTheDocument();
+  });
+
+  it("shows the report's scanner name marked as not linked for an unknown registration (#277)", async () => {
+    const scans: TagScan[] = [
+      { scanner_uuid: "s1", scanner_name: "Trivy", unlinked: false, state: "ok", note: null, job_id: null, updated_at: null },
+      { scanner_uuid: "unknown", scanner_name: "Grype", unlinked: true, state: "ok", note: null, job_id: null, updated_at: null },
+    ];
+    stub(TWO, undefined, scans);
+    renderWithRoutes(routes, "/mappings/m1");
+    const grype = await screen.findByText("Grype");
+    expect(grype.parentElement).toHaveTextContent(`Grype${t("mapping.scan.notLinked")}`);
+    expect(screen.getAllByText(t("mapping.scan.notLinked"))).toHaveLength(1);
+    expect(screen.getByText("Trivy").parentElement).not.toHaveTextContent(t("mapping.scan.notLinked"));
+  });
+
+  it("shows Unknown scanner with no suffix when the report has no name", async () => {
+    const scans: TagScan[] = [
+      { scanner_uuid: "unknown", scanner_name: "Unknown scanner", unlinked: false, state: "ok", note: null, job_id: null, updated_at: null },
+    ];
+    stub(TWO, undefined, scans);
+    renderWithRoutes(routes, "/mappings/m1");
+    expect(await screen.findByText("Unknown scanner")).toBeInTheDocument();
+    expect(screen.queryByText(t("mapping.scan.notLinked"))).toBeNull();
   });
 
   it("takes its rows from the mapping tag route, in its order, and not from sync jobs", async () => {
@@ -202,7 +225,7 @@ describe("ScansCard", () => {
 
   it("shows the restore failed banner with a Sync jobs link", async () => {
     const failed: TagScan[] = [
-      { scanner_uuid: "s1", scanner_name: "Trivy", state: "failed", note: "sync.note.restoreFailed", job_id: "j1", updated_at: null },
+      { scanner_uuid: "s1", scanner_name: "Trivy", unlinked: false, state: "failed", note: "sync.note.restoreFailed", job_id: "j1", updated_at: null },
     ];
     stub({ ...ONE, switch: { scanner_name: "Grype", state: "restore_pending" } }, undefined, failed);
     renderWithRoutes(routes, "/mappings/m1");

@@ -175,19 +175,13 @@ pub async fn store_normal(
     report: &Value,
     now: i64,
 ) -> Result<(), AppError> {
+    // The unknown identity keeps the report's own scanner object too (#277): the name, vendor and
+    // version are stored, and the uuid stays `unknown`, so it is never tied to a registration.
     let (uuid, fallback, replace_unknown) = match identity {
         Identity::Known { uuid, name } => (uuid.as_str(), Some(name.as_str()), true),
         Identity::Unknown => (UNKNOWN_SCANNER_UUID, None, false),
     };
-    let snapshot = if replace_unknown {
-        ScannerSnapshot::from_report(report, fallback)
-    } else {
-        ScannerSnapshot {
-            name: None,
-            vendor: None,
-            version: None,
-        }
-    };
+    let snapshot = ScannerSnapshot::from_report(report, fallback);
     let rows = report_findings(report);
     let mut tx = pool
         .begin_with("BEGIN IMMEDIATE")

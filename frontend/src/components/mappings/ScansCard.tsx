@@ -69,6 +69,7 @@ function ScanLine({ scan }: { scan: TagScan }) {
   return (
     <li className="flex flex-wrap items-center gap-2">
       <span>{scan.scanner_name}</span>
+      {scan.unlinked ? <span className="text-muted">{t("mapping.scan.notLinked")}</span> : null}
       <Pill kind={STATE_PILL[scan.state]} label={t(STATE_KEY[scan.state])} />
       {note === undefined ? null : <span className="text-muted">{t(note)}</span>}
     </li>

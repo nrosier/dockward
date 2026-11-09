@@ -885,3 +885,155 @@ async fn the_scans_list_shows_each_scanner_with_its_state_and_note() {
     pool.close().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The stored `(scanner_uuid, name, vendor, version)` of every report of the digest.
+async fn stored_snapshots(
+    pool: &SqlitePool,
+) -> Vec<(String, Option<String>, Option<String>, Option<String>)> {
+    sqlx::query_as(
+        "SELECT scanner_uuid, scanner_name, scanner_vendor, scanner_version FROM scanner_reports
+         WHERE mapping_id = 'm1' AND image_digest = ? ORDER BY scanner_uuid",
+    )
+    .bind(DIGEST)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+fn report_with_scanner(scanner: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "scanner": scanner,
+        "vulnerabilities": [{"id": "CVE-2026-0277", "package": "p", "severity": "High"}],
+    })
+}
+
+/// #277: a sync whose robot cannot read the project scanner stores the report's own scanner
+/// name, vendor and version under the uuid `unknown`; a report with no name stores NULL.
+#[tokio::test]
+async fn an_unknown_registration_stores_the_reports_scanner_snapshot() {
+    let (pool, dir) = fixture("unknown-snapshot").await;
+    let named = report_with_scanner(
+        serde_json::json!({"name": "Trivy", "vendor": "Aqua Security", "version": "v0.50.1"}),
+    );
+    scanner_store::store_normal(
+        &pool,
+        "m1",
+        DIGEST,
+        &scanner_store::Identity::Unknown,
+        &named,
+        10,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stored_snapshots(&pool).await,
+        vec![(
+            "unknown".to_owned(),
+            Some("Trivy".to_owned()),
+            Some("Aqua Security".to_owned()),
+            Some("v0.50.1".to_owned()),
+        )]
+    );
+
+    // A later report with no scanner object replaces it and stores no name.
+    let anonymous = serde_json::json!({"vulnerabilities": []});
+    scanner_store::store_normal(
+        &pool,
+        "m1",
+        DIGEST,
+        &scanner_store::Identity::Unknown,
+        &anonymous,
+        20,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stored_snapshots(&pool).await,
+        vec![("unknown".to_owned(), None, None, None)]
+    );
+    pool.close().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #277: a known registration is unchanged: the report's snapshot, else Harbor's name, and it
+/// replaces the digest's `unknown` report.
+#[tokio::test]
+async fn a_known_registration_store_is_unchanged() {
+    let (pool, dir) = fixture("known-snapshot").await;
+    seed_report(&pool, "unknown", None, "CVE-2026-9000").await;
+    let known = scanner_store::Identity::Known {
+        uuid: "uuid-a".to_owned(),
+        name: "Trivy (Harbor)".to_owned(),
+    };
+    let anonymous = report_with_scanner(serde_json::json!({"version": "v1"}));
+    scanner_store::store_normal(&pool, "m1", DIGEST, &known, &anonymous, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored_snapshots(&pool).await,
+        vec![(
+            "uuid-a".to_owned(),
+            Some("Trivy (Harbor)".to_owned()),
+            None,
+            Some("v1".to_owned()),
+        )]
+    );
+    pool.close().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #277: the Scans list shows an unknown registration by the report's own name with `unlinked`
+/// set, and a migrated `unknown` row (NULL name, not rewritten) as "Unknown scanner".
+#[tokio::test]
+async fn the_scans_list_names_an_unknown_registration_from_its_report() {
+    use crate::services::tag_scans;
+    let (pool, dir) = fixture("scans-unknown").await;
+    sqlx::query(
+        "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest,
+            vulnerability_summary, sarif_status, synced_at)
+         VALUES ('r1', 'm1', 'app', 'v1', ?, '{}', 'success', 1)",
+    )
+    .bind(DIGEST)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // As migration 0009 leaves it: uuid `unknown`, no name.
+    seed_report(&pool, "unknown", None, "CVE-2026-9000").await;
+    let mut conn = pool.acquire().await.unwrap();
+    let mapping = mapping_db::find_by_id(&mut conn, "m1")
+        .await
+        .unwrap()
+        .unwrap();
+    drop(conn);
+    let before = tag_scans::list(&pool, &mapping, "v1").await.unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].scanner_name, "Unknown scanner");
+    assert!(!before[0].unlinked);
+    assert_eq!(
+        stored_snapshots(&pool).await,
+        vec![("unknown".to_owned(), None, None, None)],
+        "listing does not rewrite the row"
+    );
+
+    // A later sync without Scanner Read stores the report's name.
+    let named = report_with_scanner(serde_json::json!({"name": "Grype", "vendor": "Anchore"}));
+    scanner_store::store_normal(
+        &pool,
+        "m1",
+        DIGEST,
+        &scanner_store::Identity::Unknown,
+        &named,
+        10,
+    )
+    .await
+    .unwrap();
+    let after = tag_scans::list(&pool, &mapping, "v1").await.unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].scanner_uuid, "unknown");
+    assert_eq!(after[0].scanner_name, "Grype");
+    assert!(after[0].unlinked);
+    let json = serde_json::to_value(&after[0]).unwrap();
+    assert_eq!(json["unlinked"], serde_json::json!(true));
+    pool.close().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

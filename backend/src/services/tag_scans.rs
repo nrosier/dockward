@@ -16,7 +16,7 @@ use sqlx::SqlitePool;
 use crate::db::mappings::MappingRow;
 use crate::db::scanner_reports::{self as scanner_db, TagScanJob, UNKNOWN_SCANNER_UUID};
 use crate::error::AppError;
-use crate::services::merged_view::UNKNOWN_SCANNER_NAME;
+use crate::services::merged_view::{UNKNOWN_SCANNER_NAME, unlinked_name};
 use crate::services::resolve::NOTE_ARTIFACT_GONE;
 use crate::services::scanner_launch::valid_tag;
 use crate::services::scanner_scan::{
@@ -31,6 +31,9 @@ use crate::services::time;
 pub struct TagScan {
     pub scanner_uuid: String,
     pub scanner_name: String,
+    /// True when `scanner_uuid` is `unknown` and `scanner_name` is the report's own name, so the UI
+    /// marks it as not linked to a Harbor registration (#277).
+    pub unlinked: bool,
     /// `queued`, `running`, `waiting`, `ok`, `failed` or `none`.
     pub state: &'static str,
     /// A catalog key (`sync.note.*`), or `None`.
@@ -121,10 +124,13 @@ pub async fn list(
     for (uuid, name) in names {
         let job = latest.get(uuid.as_str()).copied();
         let report = report_of.get(uuid.as_str()).copied();
-        let scanner_name = if uuid == UNKNOWN_SCANNER_UUID {
-            UNKNOWN_SCANNER_NAME.to_owned()
+        let (scanner_name, unlinked) = if uuid == UNKNOWN_SCANNER_UUID {
+            match report.and_then(unlinked_name) {
+                Some(own) => (own.to_owned(), true),
+                None => (UNKNOWN_SCANNER_NAME.to_owned(), false),
+            }
         } else {
-            name
+            (name, false)
         };
         let waiting = job.is_some_and(|job| {
             lock.as_ref().is_some_and(|lock| {
@@ -155,6 +161,7 @@ pub async fn list(
         items.push(TagScan {
             scanner_uuid: uuid,
             scanner_name,
+            unlinked,
             state,
             note,
             job_id: job.map(|job| job.id.clone()),
