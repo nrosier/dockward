@@ -36,6 +36,20 @@ pub enum AppError {
     /// (`specs/security.md`, Backup and restore).
     BackupDirUnavailable,
     UpstreamUnreachable,
+    /// The upstream registry answered `401` or `403` and would not accept the credentials
+    /// (`specs/spinoff-local-scan.md`, section 6). Fixed text; no registry body or header.
+    UpstreamAuthRejected,
+    /// The upstream registry sent content that failed verification: a digest mismatch or a
+    /// malformed manifest or index (`specs/spinoff-local-scan.md`, sections 3 and 6).
+    UpstreamContentInvalid,
+    /// An image is larger than the pull cap (`specs/spinoff-local-scan.md`, sections 3 and 13).
+    ImageTooLarge,
+    /// The registry answered a status the client does not handle. Only the number is kept, and
+    /// the body and headers are discarded (`specs/spinoff-local-scan.md`, section 6).
+    UpstreamStatus(u16),
+    /// The free-disk guard refused a pull (`specs/spinoff-local-scan.md`, sections 4 and 13).
+    /// Not an HTTP response. The job maps it to its fixed `last_error` text.
+    InsufficientDisk,
 }
 
 #[derive(Serialize)]
@@ -104,7 +118,12 @@ impl AppError {
             AppError::InternalError | AppError::BackupDirUnavailable => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
-            AppError::UpstreamUnreachable => StatusCode::BAD_GATEWAY,
+            AppError::UpstreamUnreachable
+            | AppError::UpstreamAuthRejected
+            | AppError::UpstreamContentInvalid => StatusCode::BAD_GATEWAY,
+            AppError::UpstreamStatus(_) => StatusCode::BAD_GATEWAY,
+            AppError::ImageTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            AppError::InsufficientDisk => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -124,7 +143,12 @@ impl AppError {
             AppError::PayloadTooLarge => "payload_too_large",
             AppError::RateLimited => "rate_limited",
             AppError::InternalError | AppError::BackupDirUnavailable => "internal_error",
-            AppError::UpstreamUnreachable => "upstream_unreachable",
+            AppError::UpstreamUnreachable
+            | AppError::UpstreamAuthRejected
+            | AppError::UpstreamContentInvalid => "upstream_unreachable",
+            AppError::UpstreamStatus(_) => "upstream_unreachable",
+            AppError::ImageTooLarge => "payload_too_large",
+            AppError::InsufficientDisk => "internal_error",
         }
     }
 
@@ -155,6 +179,15 @@ impl AppError {
                 "The backup directory is missing or not writable.".to_owned()
             }
             AppError::UpstreamUnreachable => "An upstream service could not be reached.".to_owned(),
+            AppError::UpstreamAuthRejected => {
+                "The upstream registry rejected the credentials.".to_owned()
+            }
+            AppError::UpstreamContentInvalid => {
+                "The upstream registry sent content that could not be verified.".to_owned()
+            }
+            AppError::UpstreamStatus(_) => "An upstream service could not be reached.".to_owned(),
+            AppError::ImageTooLarge => "The image is larger than the allowed size.".to_owned(),
+            AppError::InsufficientDisk => "An internal error occurred.".to_owned(),
         }
     }
 
@@ -215,6 +248,15 @@ mod tests {
             (AppError::InternalError, 500, "internal_error"),
             (AppError::BackupDirUnavailable, 500, "internal_error"),
             (AppError::UpstreamUnreachable, 502, "upstream_unreachable"),
+            (AppError::UpstreamAuthRejected, 502, "upstream_unreachable"),
+            (
+                AppError::UpstreamContentInvalid,
+                502,
+                "upstream_unreachable",
+            ),
+            (AppError::UpstreamStatus(503), 502, "upstream_unreachable"),
+            (AppError::ImageTooLarge, 413, "payload_too_large"),
+            (AppError::InsufficientDisk, 500, "internal_error"),
         ];
         for (err, status, code) in cases {
             assert_eq!(err.status().as_u16(), status, "status for {code}");
