@@ -42,6 +42,9 @@ pub const SEVERITIES: &[&str] = &["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"
 /// The values of the `status` filter. `accepted` matches an active acceptance.
 const STATUSES: &[&str] = &["open", "fixed", "accepted"];
 
+/// The values of the `fix` filter (#265).
+const FIXES: &[&str] = &["available", "none"];
+
 /// The caller of a read: who they are and whether they may read every tenant's data.
 pub struct Reader<'a> {
     pub user_id: &'a str,
@@ -80,6 +83,8 @@ pub struct ListParams {
     pub scope: Option<String>,
     /// #257: `true` or `false`.
     pub has_issue: Option<String>,
+    /// #265: a comma list of `available` and `none`.
+    pub fix: Option<String>,
     /// #257: the new name of `harbor_project`; wins when both are sent.
     pub project: Option<String>,
     /// #257: the new name of `harbor_repository`; wins when both are sent.
@@ -224,6 +229,7 @@ struct Filters {
     harbor_project: Option<String>,
     harbor_repository: Option<String>,
     has_issue: Option<i64>,
+    fixes: Vec<&'static str>,
 }
 
 /// The value of a renamed parameter: the new name when it is non-empty, else the old one.
@@ -308,6 +314,11 @@ fn parse_filters(params: &ListParams) -> Result<Filters, AppError> {
             ));
         }
     };
+    let fixes = parse_list(
+        params.fix.as_deref(),
+        FIXES,
+        "fix must be a comma-separated list of available or none.",
+    )?;
     let q = match params.q.as_deref() {
         None | Some("") => None,
         Some(text) if text.chars().count() > MAX_Q_CHARS => {
@@ -342,6 +353,7 @@ fn parse_filters(params: &ListParams) -> Result<Filters, AppError> {
             "repository",
         )?,
         has_issue,
+        fixes,
     })
 }
 
@@ -422,6 +434,7 @@ pub async fn list(
         harbor_project: filters.harbor_project.as_deref(),
         harbor_repository: filters.harbor_repository.as_deref(),
         has_issue: filters.has_issue,
+        fixes: &filters.fixes,
         sort: &paging.sort,
         sort_sign: if paging.ascending { 1 } else { -1 },
         limit: paging.page_size,
@@ -505,6 +518,7 @@ pub async fn detail(
         harbor_project: None,
         harbor_repository: None,
         has_issue: None,
+        fixes: &[],
         sort: "cve_id",
         sort_sign: 1,
         limit: 1,
