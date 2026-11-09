@@ -4,7 +4,7 @@ Purpose: the build specification for a spinoff of HarborGate that drops Harbor e
 
 The product name is not decided (decision 22). `localscan` is a provisional working name. Where this spec names a new identifier with it (environment variables, a metric, a directory), the identifier is provisional and is renamed together with the product (section 14, rename set).
 
-Branch: `spinoff-local-scan`. It must never be merged to `main`. Every other spec file on this branch still describes HarborGate with Harbor. This file overrides them on this branch; where they disagree, this file wins, and section 1 names what it replaces. The binding source is [spinoff-decisions.md](spinoff-decisions.md) (decisions 1 to 22). Where an older spec file or an earlier draft of this file conflicts with a decision, the decision wins.
+Branch: `spinoff-local-scan`. It must never be merged to `main`. Every other spec file on this branch still describes HarborGate with Harbor. This file overrides them on this branch; where they disagree, this file wins, and section 1 names what it replaces. The binding source is [spinoff-decisions.md](spinoff-decisions.md) (decisions 1 to 45). Where an older spec file or an earlier draft of this file conflicts with a decision, the decision wins.
 
 Marks follow [README.md](README.md). `Decided (spinoff N)` cites a decision. `Decided (spec author, spinoff)` is a gap-filler inside the decisions with its reason; the user can overturn it. `UNVERIFIED:` can only be checked by a test run or a live system. Section 15 lists the open items. Nothing in section 15 is decided.
 
@@ -20,7 +20,7 @@ Each decision and where it lands.
 | 4 | Databases refresh daily; a newer database rescans every retained image by digest | 8 |
 | 5 | Scanners out of process, pinned; app image stays `FROM scratch` | 7 |
 | 6 | SARIF upload and GitHub issues stay | 1, 6 |
-| 7 | Default hubs, custom hubs, credentials encrypted per hub (host string superseded by 11) | 2 |
+| 7 | Default hubs, custom hubs, encrypted credentials (host string superseded by 11; scope superseded by 35) | 2, 9 |
 | 8 | Each match scanned once per digest (extended by 17) | 5, 8 |
 | 9 | Count-based retention, never evict a running scan (refined by 18) | 4 |
 | 10, 22 | Name undecided; `localscan` provisional | header, 14 |
@@ -35,12 +35,25 @@ Each decision and where it lands.
 | 19 | Limits and defaults, operator-configurable | 7, 13 |
 | 20 | Keep SARIF, issue, close, reopen, accepted-CVE rules; remove Harbor parts only | 1, 9 |
 | 21 | Fresh install only; no import | 9 |
+| 33 | No project layer; a source is hub, repository and tag value; the first path segment of the repository is the namespace | 5, 9, 10, 11 |
+| 34 | Step 1 held; schema and Harbor removal land with the sync and scanner steps (supersedes 31) | 1, 9 |
+| 35 | Credentials per source; no namespace-level default | 2, 9, 10 |
+| 36 | SARIF location and Code Scanning category use hub host and repository | 9 |
+| 37 | Source identity is hub, repository and tag value; same repository on two hubs is two sources | 9, 10 |
+| 38 | CVE list keeps a namespace filter in place of the Project filter | 10, 11 |
+| 39 | Docker Hub authentication is optional; anonymous pulls work | 2 |
+| 40 | Anonymous Docker Hub rate limit: fixed catalog message, retry on the backoff | 2, 3, 6 |
+| 41 | Docker Hub credential test as for other hubs; works anonymously | 2, 10 |
+| 42 | Removing a Docker Hub credential falls back to anonymous pulls with a note | 2, 10 |
+| 43 | ghcr.io: classic personal access token with `read:packages` only | 2 |
+| 44 | Custom hub pull endpoint, default the stored host | 2, 9, 10 |
+| 45 | A hub is identified by its host only; no display label | 2, 9, 10, 11 |
 
 ## 1. Scope
 
 ### Removed (decision 1)
 
-There is no Harbor client, no Harbor webhook receiver, no Harbor poll, no project scanner call, no scheduled Harbor scan and no Harbor robot permission. The words Harbor, robot account, project webhook and `SCANNING_COMPLETED` do not appear in code, API, database or UI. Nothing contacts a Harbor instance. Also removed: the Docker daemon, `/var/run/docker.sock`, `bollard` and any pruning of the host's Docker images. The app never touches the host's Docker.
+This removal lands with the sync and scanner steps (decision 34, "Build order" below). From then on there is no Harbor client, no Harbor webhook receiver, no Harbor poll, no project scanner call, no scheduled Harbor scan and no Harbor robot permission. The words Harbor, robot account, project webhook and `SCANNING_COMPLETED` do not appear in code, API, database or UI. Nothing contacts a Harbor instance. Also removed: the Docker daemon, `/var/run/docker.sock`, `bollard` and any pruning of the host's Docker images. The app never touches the host's Docker.
 
 | Spec file | Fate in the spinoff |
 | --- | --- |
@@ -61,19 +74,31 @@ There is no Harbor client, no Harbor webhook receiver, no Harbor poll, no projec
 - The durable job queue: three outcomes (success, failure, deferred), retry 30 s doubling with 8 attempts, restart recovery, manual retry, purge of failed jobs ([backend.md](backend.md)).
 - Timestamps as `INTEGER` Unix seconds, `CHECK` constraints on enumerated columns, `PRAGMA foreign_keys = ON`.
 
+### Build order (decision 34)
+
+- Step 1 (the clean schema and the Harbor removal) is held. It does not land alone. The schema of section 9 and the removal of the Harbor code, routes, tables and tests land together with Steps 3 and 4, the sync and scanner steps, so the spinoff branch builds and passes its gates at each merge. Decision 31 (Step 1 removes the Harbor code in its own change) is superseded by decision 34.
+- Step 2, the registry client (section 3), does not depend on the schema and is already on the branch.
+- The uncommitted Step 1 work is kept, not discarded, in the worktree `agent-a45531f4f50b14b5f` on branch `feat-spinoff-step1`.
+- Until Steps 3 and 4 land, the Harbor code on the branch stays as it is, and sections 1 and 9 describe the target state.
+
 Existing names (`HARBORGATE_*` variables, `__Host-harborgate_*` cookies, `harborgate/*` HKDF labels, the issue marker and label, the SARIF tool name and category prefix) are kept unchanged until the name is decided (decision 22, section 14).
 
 ## 2. Hubs and credentials
 
-- A hub is an OCI registry host: lowercase DNS name, optional `:port`, no scheme, no userinfo, no path. It has a display name and a kind, `default` or `custom`.
-- Defaults (decisions 7, 11, 13): `ghcr.io` and `docker.io`, inserted by the fresh migration. Docker Hub is stored and shown as `docker.io`. A hub has a pull endpoint host that differs from the stored host only for Docker Hub: pulls and token requests go to `registry-1.docker.io` (token service and realm as the registry's challenge says, section 3). The mapping lives in one function in the registry client and is not user-editable. Default hubs cannot be removed by an admin.
-- Custom hubs (decision 13): an admin can add and remove them. Removing a hub that an image source uses is refused (`409 conflict`). Adding validates the host grammar and the address rules of section 12.
+- A hub is an OCI registry host: lowercase DNS name, optional `:port`, no scheme, no userinfo, no path. The host is its only identifier and the name shown everywhere (decision 45). A hub has no display name or label. It has a kind, `default` or `custom`.
+- Defaults (decisions 7, 11, 13): `ghcr.io` and `docker.io`, inserted by the fresh migration. Docker Hub is stored and shown as `docker.io`. For Docker Hub the pull endpoint differs from the stored host: pulls and token requests go to `registry-1.docker.io` (token service and realm as the registry's challenge says, section 3). That mapping lives in one function in the registry client and is not user-editable. Default hubs cannot be removed by an admin.
+- Custom hubs (decisions 13, 44): an admin can add and remove them. A custom hub can set a pull endpoint that differs from its stored host: a host in the same grammar as a hub host, to which the registry requests go instead. The default is the stored host (no endpoint set). The stored host stays the identity of the hub, the name shown, and the value in source identity, SARIF paths and issue text; the endpoint is only where requests are sent. Default hubs have no settable endpoint. Removing a hub that an image source uses is refused (`409 conflict`). Adding validates the host grammar, the endpoint grammar, and the address rules of section 12 for each.
 - Transport: HTTPS only. Plain HTTP and private addresses only through the environment opt-out in section 12 (decision 14).
-- Credentials (decision 7): encrypted per hub, in `hub_credentials`, one per (user, hub). Decided (spec author, spinoff): per user as well as per hub, because the tenancy rule says a user sees only their own credentials, and one shared credential would let one tenant pull another tenant's private images. A public image needs no credential and is pulled anonymously.
-- A credential is a username and a token. The token is a `v1:` ciphertext with AAD `hub_credentials:encrypted_token:<id>`. It is write-only through the API, never logged, never sent to a scanner (section 12).
+- Credentials (decisions 7, 35): credentials are per source. A source has at most one credential, stored encrypted in `source_credentials`, and it is the credential used to pull that source's repository from its hub. There is no credential at hub level and no default credential for a namespace (the first path segment of the repository): a source that needs a credential carries its own, and a credential is not shared between sources. Decided (spec author, spinoff): the credential belongs to the source and so to the source's owner, which keeps the tenancy rule (a user sees only their own credentials) without a separate per-user key; deleting the source deletes its credential.
+- A credential is a username and a token. The token is a `v1:` ciphertext with AAD `source_credentials:encrypted_token:<id>`. It is write-only through the API, never logged, never sent to a scanner (section 12).
+- Anonymous pulls and when a credential is needed:
+  - `docker.io` (decision 39): authentication is optional. A Docker Hub source is pulled anonymously and works with no credential. A credential is needed only for a private repository or to raise the anonymous rate limit.
+  - Other hubs keep their current rule (decision 14): a credential as the hub requires. A public repository is pulled anonymously where the registry allows it; a private one needs the source's credential.
+- Docker Hub rate limit (decision 40): when Docker Hub refuses an anonymous pull for the rate limit, the source shows a fixed catalog message that asks for a Docker Hub credential, which raises the limit (error string in section 6). The job retries on the backoff, so a later attempt can succeed.
+- Removing a Docker Hub credential (decision 42): the source falls back to anonymous pulls and shows a note that no credential is in use. It is not blocked and not paused. Decided (spec author, spinoff): the note is derived, not stored: the source shows it while its hub is `docker.io` and it has no credential. If the repository is private, the next pull fails with `registry rejected the credentials`.
 - Pull scope: the client asks only for `repository:<name>:pull`. Verified (2026-11-09) in `distribution/distribution`, `docs/content/spec/auth/token.md`: the registry answers `401` with `Www-Authenticate: Bearer realm=...,service=...,scope=...`, and the client fetches a token from the realm with Basic credentials.
-- `ghcr.io` credential: carried from the earlier draft, verified 2026-11-09 in GitHub's Container registry documentation: only a personal access token (classic) authenticates, and `read:packages` reads packages. This is a different token from the fine-grained GitHub token used for Code Scanning and issues. UNVERIFIED: the scopes Docker Hub access tokens offer.
-- Test button: `POST /api/v1/hubs/:id/credential/test` fetches `GET /v2/` and a pull token for a repository the caller names, and returns `ok`, never the token.
+- `ghcr.io` credential (decision 43): a personal access token (classic) with the `read:packages` scope. Fine-grained tokens are not accepted for `ghcr.io`. Verified 2026-11-09 in GitHub's Container registry documentation: only a personal access token (classic) authenticates, and `read:packages` reads packages. This is a different token from the GitHub token used for Code Scanning and issues. Decided (spec author, spinoff): saving a credential for a source on `ghcr.io` is refused with `422` when the token starts with `github_pat_`, the prefix of fine-grained tokens. UNVERIFIED: that prefix; check it against GitHub's token format documentation before the check is built. Any other refusal comes from the registry when a pull or the test runs. UNVERIFIED: the scopes Docker Hub access tokens offer.
+- Test button (decision 41): `POST /api/v1/image-sources/:id/credential/test` works like the test for any other hub. It fetches `GET /v2/` and a pull token for the repository the caller names, using the source's credential, and returns `ok` or the failure, never the token. It also works anonymously: with no credential on the source, it runs the same check without one (on Docker Hub this shows whether an anonymous pull is possible).
 
 ## 3. Registry client
 
@@ -91,12 +116,12 @@ Verified (2026-11-09) in that spec:
 
 Contract:
 
-- Auth: the standard Bearer challenge flow. On `401` the client reads `Www-Authenticate`, requests a token from the realm for the scope `repository:<name>:pull` (Basic credentials when a hub credential exists, none otherwise), caches it in memory until its expiry, and retries once. Docker Hub's flow is UNVERIFIED (section 15, item 2).
+- Auth: the standard Bearer challenge flow. On `401` the client reads `Www-Authenticate`, requests a token from the realm for the scope `repository:<name>:pull` (Basic credentials when the source has a credential, none otherwise), caches it in memory until its expiry, and retries once. Docker Hub's flow is UNVERIFIED (section 15, item 2).
 - Redirects (decision 12): followed, using a custom redirect policy. On every hop the client checks scheme (HTTPS only, unless the hub is named in the opt-out), validates the host, and requires every address the host resolves to to pass the address rules of section 12. The `Authorization` header is dropped when the host changes. The hop limit is 10, reqwest's default policy limit, which the client keeps as its own explicit constant. A hop that fails any check ends the request with `registry could not be reached`.
 - Address check on every request: the check runs on the addresses actually connected to (a custom resolver or connect-time check), not only on a pre-resolution of the hub host, so DNS rebinding between the check and the connect is closed. The mechanism is an implementation choice; the acceptance test in section 16 decides whether it holds.
 - Bounds: manifest and config responses have a byte cap; blobs are streamed with a running byte count against the pull cap (section 13), not trusted from `Content-Length`. Every blob's SHA-256 is verified against its descriptor while streaming.
 - Timeouts: a connect timeout and a total per-request timeout, as constants in one place.
-- Rate limit `429` from a registry: deferral using `Retry-After`, capped at 1 hour, `attempts` unchanged (the existing deferral rule).
+- Rate limit `429` from a registry: deferral using `Retry-After`, capped at 1 hour, `attempts` unchanged (the existing deferral rule). The one exception is an anonymous pull refused by Docker Hub for its rate limit (decision 40): that is a failure with the fixed message of section 6, retried on the backoff (30 s doubling, 8 attempts), not a deferral.
 - Names are validated against the grammars above before any request and percent-encoded in paths.
 
 ## 4. OCI layout store and retention
@@ -115,7 +140,7 @@ Contract:
 
 ## 5. Tags and discovery
 
-- Source (decision 1): a hub, a repository and one tag value, an exact tag or a pattern. The repository must match the OCI repository grammar and must not contain `:` or `@`. A digest reference is refused.
+- Source (decisions 1, 33): a hub, a repository and one tag value, an exact tag or a pattern. There is no project layer and no project table. The repository keeps its full path, and its first path segment is the namespace (a user or an organisation). The namespace is the only grouping; it is derived from the repository when needed and is not stored. The repository must match the OCI repository grammar and must not contain `:` or `@`. A digest reference is refused.
 - Decided (decision 15): the value is a pattern if it contains `*` or `?`, otherwise an exact tag. Only these two forms exist. There are no exclusions, no regular expressions, no character classes and no braces.
 - Glob: `*` is zero or more characters, `?` is exactly one, every other character is literal (`.` is a literal dot). Matching is against the whole tag, case-sensitive. A pattern has at most 128 characters and only tag characters plus `*` and `?`. An exact tag must match the tag grammar. Examples for `1.2.*`: `1.2.0` matches, `1.2.3-rc1` matches, `1.2.` matches, `1.2` does not, `1.20.0` does not, `v1.2.0` does not.
 - Matching is done by the app on the full tag list, never by sending the pattern to the registry.
@@ -145,6 +170,7 @@ Fixed error strings. A job's `last_error`, an alert and the Sync jobs API carry 
 | Registry answers 401 or 403 | `registry rejected the credentials` |
 | Repository or tag not found (404) | `image not found in registry` |
 | Registry 429 | deferral (`Retry-After`, cap 1 hour, `attempts` unchanged) |
+| `docker.io` refuses an anonymous pull for the rate limit (decision 40) | `docker hub rate limit reached` (a failure retried on the backoff, not a deferral) |
 | Any other non-2xx | `registry returned status N` |
 | Blob digest mismatch | `image content did not match its digest` |
 | Pull over the cap | `image is larger than the allowed size` |
@@ -155,6 +181,8 @@ Fixed error strings. A job's `last_error`, an alert and the Sync jobs API carry 
 | Scanner exited non-zero | `scanner failed` |
 | Scanner output unreadable | `scanner output not recognised` |
 | Scanner database missing | `scanner database not available` |
+
+The `docker hub rate limit reached` error is shown through a fixed catalog message (key `errors.dockerHubRateLimited`) that asks for a Docker Hub credential. Decided (spec author, spinoff): the English text is "Docker Hub is limiting anonymous pulls. Add a Docker Hub credential to this source to raise the limit." The user can change the wording. UNVERIFIED: that Docker Hub signals an anonymous rate limit with `429` (section 15, item 2); until checked, the mapping from the registry answer to this error is not fixed. After the 8th attempt the job fails and raises the sync-failed alert with the same fixed error.
 
 ## 7. Scanner processes
 
@@ -207,30 +235,20 @@ Decided (spec author, spinoff), each following from decisions 1 to 18.
 -- Registries. Defaults inserted by the migration; host is canonical.
 CREATE TABLE IF NOT EXISTS hubs (
     id TEXT PRIMARY KEY,
-    host TEXT NOT NULL UNIQUE,            -- 'ghcr.io', 'docker.io', or custom
-    display_name TEXT NOT NULL,
+    host TEXT NOT NULL UNIQUE,            -- 'ghcr.io', 'docker.io', or custom; the only identifier and name (decision 45)
+    pull_endpoint TEXT,                   -- custom hubs only; NULL means the stored host (decision 44)
     kind TEXT NOT NULL CHECK (kind IN ('default', 'custom')),
     created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
-    created_at INTEGER NOT NULL DEFAULT (unixepoch())
-);
-
-CREATE TABLE IF NOT EXISTS hub_credentials (
-    id TEXT PRIMARY KEY,
-    hub_id TEXT NOT NULL REFERENCES hubs(id) ON DELETE CASCADE,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    username TEXT NOT NULL,
-    encrypted_token TEXT NOT NULL,        -- "v1:", AAD hub_credentials:encrypted_token:<id>
-    expires_at INTEGER,
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-    UNIQUE (hub_id, user_id)
+    CHECK (pull_endpoint IS NULL OR kind = 'custom')
 );
 
--- Where an image is and where its results go. Replaces repo_mappings.
+-- Where an image is and where its results go. Replaces repo_mappings. user_id is the owner.
 CREATE TABLE IF NOT EXISTS image_sources (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     hub_id TEXT NOT NULL REFERENCES hubs(id) ON DELETE RESTRICT,
-    repository TEXT NOT NULL,
+    repository TEXT NOT NULL,             -- full path; the first segment is the namespace (decision 33); no project column
     tag_value TEXT NOT NULL,              -- exact tag, or a pattern with * or ?
     github_cred_id TEXT NOT NULL REFERENCES user_credentials(id) ON DELETE RESTRICT,
     github_owner TEXT NOT NULL,
@@ -240,7 +258,17 @@ CREATE TABLE IF NOT EXISTS image_sources (
     min_issue_severity TEXT NOT NULL DEFAULT 'CRITICAL' CHECK (min_issue_severity IN ('CRITICAL', 'HIGH')),
     last_discovery_at INTEGER,
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-    UNIQUE (user_id, hub_id, repository, tag_value)
+    UNIQUE (hub_id, repository, tag_value)  -- source identity (decision 37)
+);
+
+-- At most one credential per source (decision 35). No hub-level or namespace-level credential.
+CREATE TABLE IF NOT EXISTS source_credentials (
+    id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL UNIQUE REFERENCES image_sources(id) ON DELETE CASCADE,
+    username TEXT NOT NULL,
+    encrypted_token TEXT NOT NULL,        -- "v1:", AAD source_credentials:encrypted_token:<id>
+    expires_at INTEGER,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
 -- One image per (hub, repository, top-level digest): an index or a single manifest.
@@ -336,9 +364,10 @@ CREATE TABLE IF NOT EXISTS publish_reports (
 -- across its platforms and scanners.
 ```
 
+- Source identity (decisions 33, 37): a source is identified by hub, repository and tag value, and `UNIQUE (hub_id, repository, tag_value)` enforces it. The same repository on two hubs is two sources, each with its own tag observations, findings, acceptances, alerts (its own Code Scanning category, below) and issue rows. A second source with the same three values is `409 conflict`. Decided (spec author, spinoff): the key has no user, as the old `UNIQUE (harbor_base_url, harbor_project, harbor_repository)` had none, so two users cannot register the same source. The user can overturn this. The namespace is the first path segment of `repository`; it is not a column and no table holds it.
 - Retention: `publish_reports` and `scan_runs` follow the existing 90-day rule (by `synced_at`, `finished_at`), except that the latest `done` run per (platform image, scanner) is never deleted, because it carries the findings the view and the issue rules read. `sync_jobs` and `job_runs` 90 days, `alert_deliveries` 30 days, `audit_log` 365 days, unchanged. `images`, `tag_observations` and `image_platforms` are not under age retention (they are the "already scanned" memory).
-- Deleting a source removes its `tag_observations`, `cve_findings`, `publish_reports` and acceptances. Images, platforms and runs that no remaining source observes are deleted and their layouts removed. GitHub issues stay open and are listed in the `source.delete` audit row, as for a deleted mapping today.
-- Audit vocabulary. Removed: `mapping.*`, `project_webhook.*`, `artifact.remove`. Added: `hub.create`, `hub.delete`, `source.create`, `source.update`, `source.delete`, `source.scan`, `image.evict` (actor `system`; `details` has hub, repository, platform digest, never a path with a secret), `settings.change` (scan limits and retention; `details` old and new values), plus the existing `credential.*` for hub credentials (target names the hub, never the token). All other existing actions are kept.
+- Deleting a source removes its `tag_observations`, `cve_findings`, `publish_reports`, acceptances and `source_credentials` row. Images, platforms and runs that no remaining source observes are deleted and their layouts removed. GitHub issues stay open and are listed in the `source.delete` audit row, as for a deleted mapping today.
+- Audit vocabulary. Removed: `mapping.*`, `project_webhook.*`, `artifact.remove`. Added: `hub.create`, `hub.delete`, `source.create`, `source.update`, `source.delete`, `source.scan`, `image.evict` (actor `system`; `details` has hub, repository, platform digest, never a path with a secret), `settings.change` (scan limits and retention; `details` old and new values), plus the existing `credential.*` for source credentials (target names the source's hub and repository, never the token). All other existing actions are kept.
 
 ### CVE lifecycle wording
 
@@ -352,8 +381,8 @@ The rules in [cve-lifecycle.md](cve-lifecycle.md) (merged view, close, reopen, m
 | every enabled scanner has a report for the newest digest | every enabled scanner has a `done` run for every platform of the newest image (an evicted platform counts through its last `done` run) |
 | last 10 tags per mapping, 10-tag pruning | Removed. Findings are kept (decision 18); the image count rule is section 4. |
 | Harbor deleted the artifact (#249) | Removed. |
-| close and reopen comment scan name `<project>/<repository>:<tag>` | `<hub host>/<repository>:<tag>` |
-| SARIF `artifactLocation.uri` and category | uri `<hub host>/<repository>`; run id `harborgate/<hub host>/<repository>/` (trailing slash rule unchanged). Changing the prefix later creates new alerts (section 14). |
+| close and reopen comment scan name `<project>/<repository>:<tag>` | `<hub host>/<repository>:<tag>` (decision 36) |
+| SARIF `artifactLocation.uri` and category (`harborgate/<harbor_project>/<harbor_repository>/`) | Decision 36: uri `<hub host>/<repository>`, for example `ghcr.io/nrosier/walley`; run id `harborgate/<hub host>/<repository>/`, so the category is `harborgate/<hub host>/<repository>` (trailing slash rule unchanged; the `harborgate` prefix is kept by decision 27). No project name appears. The spinoff has no Harbor history to keep, so its alerts start fresh. The same repository on two hubs gives two categories. Changing the prefix later creates new alerts (section 14). |
 | issue table column "Harbor repository" | "Image" |
 | scanner identity by Harbor UUID, `unknown` scanner | fixed keys `grype`, `trivy` |
 
@@ -365,20 +394,22 @@ Rate limits. HarborGate has no default limit on authenticated routes; each route
 
 | Method | Path | Auth | Request and response | Status |
 | --- | --- | --- | --- | --- |
-| GET | `/api/v1/hubs` | session | list of `Hub` (`id`, `host`, `display_name`, `kind`, `has_credential` for the caller) | 200, 401 |
-| POST | `/api/v1/hubs` | admin, limited (60/min/user; resolves the host) | `{"host","display_name"}` -> `Hub` | 201, 400, 409, 422 (grammar, blocked address), 429 |
+| GET | `/api/v1/hubs` | session | list of `Hub` (`id`, `host`, `pull_endpoint` or null, `kind`); no display name | 200, 401 |
+| POST | `/api/v1/hubs` | admin, limited (60/min/user; resolves the host and the endpoint) | `{"host","pull_endpoint"?}` -> `Hub` (`kind` is `custom`; an omitted endpoint means the stored host) | 201, 400, 409, 422 (grammar, blocked address), 429 |
 | DELETE | `/api/v1/hubs/:id` | admin | empty | 204, 404, 409 (a source uses it, or it is a default hub) |
-| PUT | `/api/v1/hubs/:id/credential` | session (own) | `{"username","token","expires_at"?}` (token write-only) -> `{"hub_id","username","expires_at"}` | 200, 201, 404, 422 |
-| DELETE | `/api/v1/hubs/:id/credential` | session (own) | empty (does not check dependent sources; a failing pull shows `registry rejected the credentials`) | 204, 404 |
-| POST | `/api/v1/hubs/:id/credential/test` | session (own), limited (60/min/user) | `{"repository"}` -> `{"ok","detail"}`, never the token | 200, 404, 422, 429, 502 |
-| GET, POST | `/api/v1/image-sources` | session | list / create (`hub_id`, `repository`, `tag_value`, `github_cred_id`, `github_owner`, `github_repo`, `default_branch`, `auto_create_issues`, `min_issue_severity`) | 200, 201, 400, 404, 409, 422 |
+| PUT | `/api/v1/image-sources/:id/credential` | session (owner) | `{"username","token","expires_at"?}` (token write-only) -> `{"source_id","username","expires_at"}`; on `ghcr.io` a token starting `github_pat_` is `422` (section 2) | 200, 201, 404, 422 |
+| DELETE | `/api/v1/image-sources/:id/credential` | session (owner) | empty. On `docker.io` the source falls back to anonymous pulls and shows the no-credential note (decision 42); it is not blocked. On other hubs a failing pull shows `registry rejected the credentials`. | 204, 404 |
+| POST | `/api/v1/image-sources/:id/credential/test` | session (owner), limited (60/min/user) | `{"repository"}` -> `{"ok","detail"}`, never the token; with no credential on the source it tests anonymously (decision 41) | 200, 404, 422, 429, 502 |
+| GET, POST | `/api/v1/image-sources` | session | `Source` carries `has_credential` (never the token). List / create (`hub_id`, `repository`, `tag_value`, `github_cred_id`, `github_owner`, `github_repo`, `default_branch`, `auto_create_issues`, `min_issue_severity`) | 200, 201, 400, 404, 409, 422 |
 | GET, PUT, DELETE | `/api/v1/image-sources/:id` | session (owner; admin read) | source / update / delete | 200, 204, 404, 409, 422 |
 | GET | `/api/v1/image-sources/:id/tag-preview` | session (owner), limited (60/min/user) | `{"matches":[tag],"truncated"}`, names only, records nothing | 200, 404, 422, 429, 502 |
 | POST | `/api/v1/image-sources/:id/scan` | owner or any admin, limited (1 per source per 5 min) | `{"queued": n}`, runs discovery now | 200, 404, 429, 502 |
 | GET | `/api/v1/image-sources/:id/images`, `/api/v1/images` | session (owner; admin read) | list of images with per-platform `state`, `size_bytes`, `pulled_at`, per-scanner latest run (`status`, `version`, `error`, `db_built_at`); filters `state`, `source_id`, admin `scope=all` | 200, 404 |
 | GET, PUT | `/api/v1/admin/scan-settings` | admin | `{"max_stored","scanners_enabled","scanner_timeout_s","scanner_output_max_bytes","pull_cap_bytes","min_free_disk_bytes"}` | 200, 401, 403, 422 |
 
-Kept routes: auth, account, credentials (GitHub only; `service_type` removed from the body; the GitHub repository picker `GET /api/v1/credentials/:id/github-repositories` kept), `cves` (renaming `mapping` to `source`, Harbor parameters removed), `sync-jobs` (retry, failed count, purge-failed), dashboard (recent syncs become recent scans), admin (users, oidc, github-url, alert-channels, audit-log, jobs, backup, logs, log-level), `/healthz`. `GET /api/v1/admin/health` drops the Harbor and robot fields and adds: per-hub reachability, the pinned scanner versions found, the database build time per scanner, and free disk space of the store.
+Kept routes: auth, account, credentials (GitHub only; `service_type` removed from the body; the GitHub repository picker `GET /api/v1/credentials/:id/github-repositories` kept), `cves` (renaming `mapping` to `source`, Harbor parameters removed, `namespace` filter added: see below), `sync-jobs` (retry, failed count, purge-failed), dashboard (recent syncs become recent scans), admin (users, oidc, github-url, alert-channels, audit-log, jobs, backup, logs, log-level), `/healthz`. `GET /api/v1/admin/health` drops the Harbor and robot fields and adds: per-hub reachability, the pinned scanner versions found, the database build time per scanner, and free disk space of the store.
+
+CVE list namespace filter (decision 38): `namespace` replaces the removed `project` filter on `GET /api/v1/cves` and `GET /api/v1/image-sources/:id/cves`. It takes one value, matched exactly and case-sensitively against the first path segment of the source's repository (so `nrosier` matches `nrosier/walley` and `nrosier/other`, on any hub; the Repository filter, which lists `<hub host>/<repository>`, narrows by hub). It is not split on commas, follows the other text filters' limits (at most 256 characters, no control character, otherwise `400 invalid_request`), combines with the other filters by AND, and is bound as a SQL parameter, never part of the SQL text. An empty value means no filter. The `q` search matches the CVE id, the package and the repository. The Harbor parameters `project`, `harbor_project` and `harbor_repository` are not read.
 
 Removed: `/api/v1/webhooks/harbor/*`, `/api/v1/project-webhooks*`, `/api/v1/mappings*`, `/api/v1/credentials/:id/harbor-*`, `/api/v1/credentials/:id/source-suggestion`, `/api/v1/pickers/hidden*`.
 
@@ -386,15 +417,15 @@ Removed: `/api/v1/webhooks/harbor/*`, `/api/v1/project-webhooks*`, `/api/v1/mapp
 
 Every screen needs the user's design approval before it is built ([frontend.md](frontend.md); CLAUDE.md). Copy goes into the string catalog, English only. The rail becomes Dashboard, Sources, Images, CVEs, Sync jobs, then Admin and Account (needs approval).
 
-- New: Sources list and form (hub select, repository, tag value with a live exact-or-pattern hint and a preview from `tag-preview`, GitHub target, issue settings); Source detail with an images table (tag, platform, state, pulled time, per-scanner scan state, database date) and a Scan now button; Images page (stored images, size, which is evicted next); Admin > Settings: Hubs and Scan settings (retention count, enabled scanners, the limits of section 13); Account > Credentials: registry credentials per hub beside the GitHub ones.
-- Removed: the Harbor project and repository pickers, the project webhook proposal, the scheduled scan card, the scanner switch and restore states, the Admin Health Harbor rows, the CVE list Project filter and the `project` and `harbor_*` URL parameters. The Repository filter lists `<hub host>/<repository>`. The "Found by" scanner column lists Grype and Trivy.
+- New: Sources list and form (hub select, repository, tag value with a live exact-or-pattern hint and a preview from `tag-preview`, GitHub target, issue settings); Source detail with an images table (tag, platform, state, pulled time, per-scanner scan state, database date) and a Scan now button; Images page (stored images, size, which is evicted next); Admin > Settings: Hubs and Scan settings (retention count, enabled scanners, the limits of section 13); the Source form and detail hold the source's registry credential (optional on Docker Hub, with the no-credential note when none is set; on `ghcr.io` a hint that only a classic token with `read:packages` works) and the test button; Account > Credentials keeps the GitHub credentials only. Hubs are listed by host alone, with the pull endpoint where one is set.
+- Removed: the Harbor project and repository pickers, the project webhook proposal, the scheduled scan card, the scanner switch and restore states, the Admin Health Harbor rows, the CVE list Project filter and the `project` and `harbor_*` URL parameters. In place of the Project filter the CVE list has a Namespace filter (the first path segment of the repository, decision 38). The Repository filter lists `<hub host>/<repository>`. The "Found by" scanner column lists Grype and Trivy.
 
 ## 12. Security
 
 ### Outbound requests
 
 - The rules of [security.md](security.md), "Outbound HTTP (SSRF)", apply to every hub host and every redirect hop (decision 12): HTTPS only; every resolved address must pass the deny-list (loopback, link-local, private, shared, reserved and multicast ranges listed there, including `169.254.169.254`); the check runs on the addresses actually connected to, not once at save time. The only change is that redirects are followed (section 3) with the check on each hop.
-- Opt-out (decision 14): the environment variable `LOCALSCAN_ALLOW_PRIVATE_REGISTRIES` (provisional name), default empty, is a comma-separated list of hub hosts. A named hub may use plain HTTP and private addresses. It is environment-only, not an admin setting, and applies to named hubs only: a redirect from a named hub to an unnamed private or HTTP host is refused. An empty value means off.
+- Opt-out (decision 14): the environment variable `LOCALSCAN_ALLOW_PRIVATE_REGISTRIES` (provisional name), default empty, is a comma-separated list of hub hosts. A named hub may use plain HTTP and private addresses, and so may the pull endpoint of a named custom hub (decision 44). An endpoint of a hub that is not named gets no exemption. It is environment-only, not an admin setting, and applies to named hubs only: a redirect from a named hub to an unnamed private or HTTP host is refused. An empty value means off.
 - Adding a hub is admin-only, because an entered host is an outbound destination for the whole instance.
 - Names and tags are validated against the grammars before any request. A name outside the grammar is `422` with no request made.
 - Manifests, configs and blobs are untrusted input: byte caps and digest verification while streaming (section 3).
@@ -404,11 +435,11 @@ Every screen needs the user's design approval before it is built ([frontend.md](
 
 - Hub tokens, bearer tokens from a token service, `Authorization` and `Www-Authenticate` values, GitHub tokens and encryption keys are never logged, printed, traced, returned, put in a job row, alert, audit `details`, or sent over Server-Sent Events. A registry response body is never copied anywhere; only the fixed strings of section 6 are. The debug log records method, URL path without query, and status only.
 - Tokens are held in memory only while a pull runs and are zeroized. They never enter a scanner's arguments, environment, working directory or cache. Scanners read local layouts only and never contact a registry.
-- Key rotation must cover `hub_credentials.encrypted_token` as well as `user_credentials.encrypted_token`, `alert_channels.config_encrypted` and the encrypted `system_config` values. A test enumerates every column marked encrypted so a new table cannot be missed.
+- Key rotation must cover `source_credentials.encrypted_token` as well as `user_credentials.encrypted_token`, `alert_channels.config_encrypted` and the encrypted `system_config` values. A test enumerates every column marked encrypted so a new table cannot be missed.
 
 ### Tenancy
 
-Users see only their own sources, credentials, images and findings; admins see all, read-only. Operational exceptions follow [security.md](security.md): an admin may start discovery for any source (using the owner's hub credential on the server, with no value shown), and retry or purge failed jobs. Hubs and scan settings are admin settings.
+Users see only their own sources, credentials, images and findings; admins see all, read-only. Operational exceptions follow [security.md](security.md): an admin may start discovery for any source (using the source's own credential on the server, with no value shown), and retry or purge failed jobs. Hubs and scan settings are admin settings.
 
 ### Scanner processes
 
@@ -446,21 +477,32 @@ Decision 22: the name is decided later. `localscan` stays provisional. When the 
 Each is asked exactly as written. None is decided.
 
 1. Exact Grype and Trivy command-line behaviour for an OCI layout: the input form, the flag that disables database downloads during a scan, the exit codes, and the JSON field names. These are UNVERIFIED and need a test run. Details to settle: the input form (for Trivy, whether `trivy image --input <layout directory>` or another form is the call for a layout directory; for Grype, whether the form is `oci-dir:<path>` or another), the flag or setting that disables database downloads during a scan (Trivy: `--skip-db-update`, `--skip-java-db-update`, `--skip-check-update`, `--offline-scan` exist in the documentation; Grype: the name of its auto-update setting), the exit codes (whether a non-zero exit with a valid report is possible), and the JSON field names (Trivy `Results[].Vulnerabilities[]` with `VulnerabilityID`, `PkgName`, `InstalledVersion`, `FixedVersion`, `Severity`, `Description`, `CVSS`; Grype `matches[]` with `vulnerability`, `artifact`, `fix`, and Grype's severity names). Also: the update commands for both databases, and how to disable Trivy's usage telemetry. Capture real reports as test fixtures.
-2. The registry client's handling of Docker Hub's token service (the auth challenge flow) must be verified against the live registry before the client is built: the realm and service values, the scope string, how `docker.io` maps to `registry-1.docker.io`, the access-token scopes Docker Hub offers, and its behaviour with anonymous pulls and rate limits.
+2. The registry client's handling of Docker Hub's token service (the auth challenge flow) must be verified against the live registry before the client is built: the realm and service values, the scope string, how `docker.io` maps to `registry-1.docker.io`, the access-token scopes Docker Hub offers, and its behaviour with anonymous pulls and rate limits, including whether an anonymous rate limit is signalled as `429` (decision 40).
 3. Not asked by the user, a gap in decision 5: the app image is `FROM scratch` and has no Docker socket, so it can only call a scanner that is a file it can execute. Should the pinned Trivy and Grype executables be copied into the app image (still `FROM scratch`, built from the pinned releases), or supplied on a read-only volume populated from the pinned scanner images, or run as separate sidecar containers the app reaches over a defined protocol? Until answered, section 7 fixes only the pinning, the absolute-path call and the process rules.
 4. Not asked by the user, a gap in decision 3: attestation entries in an image index. The rule here is to skip entries with platform `unknown/unknown`. UNVERIFIED: whether that platform value is enough, or the annotation must be read.
+5. Not asked by the user, a gap in decisions 36 and 37: two sources on the same hub and repository with different tag values (for example `1.*` and `latest`) share one Code Scanning category, `harborgate/<hub host>/<repository>`, because the category has no tag part, so the later SARIF upload for the category replaces the earlier one in Code Scanning. Should the category include the tag value, should such a pair be refused, or is the shared category intended?
+6. Not asked by the user, a gap in decision 37 (separate alerts and issues): GitHub issues are keyed by GitHub repository and CVE, with the marker `harborgate:<CVE id>` (decisions 20 and 27). Two sources, for example the same repository on two hubs, that target the same GitHub repository therefore share one issue per CVE, which closes only when no source reports the CVE. Issues are separate only when the sources target different GitHub repositories. Is that the intended meaning of "separate issues", or must the issue key include the source?
 
 ## 16. Verification strategy
 
 The spinoff has no GitHub issue yet. When one is created its body carries this list as `- [ ]` items, and it stays open until every box is ticked with evidence.
 
 - [ ] The branch `spinoff-local-scan` is not merged to `main`, and a CI or review check prevents it.
-- [ ] No Harbor code, route, table, setting, string or doc reference remains (case-insensitive search, outside this spec and the changelog). No Docker daemon, socket or `bollard` dependency exists.
+- [ ] Step 1 did not land alone: the clean schema and the Harbor removal arrived together with the sync and scanner steps (decision 34), and the branch built and passed its gates at each merge.
+- [ ] No Harbor code, route, table, setting, string or doc reference remains (case-insensitive search, outside this spec and the changelog). No Docker daemon, socket or `bollard` dependency exists. No project table or project column exists.
 - [ ] `0001` creates exactly the tables of section 9 and none removed; a `main` database and a `main` backup are refused with the fixed error.
 - [ ] A default install has `ghcr.io` and `docker.io`; neither can be removed; a custom hub can be added and removed; a hub in use cannot be removed.
-- [ ] A hub credential is a `v1:` ciphertext with the right AAD, is never returned, and key rotation re-encrypts it (a test enumerates all encrypted columns).
-- [ ] Registry client against a fake registry: anonymous and Bearer-token pulls, tag paging by `Link`, a redirect to another host with `Authorization` dropped, a redirect to a private address refused on that hop, a hub host that re-resolves to a private address after the first check, a digest mismatch, a pull over the cap, a free-disk refusal. The Docker Hub flow passes against the live registry (item 2).
+- [ ] A hub is identified and shown by its host alone: the `hubs` table, the API and the UI have no display name or label.
+- [ ] A custom hub with a pull endpoint sends its registry requests to the endpoint, and with none set to the stored host; the stored host stays its name; the endpoint passes the address rules; a default hub cannot have one.
+- [ ] A source credential is a `v1:` ciphertext with the right AAD, is never returned, and key rotation re-encrypts it (a test enumerates all encrypted columns). A source has at most one credential, and there is no hub-level or namespace-level credential or default.
+- [ ] A `ghcr.io` credential is a classic personal access token with `read:packages`; a token starting `github_pat_` is refused with `422`; no text allows a fine-grained token.
+- [ ] A Docker Hub source with no credential pulls anonymously and is scanned. A refused anonymous pull for the rate limit shows the fixed catalog message that asks for a Docker Hub credential, sets `last_error` to `docker hub rate limit reached`, and retries on the backoff until a later attempt succeeds or the 8th fails.
+- [ ] The credential test works like the test for other hubs, returns `ok` or the failure and never the token, and also runs anonymously when the source has no credential.
+- [ ] Removing a Docker Hub credential leaves the source unblocked, pulls anonymously, and shows the no-credential note.
+- [ ] A source is identified by hub, repository and tag value: the same repository on two hubs is two sources with separate tag observations, findings, acceptances and Code Scanning categories; a duplicate (hub, repository, tag value) is `409`.
+- [ ] Registry client against a fake registry: anonymous and Bearer-token pulls, tag paging by `Link`, a redirect to another host with `Authorization` dropped, a redirect to a private address refused on that hop, a hub host that re-resolves to a private address after the first check, a digest mismatch, a pull over the cap, a free-disk refusal. The Docker Hub flow, anonymous and with a credential, passes against the live registry (item 2).
 - [ ] The plain-HTTP and private-address opt-out is off by default, applies only to named hubs, and does not extend to a redirect target that is not named.
+- [ ] A source keeps the repository's full path and its namespace is the first path segment.
 - [ ] Tag matching: the examples in section 5 pass; only `*` and `?`; a digest reference and a bad grammar are refused; case-sensitive.
 - [ ] Discovery runs hourly per repository; a new tag and a moved tag each queue one pull; two concurrent discovery runs queue one; a known digest (stored or evicted) is not pulled again.
 - [ ] A multi-arch index yields one stored image and one scan per platform; attestation entries are skipped; findings are stored per platform and merged for the tag.
@@ -468,10 +510,11 @@ The spinoff has no GitHub issue yet. When one is created its body carries this l
 - [ ] A database refresh that finds a newer database rescans every `stored` platform image by digest with the changed scanner and publishes for each source's newest image; an unchanged database queues nothing; an evicted image is not rescanned.
 - [ ] Both scanners run on fixture images from real captured reports; findings merge on (CVE id, package); `SchemaVersion` other than 2 fails with the fixed error; the limits (timeout, output cap) kill and fail the run with the fixed strings.
 - [ ] Scanner process rules: no shell, absolute path, clean environment (key variables absent), process group killed on timeout, nothing downloaded during a scan, a restart mid-scan recovers.
+- [ ] The SARIF `artifactLocation.uri` is `<hub host>/<repository>` and the category is `harborgate/<hub host>/<repository>`, with no project name and no Harbor-era alert carried over.
 - [ ] The merged SARIF validates against SARIF 2.1.0 (`sarif-validate`); the upload, issue create, close, reopen and manual-close honouring behave as in [cve-lifecycle.md](cve-lifecycle.md); a failed scanner or platform never closes an issue.
 - [ ] No token, registry header or key appears in a log, job row, alert, API response or SSE stream (log-capture test across a full pull and scan with a canary token).
 - [ ] Every limited route in section 10 returns `429` with `Retry-After` over its limit; a private-address hub host is refused.
 - [ ] Scanner executables and images are pinned by digest or by version plus checksum, with no floating tag; the app image is `FROM scratch`; the `docker-smoke` check passes.
-- [ ] The CVE list has no Project filter; the old Harbor URL parameters are not read.
+- [ ] The CVE list has no Project filter and has a Namespace filter on the first path segment of the repository; the old Harbor URL parameters are not read.
 - [ ] Every new screen has a user-approved design before it is built, and all text is in the string catalog.
-- [ ] Open items 1 to 4 are each resolved or restated.
+- [ ] Open items 1 to 6 are each resolved or restated.
