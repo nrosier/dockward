@@ -645,6 +645,7 @@
   "mapping.scan.col.tag": "Tag",
   "mapping.scan.col.lastScan": "Last scan",
   "mapping.scan.col.scanners": "Scanners",
+  "mapping.scan.notLinked": "(not linked to a Harbor registration)",
   "mapping.scan.col.action": "Action",
   "mapping.scan.tagLabel": "Scanner for tag {tag}",
   "mapping.scan.tableLabel": "Tags and their scanner reports",

@@ -23,6 +23,23 @@ use crate::services::sarif::normalize_severity;
 /// The name shown for a report that cannot be tied to a Harbor scanner (`cves.scanner.unknown`).
 pub const UNKNOWN_SCANNER_NAME: &str = "Unknown scanner";
 
+/// Appended to the report's own scanner name for an `unknown` report that has one (#277). The UI
+/// uses the catalog key `mapping.scan.notLinked`; this is the backend text for the issue body and
+/// the SARIF, which are not UI text.
+pub const NOT_LINKED_SUFFIX: &str = " (not linked to a Harbor registration)";
+
+/// The report's own scanner name of an `unknown` report, or `None` when it has none.
+pub fn unlinked_name(report: &ScannerReportRow) -> Option<&str> {
+    if report.scanner_uuid != UNKNOWN_SCANNER_UUID {
+        return None;
+    }
+    report
+        .scanner_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+}
+
 /// Highest first, as in `specs/cve-lifecycle.md`.
 const SEVERITY_ORDER: [&str; 5] = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"];
 
@@ -63,7 +80,8 @@ fn severity_rank(severity: &str) -> usize {
 }
 
 /// The scanners of `reports`, ordered by name (case-insensitive), then UUID, with `unknown`
-/// last. A name is the current `harbor_scanners.name`, else the report's own snapshot.
+/// last. A name is the current `harbor_scanners.name`, else the report's own snapshot. An
+/// `unknown` report shows its own name marked as not linked, else "Unknown scanner" (#277).
 pub fn order_scanners(
     reports: &[ScannerReportRow],
     current_names: &HashMap<String, String>,
@@ -72,7 +90,10 @@ pub fn order_scanners(
         .iter()
         .map(|report| {
             let name = if report.scanner_uuid == UNKNOWN_SCANNER_UUID {
-                UNKNOWN_SCANNER_NAME.to_owned()
+                unlinked_name(report).map_or_else(
+                    || UNKNOWN_SCANNER_NAME.to_owned(),
+                    |name| format!("{name}{NOT_LINKED_SUFFIX}"),
+                )
             } else {
                 current_names
                     .get(&report.scanner_uuid)
@@ -356,6 +377,34 @@ mod tests {
             .map(|s| s.name)
             .collect();
         assert_eq!(names, ["Grype", "Trivy", "trivy", UNKNOWN_SCANNER_NAME]);
+    }
+
+    /// #277: an `unknown` report shows its own scanner name, marked as not linked; with no name it
+    /// is "Unknown scanner". A known UUID with no name keeps the old label.
+    #[test]
+    fn an_unknown_report_shows_its_own_name_marked_as_not_linked() {
+        let current = HashMap::new();
+        let named = order_scanners(&[report_row("unknown", Some("Grype"))], &current);
+        assert_eq!(named[0].uuid, UNKNOWN_SCANNER_UUID);
+        assert_eq!(named[0].name, "Grype (not linked to a Harbor registration)");
+        let blank = order_scanners(&[report_row("unknown", Some("  "))], &current);
+        assert_eq!(blank[0].name, UNKNOWN_SCANNER_NAME);
+        let none = order_scanners(&[report_row("unknown", None)], &current);
+        assert_eq!(none[0].name, UNKNOWN_SCANNER_NAME);
+        let known = order_scanners(&[report_row("u-1", None)], &current);
+        assert_eq!(known[0].name, UNKNOWN_SCANNER_NAME);
+        let known_named = order_scanners(&[report_row("u-1", Some("Trivy"))], &current);
+        assert_eq!(known_named[0].name, "Trivy");
+        // Still last, and still no `Found by` line for the unknown scanner alone.
+        let both = order_scanners(
+            &[
+                report_row("unknown", Some("Aqua")),
+                report_row("u-1", Some("Trivy")),
+            ],
+            &current,
+        );
+        assert_eq!(both[1].uuid, UNKNOWN_SCANNER_UUID);
+        assert_eq!(found_by_line(&named), None);
     }
 
     #[test]
