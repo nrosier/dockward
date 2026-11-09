@@ -39,6 +39,8 @@ Each decision and where it lands.
 | 34 | Step 1 held; schema and Harbor removal land with the sync and scanner steps (supersedes 31) | 1, 9 |
 | 35 | Credentials per source; no namespace-level default | 2, 9, 10 |
 | 36 | SARIF location and Code Scanning category use hub host and repository | 9 |
+| 46 | Category includes the tag value (`harborgate/<hub host>/<repository>/<tag value>`) | 9 |
+| 47 | Issues keyed by GitHub repository and CVE; sources sharing a GitHub repo share one issue | 9 |
 | 37 | Source identity is hub, repository and tag value; same repository on two hubs is two sources | 9, 10 |
 | 38 | CVE list keeps a namespace filter in place of the Project filter | 10, 11 |
 | 39 | Docker Hub authentication is optional; anonymous pulls work | 2 |

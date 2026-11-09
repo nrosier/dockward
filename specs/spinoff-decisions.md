@@ -80,3 +80,6 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 43. ghcr.io credentials: classic personal access token only, with read:packages. Fine-grained tokens are not accepted for ghcr.io.
 44. Custom hubs: the admin can set a pull endpoint that differs from the stored host. The default for a custom hub is the stored host.
 45. A hub is identified by its host only. No separate display label; the host is the name shown everywhere.
+
+46. Code Scanning category includes the tag value: `harborgate/<hub host>/<repository>/<tag value>` (the spec's category prefix is kept, per decision 22). Each source has its own alerts; two tags of one repository never overwrite each other.
+47. GitHub issues are keyed by GitHub repository and CVE, as today. Sources that target the same GitHub repository share one issue per CVE. The issue closes only when no source for that GitHub repository reports the CVE. This supersedes the per-source-issue reading of decision 37 for issues; decision 37 still gives each source its own alerts and findings.
