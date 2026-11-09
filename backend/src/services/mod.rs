@@ -41,6 +41,8 @@ pub mod picker_upstream;
 pub mod pickers;
 pub mod poller;
 pub mod project_webhooks;
+#[allow(dead_code)] // The spinoff pull and discovery jobs call the registry client (Step 3+).
+pub mod registry;
 pub mod resolve;
 pub mod retention;
 #[allow(dead_code)] // Used by the sync pipeline.
