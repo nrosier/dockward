@@ -53,3 +53,8 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 25. Environment variables in the spinoff: `DOCKWARD_*` only. Rename outright. There is no fallback to `HARBORGATE_*`.
 26. The encryption HKDF labels (`harborgate/*`) and the cookie names stay unchanged in the spinoff, so the encrypted data and sessions stay readable. Only the visible name changes.
 27. The Code Scanning category prefix (`harborgate`) and the issue marker (`harborgate:<CVE id>`) stay unchanged, so existing alerts and issues stay linked.
+
+## Step 1 decisions (2026-11-09, user, dialogue)
+
+31. Step 1 removes the Harbor code in the same change: the Harbor query code, handlers, services and their tests (spec section 1). The build and gates must pass at the end of Step 1.
+32. The first migration includes the kept tables (users, system_config, user_credentials, github_issues, cve_acceptances, audit_log, alert_channels, alert_deliveries, job_runs, sync_jobs) and cve_findings, together with the ten new scanner tables.
