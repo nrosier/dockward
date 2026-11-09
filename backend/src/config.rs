@@ -402,7 +402,7 @@ where
         public_url,
         trusted_proxies,
         data_dir: read_path(&lookup, DATA_DIR_VAR, DEFAULT_DATA_DIR)?,
-        // Not checked at startup. A backup run checks it and fails on its own.
+        // Created by `prepare_backup_dir` when the app starts. A backup run checks it again.
         backup_dir: read_path(&lookup, BACKUP_DIR_VAR, DEFAULT_BACKUP_DIR)?,
         allow_private_harbor: read_bool(&lookup, ALLOW_PRIVATE_HARBOR_VAR)?,
         allow_private_oidc: read_bool(&lookup, ALLOW_PRIVATE_OIDC_VAR)?,
@@ -427,6 +427,43 @@ pub fn prepare_data_dir(path: &Path) -> Result<(), ConfigError> {
         .open(&probe)
         .map_err(not_writable)?;
     fs::remove_file(&probe).map_err(not_writable)
+}
+
+/// Creates the backup directory with mode 0700 when it does not exist. A directory that
+/// already exists is left alone, writable or not: its mode is never changed, and a
+/// backup run reports an unwritable one on its own. Call after [`prepare_data_dir`].
+pub fn prepare_backup_dir(path: &Path) -> Result<(), ConfigError> {
+    if path.exists() {
+        return Ok(());
+    }
+    let failed = |err: std::io::Error| {
+        invalid(
+            BACKUP_DIR_VAR,
+            format!("could not be created ({:?})", err.kind()),
+        )
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(failed)?;
+    }
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => {}
+        // Created by someone else a moment ago: leave it alone.
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(err) => return Err(failed(err)),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // The creation mode is cut by the umask, never widened. Set it exactly.
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(failed)?;
+    }
+    Ok(())
 }
 
 /// Loads the settings from the process environment and prepares the data directory.
@@ -671,8 +708,88 @@ mod tests {
         assert_eq!(msg, "HARBORGATE_BACKUP_DIR is invalid: must not be empty.");
     }
 
+    fn temp_base(tag: &str) -> PathBuf {
+        let base =
+            std::env::temp_dir().join(format!("harborgate-backupdir-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        base
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o777)
+            .unwrap_or(0)
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn backup_dir_is_not_checked_at_startup() {
+    fn fresh_data_dir_gets_backups_with_mode_0700() {
+        let base = temp_base("fresh");
+        let data = base.join("data");
+        prepare_data_dir(&data).expect_test_ok();
+        prepare_backup_dir(&data.join("backups")).expect_test_ok();
+        assert!(data.join("backups").is_dir());
+        assert_eq!(mode_of(&data.join("backups")), 0o700);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_backup_dir_is_created_with_parents() {
+        let base = temp_base("custom");
+        let dir = base.join("elsewhere").join("bk");
+        prepare_backup_dir(&dir).expect_test_ok();
+        assert!(dir.is_dir());
+        assert_eq!(mode_of(&dir), 0o700);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_backup_dir_keeps_its_mode_and_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = temp_base("existing");
+        fs::create_dir_all(&base).expect_test_ok();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o755)).expect_test_ok();
+        fs::write(base.join("keep.hgbk"), b"x").expect_test_ok();
+        prepare_backup_dir(&base).expect_test_ok();
+        assert_eq!(mode_of(&base), 0o755);
+        assert!(base.join("keep.hgbk").is_file());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unwritable_backup_dir_is_not_chmodded() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = temp_base("readonly");
+        fs::create_dir_all(&base).expect_test_ok();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o500)).expect_test_ok();
+        prepare_backup_dir(&base).expect_test_ok();
+        assert_eq!(mode_of(&base), 0o500);
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).expect_test_ok();
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn backup_dir_that_cannot_be_created_fails_by_name() {
+        let blocker = temp_base("blocker");
+        fs::write(&blocker, b"test").expect_test_ok();
+        let msg = prepare_backup_dir(&blocker.join("bk"))
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            msg.starts_with("HARBORGATE_BACKUP_DIR is invalid: could not be created"),
+            "{msg}"
+        );
+        let _ = fs::remove_file(&blocker);
+    }
+
+    #[test]
+    fn load_settings_does_not_create_the_backup_dir() {
         let settings = load_settings_with(env_of(&[
             PUBLIC,
             (BACKUP_DIR_VAR, "/nonexistent-harborgate-test/backups"),
