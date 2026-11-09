@@ -58,3 +58,8 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 
 31. Step 1 removes the Harbor code in the same change: the Harbor query code, handlers, services and their tests (spec section 1). The build and gates must pass at the end of Step 1.
 32. The first migration includes the kept tables (users, system_config, user_credentials, github_issues, cve_acceptances, audit_log, alert_channels, alert_deliveries, job_runs, sync_jobs) and cve_findings, together with the ten new scanner tables.
+
+## Namespaces and Step 1 (2026-11-10, user, dialogue)
+
+33. No project layer. A source is hub, repository, and tag value. The repository keeps its full path, and its first segment is the namespace (user or organisation). The namespace is the only grouping; no project table is created.
+34. Step 1 is held. The clean schema and Harbor removal happen together with Steps 3 and 4, so the spinoff branch stays green at each merge. The uncommitted Step 1 work is kept in the worktree agent-a45531f4f50b14b5f on branch feat-spinoff-step1, and is not discarded.
