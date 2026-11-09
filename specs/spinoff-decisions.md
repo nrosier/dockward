@@ -70,3 +70,5 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 36. SARIF location and Code Scanning category use the hub host and repository (for example `ghcr.io/nrosier/walley`). The spinoff has no Harbor history to keep, so its alerts start fresh.
 37. A source is identified by hub, repository, and tag value. The same repository on two hubs is two sources, with separate alerts and issues.
 38. The CVE list keeps a namespace filter: the first path segment of the repository, in place of the removed Project filter.
+
+39. Authentication is optional for Docker Hub. A Docker Hub source can be pulled anonymously, and a credential is needed only for private repositories or to raise the anonymous rate limit. Other hubs keep their current rule (credential as the hub requires; see decision 14 and the registry client spec).
