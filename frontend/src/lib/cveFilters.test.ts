@@ -12,7 +12,7 @@ describe("cveFilters", () => {
 
   it("round-trips every control through the URL", () => {
     const params = new URLSearchParams(
-      "q=glibc&severity=LOW,CRITICAL&status=fixed,accepted&has_issue=false&project=platform&repository=api&tag=1.42.0&mapping=m1",
+      "q=glibc&severity=LOW,CRITICAL&status=fixed,accepted&has_issue=false&fix=none,available&project=platform&repository=api&tag=1.42.0&mapping=m1",
     );
     const state = parseFilters(params);
     expect(state.severities).toEqual(["CRITICAL", "LOW"]);
@@ -21,6 +21,7 @@ describe("cveFilters", () => {
       severity: "CRITICAL,LOW",
       status: "fixed,accepted",
       has_issue: "false",
+      fix: "available,none",
       project: "platform",
       repository: "api",
       tag: "1.42.0",
@@ -30,7 +31,7 @@ describe("cveFilters", () => {
   });
 
   it("drops unknown values", () => {
-    const state = parseFilters(new URLSearchParams("severity=BOGUS&status=nope&has_issue=maybe"));
+    const state = parseFilters(new URLSearchParams("severity=BOGUS&status=nope&has_issue=maybe&fix=maybe"));
     expect(toUrlParams(state)).toEqual({});
   });
 

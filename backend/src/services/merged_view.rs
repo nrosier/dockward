@@ -396,6 +396,16 @@ mod tests {
     }
 
     #[test]
+    fn a_cve_fixed_in_one_scanner_only_has_a_fixed_in_version() {
+        // #265: fix available when at least one scanner reports a fixed version.
+        let mut with_fix = row("u-2", "CVE-1", "zlib", "HIGH");
+        with_fix.fixed_in_version = Some("1.3".to_owned());
+        let rows = vec![row("u-1", "CVE-1", "zlib", "HIGH"), with_fix];
+        let merged = merge(&rows, &[scanner("u-1", "Grype"), scanner("u-2", "Trivy")]);
+        assert_eq!(merged[0].fixed_in_version.as_deref(), Some("1.3"));
+    }
+
+    #[test]
     fn found_by_line_counts_and_names_the_scanners() {
         let two = vec![scanner("u-1", "Grype"), scanner("u-2", "Trivy")];
         assert_eq!(

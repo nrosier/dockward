@@ -109,6 +109,23 @@ describe("CvesPage", () => {
     expect(new URLSearchParams(router.state.location.search).get("has_issue")).toBeNull();
   });
 
+  it("filters on whether a fix is available, in the URL and the request", async () => {
+    const fetchMock = stub();
+    const { router } = renderAt(<CvesPage />);
+    await screen.findByText("CVE-2026-0002");
+    expect(lastQuery(fetchMock).get("fix")).toBeNull();
+    const available = group("cves.filter.fix").getByRole("button", { name: t("cves.filter.fixAvailable") });
+    expect(available).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(available);
+    expect(available).toHaveAttribute("aria-pressed", "true");
+    await vi.waitFor(() => expect(lastQuery(fetchMock).get("fix")).toBe("available"));
+    await userEvent.click(group("cves.filter.fix").getByRole("button", { name: t("cves.filter.noFix") }));
+    await vi.waitFor(() => expect(lastQuery(fetchMock).get("fix")).toBe("available,none"));
+    expect(new URLSearchParams(router.state.location.search).get("fix")).toBe("available,none");
+    await userEvent.click(available);
+    await vi.waitFor(() => expect(lastQuery(fetchMock).get("fix")).toBe("none"));
+  });
+
   it("keeps the last Status pill on", async () => {
     stub();
     renderAt(<CvesPage />);

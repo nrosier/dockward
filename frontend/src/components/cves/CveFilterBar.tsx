@@ -4,6 +4,8 @@ import {
   SEVERITIES,
   STATUSES,
   type CveFilterState,
+  FIXES,
+  type FixValue,
   type HasIssue,
   type SeverityValue,
   type StatusValue,
@@ -133,6 +135,9 @@ export function CveFilterBar({ state, mappings, tags, onChange }: CveFilterBarPr
   function pickIssue(value: Exclude<HasIssue, "">) {
     onChange({ has_issue: state.hasIssue === value ? "" : value });
   }
+  function pickFix(value: FixValue) {
+    onChange({ fix: toggle(state.fixes, value, FIXES).join(",") });
+  }
   function pickProject(project: string) {
     // A repository that is not in the chosen project is cleared with it.
     const stillFits =
@@ -180,6 +185,20 @@ export function CveFilterBar({ state, mappings, tags, onChange }: CveFilterBarPr
             tone="neutral"
             label={t("cves.filter.noIssue")}
             onClick={() => pickIssue("false")}
+          />
+        </Group>
+        <Group label={t("cves.filter.fix")}>
+          <FilterPill
+            on={state.fixes.includes("available")}
+            tone="neutral"
+            label={t("cves.filter.fixAvailable")}
+            onClick={() => pickFix("available")}
+          />
+          <FilterPill
+            on={state.fixes.includes("none")}
+            tone="neutral"
+            label={t("cves.filter.noFix")}
+            onClick={() => pickFix("none")}
           />
         </Group>
       </div>

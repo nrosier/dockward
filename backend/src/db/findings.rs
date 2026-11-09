@@ -273,6 +273,9 @@ pub struct CveListFilter<'a> {
     pub harbor_repository: Option<&'a str>,
     /// `Some(1)` keeps CVEs with a GitHub issue row, `Some(0)` those without (#257).
     pub has_issue: Option<i64>,
+    /// Any of `available` (the summary's `fixed_in_version` is non-empty) and `none` (it is
+    /// null or empty), #265. Empty means no filter.
+    pub fixes: &'a [&'a str],
     /// `severity`, `cve_id`, `first_seen_at` or `last_seen_at`.
     pub sort: &'a str,
     /// `1` ascending, `-1` descending.
@@ -341,6 +344,7 @@ pub async fn list_cves(
 ) -> Result<Vec<CveSummaryRow>, AppError> {
     let severities = json_list(filter.severities)?;
     let statuses = json_list(filter.statuses)?;
+    let fixes = json_list(filter.fixes)?;
     let rows = sqlx::query!(
         r#"WITH tag_scans AS (
                SELECT mapping_id, image_tag, MAX(synced_at) AS scan_at
@@ -449,6 +453,10 @@ pub async fn list_cves(
                   OR instr(lower(harbor_project), ?8) > 0
                   OR instr(lower(harbor_repository), ?8) > 0)
              AND (?18 IS NULL OR (?18 = 1) = (github_issue_number IS NOT NULL))
+             AND (?19 IS NULL OR EXISTS (
+                  SELECT 1 FROM json_each(?19) fx
+                  WHERE (fx.value = 'available' AND COALESCE(items.fixed_in_version, '') <> '')
+                     OR (fx.value = 'none' AND COALESCE(items.fixed_in_version, '') = '')))
              AND (?13 IS NULL OR package = ?13)
              AND (?14 IS NULL OR EXISTS (
                   SELECT 1 FROM cve_findings tf
@@ -484,7 +492,8 @@ pub async fn list_cves(
         filter.harbor_project,
         filter.harbor_repository,
         filter.include_older,
-        filter.has_issue
+        filter.has_issue,
+        fixes
     )
     .fetch_all(pool)
     .await
@@ -517,10 +526,12 @@ pub async fn list_cves(
 pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result<i64, AppError> {
     let severities = json_list(filter.severities)?;
     let statuses = json_list(filter.statuses)?;
+    let fixes = json_list(filter.fixes)?;
     let row = sqlx::query!(
         r#"WITH tag_rows AS (
                SELECT f.mapping_id AS mapping_id, f.cve_id AS cve_id, f.image_tag AS image_tag,
                       f.package AS package, f.status AS status,
+                      f.fixed_in_version AS fixed_in_version,
                       m.harbor_project AS harbor_project,
                       m.harbor_repository AS harbor_repository,
                       CASE f.severity WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4
@@ -552,6 +563,7 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
                            WHEN 3 THEN 'MEDIUM' WHEN 2 THEN 'LOW' ELSE 'UNKNOWN' END AS severity,
                       CASE WHEN MAX(status = 'open') = 1 THEN 'open' ELSE 'fixed' END AS status,
                       MAX(CASE WHEN rn = 1 THEN package END) AS package,
+                      MAX(CASE WHEN rn = 1 THEN fixed_in_version END) AS fixed_in_version,
                       MAX(harbor_project) AS harbor_project,
                       MAX(harbor_repository) AS harbor_repository,
                       EXISTS (
@@ -585,6 +597,10 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
                   OR instr(lower(harbor_project), ?8) > 0
                   OR instr(lower(harbor_repository), ?8) > 0)
              AND (?13 IS NULL OR (?13 = 1) = (has_issue = 1))
+             AND (?14 IS NULL OR EXISTS (
+                  SELECT 1 FROM json_each(?14) fx
+                  WHERE (fx.value = 'available' AND COALESCE(items.fixed_in_version, '') <> '')
+                     OR (fx.value = 'none' AND COALESCE(items.fixed_in_version, '') = '')))
              AND (?9 IS NULL OR package = ?9)
              AND (?10 IS NULL OR EXISTS (
                   SELECT 1 FROM cve_findings tf
@@ -602,7 +618,8 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
         filter.tag,
         filter.harbor_project,
         filter.harbor_repository,
-        filter.has_issue
+        filter.has_issue,
+        fixes
     )
     .fetch_one(pool)
     .await

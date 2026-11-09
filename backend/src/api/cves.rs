@@ -1697,6 +1697,66 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #265: the `fix` filter follows the Fixed in value of the summary.
+    #[tokio::test]
+    async fn fix_filter_follows_the_fixed_in_column() {
+        let (state, dir, _, _) = setup("read-fix-filter").await;
+        // 1 CRITICAL fixed in 2.0, 2 HIGH with no fix version, 3 HIGH fixed in 1.5.
+        let rows = [
+            ("CVE-2026-0001", "CRITICAL", Some("2.0")),
+            ("CVE-2026-0002", "HIGH", None),
+            ("CVE-2026-0003", "HIGH", Some("1.5")),
+        ];
+        for (cve, severity, fixed) in rows {
+            store(
+                &state,
+                &db::findings::Finding {
+                    id: &crate::services::ids::new_id().unwrap_or_default(),
+                    mapping_id: "m1",
+                    harbor_repository: "m1",
+                    image_tag: "v1",
+                    cve_id: cve,
+                    package: Some("zlib"),
+                    severity,
+                    fixed_in_version: fixed,
+                    description: None,
+                    now: AT,
+                },
+            )
+            .await;
+        }
+        let me = user("u1");
+        async fn ids(state: &AppState, me: &AuthUser, q: &str) -> Vec<String> {
+            let (ids, _) = every_page(state, me, q).await;
+            ids.into_iter()
+                .map(|id| id.replace("CVE-2026-000", ""))
+                .collect()
+        }
+        assert_eq!(ids(&state, &me, "fix=available").await, ["m1:1", "m1:3"]);
+        // Unknown in the column is No fix.
+        assert_eq!(ids(&state, &me, "fix=none").await, ["m1:2"]);
+        assert_eq!(ids(&state, &me, "fix=available,none").await.len(), 3);
+        assert_eq!(ids(&state, &me, "").await.len(), 3);
+        // The filter combines with severity by AND.
+        assert_eq!(
+            ids(&state, &me, "fix=available&severity=HIGH").await,
+            ["m1:3"]
+        );
+        assert_eq!(
+            ids(&state, &me, "fix=none&severity=CRITICAL").await,
+            Vec::<String>::new()
+        );
+        // The path route takes it too, and `total` matches.
+        let page = by_mapping(&state, &me, "m1", "fix=available")
+            .await
+            .unwrap();
+        assert_eq!(page.total, 2);
+        // A bad value is 400.
+        let error = all_cves(&state, &me, "fix=maybe").await.unwrap_err();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// #257: the control bar parameters.
     #[tokio::test]
     async fn control_bar_filters() {

@@ -6,6 +6,8 @@ export const SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"] as co
 export const STATUSES = ["open", "fixed", "accepted"] as const;
 export type SeverityValue = (typeof SEVERITIES)[number];
 export type StatusValue = (typeof STATUSES)[number];
+export const FIXES = ["available", "none"] as const;
+export type FixValue = (typeof FIXES)[number];
 export type HasIssue = "" | "true" | "false";
 
 export interface CveFilterState {
@@ -15,6 +17,8 @@ export interface CveFilterState {
   // Never empty: the default is Open.
   statuses: StatusValue[];
   hasIssue: HasIssue;
+  // Empty or both means no fix filter (#265).
+  fixes: FixValue[];
   project: string;
   repository: string;
   tag: string;
@@ -66,6 +70,7 @@ export function parseFilters(params: URLSearchParams): CveFilterState {
     severities: pick(params.get("severity"), SEVERITIES),
     statuses: parseStatuses(params),
     hasIssue: hasIssue === "true" || hasIssue === "false" ? hasIssue : "",
+    fixes: pick(params.get("fix"), FIXES),
     project: renamed(params, "project", "harbor_project"),
     repository: renamed(params, "repository", "harbor_repository"),
     tag: params.get("tag") ?? "",
@@ -88,6 +93,9 @@ export function toUrlParams(state: CveFilterState): Record<string, string> {
   if (state.hasIssue !== "") {
     out.has_issue = state.hasIssue;
   }
+  if (state.fixes.length > 0) {
+    out.fix = state.fixes.join(",");
+  }
   for (const name of ["project", "repository", "tag", "mapping"] as const) {
     if (state[name] !== "") {
       out[name] = state[name];
@@ -108,6 +116,7 @@ export const FILTER_KEYS = [
   "severity",
   "status",
   "has_issue",
+  "fix",
   "project",
   "repository",
   "tag",
