@@ -63,3 +63,10 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 
 33. No project layer. A source is hub, repository, and tag value. The repository keeps its full path, and its first segment is the namespace (user or organisation). The namespace is the only grouping; no project table is created.
 34. Step 1 is held. The clean schema and Harbor removal happen together with Steps 3 and 4, so the spinoff branch stays green at each merge. The uncommitted Step 1 work is kept in the worktree agent-a45531f4f50b14b5f on branch feat-spinoff-step1, and is not discarded.
+
+## Namespace and identity answers (2026-11-10, user, dialogue)
+
+35. Credentials are per source, not per namespace. No namespace-level default credential.
+36. SARIF location and Code Scanning category use the hub host and repository (for example `ghcr.io/nrosier/walley`). The spinoff has no Harbor history to keep, so its alerts start fresh.
+37. A source is identified by hub, repository, and tag value. The same repository on two hubs is two sources, with separate alerts and issues.
+38. The CVE list keeps a namespace filter: the first path segment of the repository, in place of the removed Project filter.
