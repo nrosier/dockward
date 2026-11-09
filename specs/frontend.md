@@ -138,7 +138,7 @@ Decided (2026-11-08, user, #243, decisions 1 to 4): the Sync jobs page has a "Pu
 Decided (2026-11-07, user, #224 d1, d8, d12): each tag has a Scan button on the mapping page, and a scanner picker appears there only when Harbor has more than one enabled scanner. The picker lists scanners by name. Nothing is stored as a default scanner.
 
 - Placement (Decided 2026-11-07, delegated, #224): a "Scans" card on the mapping edit page (`/mappings/:id`), below Scheduled scan, with one row per tracked tag (the tag set of the CVE view, up to 10). Reason: the user said "the mapping page, per tag", and the edit page is the mapping's page today. Decided (2026-11-07, user, #224, dialogue): the design is approved as specified here and is built as written; no further approval is needed. The parts are existing ones (Card, table row, select, button), no new visual.
-- Row: tag, last scan date, and one line per scanner that has a report for the tag's digest: scanner name, state pill (queued, running, waiting for report, ok, failed) and the reason when failed. A tag whose digest has no report shows "Not scanned".
+- Row: tag, last scan date, and one line per scanner that has a report for the tag's digest: scanner name (followed by `mapping.scan.notLinked` when `unlinked` is true; Decided 2026-11-09, user, #277), state pill (queued, running, waiting for report, ok, failed) and the reason when failed. A tag whose digest has no report shows "Not scanned".
 - Scan button: with `scanner_choice` `available`, the button opens the scanner picker (a select, no preselected value, the button stays disabled until one is chosen, which is the "user must choose" rule). With `single`, one click starts the scan with no prompt. With `unavailable`, one click starts a scan with the project's current scanner, and the card shows `mapping.scan.noScannerAccess`.
 - Switch notice (Decided 2026-11-07, delegated, #224): while `switch` is not null, a banner on the card shows `mapping.scan.switchActive`, and `mapping.scan.restorePending` while the restore is waiting. A failed restore shows `mapping.scan.restoreFailed` with a link to the Sync jobs page. Reason: other Harbor users of the project are affected, so the state must be visible.
 - Errors from the start route use catalog text chosen by `code`: `409` shows `mapping.scan.alreadyRunning` or `mapping.scan.restoreWaiting`; `429` shows `mapping.scan.cooldown`. Any other error shows the fixed generic text.
@@ -169,6 +169,7 @@ Decided (2026-11-07, user, #224 d1, d8, d12): each tag has a Scan button on the 
   | `cves.scanners.count` | {count, plural, one {1 scanner} other {# scanners}} |
   | `cves.scanners.foundBy` | Found by |
   | `cves.scanner.unknown` | Unknown scanner |
+  | `mapping.scan.notLinked` | (not linked to a Harbor registration) |
   | `cves.scanner.filter` | Scanner |
   | `sync.note.scannerForbidden` | Harbor refused to switch the project scanner. Grant the robot account Scanner Read and Scanner Create. |
   | `sync.note.scannerGone` | The scanner is no longer in Harbor. |
