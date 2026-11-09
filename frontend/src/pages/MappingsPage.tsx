@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Plus } from "lucide-react";
-import { Link, useSearchParams } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import { PageHeader } from "../components/mappings/PageHeader";
-import { TABLE, TD, TH } from "../components/mappings/styles";
+import { LINK, TABLE, TD, TH } from "../components/mappings/styles";
 import { TableScroll } from "../components/mappings/TableScroll";
 import { useScopeAll } from "../components/mappings/useMappings";
 import { JobStatusPill } from "../components/syncjobs/jobPill";
@@ -18,6 +18,9 @@ import { useMe } from "../lib/session";
 import type { MappingListItem, OpenCves, Page } from "../types/api";
 
 const PAGE_SIZE = 50;
+const INTERACTIVE = "a, button, input, select, textarea, label, [role='button'], [role='link']";
+const ROW_OPEN =
+  "cursor-pointer hover:bg-border/30 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
 
 function hostOf(url: string): string {
   try {
@@ -115,6 +118,7 @@ function SortHeader({
 export default function MappingsPage() {
   const scopeAll = useScopeAll();
   const me = useMe();
+  const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const page = currentPage(params);
   const sortParam = params.get("sort");
@@ -186,64 +190,81 @@ export default function MappingsPage() {
                   <th className={TH}>{t("mappings.col.issues")}</th>
                   {sortHeader("open_issues")}
                   {sortHeader("last_sync_at")}
-                  <th className={TH}>
-                    <span className="sr-only">{t("syncJobs.col.actions")}</span>
-                  </th>
                 </tr>
               </thead>
               <tbody>
-                {list.data.items.map((mapping) => (
-                  <tr key={mapping.id}>
-                    <td className={TD}>
-                      <div className="font-medium">
-                        {mapping.harbor_project}/{mapping.harbor_repository}
-                      </div>
-                      <div className="text-[12.5px] text-muted">{hostOf(mapping.harbor_base_url)}</div>
-                    </td>
-                    <td className={TD}>
-                      <div className="font-mono text-[12.5px]">
-                        {mapping.github_owner}/{mapping.github_repo}
-                      </div>
-                      <div className="text-[12.5px] text-muted">
-                        {t("mappings.branch", { branch: mapping.default_branch })}
-                      </div>
-                    </td>
-                    <td className={TD}>
-                      <IssuesCell mapping={mapping} />
-                    </td>
-                    <td className={TD}>
-                      <OpenCounts counts={mapping.open_cves} />
-                    </td>
-                    <td className={TD}>
-                      {mapping.last_sync === null ? (
-                        <>
-                          <span className="text-muted">{t("mappings.never")}</span>
-                          <div className="mt-1 text-[12.5px] text-muted">{t("mappings.neverReason")}</div>
-                        </>
-                      ) : (
-                        <>
-                          <JobStatusPill status={mapping.last_sync.status} />
-                          <div className="mt-1 text-[12.5px] text-muted">
-                            <Time iso={mapping.last_sync.updated_at} />
-                          </div>
-                        </>
-                      )}
-                    </td>
-                    <td className={`${TD} text-right`}>
-                      {me.data?.id === mapping.user_id ? (
-                        <Link
-                          to={`/mappings/${encodeURIComponent(mapping.id)}`}
-                          className={buttonClass("small")}
-                          aria-label={t("mappings.editNamed", {
-                            name: `${mapping.harbor_project}/${mapping.harbor_repository}`,
-                          })}
-                        >
-                          {t("mappings.edit")}
-                        </Link>
-                      ) : null}
-                    </td>
-                  </tr>
-                ))}
+                {list.data.items.map((mapping) => {
+                  const editable = me.data?.id === mapping.user_id;
+                  const href = `/mappings/${encodeURIComponent(mapping.id)}`;
+                  const name = `${mapping.harbor_project}/${mapping.harbor_repository}`;
+                  return (
+                    <tr
+                      key={mapping.id}
+                      tabIndex={editable ? 0 : undefined}
+                      className={editable ? ROW_OPEN : undefined}
+                      onClick={
+                        editable
+                          ? (event) => {
+                              // Inner controls keep their own action.
+                              if ((event.target as Element).closest(INTERACTIVE)) return;
+                              void navigate(href);
+                            }
+                          : undefined
+                      }
+                      onKeyDown={
+                        editable
+                          ? (event) => {
+                              if (event.key === "Enter" && event.target === event.currentTarget) {
+                                void navigate(href);
+                              }
+                            }
+                          : undefined
+                      }
+                    >
+                      <td className={TD}>
+                        <div className="font-medium">
+                          {editable ? (
+                            <Link to={href} className={LINK}>
+                              {name}
+                            </Link>
+                          ) : (
+                            name
+                          )}
+                        </div>
+                        <div className="text-[12.5px] text-muted">{hostOf(mapping.harbor_base_url)}</div>
+                      </td>
+                      <td className={TD}>
+                        <div className="font-mono text-[12.5px]">
+                          {mapping.github_owner}/{mapping.github_repo}
+                        </div>
+                        <div className="text-[12.5px] text-muted">
+                          {t("mappings.branch", { branch: mapping.default_branch })}
+                        </div>
+                      </td>
+                      <td className={TD}>
+                        <IssuesCell mapping={mapping} />
+                      </td>
+                      <td className={TD}>
+                        <OpenCounts counts={mapping.open_cves} />
+                      </td>
+                      <td className={TD}>
+                        {mapping.last_sync === null ? (
+                          <>
+                            <span className="text-muted">{t("mappings.never")}</span>
+                            <div className="mt-1 text-[12.5px] text-muted">{t("mappings.neverReason")}</div>
+                          </>
+                        ) : (
+                          <>
+                            <JobStatusPill status={mapping.last_sync.status} />
+                            <div className="mt-1 text-[12.5px] text-muted">
+                              <Time iso={mapping.last_sync.updated_at} />
+                            </div>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </TableScroll>

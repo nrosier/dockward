@@ -5,6 +5,13 @@ all-features = true
 
 [advisories]
 version = 2
+# 2026-11-09, decided by the user in issue #263.
+# Reason: no released SQLx allows libsqlite3-sys 0.39 or newer yet, and
+# HarborGate's local SQLite file is not writable by untrusted parties.
+# Removal: remove this entry when SQLx ships a release that allows
+# libsqlite3-sys 0.39 or newer. Check at each Renovate update.
+# Keep in step with backend/.cargo/audit.toml.
+ignore = ["RUSTSEC-2026-0459"]
 
 [licenses]
 version = 2
