@@ -1,234 +1,225 @@
-# Spinoff: local image scanner (working name `localscan`, provisional)
+# Spinoff: local image scanner (working name `localscan`, PROVISIONAL)
 
-Purpose: the build specification for a spinoff of HarborGate that drops Harbor entirely. The spinoff pulls container images from OCI registries ("hubs"), scans them locally with Grype and Trivy, and keeps the SARIF and GitHub output. The product name is not decided. `localscan` (provisional) is a working name used only inside this spec; it is not a package, crate, image, label or category name, and it must not be written into code, configuration or user-visible text until the user decides the name.
+Purpose: the build specification for a spinoff of HarborGate that drops Harbor entirely. The spinoff pulls container images from OCI registries ("hubs") through the registry API into OCI image layouts on disk, scans them with Trivy and Grype running out of process, and keeps the SARIF upload, the GitHub issues and the CVE rules.
 
-Branch: `spinoff-local-scan`. This branch must never be merged into `main`. Every spec file on this branch other than this one still describes HarborGate with Harbor; this file overrides them on this branch. Where this file and another spec file disagree, this file wins, and the table in section 1 names what it replaces. When the name is decided, this file is renamed and the identifiers listed in OPEN question 11 are changed together.
+The product name is not decided (decision 22). `localscan` is a provisional working name. Where this spec names a new identifier with it (environment variables, a metric, a directory), the identifier is provisional and is renamed together with the product (section 14, rename set).
 
-Decision marks follow [README.md](README.md). Every decision below dated 2026-11-09 comes from the user's spinoff decisions 1 to 9 (dialogue, 2026-11-09), recorded here as `spinoff decision N`:
+Branch: `spinoff-local-scan`. It must never be merged to `main`. Every other spec file on this branch still describes HarborGate with Harbor. This file overrides them on this branch; where they disagree, this file wins, and section 1 names what it replaces. The binding source is [spinoff-decisions.md](spinoff-decisions.md) (decisions 1 to 22). Where an older spec file or an earlier draft of this file conflicts with a decision, the decision wins.
 
-1. The spinoff lives in this repository on the branch `spinoff-local-scan`, not on `main`.
-2. Harbor is removed entirely. The user enters where an image is: a registry host, a repository, and a tag or tag pattern.
-3. Several registries (hubs) are configurable. `ghcr.io` and `hub.docker.com` are included by default; custom registries can be added.
-4. Credentials for each hub are stored encrypted per hub, with the same key scheme HarborGate uses today. Public images need no credential.
-5. The tool pulls each tag the user defines and scans it locally with the included scanners, Grype and Trivy by default. Images are stored locally.
-6. The user sets a maximum number of stored images. When it is exceeded, the oldest image is removed.
-7. The user enters an exact tag or a pattern (for example `1.2.*`). Each matching tag is pulled and scanned once.
-8. Output: keep the SARIF and GitHub output. SARIF is still uploaded to Code Scanning and GitHub issues are still opened, which needs GitHub credentials.
-9. The name is not decided. Use `localscan` only inside the spec, marked provisional.
+Marks follow [README.md](README.md). `Decided (spinoff N)` cites a decision. `Decided (spec author, spinoff)` is a gap-filler inside the decisions with its reason; the user can overturn it. `UNVERIFIED:` can only be checked by a test run or a live system. Section 15 lists the open items. Nothing in section 15 is decided.
 
-Anything this file adds beyond those nine decisions is marked `Decided (2026-11-09, spec author, spinoff)` with its reason, or `PROPOSED:` when it needs the user's approval, or is an OPEN question in section 9. Nothing in section 9 is decided.
+## Decisions
 
-## 1. Scope: what is removed, superseded and kept
+Each decision and where it lands.
 
-### Removed (Harbor)
-
-Decided (2026-11-09, user, dialogue, spinoff decision 2): there is no Harbor client, no Harbor webhook receiver, no Harbor poll, no project scanner call, no scheduled Harbor scan and no Harbor robot permission. Nothing in the spinoff contacts a Harbor instance, and the words Harbor, robot account, project webhook and `SCANNING_COMPLETED` do not appear in code, API, database or UI.
-
-| Spec file | Section | Fate in the spinoff |
+| N | Decision (short) | Lands in |
 | --- | --- | --- |
-| [architecture.md](architecture.md) | Overview, Components, Data flow steps 1 to 3 | Superseded by section 3 below. Steps 4 to 7 (convert, upload, issues, alerts) are kept, fed from local scan results. |
-| [integrations.md](integrations.md) | Harbor webhook (all subsections: project webhook, payload format, auth header, URL token, responses) | Removed. |
-| | Harbor API (vulnerability report endpoint, credentials and robot account, base URL and transport, test button) | Removed. The GitHub test button is kept ([api.md](api.md), Credentials). |
-| | Polling | Removed. Replaced by tag discovery, section 5. |
-| | Scheduled scan | Removed. No rescans in v1 (OPEN question 6). |
-| | Scanner reports and scan launch (all, including the project lock, switch and restore, and "Grype report reader" for the Harbor adapter) | Removed. Replaced by section 3. The Harbor adapter's report shape no longer applies. |
-| | OCI labels | Kept, reworded: labels are read from the locally pulled image config (section 3). |
-| | SARIF conversion and upload | Kept, reworded (section 3). |
-| | GitHub base URL, GitHub issues, GitHub target | Kept, reworded to images (section 3). |
-| | Mapping pickers | Removed, except the GitHub repository list (`GET /user/repos`, search, 5-minute cache). Hide and restore is removed with `picker_hidden_items`. Decided (2026-11-09, spec author, spinoff): the GitHub list is kept because the source form still needs a GitHub target; the Harbor lists and the source suggestion have nothing to read. |
-| [database.md](database.md) | `repo_mappings`, `project_webhooks`, `project_webhook_unmatched`, `picker_hidden_items`, `harbor_scanners`, `scanner_reports`, `project_scanner_locks`, `sync_reports` columns | Removed or replaced; see section 6. |
-| | Decisions on migrations 0006, 0008, 0009, #185, #132, #249 | Removed (Harbor specific). The new schema is one fresh `0001` (section 6). |
-| | Audit vocabulary: `mapping.*`, `project_webhook.*`, `mapping.scan`, `mapping.pull`, `artifact.remove`, `mapping.webhook_token_rotate`, `mapping.auth_secret_rotate` | Removed; replacements in section 6. |
-| [backend.md](backend.md) | `webhooks.rs`, the Harbor polling task, resolve jobs, scan jobs (#191), `scanner_scan`, `scanner_restore`, the per-project scanner lock, Harbor rate-limit deferral | Removed. |
-| [security.md](security.md) | Hardening: webhook rate limits and the 64 KiB webhook body cap; the manual pull limit (#131) | Removed. |
-| | Tenancy: the manual-pull and tag-scan exceptions (#131, #224) | Replaced by section 8. |
-| | Secrets in logs: the Harbor scanner paragraph | Removed. |
-| | Outbound HTTP (SSRF): the Harbor base URL rules and `HARBORGATE_ALLOW_PRIVATE_HARBOR` | Replaced by the registry rules in section 2. |
-| [cve-lifecycle.md](cve-lifecycle.md) | "Tracking per tag" (Harbor tag, digest, push time, last 10 tags), "Merged view" scanner identity by Harbor UUID, issue rules built on Harbor digests, Retention for `sync_reports` | Reworded; the table in section 6 gives the new wording. |
-| [alerts.md](alerts.md) | Trigger "A sync fails" wording and the webhook payload field `mapping.harbor` | Reworded (section 8). |
-| [api.md](api.md) | Mappings, Scanners and tag scans, Project webhooks, Pickers (Harbor routes), Webhook, the Harbor part of Health, Credentials `service_type=harbor` | Removed or replaced by section 7. |
-| [frontend.md](frontend.md) | Mapping form, Tag scans on the mapping page, Project webhook proposal, pickers, the Harbor parts of Admin Health | Removed or replaced by section 7. |
-| [deployment.md](deployment.md) | "the app spawns no processes", the `scratch` base image reasoning, `HARBORGATE_ALLOW_PRIVATE_HARBOR` | Superseded by section 3 and OPEN question 7. |
-| `docs/SETUP.md` | Harbor, robot and webhook setup | Becomes stale on this branch. Not changed by this spec. |
+| 1 | Harbor removed; source = hub, repository, tag or pattern | 1, 5, 9 |
+| 2 | Registry API into OCI layouts on disk; no Docker daemon or socket | 3, 4, 6 |
+| 3 | Every platform in an index is scanned; results per platform | 6, 9 |
+| 4 | Databases refresh daily; a newer database rescans every retained image by digest | 8 |
+| 5 | Scanners out of process, pinned; app image stays `FROM scratch` | 7 |
+| 6 | SARIF upload and GitHub issues stay | 1, 6 |
+| 7 | Default hubs, custom hubs, credentials encrypted per hub (host string superseded by 11) | 2 |
+| 8 | Each match scanned once per digest (extended by 17) | 5, 8 |
+| 9 | Count-based retention, never evict a running scan (refined by 18) | 4 |
+| 10, 22 | Name undecided; `localscan` provisional | header, 14 |
+| 11 | Docker Hub stored as `docker.io`; pulls go to `registry-1.docker.io` | 2 |
+| 12 | Own registry client on reqwest; redirects followed, address checked on every hop | 3, 12 |
+| 13 | Default hubs not removable; custom hubs addable and removable | 2 |
+| 14 | Private or plain-HTTP registries: environment opt-out, off by default, named hubs only | 3, 12 |
+| 15 | Tags: exact, `*`, `?`; no exclusions, no regex | 5 |
+| 16 | Discovery hourly per repository | 5 |
+| 17 | Scan triggers: first pull, tag moves to a new digest, vulnerability DB change | 6, 8 |
+| 18 | Retention count default 20; eviction deletes the layout only | 4 |
+| 19 | Limits and defaults, operator-configurable | 7, 13 |
+| 20 | Keep SARIF, issue, close, reopen, accepted-CVE rules; remove Harbor parts only | 1, 9 |
+| 21 | Fresh install only; no import | 9 |
 
-### Kept unchanged
+## 1. Scope
 
-Decided (2026-11-09, user, dialogue, spinoff decisions 4 and 8): these rules carry over as written in their own files.
+### Removed (decision 1)
 
-- Encryption and keys: `HARBORGATE_ENCRYPTION_KEY` format, AES-256-GCM, the `v1:` ciphertext format, the AAD rule `<table>:<column>:<row id>`, the HKDF labels (`harborgate/credentials-v1`, `harborgate/session-v1`, `harborgate/backup-v1`, `harborgate/csrf-v1`), key rotation by CLI, `zeroize` ([security.md](security.md), Encryption and keys).
-- Backup and restore ([security.md](security.md)), with the schema check in section 6.
-- Authentication, first-run setup, OIDC, roles, sessions, CSRF, login CSRF, security headers, client IP, login rate limit, `Cache-Control: no-store`.
-- Secrets in logs, the application log, audit rules.
-- SARIF 2.1.0 conversion and upload, the GitHub base URL setting, the GitHub token scope, GitHub issues (marker, labels, title, adoption, manual route, create lock), acceptance, dashboard counts, the alert channels.
-- The durable job queue: `sync_jobs` rows, the three outcomes (success, failure, deferred), retry constants (30 s doubling, 8 attempts), restart recovery, manual retry, purge of failed jobs ([backend.md](backend.md)).
+There is no Harbor client, no Harbor webhook receiver, no Harbor poll, no project scanner call, no scheduled Harbor scan and no Harbor robot permission. The words Harbor, robot account, project webhook and `SCANNING_COMPLETED` do not appear in code, API, database or UI. Nothing contacts a Harbor instance. Also removed: the Docker daemon, `/var/run/docker.sock`, `bollard` and any pruning of the host's Docker images. The app never touches the host's Docker.
+
+| Spec file | Fate in the spinoff |
+| --- | --- |
+| [architecture.md](architecture.md) | Overview, components and data flow steps 1 to 3 replaced by sections 5 to 8. Convert, upload, issues and alerts are kept. |
+| [integrations.md](integrations.md) | Removed: Harbor webhook, Harbor API, polling, scheduled scan, scanner reports and scan launch (including the project lock and the Grype report reader for the Harbor adapter), mapping pickers except the GitHub repository list. Kept: SARIF conversion and upload, GitHub base URL, GitHub issues, GitHub target, with the wording in section 9. OCI labels kept, read from the pulled image config (section 6). |
+| [database.md](database.md) | Replaced by section 9. |
+| [backend.md](backend.md) | Removed: `webhooks.rs`, the Harbor poll, resolve jobs, `scanner_scan`, `scanner_restore`, the project scanner lock, Harbor rate-limit deferral. The durable job queue is kept with the job kinds of section 9. |
+| [security.md](security.md) | Removed: webhook limits and body cap, the manual-pull limit, the Harbor scanner secrets paragraph, `HARBORGATE_ALLOW_PRIVATE_HARBOR`. The outbound rules are replaced by section 12. Everything else is kept (below). |
+| [cve-lifecycle.md](cve-lifecycle.md) | Reworded by the table in section 9. |
+| [alerts.md](alerts.md), [api.md](api.md), [frontend.md](frontend.md) | Harbor parts removed; replaced by sections 10 and 11 and the alert note in section 12. |
+| [deployment.md](deployment.md) | "The app spawns no processes" is superseded by section 7. `scratch` stays (decision 5). |
+| `docs/SETUP.md` | Stale on this branch; not changed by this spec. |
+
+### Kept (decisions 6 and 20)
+
+- GitHub SARIF 2.1.0 conversion and upload, the GitHub base URL setting, the GitHub token scope, GitHub issues (marker `<!-- harborgate:<CVE id> -->`, label, title, adoption, manual route, create lock), the CVE close, reopen and manual-close rules, acceptance, dashboard counts, the alert channels and the audit log.
+- Authentication, first-run setup, OIDC, roles, sessions, CSRF, login CSRF, security headers, client IP, login rate limit, `Cache-Control: no-store`, encryption and keys (`v1:` ciphertext, AAD `<table>:<column>:<row id>`, the HKDF labels, key rotation by CLI, `zeroize`), backup and restore, secrets in logs, the application log ([security.md](security.md)).
+- The durable job queue: three outcomes (success, failure, deferred), retry 30 s doubling with 8 attempts, restart recovery, manual retry, purge of failed jobs ([backend.md](backend.md)).
 - Timestamps as `INTEGER` Unix seconds, `CHECK` constraints on enumerated columns, `PRAGMA foreign_keys = ON`.
 
-The names `HARBORGATE_*`, the `__Host-harborgate_*` cookies, `harborgate/*` HKDF labels and the crate name `harborgate` are kept for now and are provisional with the product name (OPEN question 11). Decided (2026-11-09, spec author, spinoff): the HKDF labels in particular are not changed when the name changes unless the user says so, because spinoff decision 4 says "the same key scheme".
+Existing names (`HARBORGATE_*` variables, `__Host-harborgate_*` cookies, `harborgate/*` HKDF labels, the issue marker and label, the SARIF tool name and category prefix) are kept unchanged until the name is decided (decision 22, section 14).
 
-## 2. Hubs
+## 2. Hubs and credentials
 
-### Configuration
+- A hub is an OCI registry host: lowercase DNS name, optional `:port`, no scheme, no userinfo, no path. It has a display name and a kind, `default` or `custom`.
+- Defaults (decisions 7, 11, 13): `ghcr.io` and `docker.io`, inserted by the fresh migration. Docker Hub is stored and shown as `docker.io`. A hub has a pull endpoint host that differs from the stored host only for Docker Hub: pulls and token requests go to `registry-1.docker.io` (token service and realm as the registry's challenge says, section 3). The mapping lives in one function in the registry client and is not user-editable. Default hubs cannot be removed by an admin.
+- Custom hubs (decision 13): an admin can add and remove them. Removing a hub that an image source uses is refused (`409 conflict`). Adding validates the host grammar and the address rules of section 12.
+- Transport: HTTPS only. Plain HTTP and private addresses only through the environment opt-out in section 12 (decision 14).
+- Credentials (decision 7): encrypted per hub, in `hub_credentials`, one per (user, hub). Decided (spec author, spinoff): per user as well as per hub, because the tenancy rule says a user sees only their own credentials, and one shared credential would let one tenant pull another tenant's private images. A public image needs no credential and is pulled anonymously.
+- A credential is a username and a token. The token is a `v1:` ciphertext with AAD `hub_credentials:encrypted_token:<id>`. It is write-only through the API, never logged, never sent to a scanner (section 12).
+- Pull scope: the client asks only for `repository:<name>:pull`. Verified (2026-11-09) in `distribution/distribution`, `docs/content/spec/auth/token.md`: the registry answers `401` with `Www-Authenticate: Bearer realm=...,service=...,scope=...`, and the client fetches a token from the realm with Basic credentials.
+- `ghcr.io` credential: carried from the earlier draft, verified 2026-11-09 in GitHub's Container registry documentation: only a personal access token (classic) authenticates, and `read:packages` reads packages. This is a different token from the fine-grained GitHub token used for Code Scanning and issues. UNVERIFIED: the scopes Docker Hub access tokens offer.
+- Test button: `POST /api/v1/hubs/:id/credential/test` fetches `GET /v2/` and a pull token for a repository the caller names, and returns `ok`, never the token.
 
-- A hub is an OCI registry the instance can pull from. It has a canonical host (lowercase DNS name, optional `:port`, no scheme, no userinfo, no path), a display name, and a kind: `default` or `custom`.
-- Decided (2026-11-09, user, dialogue, spinoff decision 3): the default set is `ghcr.io` and Docker Hub. Both exist after a fresh install, inserted by the `0001` migration. The host string stored for Docker Hub is OPEN question 1, because the user named `hub.docker.com` and the Docker documentation uses `registry-1.docker.io` for pulls.
-- Decided (2026-11-09, user, dialogue, spinoff decision 3): custom hubs can be added and removed. Decided (2026-11-09, spec author, spinoff): adding and removing a hub is admin only, because a hub is an outbound destination for the whole instance and the SSRF rules treat an entered host as a risk (section 8). Removing a hub that an image source uses returns `409 conflict`. PROPOSED: default hubs cannot be removed (OPEN question 9).
-- Transport: HTTPS only. Decided (2026-11-09, spec author, spinoff): this is the existing rule in [security.md](security.md), "Outbound HTTP (SSRF)", applied to registries. A plain-HTTP or private-address registry is OPEN question 8.
-- A hub has no credential of its own. Credentials are per user and per hub (below).
+## 3. Registry client
 
-### Authentication of a pull
+Decided (spinoff 12): our own client on `reqwest`, in `services/registry/`. No `oci-client`, no `bollard`, no Docker daemon. (The earlier draft's library evaluation is withdrawn.)
 
-- Decided (2026-11-09, user, dialogue, spinoff decision 4): a credential is stored per hub, encrypted with the existing scheme. A public image needs no credential, and the pull is anonymous.
-- Decided (2026-11-09, spec author, spinoff): a credential belongs to one user and one hub (`hub_credentials`, section 6) and is used only for that user's image sources. Reason: existing tenancy ([security.md](security.md), Tenancy) says a user sees only their own credentials, and a shared instance credential would let one tenant pull another tenant's private images. Whether hubs and credentials should instead be instance-wide is OPEN question 3.
-- A credential is a username and a token (a password or access token). The token is encrypted as a `v1:` ciphertext with AAD `hub_credentials:encrypted_token:<id>`. It is never returned by the API after save, never logged, and never sent to a scanner.
-- The client requests only the `pull` action for the repository. Verified (2026-11-09) in the Docker registry token documentation (`distribution/distribution`, `docs/content/spec/auth/token.md`): the registry answers `401` with `Www-Authenticate: Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:<name>:pull,push"`, and the client gets a token from the realm with Basic credentials. The scope for a scan-only client is `repository:<name>:pull`.
-- Credential kinds per default hub:
-  - `ghcr.io`: Verified (2026-11-09) in GitHub's Container registry documentation: "GitHub Packages only supports authentication using a personal access token (classic)", and `read:packages` is the scope that reads packages. So a pull credential for `ghcr.io` is a classic token with `read:packages`. This is a different token from the fine-grained GitHub token HarborGate uses for Code Scanning ([security.md](security.md), GitHub token scope), which is fine-grained only. The operator needs both when the images are private.
-  - Docker Hub: a username and an access token. UNVERIFIED: the exact scopes Docker Hub access tokens offer. Source not read this session.
-- Test button: `POST /api/v1/hubs/:id/credential/test` fetches `GET /v2/` and a token for a repository the caller names, and reports `ok`, never the token. Rate limited (section 7).
+Endpoints, from the OCI Distribution Specification (`opencontainers/distribution-spec`, `spec.md`): `GET /v2/`, `GET /v2/<name>/tags/list` with `n` and `last` or the `Link` header, `GET /v2/<name>/manifests/<reference>`, `GET /v2/<name>/blobs/<digest>`.
 
-### Pull method
+Verified (2026-11-09) in that spec:
 
-- Decided (2026-11-09, user, dialogue, spinoff decision 5, with the library below decided by the spec author): the OCI Distribution API over HTTPS. Endpoints used, from the OCI Distribution Specification (`opencontainers/distribution-spec`, `spec.md`, read 2026-11-09): `GET /v2/<name>/tags/list` with `n` and `last` for paging, `GET /v2/<name>/manifests/<reference>`, and `GET /v2/<name>/blobs/<digest>`.
-- Verified (2026-11-09) in the same spec: a tag matches `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}` (at most 128 characters), a repository name matches `[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*(\/[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*)*`, registries MAY redirect any request, and clients SHOULD follow redirects but MUST NOT forward `Authorization` headers across host boundaries unless explicitly configured. A `Link` header MAY be sent when more tags exist.
-- Library: `oci-client`, version 0.18.0. Verified (2026-11-09):
-  - Source: `https://github.com/oras-project/rust-oci-client`, crate `oci-client` on crates.io, Apache-2.0.
-  - Maintained: yes by these signs only. The 0.18.0 release is dated 2026-09-18 on crates.io (GitHub release 2026-09-28), the repository is not archived and its last push was 2026-11-06, its `Cargo.toml` declares `maintenance = { status = "actively-developed" }`, and releases came in 2024-10, 2025-05, 2026-01, 2026-03, 2026-05 and 2026-09. It has about 10.5 million downloads. "Maintained" here is an observation of activity on 2026-11-09, not a guarantee.
-  - Fit: it depends on `reqwest ^0.13` with `rustls` (the backend already uses `reqwest 0.13` with `rustls`, `backend/Cargo.toml`). Methods: `list_tags(image, auth, n, last)`, `pull_image_manifest`, `pull_manifest_and_config`, `pull_blob`, `pull_blob_stream`. Auth type `RegistryAuth` is `Anonymous`, `Basic(user, password)` or `Bearer(token)`. `ClientConfig` has `protocol`, `accept_invalid_certificates`, `platform_resolver`, proxy, timeouts and `max_concurrent_download` (default 16).
-  - Gaps against HarborGate's rules, from `src/client.rs` at tag v0.18.0 (a search for `redirect` and `dns` found no match): the client builds its own private `reqwest::Client` from `ClientConfig`, so the backend cannot supply its own redirect policy or DNS resolver. reqwest's default policy then follows up to 10 redirects (`Policy::limited(10)`, reqwest `src/redirect.rs`), and reqwest strips `Authorization` on a cross-host redirect (`remove_sensitive_headers`). So the "no redirects" and "check every resolved address, again on DNS change" rules of [security.md](security.md) cannot be enforced through `oci-client` as it is. This is a `CONFLICT:` recorded in OPEN question 2, because registries legitimately redirect blob downloads to another host and the existing rule forbids all redirects.
-  - UNVERIFIED: whether `oci-client` performs the Docker token flow itself from `RegistryAuth::Basic`. A search for `www-authenticate` in `client.rs` found nothing; the code may be in `token_cache.rs`. Check at implementation.
-  - UNVERIFIED: how `Reference` maps the host `docker.io` to the registry that is called (`oci-spec` `Reference::resolve_registry` exists; its mapping table was not read).
-- No other registry library is named. Hand-written client on `reqwest` is the alternative in OPEN question 2.
+- A `Link` header with `rel="next"` MAY be sent when more tags exist, and clients should prefer it over `last` (lines 592 to 614).
+- Registries MAY redirect any request; clients SHOULD follow redirects and MUST NOT forward `Authorization` headers across host boundaries (line 829).
+- A tag matches `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`; a repository name matches `[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*(\/[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*)*`.
+- Clients should expect to handle manifests of at least 4 megabytes (line 544).
+- A token response's `expires_in` defaults to 60 seconds when omitted (distribution token spec).
 
-## 3. Scan flow
+Contract:
 
-Decided (2026-11-09, user, dialogue, spinoff decisions 5 and 8): pull, scan locally, convert, then upload and open issues as today.
+- Auth: the standard Bearer challenge flow. On `401` the client reads `Www-Authenticate`, requests a token from the realm for the scope `repository:<name>:pull` (Basic credentials when a hub credential exists, none otherwise), caches it in memory until its expiry, and retries once. Docker Hub's flow is UNVERIFIED (section 15, item 2).
+- Redirects (decision 12): followed, using a custom redirect policy. On every hop the client checks scheme (HTTPS only, unless the hub is named in the opt-out), validates the host, and requires every address the host resolves to to pass the address rules of section 12. The `Authorization` header is dropped when the host changes. The hop limit is 10, reqwest's default policy limit, which the client keeps as its own explicit constant. A hop that fails any check ends the request with `registry could not be reached`.
+- Address check on every request: the check runs on the addresses actually connected to (a custom resolver or connect-time check), not only on a pre-resolution of the hub host, so DNS rebinding between the check and the connect is closed. The mechanism is an implementation choice; the acceptance test in section 16 decides whether it holds.
+- Bounds: manifest and config responses have a byte cap; blobs are streamed with a running byte count against the pull cap (section 13), not trusted from `Content-Length`. Every blob's SHA-256 is verified against its descriptor while streaming.
+- Timeouts: a connect timeout and a total per-request timeout, as constants in one place.
+- Rate limit `429` from a registry: deferral using `Retry-After`, capped at 1 hour, `attempts` unchanged (the existing deferral rule).
+- Names are validated against the grammars above before any request and percent-encoded in paths.
 
-1. **Discover** (section 5): list the source's tags, match the pattern, record each new tag once, queue a pull job per new tag.
-2. **Pull**: resolve the tag to a manifest, choose a platform if it is an index (OPEN question 4), check the size bound (OPEN question 5), download the manifest, config and layer blobs into a temporary directory under the store, verify each blob's digest, then write them as an OCI image layout (`oci-layout`, `index.json`, `blobs/sha256/...`) and move the directory into place atomically. Only then is the image `stored`. A failed pull deletes the temporary directory.
-3. **Evict** (section 4), in the same step as the commit that marks the image `stored`.
-4. **Scan**: one `scan` job per enabled scanner, run one at a time (the single worker). Each scan runs a scanner binary on the stored directory and writes JSON to a file.
-5. **Convert**: parse the JSON into `scanner_findings` rows (replacing the scanner's earlier rows for that image) and recompute the merged `cve_findings` for the tag in the same transaction, as in [cve-lifecycle.md](cve-lifecycle.md), "Merged view".
-6. **Publish**: when every enabled scanner's run for the image has ended, one `publish` job reads the labels from the stored image config, builds the merged SARIF, uploads it, and runs the issue rules, exactly as the existing sync does after the report is stored. Decided (2026-11-09, spec author, spinoff): a scanner whose run failed after all attempts does not hold the SARIF back, and, by the existing rule ([cve-lifecycle.md](cve-lifecycle.md), "GitHub issue rules", #224 d14), it holds issue closing open. Reason: a partial result must never close an issue.
+## 4. OCI layout store and retention
 
-### Scanners
+- Location: `HARBORGATE_DATA_DIR/images` (default `/data/images`). One directory per stored image, named by a generated id, never by a registry-supplied string. Pulls are written to `images/.tmp/<id>` and renamed into place.
+- Layout: a standard OCI image layout (`oci-layout`, `index.json`, `blobs/sha256/...`).
+- Decided (spec author, spinoff): a stored image is one OCI layout per platform manifest. A multi-arch tag is therefore several stored images, one per platform (decision 3). Reasons: a layout with one manifest needs no platform selector at scan time, results are per platform, and eviction and the pull cap stay a directory delete and a single size. Blobs are not shared between layouts in v1.
+- Retention (decision 18): count-based, default 20 stored images, operator-configurable (setting `images.max_stored`, a positive integer). Only images in state `stored` count.
+- Eviction deletes the OCI layout only. Findings, scan runs, scan history, publish reports, issues and uploaded SARIF are kept; the UI shows the image as removed. The `image_platforms` row stays with state `evicted`, as the memory that the digest was scanned.
+- Order: when the count exceeds the maximum, the oldest is removed first: smallest `pulled_at`, ties by smallest id (decision 9).
+- Never evict (decision 9): a layout with a running scan. Decided (spec author, spinoff): also never a layout with a queued scan, and never the image just pulled, because a queued scan would fail with its layout gone.
+- Procedure: one `BEGIN IMMEDIATE` transaction selects the oldest eligible image and sets it to `evicting`; a scan starts only if it can move its run to `running` while the image is `stored`, in a transaction, so the two cannot interleave. After commit the directory is deleted, then the state becomes `evicted` with `evicted_at`. This repeats until the count is at the maximum or none is eligible. If none is eligible the store stays over the maximum and the check runs again when a scan run ends.
+- Startup sweep: a directory with no `stored` or `evicting` row, and everything in `images/.tmp`, is deleted at start. An `evicting` row is completed. Logged as fixed text.
+- An evicted image cannot be rescanned (section 8). A tag that points to an evicted digest is not pulled again; the digest is already known.
+- Disk guard: before every pull the free space of the store volume must be at least the minimum (section 13). Otherwise the job fails with `not enough disk space`.
 
-- Decided (2026-11-09, user, dialogue, spinoff decision 5): the included scanners are Grype and Trivy. Both are enabled by default. Which scanners are enabled is the system setting `scanners.enabled` (a list of `grype` and `trivy`, at least one). Whether more scanners can be added is OPEN question 10.
-- Decided (2026-11-09, spec author, spinoff): scanners run **inside the same container** as pinned binaries, spawned by the backend. Reason: CLAUDE.md says the product ships as a single Docker container, and a sidecar would need a socket or shared volume, a second image to sign, and an inter-container protocol with no secrets rule. This replaces the sentence "the app spawns no processes" and the scratch-image reasoning in [deployment.md](deployment.md). Whether the base image can stay `scratch` is OPEN question 7.
-- Version pinning: Decided (2026-11-09, spec author, spinoff) the binaries are installed in the Docker build from the official release at a pinned version and a pinned SHA-256 of the release archive, with a Renovate comment on the version line, the same mechanism as [testing-and-ci.md](testing-and-ci.md), "Pinning (d3) and updates". The pins already in that file are Grype `v0.121.2` and Trivy `v0.76.2`. Verified (2026-11-09) with the GitHub API: the latest releases are Grype `v0.121.3` (2026-11-09) and Trivy `v0.76.2` (2026-11-05); neither repository is archived. The implementation checks again and pins the newest, then records the SHA-256. The version in use is stored with every scan run.
-- Decided (2026-11-09, spec author, spinoff): the readers are strict about shape. Trivy: `SchemaVersion` must be `2` (Verified 2026-11-09 in the Trivy reporting documentation, whose JSON example has `"SchemaVersion": 2`). Any other value fails the run with the fixed error `scanner output not recognised`. Grype: the report must be a JSON object with a `matches` array.
+## 5. Tags and discovery
 
-### Command line
+- Source (decision 1): a hub, a repository and one tag value, an exact tag or a pattern. The repository must match the OCI repository grammar and must not contain `:` or `@`. A digest reference is refused.
+- Decided (decision 15): the value is a pattern if it contains `*` or `?`, otherwise an exact tag. Only these two forms exist. There are no exclusions, no regular expressions, no character classes and no braces.
+- Glob: `*` is zero or more characters, `?` is exactly one, every other character is literal (`.` is a literal dot). Matching is against the whole tag, case-sensitive. A pattern has at most 128 characters and only tag characters plus `*` and `?`. An exact tag must match the tag grammar. Examples for `1.2.*`: `1.2.0` matches, `1.2.3-rc1` matches, `1.2.` matches, `1.2` does not, `1.20.0` does not, `v1.2.0` does not.
+- Matching is done by the app on the full tag list, never by sending the pattern to the registry.
+- Discovery (decision 16): a `discover` job runs hourly per configured repository (one job per distinct hub and repository, covering every source on it). It lists the tags (paging by `Link`, with a page cap, section 13), matches each source's value, resolves each matching tag to its manifest digest, and records the observation (section 9, `tag_observations`).
+- Triggers (decision 17): a digest is queued for pull and scan when it is new to the store (first pull) or when a tag now points to a different digest than before (tag moved). The old digest stays recorded. A digest already known (stored or evicted) is never pulled again for a tag; two sources or tags that reach the same digest share one image and scan (decision 8).
+- Insertion is `INSERT ... ON CONFLICT DO NOTHING` inside one `BEGIN IMMEDIATE` transaction, with the pull job queued only when a row was added, so two discovery runs cannot queue the same digest twice.
+- A listing that did not finish (error or page cap) records nothing for the missing tail and is retried at the next hourly run. A pull or scan that failed after 8 attempts is not retried by discovery; a manual retry of the failed job re-runs it.
+- A manual `POST /api/v1/image-sources/:id/scan` runs discovery for that source now.
+- Editing a source's value does not delete anything already recorded. New matches are pulled.
+- A tag deleted in the registry is not noticed; its findings stay until the source is deleted.
 
-- Output format: JSON for both, written to a file. Verified (2026-11-09): Grype's output formats include `json`, `sarif`, `table`, `cyclonedx` (`internal/format/format.go`); Trivy supports `--format json` and `--format sarif` with `--output <file>` (Trivy reporting documentation). Decided (2026-11-09, spec author, spinoff): JSON, not each scanner's own SARIF, because the merged view needs the fields per finding and one SARIF run per image must come from the merged list ([integrations.md](integrations.md), "SARIF conversion and upload", #224 d2, d6).
-- Input: the stored OCI layout directory.
-  - Trivy: Verified (2026-11-09) that Trivy supports directories compliant with the OCI Image Layout Specification, and `--input` takes an image archive. UNVERIFIED: whether `trivy image --input <layout directory>` is the exact call for a directory.
-  - Grype: Verified (2026-11-09) in `anchore/stereoscope` `pkg/image/source.go` that the image sources include `oci-dir`, `oci-archive`, `docker-archive` and `oci-registry`. UNVERIFIED: the exact command-line spelling `oci-dir:<path>`.
-- Offline scan: the scan step must not download anything. Trivy: `--skip-db-update`, `--skip-java-db-update`, `--skip-check-update` and `--offline-scan` exist (Trivy `db.md` and `air-gap.md`, read 2026-11-09). Grype: the database options include `auto-update` and `cache-dir` (`cmd/grype/cli/options/database.go`); UNVERIFIED: the environment variable or flag name that sets them. UNVERIFIED: how to disable Trivy's usage telemetry (the air-gap page says Trivy collects it).
-- Vulnerability databases: a `db_update` job (no source) refreshes them into `HARBORGATE_DATA_DIR/scanner-cache`, outside the scan step. Verified (2026-11-09): Trivy publishes its database at `ghcr.io/aquasecurity/trivy-db` and mirrors at `mirror.gcr.io/aquasec`, and `--db-repository` can point elsewhere. The update command names and the Grype update URL are UNVERIFIED. How often the update runs is OPEN question 6. The database build time is stored with each scan run.
-- Exit status handling is UNVERIFIED for both (whether a non-zero exit with a valid report is possible without `--fail-on` or `--exit-code`). Until checked, any non-zero exit is a failed scan with the fixed error `scanner failed`.
+## 6. Scan flow per platform
 
-### Field mapping
+1. **Discover** (section 5). Output: a (tag, top-level digest) observation.
+2. **Resolve**: fetch the manifest. If it is an image index, list its entries (decision 3). Attestation entries (platform `unknown/unknown`) are skipped. UNVERIFIED: the exact annotation that marks them; the platform value is the rule until checked. If it is a single manifest, the platform comes from the image config (`os`, `architecture`, `variant`). Each platform digest not already stored or evicted becomes one `pull` job.
+3. **Pull** (one platform): check the free-disk guard, then the declared size against the pull cap, then download the manifest, config and layer blobs into `images/.tmp/<id>`, verifying each digest and the running byte total. Write the layout, rename it into place, mark `stored` with `pulled_at`, then run eviction (section 4) in the same transaction. A failed pull deletes the temporary directory.
+4. **Scan**: one `scan` job per (platform image, enabled scanner), run by the single worker, one at a time. Section 7.
+5. **Convert**: parse the scanner JSON into `scanner_findings` for that run and recompute the merged `cve_findings` of each tag whose current digest includes the platform, in one transaction ([cve-lifecycle.md](cve-lifecycle.md), "Merged view"). Each run is kept; the latest `done` run per (platform image, scanner) is the one the merged view reads.
+6. **Publish**: when every enabled scanner's run for every platform of the source's newest image has ended, one `publish` job reads the labels from the pulled config (`config.Labels`, the rules in [integrations.md](integrations.md), "OCI labels", unchanged; for a multi-platform image the first scanned platform's config is used, because labels are image-level metadata), builds one merged SARIF, uploads it and runs the issue rules. Decided (spec author, spinoff): findings are merged across platforms and scanners by (CVE id, package) into one result; the platforms that report a result are added to its property bag as `harborgate/platforms`. A failed run does not hold the SARIF back, and it holds issue closing open, as the existing rule says ([cve-lifecycle.md](cve-lifecycle.md), #224 d14). A missing `org.opencontainers.image.revision` fails the publish with the existing clear error.
+7. Decided (spec author, spinoff): publish and issue updates run for the source's newest image only (section 9, newest image). Older images' scans update their tag's `cve_findings` but upload nothing.
 
-- Common stored finding: CVE or advisory id, package, installed version, fixed-in version, severity (five values), CVSS v3 score, description (at most 4,000 characters), as `scanner_findings` ([database.md](database.md), `scanner_findings`, kept).
-- Grype JSON. Verified (2026-11-09) in `grype/presenter/models`: each match has `vulnerability` (with `id`, `severity`, `description`, `cvss`), `relatedVulnerabilities`, `matchDetails`, and `artifact` (the package). UNVERIFIED: the exact field names for the package name, version and fixed version inside `artifact` and `vulnerability.fix`; the Harbor adapter's mapping in [integrations.md](integrations.md) ("Grype report reader") read the same fields from Grype's model and is the starting point, not a source for the native shape.
-- Trivy JSON. UNVERIFIED in this session: `Results[].Vulnerabilities[]` with `VulnerabilityID`, `PkgName`, `InstalledVersion`, `FixedVersion`, `Severity`, `Description`, `CVSS`. Capture a real report as the test fixture.
-- Severity: compared case-insensitively and stored upper-case as `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `UNKNOWN`. `Negligible` maps to `LOW` and anything else to `UNKNOWN`, as already decided ([cve-lifecycle.md](cve-lifecycle.md), severity values; Decided 2026-11-07, user, #224 d19). Grype's native severity names are UNVERIFIED.
-- Merge key and merged fields: unchanged ([cve-lifecycle.md](cve-lifecycle.md), "Merged view"). The scanner is identified by its fixed key (`grype`, `trivy`), not by a Harbor UUID, and its name is `Grype` or `Trivy` with the stored version. The `unknown` scanner and "not linked to a Harbor registration" wording are removed.
-- SARIF: unchanged except the following. The `physicalLocation.artifactLocation.uri` is `<hub host>/<repository>`. The run id and Code Scanning category are `<tool prefix>/<hub host>/<repository>/`, with the same trailing-slash rule as today. The tool prefix is `harborgate` until the name is decided, and changing it later creates new alerts (OPEN question 11). The fingerprint `sha256(<id>|<package>)` is unchanged. One SARIF per publish job, never one per scanner.
-
-### Labels (reworded OCI labels rule)
-
-Decided (2026-11-09, spec author, spinoff): the rules in [integrations.md](integrations.md), "OCI labels", apply unchanged except that labels are read from the config blob of the stored image (`config.Labels`), not from Harbor. For an index, the labels are read from the platform image that was pulled. A missing `org.opencontainers.image.revision` fails the publish job with the existing clear error.
-
-### Fixed error strings
-
-Decided (2026-11-09, spec author, spinoff): same principle as the existing fixed Harbor errors. A job's `last_error`, an alert and the Sync jobs API carry only these strings, never a registry body, URL, header or scanner stderr.
+Fixed error strings. A job's `last_error`, an alert and the Sync jobs API carry only these, never a registry body, URL, header or scanner stderr.
 
 | Cause | `last_error` |
 | --- | --- |
-| Registry cannot be reached, TLS or network error | `registry could not be reached` |
+| Registry unreachable, TLS or network error, or an address or redirect check refused | `registry could not be reached` |
 | Registry answers 401 or 403 | `registry rejected the credentials` |
 | Repository or tag not found (404) | `image not found in registry` |
-| Registry rate limit (429) | deferral, not an error (uses `Retry-After`, capped at 1 hour, `attempts` unchanged) |
+| Registry 429 | deferral (`Retry-After`, cap 1 hour, `attempts` unchanged) |
 | Any other non-2xx | `registry returned status N` |
-| Blob digest does not match | `image content did not match its digest` |
-| Pull exceeds the size bound | `image is larger than the allowed size` |
-| Not enough free disk space for the pull | `not enough disk space` |
+| Blob digest mismatch | `image content did not match its digest` |
+| Pull over the cap | `image is larger than the allowed size` |
+| Free disk below the minimum | `not enough disk space` |
+| Layout evicted before a scan could start | `image is no longer stored` |
 | Scanner timed out | `scanner timed out` |
 | Scanner output over the cap | `scanner output too large` |
 | Scanner exited non-zero | `scanner failed` |
 | Scanner output unreadable | `scanner output not recognised` |
-| Scanner database missing or too old | `scanner database not available` |
+| Scanner database missing | `scanner database not available` |
 
-## 4. Local image store
+## 7. Scanner processes
 
-- Location: `HARBORGATE_DATA_DIR/images` (default `/data/images`), one directory per pulled image, named by the `pulled_images.id` (a generated id, never a registry-supplied string). Temporary pulls go to `images/.tmp/<id>` and are renamed into place. Decided (2026-11-09, spec author, spinoff): the store is under the `data` volume so it survives restarts and shares the volume rules in [deployment.md](deployment.md). Scanner caches are in `scanner-cache`, outside the image count.
-- Decided (2026-11-09, user, dialogue, spinoff decision 6): the user sets a maximum number of stored images. The setting is `images.max_stored`, a positive integer. Its scope and default are OPEN question 3. Layers are not shared between images in v1; each image is a full copy, so two tags of the same digest count as two images. PROPOSED: sharing blobs across images is not done in v1, to keep eviction a directory delete.
-- Counting: only images in state `stored` count. Images that are `pulling` or already `evicted` do not.
-- Eviction rule. Decided (2026-11-09, user, dialogue, spinoff decision 6): when the stored count exceeds the maximum, the oldest image is removed. "Oldest" is the smallest `pulled_at` (the time the pull finished and the row became `stored`), ties broken by the smallest `id`. Decided (2026-11-09, spec author, spinoff, following the task brief): never an image with a running scan. Decided (2026-11-09, spec author, spinoff): also never an image with a queued scan, and never the image that has just been pulled, because a queued scan would fail with the image gone. Reason: the user's rule protects a running scan, and a queued one is about to run.
-- Procedure: one `BEGIN IMMEDIATE` transaction selects the oldest eligible image and sets its state to `evicting`; a scan job starts only if it can set its run to `running` while the image is `stored`, in a transaction, so the two cannot interleave. After commit the directory is deleted, then the state becomes `evicted` with `evicted_at` and `store_dir` cleared. This repeats until the count is at the maximum or no image is eligible. If none is eligible the store stays over the maximum and the check runs again whenever a scan run ends. Disk, not the count, is the real bound, so the pull checks free space first (OPEN question 5).
-- Startup sweep: a directory under `images/` with no `stored` or `evicting` row, and anything in `images/.tmp`, is deleted at start. An `evicting` row at start is completed. Logged as fixed text.
-- Decided (2026-11-09, spec author, spinoff): the `pulled_images` row of an evicted image is kept, with state `evicted`. Reason: the once-per-tag rule (section 5) depends on remembering that the tag was scanned; deleting the row would pull the tag again.
-- Findings on eviction. PROPOSED: eviction deletes only the image directory. The `scan_runs`, `scanner_findings`, `cve_findings`, publish report, GitHub issues and uploaded SARIF are kept, and the UI shows the image as removed. Reasons: the limit exists for disk space and findings are small text; and with a small maximum the oldest image can be the only image of a source, whose CVE view would otherwise become empty and could close its issues. This is OPEN question 3 in part, because it also decides whether `cve_findings` need a retention rule now that the 10-tag limit is gone.
-- Decided (2026-11-09, spec author, spinoff): a source that is deleted removes its `pulled_images`, directories and findings; GitHub issues stay open and are listed in the `source.delete` audit row, as today for a deleted mapping.
+- Decided (spinoff 5): Trivy and Grype run out of process. The app image stays `FROM scratch`. The app calls pinned scanner executables by absolute path; no shell, no `PATH` search.
+- Pinning (repo pinning rule): every scanner image or binary is pinned by image digest (`@sha256:...`) or by release version plus the SHA-256 of the release archive. Never a floating tag such as `latest`. Each pin carries a Renovate comment as in [testing-and-ci.md](testing-and-ci.md), "Pinning (d3) and updates". The pins in that file today are Grype `v0.121.2` and Trivy `v0.76.2`; the implementation checks the newest release, pins it and records the digest. The scanner version in use is stored with every run.
+- How the executables reach the app without a Docker socket (copied into the image, or supplied on a read-only volume from the pinned scanner images) is not fixed by decision 5. It is open item 3 in section 15.
+- Command line (inputs, flags, exit codes, JSON fields) is UNVERIFIED (section 15, item 1). The rules below hold whatever the flags are.
+- Offline scan: a scan run downloads nothing. A scan run fails with `scanner database not available` if the database is missing. Only the `db_update` job (section 8) lets a scanner reach the network.
+- Output: JSON for both scanners, written to a file. Decided (spec author, spinoff): JSON and not each scanner's own SARIF, because the merged view needs the fields per finding and one SARIF per image must come from the merged list.
+- Limits (decision 19, defaults, operator-configurable): timeout 10 minutes per run; output 64 MB. On timeout the whole process group is killed, the output file is deleted and the run fails with `scanner timed out`. Output over the cap fails with `scanner output too large`; the cap is checked on the file before parsing, and the parser rejects deeply nested input. stdout and stderr are drained with a byte cap and are never stored or logged raw.
+- Process rules: argument vector only (`tokio::process::Command`); the only variable argument is the layout directory generated from an id; no registry, repository or tag string in an argument, a file name or the environment; an empty environment plus a fixed allow-list (cache and home under `scanner-cache`, locale, offline settings), so `HARBORGATE_ENCRYPTION_KEY` and `HARBORGATE_OLD_ENCRYPTION_KEY` never reach the child; same user as the app (65532) with no extra capabilities; reads the layout and writes the output file and the cache only; one scanner process at a time; the child is killed on drop and a startup sweep removes temporary files in `scanner-cache`. One container cannot isolate one child's network; that is a stated limitation, not a guarantee.
+- Readers are strict. Trivy: `SchemaVersion` must be `2` (Verified 2026-11-09, Trivy reporting documentation example), otherwise `scanner output not recognised`. Grype: the report must be a JSON object with a `matches` array. The field names inside are UNVERIFIED (item 1).
+- Severity: compared case-insensitively and stored upper-case as `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `UNKNOWN`; `Negligible` maps to `LOW`, anything else to `UNKNOWN` ([cve-lifecycle.md](cve-lifecycle.md)).
+- Scanner identity is the fixed key `grype` or `trivy`, with the stored version. The merge key, merged fields and order are unchanged ([cve-lifecycle.md](cve-lifecycle.md), "Merged view").
+- Until the exit codes are verified, any non-zero exit is `scanner failed`.
 
-## 5. Tags and patterns
+## 8. Database refresh and rescan
 
-- Input. Decided (2026-11-09, user, dialogue, spinoff decisions 2 and 7): an image source is a hub, a repository and one tag value: an exact tag or a pattern. The repository must match the OCI repository name grammar above, and must not contain `:` or `@`. A digest reference is refused.
-- Exact or pattern. Decided (2026-11-09, spec author, spinoff): the value is a pattern if it contains `*` or `?`, otherwise an exact tag. An exact tag must match the tag grammar (`[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`, from the OCI Distribution Specification, verified 2026-11-09). A pattern is at most 128 characters and uses only tag characters plus `*` and `?`.
-- Glob semantics. Decided (2026-11-09, spec author, spinoff): the user's one example is `1.2.*`; the smallest glob that fits it is `*` for zero or more characters and `?` for exactly one, with every other character literal. `.` is a literal dot, not "any character". There are no character classes, no braces and no escapes, because `*` and `?` cannot occur in a tag. Matching is against the whole tag, case-sensitive, because tags are case-sensitive. Examples, for `1.2.*`: `1.2.0` matches, `1.2.3-rc1` matches, `1.2.` matches, `1.2` does not, `1.20.0` does not, `v1.2.0` does not. A pattern that needs more (character classes, regular expressions, exclusions) is OPEN question 10.
-- Match rule. A source matches a registry tag when the tag equals the exact value, or matches the pattern. Matching is done by HarborGate on the full tag list, never by passing the pattern to the registry.
-- Listing. `GET /v2/<name>/tags/list` with `n` and `last` for paging (verified, section 2), until the registry returns no more tags or the page cap is reached. The page size and cap are OPEN question 5. A listing that did not finish (error, cap reached) records nothing for the missing tail and is retried at the next discovery. How often discovery runs is OPEN question 6.
-- Once per tag. Decided (2026-11-09, user, dialogue, spinoff decision 7): each matching tag is pulled and scanned once. Mechanism: `pulled_images` has `UNIQUE (source_id, tag)`. The discovery job inserts a row with `INSERT ... ON CONFLICT DO NOTHING` and queues a pull job for the tag only when the insert added a row, in the same `BEGIN IMMEDIATE` transaction, so two discovery runs cannot queue the same tag twice. The row stays for evicted images (section 4), for failed pulls and failed scans.
-- Edits. Changing a source's pattern does not remove rows already recorded. New matches are pulled. Tags that no longer match are kept and not re-pulled. Deleting the source deletes the rows (section 4).
-- A failed pull or scan, after the 8 attempts, leaves the tag recorded and is not retried by discovery. A manual retry of the failed job (`POST /api/v1/sync-jobs/:id/retry`, kept) re-runs it.
-- Not decided: whether a tag that later points to a different digest is scanned again (OPEN question 6). Until answered, the tag is not scanned again, and the digest seen at pull time is stored.
+- Decided (spinoff 4): the Trivy and Grype vulnerability databases refresh once a day. A `db_update` job per scanner runs on a 24-hour schedule, recorded in `job_runs` (`job_kind = 'db_update'`). It is the only job that reaches the network for a scanner, and only to the database location. Verified (2026-11-09, earlier draft): Trivy publishes its database at `ghcr.io/aquasecurity/trivy-db` and `--db-repository` can point elsewhere. The update commands and Grype's update source are UNVERIFIED (item 1).
+- After an update the job compares the database's build time (or version) with `scanner_databases.built_at`, the value stored for that scanner. If the database is newer, it stores the new value and, in the same transaction, queues one `scan` job (trigger `db_update`) for every `stored` platform image and that scanner (decision 4, decision 17). Decided (spec author, spinoff): only the scanner whose database changed rescans, because the other scanner's result cannot change. If the database is not newer, nothing is queued.
+- Rescans are keyed on the platform digest. Each rescan is a new `scan_runs` row; earlier runs are kept as history. Evicted images are not rescanned (their layout is gone); their last findings stay as they were.
+- After the rescans of an image end, its tags' `cve_findings` are recomputed (step 5 of section 6), and a `publish` job is queued for a source's newest image only, so a CVE added or fixed by the new database updates Code Scanning and the issues.
+- A database refresh that fails leaves the old database in use, fails the `db_update` job with the existing retry rules, and raises the sync-failed alert after the 8th attempt. A scan never starts on a missing database.
+- Concurrency: rescans queue behind pulls and scans in the single worker. Eviction (section 4) still protects every queued or running scan.
 
-## 6. Data model
+## 9. Data model
 
-### Fresh database
+A fresh schema in one `backend/migrations/0001_init.sql` (decision 21). There is no import from an existing HarborGate database and no upgrade path. Decided (spec author, spinoff): at startup, and in `harborgate restore` before it replaces anything, a database file that contains a `repo_mappings` table (a HarborGate `main` database) is refused with the fixed error `this database was created by HarborGate and cannot be used by this version`. Reason: opening it would silently skip the migration and break on the first query. SQLx offline metadata is regenerated.
 
-Decided (2026-11-09, spec author, spinoff, following the task brief that the spinoff starts a new schema; the user has not stated it among decisions 1 to 9, so the user can overturn it): the spinoff uses a fresh database. There is no migration from HarborGate `main` and no upgrade path. The branch has its own migration history: one `backend/migrations/0001_init.sql` that defines the whole schema, replacing `main`'s `0001` to `0009`. SQLx offline metadata (`.sqlx`) is regenerated. Decided (2026-11-09, spec author, spinoff): at startup, and in `harborgate restore` before it replaces anything, the app refuses a database file that contains a `repo_mappings` table (a `main` database) with the fixed error `this database was created by HarborGate and cannot be used by this version`. Reason: opening a `main` database would silently skip migrations and break on the first query. Importing users, OIDC settings or GitHub credentials from a `main` database is OPEN question 12.
-
-### Tables kept (definition in [database.md](database.md), changes listed)
+### Kept from [database.md](database.md), with the stated changes
 
 | Table | Change |
 | --- | --- |
-| `system_config` | Kept. New keys: `images.max_stored`, `scanners.enabled`. Remove nothing else. |
+| `system_config` | Kept. New keys: `images.max_stored`, `scanners.enabled`, and the limit keys of section 13. |
 | `users` | Kept. |
-| `user_credentials` | Kept for GitHub only. Drop `service_type`, `base_url`, `username` (they served Harbor). Keep `id`, `user_id`, `label`, `encrypted_token`, `expires_at`, `created_at`. |
-| `github_issues` | Kept. `sync_report_id` becomes `publish_report_id` (`ON DELETE SET NULL`). |
-| `cve_acceptances` | Kept. `mapping_id` becomes `source_id`. |
+| `user_credentials` | GitHub only. `service_type`, `base_url`, `username` dropped. |
+| `github_issues` | Kept; `sync_report_id` becomes `publish_report_id` (`ON DELETE SET NULL`). |
+| `cve_acceptances` | Kept; `mapping_id` becomes `source_id`. |
 | `audit_log`, `alert_channels`, `alert_deliveries` | Kept. |
-| `job_runs` | Kept. `job_kind` values: `cleanup`, `retention`, `discover`, `db_update`. |
-| `sync_jobs` | Kept. `mapping_id` becomes `source_id`, nullable (a `db_update` job has none). Payload `kind` values: `discover`, `pull`, `scan`, `publish`, `db_update`. Payloads hold ids and the tag only, never a token. |
+| `job_runs` | Kept; `job_kind` values `cleanup`, `retention`, `discover`, `db_update`. |
+| `sync_jobs` | Kept; `mapping_id` becomes nullable `source_id` (a `db_update` job has none). Payload `kind`: `discover`, `pull`, `scan`, `publish`, `db_update`. Payloads hold ids and the tag only, never a token. |
 
-### Tables removed
+Removed: `repo_mappings`, `project_webhooks`, `project_webhook_unmatched`, `picker_hidden_items`, `harbor_scanners`, `scanner_reports`, `project_scanner_locks`, `sync_reports`.
 
-`repo_mappings`, `project_webhooks`, `project_webhook_unmatched`, `picker_hidden_items`, `harbor_scanners`, `scanner_reports`, `project_scanner_locks`.
+### New tables
 
-### New and replaced tables
-
-Decided (2026-11-09, spec author, spinoff), each a consequence of decisions 2 to 8:
+Decided (spec author, spinoff), each following from decisions 1 to 18.
 
 ```sql
--- Registries. Defaults are inserted by this migration. Host is canonical (lowercase, optional :port).
+-- Registries. Defaults inserted by the migration; host is canonical.
 CREATE TABLE IF NOT EXISTS hubs (
     id TEXT PRIMARY KEY,
-    host TEXT NOT NULL UNIQUE,
+    host TEXT NOT NULL UNIQUE,            -- 'ghcr.io', 'docker.io', or custom
     display_name TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('default', 'custom')),
     created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
--- One pull credential per (user, hub). Public images need no row.
 CREATE TABLE IF NOT EXISTS hub_credentials (
     id TEXT PRIMARY KEY,
     hub_id TEXT NOT NULL REFERENCES hubs(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     username TEXT NOT NULL,
-    encrypted_token TEXT NOT NULL, -- "v1:" ciphertext, AAD hub_credentials:encrypted_token:<id>
+    encrypted_token TEXT NOT NULL,        -- "v1:", AAD hub_credentials:encrypted_token:<id>
     expires_at INTEGER,
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     UNIQUE (hub_id, user_id)
@@ -240,7 +231,7 @@ CREATE TABLE IF NOT EXISTS image_sources (
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     hub_id TEXT NOT NULL REFERENCES hubs(id) ON DELETE RESTRICT,
     repository TEXT NOT NULL,
-    tag_value TEXT NOT NULL,           -- exact tag, or a pattern with * or ?
+    tag_value TEXT NOT NULL,              -- exact tag, or a pattern with * or ?
     github_cred_id TEXT NOT NULL REFERENCES user_credentials(id) ON DELETE RESTRICT,
     github_owner TEXT NOT NULL,
     github_repo TEXT NOT NULL,
@@ -252,38 +243,66 @@ CREATE TABLE IF NOT EXISTS image_sources (
     UNIQUE (user_id, hub_id, repository, tag_value)
 );
 
--- One row per (source, tag), kept after eviction (the once-per-tag memory).
-CREATE TABLE IF NOT EXISTS pulled_images (
+-- One image per (hub, repository, top-level digest): an index or a single manifest.
+CREATE TABLE IF NOT EXISTS images (
     id TEXT PRIMARY KEY,
+    hub_id TEXT NOT NULL REFERENCES hubs(id) ON DELETE RESTRICT,
+    repository TEXT NOT NULL,
+    digest TEXT NOT NULL,                 -- sha256:<hex>
+    is_index BOOLEAN NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE (hub_id, repository, digest)
+);
+
+-- Which digest a source's tag pointed to, and when discovery first saw it.
+CREATE TABLE IF NOT EXISTS tag_observations (
     source_id TEXT NOT NULL REFERENCES image_sources(id) ON DELETE CASCADE,
     tag TEXT NOT NULL,
-    manifest_digest TEXT,              -- sha256:<hex> of the manifest pulled; NULL until resolved
-    platform TEXT,                     -- os/arch[/variant] when the tag was an index; NULL otherwise
+    image_id TEXT NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    first_seen_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    last_seen_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (source_id, tag, image_id)
+);
+
+-- One platform manifest = one OCI layout on disk. Kept after eviction.
+CREATE TABLE IF NOT EXISTS image_platforms (
+    id TEXT PRIMARY KEY,
+    image_id TEXT NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    platform TEXT NOT NULL,               -- os/arch[/variant]
+    platform_digest TEXT NOT NULL,        -- sha256:<hex> of the platform manifest
     state TEXT NOT NULL CHECK (state IN ('queued', 'pulling', 'stored', 'evicting', 'evicted', 'failed')),
     size_bytes INTEGER,
-    pulled_at INTEGER,                 -- set when state becomes 'stored'; the eviction clock
+    pulled_at INTEGER,                    -- set when 'stored'; the eviction clock
     evicted_at INTEGER,
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-    UNIQUE (source_id, tag)
+    UNIQUE (image_id, platform_digest)
 );
-CREATE INDEX IF NOT EXISTS idx_pulled_images_evict ON pulled_images (state, pulled_at, id);
+CREATE INDEX IF NOT EXISTS idx_image_platforms_evict ON image_platforms (state, pulled_at, id);
 
--- One scan of one stored image by one scanner. Replaces scanner_reports.
+-- Per scanner: the vulnerability database in use and when it was built.
+CREATE TABLE IF NOT EXISTS scanner_databases (
+    scanner TEXT PRIMARY KEY CHECK (scanner IN ('grype', 'trivy')),
+    scanner_version TEXT,
+    built_at INTEGER,
+    checked_at INTEGER
+);
+
+-- One scan of one platform image by one scanner. Append-only history.
 CREATE TABLE IF NOT EXISTS scan_runs (
     id TEXT PRIMARY KEY,
-    pulled_image_id TEXT NOT NULL REFERENCES pulled_images(id) ON DELETE CASCADE,
+    image_platform_id TEXT NOT NULL REFERENCES image_platforms(id) ON DELETE CASCADE,
     scanner TEXT NOT NULL CHECK (scanner IN ('grype', 'trivy')),
     scanner_version TEXT,
-    db_built_at INTEGER,               -- vulnerability database build time at scan time
+    db_built_at INTEGER,
+    trigger TEXT NOT NULL CHECK (trigger IN ('first_pull', 'tag_moved', 'db_update')),
     status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed')),
     sync_job_id TEXT REFERENCES sync_jobs(id) ON DELETE SET NULL,
     started_at INTEGER,
     finished_at INTEGER,
-    error TEXT,                        -- one fixed string from section 3
-    UNIQUE (pulled_image_id, scanner)
+    error TEXT                            -- one fixed string from section 6
 );
+CREATE INDEX IF NOT EXISTS idx_scan_runs_current ON scan_runs (image_platform_id, scanner, status, finished_at);
 
--- Findings of one run, one row per (CVE id, package). Same columns as today's scanner_findings.
 CREATE TABLE IF NOT EXISTS scanner_findings (
     run_id TEXT NOT NULL REFERENCES scan_runs(id) ON DELETE CASCADE,
     cve_id TEXT NOT NULL,
@@ -292,7 +311,7 @@ CREATE TABLE IF NOT EXISTS scanner_findings (
     fixed_in_version TEXT,
     severity TEXT NOT NULL CHECK (severity IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN')),
     cvss_v3 REAL,
-    description TEXT,                  -- at most 4,000 characters
+    description TEXT,                     -- at most 4,000 characters
     PRIMARY KEY (run_id, cve_id, package)
 );
 
@@ -300,155 +319,159 @@ CREATE TABLE IF NOT EXISTS scanner_findings (
 CREATE TABLE IF NOT EXISTS publish_reports (
     id TEXT PRIMARY KEY,
     source_id TEXT NOT NULL REFERENCES image_sources(id) ON DELETE CASCADE,
-    pulled_image_id TEXT REFERENCES pulled_images(id) ON DELETE SET NULL,
+    image_id TEXT REFERENCES images(id) ON DELETE SET NULL,
     sync_job_id TEXT REFERENCES sync_jobs(id) ON DELETE SET NULL,
     image_tag TEXT NOT NULL,
     image_digest TEXT NOT NULL,
     commit_sha TEXT,
-    vulnerability_summary TEXT NOT NULL,   -- JSON, as sync_reports
+    vulnerability_summary TEXT NOT NULL,  -- JSON
     sarif_status TEXT NOT NULL CHECK (sarif_status IN ('pending', 'success', 'failed')),
     github_sarif_id TEXT,
     error_message TEXT,
     synced_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
--- cve_findings: as today, with mapping_id -> source_id, harbor_repository dropped,
--- UNIQUE (source_id, image_tag, cve_id). It is still the merged view of one tag's image.
+-- cve_findings: as today, mapping_id -> source_id, harbor_repository dropped,
+-- UNIQUE (source_id, image_tag, cve_id). The merged view of the tag's current image,
+-- across its platforms and scanners.
 ```
 
-- Retention: Decided (2026-11-09, spec author, spinoff): `publish_reports` and `scan_runs` follow the existing 90-day rule by `synced_at` and `finished_at`. `pulled_images` is not under retention, because it holds the once-per-tag memory; it goes with its source. `sync_jobs` 90 days, `job_runs` 90 days, `alert_deliveries` 30 days, `audit_log` 365 days, unchanged.
-- Audit vocabulary. Removed: all `mapping.*`, `project_webhook.*`, `artifact.remove`. Added (Decided 2026-11-09, spec author, spinoff, no secrets in `details`): `hub.create`, `hub.delete` (`details` the host), `source.create`, `source.update`, `source.delete` (lists the issue numbers left open), `source.scan` (a manual scan, `details` source id), `image.evict` (actor `system`, `details` `{"source_id","tag"}`), and the existing `credential.create`, `credential.rotate`, `credential.delete` for hub credentials (`target` names the hub, never the token). `sync_job.retry`, `sync_job.purge`, `backup.run`, `restore.run`, `key.rotate`, `retention.run`, `log.level_change`, `user.*`, `oidc.config_change`, `alert.config_change`, `cve.accept`, `cve.unaccept` are kept.
+- Retention: `publish_reports` and `scan_runs` follow the existing 90-day rule (by `synced_at`, `finished_at`), except that the latest `done` run per (platform image, scanner) is never deleted, because it carries the findings the view and the issue rules read. `sync_jobs` and `job_runs` 90 days, `alert_deliveries` 30 days, `audit_log` 365 days, unchanged. `images`, `tag_observations` and `image_platforms` are not under age retention (they are the "already scanned" memory).
+- Deleting a source removes its `tag_observations`, `cve_findings`, `publish_reports` and acceptances. Images, platforms and runs that no remaining source observes are deleted and their layouts removed. GitHub issues stay open and are listed in the `source.delete` audit row, as for a deleted mapping today.
+- Audit vocabulary. Removed: `mapping.*`, `project_webhook.*`, `artifact.remove`. Added: `hub.create`, `hub.delete`, `source.create`, `source.update`, `source.delete`, `source.scan`, `image.evict` (actor `system`; `details` has hub, repository, platform digest, never a path with a secret), `settings.change` (scan limits and retention; `details` old and new values), plus the existing `credential.*` for hub credentials (target names the hub, never the token). All other existing actions are kept.
 
-### CVE lifecycle rewording
+### CVE lifecycle wording
 
-Decided (2026-11-09, spec author, spinoff), the Harbor words in [cve-lifecycle.md](cve-lifecycle.md) become:
+The rules in [cve-lifecycle.md](cve-lifecycle.md) (merged view, close, reopen, manual-close honouring, marker and adoption, acceptance, dashboard counts) are kept (decision 20). Harbor words become:
 
 | Existing wording | Spinoff wording |
 | --- | --- |
 | mapping, Harbor repository | image source |
-| tracked tag set | tags of the source's `pulled_images` that have at least one `done` scan run |
-| newest scanned digest, latest `image_push_time` | PROPOSED: the newest scanned image of the source, by the largest `pulled_at` among its images with at least one `done` run. A registry has no push time; the image config `created` field is not trusted (OPEN question 3). |
-| last 10 tags per mapping | Removed. The number of stored images is the `images.max_stored` rule; findings retention is OPEN question 3. |
-| every enabled scanner has a report for the newest digest | every enabled scanner has a `done` run for the newest image |
-| Harbor deleted the artifact (#249) | Removed. A tag deleted in the registry is not noticed. |
+| tracked tag set | tags observed for the source whose current image has at least one `done` scan run |
+| newest scanned digest, latest `image_push_time` | Decided (spec author, spinoff): the source's newest image is the one whose `tag_observations.first_seen_at` for that source is the latest. A registry has no push time and the config `created` field is not trusted. |
+| every enabled scanner has a report for the newest digest | every enabled scanner has a `done` run for every platform of the newest image (an evicted platform counts through its last `done` run) |
+| last 10 tags per mapping, 10-tag pruning | Removed. Findings are kept (decision 18); the image count rule is section 4. |
+| Harbor deleted the artifact (#249) | Removed. |
 | close and reopen comment scan name `<project>/<repository>:<tag>` | `<hub host>/<repository>:<tag>` |
-| issue table column "Harbor repository" | "Image" (`<hub host>/<repository>`) |
+| SARIF `artifactLocation.uri` and category | uri `<hub host>/<repository>`; run id `harborgate/<hub host>/<repository>/` (trailing slash rule unchanged). Changing the prefix later creates new alerts (section 14). |
+| issue table column "Harbor repository" | "Image" |
+| scanner identity by Harbor UUID, `unknown` scanner | fixed keys `grype`, `trivy` |
 
-The merged view, the issue marker and adoption, the shared issue per GitHub repository and CVE, acceptance, and the dashboard counts keep their rules with those substitutions.
+## 10. API routes
 
-## 7. API and UI
+Conventions, auth levels, the error envelope, lists and pagination are unchanged ([api.md](api.md)). State-changing routes need the CSRF header.
 
-### Rate limits
+Rate limits. HarborGate has no default limit on authenticated routes; each route that calls an outbound service or starts work declares one explicitly. Values are the existing ones, reused: 60 requests per minute per user for routes that call a registry or GitHub for a list or test ([api.md](api.md), Pickers, Decided 2026-11-05, #126); one start per source per 5 minutes for a manual scan (Decided 2026-11-05, user, #131). Over the limit: `429` with `Retry-After` (RFC 6585, RFC 9110). Held in memory, cleared by a restart. The limited routes are marked "limited" below.
 
-Every new route that calls an outbound service or starts work is limited, because HarborGate's limiter model is explicit per route. Values are the existing ones, reused, with their source: 60 requests per minute per user for routes that call a registry or GitHub for a list or a test, as the pickers ([api.md](api.md), Pickers, Decided 2026-11-05, delegated, #126), and one start per source per 5 minutes for a manual scan, as the manual pull (Decided 2026-11-05, user, #131); over the limit is `429` with `Retry-After` (RFC 6585, RFC 9110). Held in memory, cleared by a restart.
+| Method | Path | Auth | Request and response | Status |
+| --- | --- | --- | --- | --- |
+| GET | `/api/v1/hubs` | session | list of `Hub` (`id`, `host`, `display_name`, `kind`, `has_credential` for the caller) | 200, 401 |
+| POST | `/api/v1/hubs` | admin, limited (60/min/user; resolves the host) | `{"host","display_name"}` -> `Hub` | 201, 400, 409, 422 (grammar, blocked address), 429 |
+| DELETE | `/api/v1/hubs/:id` | admin | empty | 204, 404, 409 (a source uses it, or it is a default hub) |
+| PUT | `/api/v1/hubs/:id/credential` | session (own) | `{"username","token","expires_at"?}` (token write-only) -> `{"hub_id","username","expires_at"}` | 200, 201, 404, 422 |
+| DELETE | `/api/v1/hubs/:id/credential` | session (own) | empty (does not check dependent sources; a failing pull shows `registry rejected the credentials`) | 204, 404 |
+| POST | `/api/v1/hubs/:id/credential/test` | session (own), limited (60/min/user) | `{"repository"}` -> `{"ok","detail"}`, never the token | 200, 404, 422, 429, 502 |
+| GET, POST | `/api/v1/image-sources` | session | list / create (`hub_id`, `repository`, `tag_value`, `github_cred_id`, `github_owner`, `github_repo`, `default_branch`, `auto_create_issues`, `min_issue_severity`) | 200, 201, 400, 404, 409, 422 |
+| GET, PUT, DELETE | `/api/v1/image-sources/:id` | session (owner; admin read) | source / update / delete | 200, 204, 404, 409, 422 |
+| GET | `/api/v1/image-sources/:id/tag-preview` | session (owner), limited (60/min/user) | `{"matches":[tag],"truncated"}`, names only, records nothing | 200, 404, 422, 429, 502 |
+| POST | `/api/v1/image-sources/:id/scan` | owner or any admin, limited (1 per source per 5 min) | `{"queued": n}`, runs discovery now | 200, 404, 429, 502 |
+| GET | `/api/v1/image-sources/:id/images`, `/api/v1/images` | session (owner; admin read) | list of images with per-platform `state`, `size_bytes`, `pulled_at`, per-scanner latest run (`status`, `version`, `error`, `db_built_at`); filters `state`, `source_id`, admin `scope=all` | 200, 404 |
+| GET, PUT | `/api/v1/admin/scan-settings` | admin | `{"max_stored","scanners_enabled","scanner_timeout_s","scanner_output_max_bytes","pull_cap_bytes","min_free_disk_bytes"}` | 200, 401, 403, 422 |
 
-### Routes
+Kept routes: auth, account, credentials (GitHub only; `service_type` removed from the body; the GitHub repository picker `GET /api/v1/credentials/:id/github-repositories` kept), `cves` (renaming `mapping` to `source`, Harbor parameters removed), `sync-jobs` (retry, failed count, purge-failed), dashboard (recent syncs become recent scans), admin (users, oidc, github-url, alert-channels, audit-log, jobs, backup, logs, log-level), `/healthz`. `GET /api/v1/admin/health` drops the Harbor and robot fields and adds: per-hub reachability, the pinned scanner versions found, the database build time per scanner, and free disk space of the store.
 
-Conventions, auth levels, the error envelope, lists and pagination are unchanged ([api.md](api.md), Conventions). All state-changing routes need the CSRF header.
+Removed: `/api/v1/webhooks/harbor/*`, `/api/v1/project-webhooks*`, `/api/v1/mappings*`, `/api/v1/credentials/:id/harbor-*`, `/api/v1/credentials/:id/source-suggestion`, `/api/v1/pickers/hidden*`.
 
-| Method | Path | Auth | Request | Response | Status |
-| --- | --- | --- | --- | --- | --- |
-| GET | `/api/v1/hubs` | session | list params | list of `Hub` (`id`, `host`, `display_name`, `kind`, `has_credential` for the caller) | 200, 401 |
-| POST | `/api/v1/hubs` | admin | `{"host","display_name"}` | `Hub` | 201, 400, 409 (host exists), 422 (not a valid host, blocked address) |
-| DELETE | `/api/v1/hubs/:id` | admin | none | empty | 204, 404, 409 (a source uses it; PROPOSED: also a default hub) |
-| PUT | `/api/v1/hubs/:id/credential` | session (own) | `{"username","token","expires_at"?}` (token write-only) | `{"hub_id","username","expires_at"}` | 200, 201, 404, 422 |
-| DELETE | `/api/v1/hubs/:id/credential` | session (own) | none | empty | 204, 404, 409 (a source for this hub exists and the repository needs it; not checked, see note) |
-| POST | `/api/v1/hubs/:id/credential/test` | session (own) | `{"repository"}` | `{"ok","detail"}` (never the token) | 200, 404, 422, 429, 502 `upstream_unreachable` |
-| GET | `/api/v1/image-sources` | session | list params; `hub_id`; admin may add `scope=all` | list of `ImageSource` | 200, 401 |
-| POST | `/api/v1/image-sources` | session | `{"hub_id","repository","tag_value","github_cred_id","github_owner","github_repo","default_branch","auto_create_issues","min_issue_severity"}` | `ImageSource` | 201, 400, 404, 409 (same user, hub, repository and tag value exists), 422 (name or tag grammar, code scanning unavailable, Issues permission) |
-| GET | `/api/v1/image-sources/:id` | session | none | `ImageSource` | 200, 404 |
-| PUT | `/api/v1/image-sources/:id` | session (owner) | any subset of the create fields | `ImageSource` | 200, 404, 409, 422 |
-| DELETE | `/api/v1/image-sources/:id` | session (owner) | none | empty | 204, 404 |
-| GET | `/api/v1/image-sources/:id/tag-preview` | session (owner) | none | `{"matches": [tag], "truncated": bool}` (names only; lists the registry, records nothing) | 200, 404, 422, 429, 502 |
-| POST | `/api/v1/image-sources/:id/scan` | session (owner, or any admin) | none | `{"queued": <n>}` (runs discovery now) | 200, 404, 429 (with `Retry-After`), 502 |
-| GET | `/api/v1/image-sources/:id/images` | session (owner, or any admin read) | list params | list of `PulledImage` (`id`, `tag`, `manifest_digest`, `platform`, `state`, `size_bytes`, `pulled_at`, `scans`: per scanner `status`, `version`, `error`) | 200, 404 |
-| GET | `/api/v1/images` | session | list params; `state`, `source_id`; admin may add `scope=all` | list of `PulledImage` | 200, 401 |
-| GET, PUT | `/api/v1/admin/image-store` | admin | `{"max_stored","scanners_enabled"}` | same | 200, 401, 403, 422 |
+## 11. UI
 
-Notes: `DELETE .../credential` does not check dependent sources; a source whose pull then fails shows `registry rejected the credentials`. Decided (2026-11-09, spec author, spinoff): simplest rule, no coupling between the credential and a source, since a public repository needs no credential. The GitHub repository picker `GET /api/v1/credentials/:id/github-repositories` is kept.
+Every screen needs the user's design approval before it is built ([frontend.md](frontend.md); CLAUDE.md). Copy goes into the string catalog, English only. The rail becomes Dashboard, Sources, Images, CVEs, Sync jobs, then Admin and Account (needs approval).
 
-Kept routes: auth, account, credentials (GitHub only; `service_type` removed from the body), `cves` (with `mapping`/`mapping_id` renamed `source`/`source_id`; Harbor `project` and `harbor_*` parameters removed), `sync-jobs` (including retry, failed-count, purge-failed), dashboard (recent syncs become recent scans), admin (users, oidc, github-url, alert-channels, audit-log, jobs, backup, logs, log-level), `/healthz`. `GET /api/v1/admin/health` drops the Harbor and robot-account fields and adds: per hub reachability, the pinned scanner versions found, the database build time per scanner, and free disk space of the store.
+- New: Sources list and form (hub select, repository, tag value with a live exact-or-pattern hint and a preview from `tag-preview`, GitHub target, issue settings); Source detail with an images table (tag, platform, state, pulled time, per-scanner scan state, database date) and a Scan now button; Images page (stored images, size, which is evicted next); Admin > Settings: Hubs and Scan settings (retention count, enabled scanners, the limits of section 13); Account > Credentials: registry credentials per hub beside the GitHub ones.
+- Removed: the Harbor project and repository pickers, the project webhook proposal, the scheduled scan card, the scanner switch and restore states, the Admin Health Harbor rows, the CVE list Project filter and the `project` and `harbor_*` URL parameters. The Repository filter lists `<hub host>/<repository>`. The "Found by" scanner column lists Grype and Trivy.
 
-Removed routes: `/api/v1/webhooks/harbor/*`, `/api/v1/project-webhooks*`, `/api/v1/mappings*` (replaced by `image-sources`), `/api/v1/mappings/:id/scanners`, `/api/v1/mappings/:id/tags/:tag/scan*`, `/api/v1/credentials/:id/harbor-*`, `/api/v1/credentials/:id/source-suggestion`, `/api/v1/pickers/hidden*`.
+## 12. Security
 
-### UI
+### Outbound requests
 
-Every screen below needs the user's design approval before it is built ([frontend.md](frontend.md), process rules; CLAUDE.md). Copy goes into the string catalog, English only. IA goal and scope, per the information-architecture check: the user's goal is "tell the tool where my images are and see what was scanned and what is open"; sources and images are per-user, hubs and the store limit are instance-wide (admin).
+- The rules of [security.md](security.md), "Outbound HTTP (SSRF)", apply to every hub host and every redirect hop (decision 12): HTTPS only; every resolved address must pass the deny-list (loopback, link-local, private, shared, reserved and multicast ranges listed there, including `169.254.169.254`); the check runs on the addresses actually connected to, not once at save time. The only change is that redirects are followed (section 3) with the check on each hop.
+- Opt-out (decision 14): the environment variable `LOCALSCAN_ALLOW_PRIVATE_REGISTRIES` (provisional name), default empty, is a comma-separated list of hub hosts. A named hub may use plain HTTP and private addresses. It is environment-only, not an admin setting, and applies to named hubs only: a redirect from a named hub to an unnamed private or HTTP host is refused. An empty value means off.
+- Adding a hub is admin-only, because an entered host is an outbound destination for the whole instance.
+- Names and tags are validated against the grammars before any request. A name outside the grammar is `422` with no request made.
+- Manifests, configs and blobs are untrusted input: byte caps and digest verification while streaming (section 3).
+- The `Authorization` header is never sent to a host other than the one that issued the challenge.
 
-- Rail (Decided 2026-11-09, spec author, spinoff, needs approval): Dashboard, Sources (replaces Mappings), Images (new), CVEs, Sync jobs; bottom: Admin (admins), Account. Reason: the new objects are sources and stored images; Sync jobs stays because the durable queue stays.
-- Removed pages and parts: the mapping form's Harbor source section, its Scheduled scan card and its project webhook proposal; the mapping-created screen with shown-once webhook URL and auth secret; the Harbor project and repository pickers, "Already mapped", and the hidden items manager; the Scans card with scanner picker, switch notice and restore states; the Admin Health Harbor and robot expiry rows.
-- New: Sources list and form (hub select, repository, tag value with live exact-or-pattern hint and a preview from `tag-preview`, GitHub target, issue settings); Source detail with an Images table (tag, state, pulled time, scan state per scanner) and a Scan now button; Images page (stored images, state, size, which will be evicted next); Admin > Settings: Hubs (list, add custom, remove) and Image store (maximum images, enabled scanners); Account > Credentials: a registry credentials list per hub beside the GitHub credentials.
-- CVE list control bar ([frontend.md](frontend.md), "CVE list control bar"): kept concepts: the search field, Severity, Status, GitHub issue and Fix available pill groups, the Repository, Tag and Mapping comboboxes (Mapping renamed Source), URL sync, the table columns, the Create issue dialog. Removed with the Harbor fields: the **Project** combobox and its narrowing of Repository, the search match on "Harbor project", the URL parameters `project` and `harbor_project`, and the old-link compatibility for `harbor_*` and `mapping_id`. Changed: the search matches CVE id, package, hub host and repository; the Repository combobox lists `<hub host>/<repository>`. The "Found by" scanner column and the scanner filter are kept and now list Grype and Trivy. PROPOSED: a **Hub** combobox in the place of Project. The "Tags n of m" column counts tags of the source (see section 6, tracked tag set), not Harbor tags.
-- Per-CVE view, dashboard cards, acceptance, Sync jobs page with purge, and the Admin tabs Jobs, Failed syncs, Audit log and Settings are kept with the substitutions above.
+### Secrets
 
-## 8. Security
+- Hub tokens, bearer tokens from a token service, `Authorization` and `Www-Authenticate` values, GitHub tokens and encryption keys are never logged, printed, traced, returned, put in a job row, alert, audit `details`, or sent over Server-Sent Events. A registry response body is never copied anywhere; only the fixed strings of section 6 are. The debug log records method, URL path without query, and status only.
+- Tokens are held in memory only while a pull runs and are zeroized. They never enter a scanner's arguments, environment, working directory or cache. Scanners read local layouts only and never contact a registry.
+- Key rotation must cover `hub_credentials.encrypted_token` as well as `user_credentials.encrypted_token`, `alert_channels.config_encrypted` and the encrypted `system_config` values. A test enumerates every column marked encrypted so a new table cannot be missed.
 
-### Credentials and secrets
+### Tenancy
 
-- Decided (2026-11-09, user, dialogue, spinoff decision 4): hub credentials are encrypted per hub with the existing scheme (section 2, `hub_credentials`). Rotation by the existing CLI command must include `hub_credentials.encrypted_token` and `user_credentials.encrypted_token`, `alert_channels.config_encrypted` and `system_config` values; a test enumerates every `is_encrypted` column so a new table cannot be missed.
-- Decided (2026-11-09, user, dialogue, spinoff decision 4, extending CLAUDE.md non-negotiable rules): no hub token, registry `Authorization` or `Www-Authenticate` value, bearer token from a token service, GitHub token, or encryption key is logged, printed, traced, returned, or sent over Server-Sent Events. A registry response body is never copied into a log, job row, alert or API response; only the fixed strings in section 3. The debug-level outbound request log records method, URL path without query, and status only ([security.md](security.md), Application log). The `Authorization` header is not forwarded to a different host on a redirect (the OCI spec's MUST NOT, section 2).
-- Tokens are held in memory only while a pull runs and zeroized. They are never put in a scanner's argument vector, environment or working directory. Decided (2026-11-09, spec author, spinoff): scanners work on the local directory only and never contact a private registry.
-- Tenancy: users see only their own sources, images, hub credentials and findings. Admins view all read-only. Operational exceptions follow the existing pattern ([security.md](security.md), Tenancy): an admin may start discovery for any source (`POST /image-sources/:id/scan`; it uses the owner's hub credential on the server and shows no value), and may retry or purge failed jobs. Decided (2026-11-09, spec author, spinoff): the exceptions replace the manual-pull and tag-scan exceptions, for the same reason. Hubs and the store limit are admin settings.
+Users see only their own sources, credentials, images and findings; admins see all, read-only. Operational exceptions follow [security.md](security.md): an admin may start discovery for any source (using the owner's hub credential on the server, with no value shown), and retry or purge failed jobs. Hubs and scan settings are admin settings.
 
-### Outbound registry requests (SSRF)
+### Scanner processes
 
-- Decided (2026-11-09, spec author, spinoff): the existing rules in [security.md](security.md), "Outbound HTTP (SSRF)" apply to every hub host: HTTPS only; the resolved address must not be loopback, link-local, private or in the other listed ranges; the check repeats when DNS changes; the opt-out is an environment variable, default `false`, named `HARBORGATE_ALLOW_PRIVATE_REGISTRIES` (provisional with the name). Adding a hub is admin only, and the host is checked when the hub is saved and at every request.
-- The conflict with `oci-client` and with redirects is `CONFLICT:` in section 2 and OPEN question 2. Until the user resolves it, the implementation does not claim these rules hold for blob downloads.
-- Repository names and tags are validated against the grammars above before any request, and percent-encoded in paths. A name outside the grammar is `422` with no request made.
-- Size and decompression: a registry or image is untrusted input. Every manifest and config response has a byte cap, and the total blob bytes of a pull have a bound (OPEN question 5), enforced while streaming, not from the declared size alone.
-
-### Scanner process rules
-
-Decided (2026-11-09, spec author, spinoff), because an image is attacker-controlled input to a parser, and the process runs next to the encryption key's process:
-
-- No shell. The backend starts the scanner with `tokio::process::Command` and an argument vector, never `sh -c`, never string interpolation. The program is an absolute path to the pinned binary; `PATH` is not searched. The only variable argument is the store directory, generated from the image id. A registry, repository or tag string never appears in an argument, a file name or an environment variable.
-- Clean environment: the child starts with an empty environment plus a fixed allow-list (cache and home directory under `scanner-cache`, locale, and the scanner's own offline settings). It inherits nothing from the parent, so `HARBORGATE_ENCRYPTION_KEY`, `HARBORGATE_OLD_ENCRYPTION_KEY` and any token never reach it. A test starts a child that prints its environment and asserts the key variables are absent.
-- Identity and files: same user as the app (65532), no extra capabilities. The scan reads the image directory and writes the output file and the cache only.
-- Network: the scan step is offline (flags above). One container cannot isolate one child's network; this is a limitation, stated, not a guarantee. Only the `db_update` job lets a scanner reach the network, to the database location only.
-- Timeout: every run has a wall-clock timeout; on expiry the whole process group is killed (`kill_on_drop` plus a group kill), the output file is deleted, and the run fails with `scanner timed out`. The value is OPEN question 5.
-- Bounded output: stdout and stderr are drained with a byte cap and discarded or reduced to a fixed string; the JSON output file has a size cap checked before parsing, and the parser rejects deeply nested input. Exceeding the cap fails the run with `scanner output too large`. The value is OPEN question 5.
-- One scanner process at a time (the single worker). A scanner's stderr is never stored or logged raw.
-- A crash or restart mid-scan re-queues the job by the existing restart rule ([backend.md](backend.md)); the child is not left running (`kill_on_drop`, and a startup sweep of `scanner-cache` temporary files).
+Section 7 holds the rules. A test starts a child that prints its environment and asserts the key variables are absent.
 
 ### Alerts
 
-Alerts keep their rules. A failed pull, scan or publish job raises the existing sync-failed alert with a fixed `error` string; the webhook body field `mapping.harbor` becomes `source.image` (`<hub host>/<repository>`). The new CRITICAL CVE alert is unchanged.
+Alert rules are kept. A failed discover, pull, scan, publish or `db_update` job raises the existing sync-failed alert with a fixed `error` string. The webhook body field `mapping.harbor` becomes `source.image` (`<hub host>/<repository>`).
 
-## 9. Open questions
+## 13. Configuration and limits
+
+Decision 19 sets the defaults. All are operator-configurable. Decided (spec author, spinoff): they are `system_config` values edited by an admin in Admin > Settings, so they can change without a restart; the environment holds only things that grant reach (the registry opt-out) or locate files.
+
+| Setting | Default | Source |
+| --- | --- | --- |
+| `images.max_stored` | 20 | decision 18 |
+| `scanner.timeout_s` | 600 (10 minutes) | decision 19 |
+| `scanner.output_max_bytes` | 64 MB | decision 19 |
+| `pull.max_bytes_per_image` | 10 GB | decision 19 |
+| `disk.min_free_bytes_before_pull` | 10 GB | decision 19 |
+| `discovery.interval` | 1 hour | decision 16 (fixed; not operator-set) |
+| `scanner_db.interval` | 24 hours | decision 4 (fixed; not operator-set) |
+| tag list page size, page cap, cap on new digests per discovery | not set by the decisions; constants chosen at implementation and recorded as `Decided (spec author)` | none |
+
+Decision 19 does not say whether MB and GB are decimal or binary. Decided (spec author, spinoff): stored in bytes, entered in the UI with an explicit unit, the defaults read as MiB and GiB (the larger reading, so the default is not stricter than the user may have meant).
+
+Environment (new, provisional names): `LOCALSCAN_ALLOW_PRIVATE_REGISTRIES` (section 12); the paths or locations of the scanner executables (open item 3). Existing `HARBORGATE_*` variables are kept; `HARBORGATE_ALLOW_PRIVATE_HARBOR` is removed.
+
+## 14. Name (provisional)
+
+Decision 22: the name is decided later. `localscan` stays provisional. When the name is decided, these are renamed together, and only then: the `HARBORGATE_*` variables, the `LOCALSCAN_*` variables, the `__Host-harborgate_*` cookies, the SARIF tool name, the Code Scanning category prefix (changing it makes GitHub create new alerts), the issue label and the issue marker (changing the marker needs a re-adoption rule), the crate and image names. The `harborgate/*` HKDF labels are not renamed unless the user says so, because renaming changes the derived keys and breaks every stored ciphertext.
+
+## 15. Open items
 
 Each is asked exactly as written. None is decided.
 
-1. The Docker documentation uses `registry-1.docker.io` for pulls, and `hub.docker.com` is Docker's web site. Which host should the default Docker Hub entry store and show: `docker.io`, `registry-1.docker.io` or `hub.docker.com`?
-2. Registries redirect blob downloads to another host, `oci-client` cannot take our redirect policy or DNS check, and our security rules say no redirects and a resolved-address check on every request. Which do you want: use `oci-client` and allow redirects for registry blob downloads with the address check only on the registry host, or write a small registry client on `reqwest` that keeps both rules?
-3. Should hubs, the maximum number of stored images and eviction be instance-wide (one shared store, so one user's pulls can evict another user's oldest image), or per user? And when an image is evicted, do its findings, scan runs and CVE view stay (the proposal in section 4), or are they deleted? And, with no push time in a registry, is the newest image of a source the one with the latest pull time (the proposal in section 6)?
-4. For a tag that is a multi-architecture image index, which platform do you want pulled and scanned: one fixed platform (which one), the platform of this server, or every platform in the index?
-5. Which values do you want for these limits: the maximum size of one pull, the minimum free disk space before a pull, the tag list page size and page cap, the cap on new tags one discovery may record, the scanner wall-clock timeout, the scanner output size cap, and the default for the maximum number of stored images?
-6. How often should tag discovery and the vulnerability database update run? And when a tag you already scanned later points to a different image, or the vulnerability database gets newer, should the tag be scanned again, or never (the literal reading of "scanned once")?
-7. The runtime image is `scratch` and the spec said the app spawns no processes. Do you accept a different runtime base image (for example `alpine`) if the official Grype and Trivy binaries do not run on `scratch`?
-8. Do you need registries over plain HTTP or on a private address (for example a registry on your own network)? If yes, is an environment-variable opt-out like the current Harbor one enough?
-9. Can the default hubs (`ghcr.io` and Docker Hub) be removed by an admin, or only the custom ones?
-10. Is the glob with only `*` and `?` enough for tag patterns, or do you need character classes, regular expressions or exclusions? And should the set of scanners stay fixed to Grype and Trivy, or should an admin be able to add other scanners later?
-11. When the product name is decided, may these be renamed together: the `HARBORGATE_*` variables, the `__Host-harborgate_*` cookies, the `harborgate/*` HKDF labels, the SARIF tool name, the Code Scanning category prefix `harborgate` (changing it makes GitHub create new alerts), the issue label `harborgate` and the issue marker `<!-- harborgate:<CVE id> -->`?
-12. Should the spinoff be able to import anything from an existing HarborGate database (users, OIDC settings, GitHub credentials), or is it always a fresh install?
+1. Exact Grype and Trivy command-line behaviour for an OCI layout: the input form, the flag that disables database downloads during a scan, the exit codes, and the JSON field names. These are UNVERIFIED and need a test run. Details to settle: the input form (for Trivy, whether `trivy image --input <layout directory>` or another form is the call for a layout directory; for Grype, whether the form is `oci-dir:<path>` or another), the flag or setting that disables database downloads during a scan (Trivy: `--skip-db-update`, `--skip-java-db-update`, `--skip-check-update`, `--offline-scan` exist in the documentation; Grype: the name of its auto-update setting), the exit codes (whether a non-zero exit with a valid report is possible), and the JSON field names (Trivy `Results[].Vulnerabilities[]` with `VulnerabilityID`, `PkgName`, `InstalledVersion`, `FixedVersion`, `Severity`, `Description`, `CVSS`; Grype `matches[]` with `vulnerability`, `artifact`, `fix`, and Grype's severity names). Also: the update commands for both databases, and how to disable Trivy's usage telemetry. Capture real reports as test fixtures.
+2. The registry client's handling of Docker Hub's token service (the auth challenge flow) must be verified against the live registry before the client is built: the realm and service values, the scope string, how `docker.io` maps to `registry-1.docker.io`, the access-token scopes Docker Hub offers, and its behaviour with anonymous pulls and rate limits.
+3. Not asked by the user, a gap in decision 5: the app image is `FROM scratch` and has no Docker socket, so it can only call a scanner that is a file it can execute. Should the pinned Trivy and Grype executables be copied into the app image (still `FROM scratch`, built from the pinned releases), or supplied on a read-only volume populated from the pinned scanner images, or run as separate sidecar containers the app reaches over a defined protocol? Until answered, section 7 fixes only the pinning, the absolute-path call and the process rules.
+4. Not asked by the user, a gap in decision 3: attestation entries in an image index. The rule here is to skip entries with platform `unknown/unknown`. UNVERIFIED: whether that platform value is enough, or the annotation must be read.
 
-## 10. Verification strategy
+## 16. Verification strategy
 
-The spinoff has no GitHub issue yet. When one is created, its body must carry this list as `- [ ]` items, and it stays open until each is ticked with evidence.
+The spinoff has no GitHub issue yet. When one is created its body carries this list as `- [ ]` items, and it stays open until every box is ticked with evidence.
 
 - [ ] The branch `spinoff-local-scan` is not merged to `main`, and a CI or review check prevents it.
-- [ ] No Harbor code, route, table, setting, string or doc reference remains (search test for `harbor`, case-insensitive, outside this spec and the changelog).
-- [ ] The `0001` migration creates every table in section 6 and none of the removed ones; a `main` database and a `main` backup are refused with the fixed error.
-- [ ] A default install has the two default hubs; an admin can add and remove a custom hub; a hub in use cannot be removed.
-- [ ] A hub credential is stored as a `v1:` ciphertext with AAD `hub_credentials:encrypted_token:<id>`, is never returned, and key rotation re-encrypts it (a test enumerates all encrypted columns).
-- [ ] A public image pulls with no credential; a private image pulls with one; a wrong credential gives `registry rejected the credentials`. A fake registry covers the token flow, paging, redirects and digest mismatch.
-- [ ] Tag matching: the examples in section 5 pass; `*` and `?` only; a digest reference and a bad grammar are refused; matching is case-sensitive.
-- [ ] Once per tag: two concurrent discovery runs queue one pull; a tag whose image was evicted is not pulled again; a failed tag is not re-queued by discovery.
-- [ ] Eviction: with the maximum at N, pulling the N+1th removes the oldest by `pulled_at`; an image with a running or queued scan is never removed; the store stays over the maximum when none is eligible and recovers when a run ends; a crash during eviction is repaired at startup; findings are handled as decided in OPEN question 3.
-- [ ] Both scanners run on a fixture image (a real captured Grype and Trivy report as fixtures); their findings merge on (CVE id, package) into one finding with scanner count 2; severity mapping covers `Negligible` and unknown values; `SchemaVersion` other than 2 fails with the fixed error.
-- [ ] The merged SARIF validates against SARIF 2.1.0 (`sarif-validate`); the upload, issue creation, close, reopen and manual-close honouring behave as in [cve-lifecycle.md](cve-lifecycle.md); a failed scanner never closes an issue.
-- [ ] Scanner process rules: no shell, clean environment (the key variables are absent), timeout kills the process group, output cap enforced, nothing downloaded during a scan, a restart mid-scan recovers.
-- [ ] No token, registry header or key appears in a log, a job row, an alert, an API response or an SSE stream (log-capture test across a full pull and scan with a canary token).
-- [ ] Every new outbound route returns `429` with `Retry-After` over its limit; the SSRF checks reject a private-address hub host.
-- [ ] The CVE list has no Project filter, the Source and Repository filters work, and the old Harbor URL parameters are not read.
+- [ ] No Harbor code, route, table, setting, string or doc reference remains (case-insensitive search, outside this spec and the changelog). No Docker daemon, socket or `bollard` dependency exists.
+- [ ] `0001` creates exactly the tables of section 9 and none removed; a `main` database and a `main` backup are refused with the fixed error.
+- [ ] A default install has `ghcr.io` and `docker.io`; neither can be removed; a custom hub can be added and removed; a hub in use cannot be removed.
+- [ ] A hub credential is a `v1:` ciphertext with the right AAD, is never returned, and key rotation re-encrypts it (a test enumerates all encrypted columns).
+- [ ] Registry client against a fake registry: anonymous and Bearer-token pulls, tag paging by `Link`, a redirect to another host with `Authorization` dropped, a redirect to a private address refused on that hop, a hub host that re-resolves to a private address after the first check, a digest mismatch, a pull over the cap, a free-disk refusal. The Docker Hub flow passes against the live registry (item 2).
+- [ ] The plain-HTTP and private-address opt-out is off by default, applies only to named hubs, and does not extend to a redirect target that is not named.
+- [ ] Tag matching: the examples in section 5 pass; only `*` and `?`; a digest reference and a bad grammar are refused; case-sensitive.
+- [ ] Discovery runs hourly per repository; a new tag and a moved tag each queue one pull; two concurrent discovery runs queue one; a known digest (stored or evicted) is not pulled again.
+- [ ] A multi-arch index yields one stored image and one scan per platform; attestation entries are skipped; findings are stored per platform and merged for the tag.
+- [ ] Eviction with the maximum at N removes the oldest by `pulled_at` and deletes the layout only; findings, runs and history remain; an image with a running or queued scan is never removed; a crash during eviction is repaired at startup.
+- [ ] A database refresh that finds a newer database rescans every `stored` platform image by digest with the changed scanner and publishes for each source's newest image; an unchanged database queues nothing; an evicted image is not rescanned.
+- [ ] Both scanners run on fixture images from real captured reports; findings merge on (CVE id, package); `SchemaVersion` other than 2 fails with the fixed error; the limits (timeout, output cap) kill and fail the run with the fixed strings.
+- [ ] Scanner process rules: no shell, absolute path, clean environment (key variables absent), process group killed on timeout, nothing downloaded during a scan, a restart mid-scan recovers.
+- [ ] The merged SARIF validates against SARIF 2.1.0 (`sarif-validate`); the upload, issue create, close, reopen and manual-close honouring behave as in [cve-lifecycle.md](cve-lifecycle.md); a failed scanner or platform never closes an issue.
+- [ ] No token, registry header or key appears in a log, job row, alert, API response or SSE stream (log-capture test across a full pull and scan with a canary token).
+- [ ] Every limited route in section 10 returns `429` with `Retry-After` over its limit; a private-address hub host is refused.
+- [ ] Scanner executables and images are pinned by digest or by version plus checksum, with no floating tag; the app image is `FROM scratch`; the `docker-smoke` check passes.
+- [ ] The CVE list has no Project filter; the old Harbor URL parameters are not read.
 - [ ] Every new screen has a user-approved design before it is built, and all text is in the string catalog.
-- [ ] The image builds with pinned Grype and Trivy at a verified SHA-256, the `docker-smoke` check passes, and the UNVERIFIED items in sections 2 and 3 are each resolved or restated.
+- [ ] Open items 1 to 4 are each resolved or restated.
