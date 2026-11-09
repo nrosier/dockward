@@ -608,6 +608,7 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
     // Refuse to start without a valid key or settings. This runs before the port is bound.
     let encryption_key = config::load_encryption_key()?;
     let settings = config::load_settings()?;
+    config::prepare_backup_dir(&settings.backup_dir)?;
     auth::password::warm_dummy_hash().map_err(|_| "could not compute the dummy password hash")?;
     let pool = db::open(&settings.data_dir)
         .await

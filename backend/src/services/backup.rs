@@ -357,6 +357,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backup_succeeds_after_a_fresh_start_creates_the_directory() {
+        let data = unique_dir("fresh-data");
+        let pool = db::open(&data).await.unwrap();
+        let backups = data.join("backups");
+        assert!(!backups.exists());
+
+        crate::config::prepare_backup_dir(&backups).unwrap();
+        let name = create(&pool, &key(), &data, &backups, NOW).await.unwrap();
+        assert!(backups.join(name).is_file());
+    }
+
+    #[tokio::test]
     async fn temp_file_is_removed_on_error() {
         let data = unique_dir("temp-data");
         let backups = unique_dir("temp-backups");
