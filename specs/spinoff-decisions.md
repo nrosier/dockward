@@ -29,3 +29,10 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 22. Name: decide later. `localscan` stays provisional.
 
 23. Scanner delivery: the pinned Trivy and Grype executables are copied into the app image, which stays FROM scratch and is built from their pinned releases. The app calls them by absolute path. Scanner updates are an app image rebuild (answer to open item 3, 2026-11-09).
+
+## Rename (2026-11-09, user, dialogue)
+
+24. The spinoff is named dockward. The name is no longer provisional; `localscan` is removed from the spec and the code. Main stays HarborGate; the rename does not touch main.
+25. Environment variables in the spinoff: `DOCKWARD_*` only. Rename outright. There is no fallback to `HARBORGATE_*`.
+26. The encryption HKDF labels (`harborgate/*`) and the cookie names stay unchanged in the spinoff, so the encrypted data and sessions stay readable. Only the visible name changes.
+27. The Code Scanning category prefix (`harborgate`) and the issue marker (`harborgate:<CVE id>`) stay unchanged, so existing alerts and issues stay linked.
