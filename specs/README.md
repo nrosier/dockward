@@ -15,7 +15,7 @@ Index of the detailed build specifications. CLAUDE.md is the general guide; this
 - [frontend.md](frontend.md) - App shell, page map, screens, visual direction, status pills, i18n, house style, design-before-build.
 - [deployment.md](deployment.md) - Dockerfile, compose, Traefik, Cloudflare tunnel, volumes, health endpoint, .gitignore, releases.
 - [testing-and-ci.md](testing-and-ci.md) - Test strategy, CI workflows (including the Syft, Grype and Trivy security scanning workflow, #227), Renovate, repo hygiene files.
-- [spinoff-local-scan.md](spinoff-local-scan.md) - Spinoff on the branch `spinoff-local-scan` (never merged to `main`): a local image scanner that drops Harbor. Hubs (registries), pull, local Grype and Trivy scans, image store and eviction, tag patterns, new schema, API and UI, security. Working name `localscan` is provisional. Decided 2026-11-09 (user, spinoff decisions 1 to 9).
+- [spinoff-local-scan.md](spinoff-local-scan.md) - PROVISIONAL. Spinoff on the branch `spinoff-local-scan` (never merged to `main`), working name `localscan` (provisional, name decided later): a local image scanner with no Harbor. Hubs and per-hub encrypted credentials, own registry client into OCI layouts on disk (no Docker daemon), per-platform scans with out-of-process pinned Trivy and Grype, daily database refresh and rescan by digest, hourly tag discovery, count-based retention, fresh schema, API, security rules and open items. Binding decisions: [spinoff-decisions.md](spinoff-decisions.md) (1 to 22).
 
 ## Rules
 
