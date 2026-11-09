@@ -27,7 +27,7 @@ ARG REVISION
 RUN test -n "$REVISION" || { echo 'REVISION build argument is required (the source commit)' >&2; exit 1; }
 # System roots for outbound TLS: rustls-platform-verifier reads the OS trust store.
 # The repository index is pinned by the alpine:3.24 tag, so the version follows the release branch.
-RUN apk add --no-cache ca-certificates
+RUN apk upgrade --no-cache zlib && apk add --no-cache ca-certificates
 RUN mkdir -p /data && chown 65532:65532 /data
 COPY --from=backend /harborgate /usr/local/bin/harborgate
 USER 65532:65532
