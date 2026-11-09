@@ -190,6 +190,10 @@ Decided (2026-11-05, user, #136). The application log is the `tracing` output us
 - Access: admin only, for reading the log and for changing the level. A regular user gets `403`; no session gets `401`. Log lines can name any tenant's mapping, so a regular user never sees them.
 - Separation: log lines are never written to `audit_log`, and audit rows are never shown as log lines. The audit log is the record of who did what; the application log is for diagnosis only.
 
+## Dependency audit
+
+- Decided (2026-11-09, user, #263): CI ignores advisory RUSTSEC-2026-0459 in `cargo audit` (`backend/.cargo/audit.toml`) and `cargo deny` (`backend/deny.toml`). No released SQLx allows `libsqlite3-sys` 0.39 or newer yet, and HarborGate's local SQLite file is not writable by untrusted parties. Removal condition: remove both entries when SQLx ships a release that allows `libsqlite3-sys` 0.39 or newer; check at each Renovate update.
+
 ## Outbound HTTP (SSRF)
 
 - Decided (2026-11-03, delegated): the Harbor base URL must use HTTPS. Plain HTTP is rejected.
