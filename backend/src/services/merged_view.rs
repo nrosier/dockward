@@ -47,7 +47,10 @@ const SEVERITY_ORDER: [&str; 5] = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScannerRef {
     pub uuid: String,
+    /// The name shown in the UI, with the not-linked suffix for an unlinked report.
     pub name: String,
+    /// The plain name for SARIF properties and GitHub issue lines (never the UI suffix).
+    pub plain_name: String,
 }
 
 /// One finding of the merged view.
@@ -89,21 +92,26 @@ pub fn order_scanners(
     let mut scanners: Vec<ScannerRef> = reports
         .iter()
         .map(|report| {
-            let name = if report.scanner_uuid == UNKNOWN_SCANNER_UUID {
-                unlinked_name(report).map_or_else(
-                    || UNKNOWN_SCANNER_NAME.to_owned(),
-                    |name| format!("{name}{NOT_LINKED_SUFFIX}"),
-                )
+            let (plain_name, name) = if report.scanner_uuid == UNKNOWN_SCANNER_UUID {
+                match unlinked_name(report) {
+                    Some(plain) => (plain.to_owned(), format!("{plain}{NOT_LINKED_SUFFIX}")),
+                    None => (
+                        UNKNOWN_SCANNER_NAME.to_owned(),
+                        UNKNOWN_SCANNER_NAME.to_owned(),
+                    ),
+                }
             } else {
-                current_names
+                let plain = current_names
                     .get(&report.scanner_uuid)
                     .cloned()
                     .or_else(|| report.scanner_name.clone().filter(|name| !name.is_empty()))
-                    .unwrap_or_else(|| UNKNOWN_SCANNER_NAME.to_owned())
+                    .unwrap_or_else(|| UNKNOWN_SCANNER_NAME.to_owned());
+                (plain.clone(), plain)
             };
             ScannerRef {
                 uuid: report.scanner_uuid.clone(),
                 name,
+                plain_name,
             }
         })
         .collect();
@@ -247,8 +255,8 @@ pub fn names_of(scanners: &[ScannerRef]) -> Vec<String> {
     let mut seen = HashSet::new();
     scanners
         .iter()
-        .filter(|scanner| seen.insert(scanner.name.clone()))
-        .map(|scanner| scanner.name.clone())
+        .filter(|scanner| seen.insert(scanner.plain_name.clone()))
+        .map(|scanner| scanner.plain_name.clone())
         .collect()
 }
 
@@ -334,7 +342,20 @@ mod tests {
         ScannerRef {
             uuid: uuid.to_owned(),
             name: name.to_owned(),
+            plain_name: name.to_owned(),
         }
+    }
+
+    /// #277 regression: the SARIF and issue names never carry the UI suffix, even for an
+    /// unlinked report whose display name has it.
+    #[test]
+    fn names_for_sarif_omit_the_not_linked_suffix() {
+        let unlinked = ScannerRef {
+            uuid: UNKNOWN_SCANNER_UUID.to_owned(),
+            name: format!("Grype{NOT_LINKED_SUFFIX}"),
+            plain_name: "Grype".to_owned(),
+        };
+        assert_eq!(names_of(&[unlinked]), vec!["Grype".to_owned()]);
     }
 
     fn row(uuid: &str, cve: &str, package: &str, severity: &str) -> ScannerFindingRow {
