@@ -134,7 +134,7 @@ Decided (2026-11-03, delegated): this route contract is approved, with the chang
 
 Decided (2026-11-07, user, #224 d1, d8, d11, d12): the mapping page lists the Harbor scanners and starts a scan of one tag with a chosen scanner. Rules, Harbor calls and permissions are in [integrations.md](integrations.md), "Scanner reports and scan launch". Route names are delegated (Decided 2026-11-07, delegated, #224): they hang under the mapping, like `pull`.
 
-`Scanner` is `{"uuid","name","vendor","version","is_current"}`: `is_current` is true for the scanner the Harbor project uses now. It never carries the scanner URL, auth or credential. `TagScan` is `{"scanner_uuid","scanner_name","state","note","job_id","updated_at"}`: `state` is `queued`, `running`, `waiting` (scan started, waiting for the report), `ok`, `failed` or `none`; `note` is a fixed catalog key (see below) or `null`.
+`Scanner` is `{"uuid","name","vendor","version","is_current"}`: `is_current` is true for the scanner the Harbor project uses now. It never carries the scanner URL, auth or credential. `TagScan` is `{"scanner_uuid","scanner_name","unlinked","state","note","job_id","updated_at"}`. Decided (2026-11-09, user, #277): for `scanner_uuid` `unknown`, `scanner_name` is the stored report's own scanner name, or "Unknown scanner" when it has none; `unlinked` is `true` exactly when `scanner_uuid` is `unknown` and `scanner_name` is the report's own name, so the UI adds `mapping.scan.notLinked`. It is `false` otherwise. `state` is `queued`, `running`, `waiting` (scan started, waiting for the report), `ok`, `failed` or `none`; `note` is a fixed catalog key (see below) or `null`.
 
 | Method | Path | Auth | Request | Response | Codes |
 | --- | --- | --- | --- | --- | --- |
