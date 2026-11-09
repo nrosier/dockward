@@ -40,7 +40,7 @@ The planned v1 functionality, summarized from the specification. Items listed he
 - **Deployment:** a single Docker container. The frontend is built to static assets and embedded in the Rust binary via `rust-embed`. Dev mode may serve them from disk.
 - **Layering:** HTTP handlers live in `api/`, business logic (SARIF conversion and the Harbor and GitHub API clients) in `services/`, and database access in `db/`.
 
-The Dockerfile is a multi-stage build: Node builds the frontend, Rust builds the binary, and the runtime stage is `alpine:3.24`.
+The Dockerfile is a multi-stage build: Node builds the frontend, Rust builds the binary, and the runtime stage is `scratch` (the static binary, the CA bundle, `/data` and `/tmp`; no shell). The binary is built with `cargo auditable`, so image scans list its Rust crates.
 
 ## Configuration
 

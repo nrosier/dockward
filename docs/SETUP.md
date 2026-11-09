@@ -21,6 +21,7 @@ If a webhook is missed, HarborGate is designed to also poll every 15 minutes and
 ### Prerequisites
 
 - **Docker Engine 25.0 or later.** On Engine 25.0 and later, health checks run every `start_interval` (5 seconds by default) during the healthcheck's `start_period`, so Traefik routes to HarborGate within seconds of start. On an older Engine the first check runs only after the 30-second `interval`, and Traefik does not route to HarborGate until then (see [specs/deployment.md](../specs/deployment.md), Health).
+- **No shell in the container.** The image is built `FROM scratch`: it holds the HarborGate binary, the CA bundle, `/data` and `/tmp`, with no shell, package manager or `wget`. The health check runs `harborgate healthcheck` (a `GET /healthz` to `127.0.0.1:8080` that exits 0 on `200`). To run it by hand, use `docker exec <container> /usr/local/bin/harborgate healthcheck`. `docker exec <container> sh` does not work. `restore` and `rotate-key` still run through `docker compose run --rm harborgate <command>`, because they are subcommands of the same binary.
 - **A public HTTPS hostname** for HarborGate. You set it as `HARBORGATE_PUBLIC_URL` below.
 - **Your reverse proxy addresses**, if Traefik or another proxy sits in front of HarborGate. You set them as `HARBORGATE_TRUSTED_PROXIES` below.
 

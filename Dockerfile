@@ -11,6 +11,10 @@ RUN npm run build
 # The frontend is built before the backend so rust-embed can embed
 # /src/frontend/dist (relative to the backend crate: ../frontend/dist).
 FROM rust:1.99.1-alpine@sha256:27cd9befd4a05d6f6eb407c3e28365f5092f008bfc5946207cca76ae5179ef23 AS backend
+# cargo-auditable embeds the dependency list in the binary, so Trivy and Grype can read
+# the Rust crates in the image (specs/testing-and-ci.md). Pinned; Renovate does not track it.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo install cargo-auditable --version 0.7.7 --locked
 WORKDIR /src/backend
 COPY backend/ ./
 COPY --from=frontend /build/dist /src/frontend/dist
@@ -18,24 +22,38 @@ ENV SQLX_OFFLINE=true
 # A cache mount is not part of the layer, so the binary is copied out of target/.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/backend/target \
-    cargo build --release --locked && cp target/release/harborgate /harborgate
-
-FROM alpine:3.24
+    cargo auditable build --release --locked && cp target/release/harborgate /harborgate
 # The source commit. Required: the build fails without it, so every image carries
 # org.opencontainers.image.revision. HarborGate reads that label on the image it scans.
+# Checked in the builder because the scratch runtime stage has no shell. Declared after the
+# build, so a new commit does not invalidate the cargo layer.
 ARG REVISION
 RUN test -n "$REVISION" || { echo 'REVISION build argument is required (the source commit)' >&2; exit 1; }
-# System roots for outbound TLS: rustls-platform-verifier reads the OS trust store.
+
+# The files the scratch image needs, built where there is a shell: the system roots for
+# outbound TLS (rustls-platform-verifier reads /etc/ssl/certs/ca-certificates.crt),
+# /data for the runtime user, and /tmp at 1777 for SQLite temporary files.
 # The repository index is pinned by the alpine:3.24 tag, so the version follows the release branch.
-RUN apk upgrade --no-cache zlib && apk add --no-cache ca-certificates
-RUN mkdir -p /data && chown 65532:65532 /data
+FROM alpine:3.24 AS rootfs
+RUN apk add --no-cache ca-certificates \
+    && mkdir -p /rootfs/etc/ssl/certs /rootfs/data /rootfs/tmp \
+    && cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ca-certificates.crt \
+    && chown 65532:65532 /rootfs/data \
+    && chmod 1777 /rootfs/tmp
+
+FROM scratch
+ARG REVISION
+# One COPY of the tree keeps the owner and mode of each entry: /data owned by 65532 and
+# /tmp at 1777. Copying a directory on its own copies only its contents, and --chmod
+# drops the sticky bit.
+COPY --from=rootfs /rootfs/ /
 COPY --from=backend /harborgate /usr/local/bin/harborgate
 USER 65532:65532
 EXPOSE 8080
 ENV HARBORGATE_DATA_DIR=/data
 VOLUME ["/data"]
-# Same values as docker-compose.yml. Uses busybox wget, which is in the alpine base image.
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
+# Same values as docker-compose.yml. Exec form: the image has no shell.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD ["/usr/local/bin/harborgate", "healthcheck"]
 LABEL org.opencontainers.image.title="HarborGate" \
       org.opencontainers.image.source="https://github.com/nrosier/harborgate" \
       org.opencontainers.image.licenses="MIT" \
