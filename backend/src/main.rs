@@ -242,11 +242,6 @@ async fn shutdown_signal(mut terminate: Signal) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Logs go to stdout and to the admin's in-memory buffer. Every start is at `info`;
-    // `RUST_LOG` is ignored (`specs/security.md`, Application log). The access log
-    // records route templates, so tokens in paths stay out.
-    let app_log = services::app_log::install()?;
-
     let args: Vec<String> = std::env::args().collect();
     let command = match cli::parse(args.get(1..).unwrap_or_default()) {
         Ok(command) => command,
@@ -255,6 +250,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
+    // The container healthcheck runs every few seconds: it installs no logger, reads no
+    // configuration and prints only a fixed line on failure (`specs/deployment.md`, Health).
+    if command == cli::Command::Healthcheck {
+        if cli::healthcheck(cli::HEALTHCHECK_URL).await.is_err() {
+            eprintln!(
+                "healthcheck failed: no 200 response from {}",
+                cli::HEALTHCHECK_URL
+            );
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // Logs go to stdout and to the admin's in-memory buffer. Every start is at `info`;
+    // `RUST_LOG` is ignored (`specs/security.md`, Application log). The access log
+    // records route templates, so tokens in paths stay out.
+    let app_log = services::app_log::install()?;
+
     match command {
         cli::Command::Serve => serve(app_log).await,
         cli::Command::Restore(file) => {
@@ -271,6 +284,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
+        // Handled above, before the logger is installed.
+        cli::Command::Healthcheck => Ok(()),
     }
 }
 
