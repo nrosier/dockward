@@ -147,8 +147,6 @@
   "mappings.count.total": "{n} open",
   "mappings.never": "Never",
   "mappings.neverReason": "No sync yet: no tagged artifact yet, no webhook event yet, or the first poll has not run.",
-  "mappings.edit": "Edit",
-  "mappings.editNamed": "Edit {name}",
   "mappings.cancel": "Cancel",
   "mappings.back": "← Mappings",
   "mappings.filter.label": "Mapping",

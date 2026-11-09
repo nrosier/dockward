@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { t, type MessageKey } from "../i18n";
-import { json, renderAt, stubApi, user } from "../test/render";
+import { json, renderAt, renderWithRoutes, stubApi, user } from "../test/render";
 import type { MappingListItem } from "../types/api";
 import MappingsPage from "./MappingsPage";
 
@@ -67,13 +67,65 @@ describe("MappingsPage", () => {
     expect(within(first).getByText(t("mappings.count.unknown", { n: 1 }))).toBeInTheDocument();
     expect(within(first).getByText(t("mappings.count.total", { n: 11 }))).toBeInTheDocument();
     expect(within(first).getByText(t("pill.done"))).toBeInTheDocument();
-    expect(within(first).getByRole("link", { name: t("mappings.editNamed", { name: "platform/api-gateway" }) })).toBeInTheDocument();
+    expect(within(first).getByRole("link", { name: "platform/api-gateway" })).toHaveAttribute("href", "/mappings/m1");
+    expect(screen.queryByRole("link", { name: /^edit/i })).not.toBeInTheDocument();
 
     const second = screen.getByText("platform/web").closest("tr") as HTMLElement;
     expect(within(second).getByText(t("mappings.never"))).toBeInTheDocument();
     expect(within(second).getByText(t("mappings.issues.offDetail"))).toBeInTheDocument();
-    // Not the owner: no Edit link.
+    // Not the owner: no link.
     expect(within(second).queryByRole("link")).not.toBeInTheDocument();
+  });
+
+  describe("row opens the mapping", () => {
+    function setupRow() {
+      stubApi((path) => {
+        if (path === "/api/v1/account/me") return json({ user: user("user") });
+        if (path.startsWith("/api/v1/mappings")) {
+          return json({ items: [mapping({})], page: 1, page_size: 50, total: 1 });
+        }
+        return undefined;
+      });
+      renderWithRoutes(
+        [
+          { path: "/mappings", element: <MappingsPage /> },
+          { path: "/mappings/:id", element: <p>mapping page</p> },
+        ],
+        "/mappings",
+      );
+    }
+
+    it("opens on a click in the row", async () => {
+      setupRow();
+      const row = (await screen.findByText("example-org/api-gateway")).closest("tr") as HTMLElement;
+      await userEvent.click(row);
+      expect(await screen.findByText("mapping page")).toBeInTheDocument();
+    });
+
+    it("opens on Enter for a focused row", async () => {
+      setupRow();
+      const row = (await screen.findByText("example-org/api-gateway")).closest("tr") as HTMLElement;
+      row.focus();
+      await userEvent.keyboard("{Enter}");
+      expect(await screen.findByText("mapping page")).toBeInTheDocument();
+    });
+
+    it("an inner button does not open it and the name link does", async () => {
+      setupRow();
+      const row = (await screen.findByText("example-org/api-gateway")).closest("tr") as HTMLElement;
+      await userEvent.click(screen.getByRole("button", { name: t("mappings.sort.harborSource") }));
+      expect(screen.queryByText("mapping page")).not.toBeInTheDocument();
+      expect(row.getAttribute("tabindex")).toBe("0");
+      await userEvent.click(await screen.findByRole("link", { name: "platform/api-gateway" }));
+      expect(await screen.findByText("mapping page")).toBeInTheDocument();
+    });
+
+    it("has no Edit button", async () => {
+      setupRow();
+      await screen.findByText("example-org/api-gateway");
+      expect(screen.queryByRole("link", { name: /edit/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /edit/i })).not.toBeInTheDocument();
+    });
   });
 
   it("mapping with no sync job shows the reason", async () => {
