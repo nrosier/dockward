@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE scan_runs SET status = 'failed', error = ?, finished_at = ?\n         WHERE id = ? AND status IN ('queued', 'running')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "4e15bacb7a6248cf81e13cd9b46a821d403f32bbfb7f8797ecbef090a9a4b870"
+}

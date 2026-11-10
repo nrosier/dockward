@@ -12,7 +12,7 @@ use crate::db::discovery as db;
 use crate::db::sync_jobs::ClaimedJob;
 use crate::error::AppError;
 use crate::services::discovery::{Discovery, MSG_BAD_PAYLOAD, PullPayload, failure, fixed_text};
-use crate::services::issue_lifecycle::enabled_scanner_keys;
+use crate::services::scan::queue::queue_scans;
 use crate::services::storage::StoreRoot;
 use crate::services::storage::checked_id;
 use crate::services::storage::limits::{self, StoreLimits};
@@ -35,8 +35,11 @@ pub async fn run_pull(
         return JobOutcome::Permanent(MSG_BAD_PAYLOAD.to_owned());
     }
     match pull_once(pool, discovery, store, job, &payload, now).await {
-        Ok(Pulled::Stored) => JobOutcome::Done,
-        Ok(Pulled::AlreadyDone) => JobOutcome::DoneWithNote("already pulled".to_owned()),
+        Ok(Pulled::Stored) => queued_outcome(pool, job, &payload, now, JobOutcome::Done).await,
+        Ok(Pulled::AlreadyDone) => {
+            let note = JobOutcome::DoneWithNote("already pulled".to_owned());
+            queued_outcome(pool, job, &payload, now, note).await
+        }
         Err((AppError::ImageTooLarge, _)) => {
             // A larger image cannot shrink, so retrying only repeats the check.
             JobOutcome::Permanent(fixed_text(&AppError::ImageTooLarge))
@@ -125,26 +128,53 @@ async fn pull_once(
         "image pulled"
     );
 
-    // A scan is queued for each enabled scanner. A failure here does not fail the stored pull.
-    match scanners_to_queue(pool).await {
-        Ok(scanners) => tracing::info!(scanners = scanners.len(), "scans ready to queue"),
-        Err(_) => tracing::warn!("could not read the enabled scanners"),
-    }
     Ok(Pulled::Stored)
 }
 
-/// The single hook for step 4. A successful pull calls it, and it names the scanners the scan
-/// job must queue one run for (`scanners.enabled`; unset enables both). Decided (author): this
-/// PR queues nothing, because the scan job and its payload arrive in the next PR, and a queued
-/// `scan_runs` row with no handler would block the eviction of its image forever. The scan PR
-/// replaces the caller's log line with the inserts, in the same place.
-pub async fn scanners_to_queue(pool: &SqlitePool) -> Result<Vec<String>, AppError> {
-    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
-    enabled_scanner_keys(&mut conn).await
+/// Queues the scans of a stored platform (step 4): one `scan` job per enabled scanner. The
+/// trigger is the one discovery recorded on the pull job (decision 17). Called for a fresh pull
+/// and for a pull job that finds its image already stored, so a crash between the store and the
+/// queueing loses nothing: queueing skips the scanners that already have a run.
+async fn queue_after_pull(
+    pool: &SqlitePool,
+    job: &ClaimedJob,
+    payload: &PullPayload,
+    now: i64,
+) -> Result<usize, AppError> {
+    let trigger = match payload.trigger.as_str() {
+        "tag_moved" => "tag_moved",
+        _ => "first_pull",
+    };
+    queue_scans(
+        pool,
+        &payload.platform_id,
+        job.source_id.as_deref(),
+        trigger,
+        now,
+    )
+    .await
+}
+
+/// Queues the scans, and returns `done` when that worked. A queueing failure fails the pull job
+/// with a fixed text, so it retries: the image is stored, so the retry only queues the scans.
+async fn queued_outcome(
+    pool: &SqlitePool,
+    job: &ClaimedJob,
+    payload: &PullPayload,
+    now: i64,
+    done: JobOutcome,
+) -> JobOutcome {
+    match queue_after_pull(pool, job, payload, now).await {
+        Ok(queued) => {
+            tracing::info!(queued, "scans queued");
+            done
+        }
+        Err(_) => JobOutcome::Failed(fixed_text(&AppError::InternalError)),
+    }
 }
 
 /// Reads the three limits from `system_config`. An unset or unusable value is the default.
-async fn read_limits<R: StoreRepository>(repo: &R) -> Result<StoreLimits, AppError> {
+pub(crate) async fn read_limits<R: StoreRepository>(repo: &R) -> Result<StoreLimits, AppError> {
     let max_stored = repo.setting(limits::MAX_STORED_KEY).await?;
     let cap = repo.setting(limits::PULL_CAP_KEY).await?;
     let min_free = repo.setting(limits::MIN_FREE_KEY).await?;

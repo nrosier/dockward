@@ -19,6 +19,7 @@ pub mod job_runs;
 pub mod key_rotation;
 pub mod retention;
 pub mod scan_runs;
+pub mod scans;
 #[allow(dead_code)] // Used by the setup and login services.
 pub mod setup;
 pub mod sources;

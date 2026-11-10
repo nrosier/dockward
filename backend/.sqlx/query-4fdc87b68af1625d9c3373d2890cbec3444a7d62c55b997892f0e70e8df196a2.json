@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT scanner AS \"scanner!\" FROM scan_runs\n           WHERE image_platform_id = ? AND trigger = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "scanner!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "scanner"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4fdc87b68af1625d9c3373d2890cbec3444a7d62c55b997892f0e70e8df196a2"
+}

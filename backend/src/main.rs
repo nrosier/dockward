@@ -634,8 +634,9 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
     // The worker stops taking jobs on the same signal. A job it already took finishes.
     let worker_pool = state.pool.clone();
     let worker_stop = stop_rx.clone();
-    // `discover` has a handler. `pull` pulls into `<data dir>/images`,
-    // and the scan and publish kinds fail permanently as before.
+    // `discover` has a handler. `pull` pulls into `<data dir>/images` and queues the scans,
+    // `scan` runs the scanners and the convert step, and `publish` fails permanently until the
+    // publish step lands.
     let notifier = services::alerts::Notifier::new(
         state.pool.clone(),
         state.credentials_key.clone(),
@@ -646,6 +647,7 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         notifier,
         state.pool.clone(),
         services::storage::StoreRoot::under(&state.data_dir),
+        services::scan::ScanEnv::under(&state.data_dir),
     ));
     let worker_task = tokio::spawn(async move {
         worker::run(worker_pool, handler, worker_stop).await;
