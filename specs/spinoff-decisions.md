@@ -93,3 +93,6 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 52. A releasable version requires: the full pipeline (discover, pull, scan, publish), the db_update job, the minimal Sources and Images screens, and a passing gate set on the spinoff branch. The live checks against a real registry, GitHub and Code Scanning are the release's verification and are recorded with the release.
 
 53. The first spinoff release is a pre-release, 0.1.0. It is tagged only after CI is green on the spinoff head. The live checks (registry, GitHub, Code Scanning) and the browser approval of the Sources and Images screens are recorded against the release, not used as a gate for the tag.
+
+54. Supersedes 26 and 27. Every name reflects dockward, including the HKDF labels (`dockward/*`), the cookie names, the Code Scanning category prefix, and the issue marker (`dockward:<CVE id>`). Existing data is migrated: stored credentials are re-encrypted under the new labels, sessions are reset, and existing GitHub issues are re-keyed to the new marker. The migration is a required part of the release.
+55. The harborgate images on GHCR are deleted, including 0.1.0 and 0.1.1. dockward 0.2 is the first image in the renamed package. The deletion is permanent and is performed after dockward 0.2 is published and verified.
