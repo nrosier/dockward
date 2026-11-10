@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT g.cve_id AS \"cve_id!\", g.github_issue_number AS \"number!: i64\"\n           FROM cve_findings f JOIN github_issues g ON g.id = f.github_issue_id\n           WHERE f.source_id = ? AND g.status = 'open'\n           ORDER BY g.cve_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "cve_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "github_issues",
+            "name": "cve_id"
+          }
+        }
+      },
+      {
+        "name": "number!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "github_issues",
+            "name": "github_issue_number"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b89be3aadb3dc8b2c6ab1893f658e5803d364e8dd8f40dbaf1e2d402fccd9681"
+}

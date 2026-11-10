@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM hubs WHERE id = ? AND kind = 'custom'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b5594d88d9dda399e36ae7604856faf72b5d969d15fcb7df6f50e236699abf29"
+}

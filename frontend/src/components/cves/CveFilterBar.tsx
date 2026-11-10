@@ -5,6 +5,7 @@ import {
   STATUSES,
   type CveFilterState,
   FIXES,
+  namespaceOf,
   type FixValue,
   type HasIssue,
   type SeverityValue,
@@ -113,13 +114,10 @@ function toggle<T extends string>(selected: T[], value: T, all: readonly T[]): T
 }
 
 export function CveFilterBar({ state, mappings, tags, onChange }: CveFilterBarProps) {
-  const projects = Array.from(new Set(mappings.map((mapping) => mapping.harbor_project))).sort();
+  const paths = mappings.map(mappingName);
+  const namespaces = Array.from(new Set(paths.map(namespaceOf))).sort();
   const repositories = Array.from(
-    new Set(
-      mappings
-        .filter((mapping) => state.project === "" || mapping.harbor_project === state.project)
-        .map((mapping) => mapping.harbor_repository),
-    ),
+    new Set(paths.filter((path) => state.namespace === "" || namespaceOf(path) === state.namespace)),
   ).sort();
 
   function pickSeverity(value: SeverityValue) {
@@ -138,13 +136,10 @@ export function CveFilterBar({ state, mappings, tags, onChange }: CveFilterBarPr
   function pickFix(value: FixValue) {
     onChange({ fix: toggle(state.fixes, value, FIXES).join(",") });
   }
-  function pickProject(project: string) {
-    // A repository that is not in the chosen project is cleared with it.
-    const stillFits =
-      state.repository === "" ||
-      project === "" ||
-      mappings.some((mapping) => mapping.harbor_project === project && mapping.harbor_repository === state.repository);
-    onChange({ project, ...(stillFits ? {} : { repository: "" }) });
+  function pickNamespace(namespace: string) {
+    // A repository that is not in the chosen namespace is cleared with it.
+    const stillFits = state.repository === "" || namespace === "" || namespaceOf(state.repository) === namespace;
+    onChange({ namespace, ...(stillFits ? {} : { repository: "" }) });
   }
 
   return (
@@ -204,12 +199,12 @@ export function CveFilterBar({ state, mappings, tags, onChange }: CveFilterBarPr
       </div>
       <div className="grid grid-cols-1 gap-3 min-[1024px]:grid-cols-4">
         <Combobox
-          id="cve-project"
-          label={t("cves.filter.project")}
-          value={state.project}
-          options={projects.map((project) => ({ value: project, label: project }))}
-          allLabel={t("cves.filter.allProjects")}
-          onChange={pickProject}
+          id="cve-namespace"
+          label={t("cves.filter.namespace")}
+          value={state.namespace}
+          options={namespaces.map((namespace) => ({ value: namespace, label: namespace }))}
+          allLabel={t("cves.filter.allNamespaces")}
+          onChange={pickNamespace}
         />
         <Combobox
           id="cve-repository"

@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", label AS \"label!\", encrypted_token AS \"encrypted_token!\",\n                  expires_at, created_at\n           FROM user_credentials WHERE id = ? AND user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "label!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "label"
+          }
+        }
+      },
+      {
+        "name": "encrypted_token!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "encrypted_token"
+          }
+        }
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "0389793b949ea18f148337138851436ede2d56bbe65c4dabee622dea88fc9239"
+}

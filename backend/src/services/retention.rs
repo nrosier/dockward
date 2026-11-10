@@ -207,16 +207,12 @@ mod tests {
         for sql in [
             "INSERT INTO users (id, username, role, auth_provider)
              VALUES ('user-1', 'test-user', 'user', 'local')",
-            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, encrypted_token)
-             VALUES ('cred-harbor', 'user-1', 'harbor', 'harbor', 'https://harbor.example.com', 'v1:test')",
-            "INSERT INTO user_credentials (id, user_id, service_type, label, encrypted_token)
-             VALUES ('cred-gh', 'user-1', 'github', 'github', 'v1:test')",
-            "INSERT INTO repo_mappings (
-                id, user_id, harbor_cred_id, github_cred_id, harbor_base_url,
-                harbor_project, harbor_repository, github_owner, github_repo,
-                webhook_token_hash, webhook_auth_secret_hash)
-             VALUES ('map-1', 'user-1', 'cred-harbor', 'cred-gh', 'https://harbor.example.com',
-                'project', 'repo', 'owner', 'repo', 'hash-token-test', 'hash-secret-test')",
+            "INSERT INTO user_credentials (id, user_id, label, encrypted_token)
+             VALUES ('cred-gh', 'user-1', 'github', 'v1:test')",
+            "INSERT INTO image_sources (
+                id, user_id, hub_id, repository, tag_value, github_cred_id, github_owner, github_repo)
+             VALUES ('map-1', 'user-1', 'hub-default-ghcr', 'project/repo', '*', 'cred-gh',
+                'owner', 'repo')",
             "INSERT INTO alert_channels (id, kind, config_encrypted, enabled)
              VALUES ('chan-1', 'webhook', 'v1:test', FALSE)",
         ] {
@@ -234,9 +230,9 @@ mod tests {
         synced_at: i64,
     ) -> Result<(), AppError> {
         sqlx::query(
-            "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest,
+            "INSERT INTO publish_reports (id, source_id, image_tag, image_digest,
                 vulnerability_summary, sarif_status, synced_at)
-             VALUES (?, 'map-1', 'repo', 'v1', 'sha256:aa', '{}', 'success', ?)",
+             VALUES (?, 'map-1', 'v1', 'sha256:aa', '{}', 'success', ?)",
         )
         .bind(id)
         .bind(synced_at)
@@ -253,7 +249,7 @@ mod tests {
         updated_at: i64,
     ) -> Result<(), AppError> {
         sqlx::query(
-            "INSERT INTO sync_jobs (id, mapping_id, status, payload, updated_at)
+            "INSERT INTO sync_jobs (id, source_id, status, payload, updated_at)
              VALUES (?, 'map-1', ?, '{}', ?)",
         )
         .bind(id)
@@ -268,7 +264,7 @@ mod tests {
     async fn insert_job_run(pool: &SqlitePool, id: &str, started_at: i64) -> Result<(), AppError> {
         sqlx::query(
             "INSERT INTO job_runs (id, job_kind, started_at, status, processed_count)
-             VALUES (?, 'poll', ?, 'done', 0)",
+             VALUES (?, 'discover', ?, 'done', 0)",
         )
         .bind(id)
         .bind(started_at)
@@ -339,7 +335,7 @@ mod tests {
         let checks = [
             (
                 "sync_reports",
-                "SELECT COUNT(*) FROM sync_reports WHERE id = ?",
+                "SELECT COUNT(*) FROM publish_reports WHERE id = ?",
             ),
             ("sync_jobs", "SELECT COUNT(*) FROM sync_jobs WHERE id = ?"),
             ("job_runs", "SELECT COUNT(*) FROM job_runs WHERE id = ?"),
@@ -387,7 +383,7 @@ mod tests {
         let checks = [
             (
                 "sync_reports",
-                "SELECT COUNT(*) FROM sync_reports WHERE id = ?",
+                "SELECT COUNT(*) FROM publish_reports WHERE id = ?",
             ),
             ("sync_jobs", "SELECT COUNT(*) FROM sync_jobs WHERE id = ?"),
             ("job_runs", "SELECT COUNT(*) FROM job_runs WHERE id = ?"),
@@ -412,10 +408,12 @@ mod tests {
         insert_sync_job(&pool, "job-old", "done", NOW - SYNC_JOB_AGE - 1).await?;
         // The report is recent, so only the job is expired.
         insert_sync_report(&pool, "report-recent", NOW).await?;
-        sqlx::query("UPDATE sync_reports SET sync_job_id = 'job-old' WHERE id = 'report-recent'")
-            .execute(&pool)
-            .await
-            .map_err(|_| AppError::InternalError)?;
+        sqlx::query(
+            "UPDATE publish_reports SET sync_job_id = 'job-old' WHERE id = 'report-recent'",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
 
         run_once(&pool, NOW).await?;
 
@@ -428,7 +426,7 @@ mod tests {
         assert_eq!(jobs, 0, "the expired job was kept");
         let linked = count(
             &pool,
-            "SELECT COUNT(*) FROM sync_reports WHERE id = ? AND sync_job_id IS NULL",
+            "SELECT COUNT(*) FROM publish_reports WHERE id = ? AND sync_job_id IS NULL",
             "report-recent",
         )
         .await?;
@@ -544,7 +542,7 @@ mod tests {
 
         let kept = count(
             &pool,
-            "SELECT COUNT(*) FROM sync_reports WHERE id = ?",
+            "SELECT COUNT(*) FROM publish_reports WHERE id = ?",
             "sync_reports-old",
         )
         .await?;

@@ -1,0 +1,437 @@
+//! The `scan` job and the convert step (`specs/spinoff-local-scan.md`, section 6 steps 4 and 5,
+//! section 7, section 9; decisions 28, 29 and 19).
+//!
+//! A scan job carries ids only ([`queue::ScanPayload`]). It runs the pinned scanner out of
+//! process through [`ScannerRunner`] (absolute path, argument vector, cleared environment, the
+//! process group killed on timeout, one process at a time), reads the output with the strict
+//! parser, and stores the run in one `BEGIN IMMEDIATE` transaction: the run becomes `done`, its
+//! findings are stored, and the merged `cve_findings` of every tag whose current image holds the
+//! platform are recomputed ([`convert`]). Either all of it commits or none of it.
+//!
+//! A scan never downloads: Trivy runs with `--skip-db-update --skip-java-db-update`, Grype with
+//! `GRYPE_DB_AUTO_UPDATE=false`, and a missing database fails the run before any process starts
+//! (`scanner database not available`).
+//!
+//! Failure rules: a failed run records one fixed text (`scan_runs.error`, the job's `last_error`)
+//! and is never `done`, so the merged view and the issue rules never read it. A failed scanner
+//! or platform therefore never closes an issue (section 16): the issue rules hold a close open
+//! until every enabled scanner has a `done` run for every platform of the newest image.
+//! Timeouts, an oversized output and unreadable output cannot heal by retrying and fail the job
+//! at once. A non-zero exit and a missing database are retried on the backoff.
+//!
+//! The publish step is `services::publish`. [`publish_ready`] is the hook that queues it: when a
+//! run ends and no run or pull of its image is open, one `publish` job is queued for each source
+//! whose newest image it is (section 6 steps 6 and 7).
+
+pub mod convert;
+pub mod queue;
+#[cfg(test)]
+mod tests;
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use sqlx::SqlitePool;
+
+use crate::db::scans as db;
+use crate::db::sync_jobs::ClaimedJob;
+use crate::error::{AppError, ScannerFault};
+use crate::services::discovery::{MSG_BAD_PAYLOAD, fixed_text};
+use crate::services::publish;
+use crate::services::scanner::parse::{self, Report};
+use crate::services::scanner::process::{Invocation, Limits, ScannerRunner};
+use crate::services::scanner::{Scanner, cache_dir, environment, scan_args};
+use crate::services::storage::eviction;
+use crate::services::storage::job::read_limits;
+use crate::services::storage::limits::parse_positive_u64;
+use crate::services::storage::messages::NO_LONGER_STORED;
+use crate::services::storage::repository::{SqlStoreRepository, StoreRepository};
+use crate::services::storage::{StoreRoot, checked_id};
+use crate::services::sync_jobs::MAX_ATTEMPTS;
+use crate::worker::JobOutcome;
+
+use queue::ScanPayload;
+
+/// `scanner.timeout_s`: the timeout of one run in seconds (section 13).
+pub const TIMEOUT_KEY: &str = "scanner.timeout_s";
+/// `scanner.output_max_bytes`: the cap on one run's output (section 13).
+pub const OUTPUT_MAX_KEY: &str = "scanner.output_max_bytes";
+
+/// What the scan job needs besides the pool: the runner, the cache root and the executables.
+#[derive(Debug, Clone)]
+pub struct ScanEnv {
+    runner: ScannerRunner,
+    cache_root: PathBuf,
+    trivy: PathBuf,
+    grype: PathBuf,
+}
+
+impl ScanEnv {
+    /// The production setup: the pinned executables at their absolute paths and the cache under
+    /// `<data dir>/scanner-cache`.
+    pub fn under(data_dir: &Path) -> Self {
+        Self {
+            runner: ScannerRunner::new(),
+            cache_root: data_dir.join("scanner-cache"),
+            trivy: Scanner::Trivy.program().to_owned(),
+            grype: Scanner::Grype.program().to_owned(),
+        }
+    }
+
+    /// A setup that calls other executables. Used by the tests, with scripts.
+    #[cfg(test)]
+    pub fn with_programs(cache_root: PathBuf, trivy: PathBuf, grype: PathBuf) -> Self {
+        Self {
+            runner: ScannerRunner::new(),
+            cache_root,
+            trivy,
+            grype,
+        }
+    }
+
+    pub(crate) fn program(&self, scanner: Scanner) -> &Path {
+        match scanner {
+            Scanner::Trivy => &self.trivy,
+            Scanner::Grype => &self.grype,
+        }
+    }
+
+    /// The runner that holds the one-scanner-process-at-a-time lock.
+    pub(crate) fn runner(&self) -> &ScannerRunner {
+        &self.runner
+    }
+
+    /// The root of the scanner caches.
+    pub(crate) fn cache_root(&self) -> &Path {
+        &self.cache_root
+    }
+
+    /// True when the scanner's database is in its cache. Without it a scan run fails before any
+    /// process starts. Trivy keeps `db/trivy.db`; Grype keeps `<schema>/vulnerability.db`.
+    fn database_present(&self, scanner: Scanner) -> bool {
+        let cache = cache_dir(&self.cache_root, scanner);
+        match scanner {
+            Scanner::Trivy => cache.join("db").join("trivy.db").is_file(),
+            Scanner::Grype => std::fs::read_dir(&cache)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .any(|entry| entry.path().join("vulnerability.db").is_file())
+                })
+                .unwrap_or(false),
+        }
+    }
+}
+
+/// The timeout and output cap of one scanner process, from the operator settings or the defaults
+/// (section 13). A database refresh uses the same limits as a scan.
+pub(crate) async fn process_limits<R: StoreRepository>(repo: &R) -> Result<Limits, AppError> {
+    let timeout = parse_positive_u64(
+        repo.setting(TIMEOUT_KEY).await?.as_deref(),
+        crate::services::scanner::process::DEFAULT_TIMEOUT.as_secs(),
+    );
+    let output_max = parse_positive_u64(
+        repo.setting(OUTPUT_MAX_KEY).await?.as_deref(),
+        crate::services::scanner::process::DEFAULT_OUTPUT_MAX_BYTES,
+    );
+    Ok(Limits {
+        timeout: Duration::from_secs(timeout),
+        output_max_bytes: output_max,
+    })
+}
+
+/// How a scan attempt stopped short of `done`.
+enum Stop {
+    /// The job fails now, with no retry.
+    Permanent(String),
+    /// The job fails and retries on the backoff.
+    Retry(String),
+    /// The run is `done` already: nothing to do.
+    AlreadyDone,
+}
+
+/// Runs one `scan` job.
+pub async fn run_scan(
+    pool: &SqlitePool,
+    env: &ScanEnv,
+    store: &StoreRoot,
+    job: &ClaimedJob,
+    now: i64,
+) -> JobOutcome {
+    let Ok(payload) = serde_json::from_str::<ScanPayload>(&job.payload) else {
+        return JobOutcome::Permanent(MSG_BAD_PAYLOAD.to_owned());
+    };
+    let scanner = match payload.scanner.as_str() {
+        "trivy" => Scanner::Trivy,
+        "grype" => Scanner::Grype,
+        _ => return JobOutcome::Permanent(MSG_BAD_PAYLOAD.to_owned()),
+    };
+    if checked_id(&payload.run_id).is_err() || checked_id(&payload.platform_id).is_err() {
+        return JobOutcome::Permanent(MSG_BAD_PAYLOAD.to_owned());
+    }
+    match scan_once(pool, env, store, &payload, scanner, job.attempts, now).await {
+        Ok(()) => JobOutcome::Done,
+        Err(Stop::AlreadyDone) => JobOutcome::DoneWithNote("already scanned".to_owned()),
+        Err(Stop::Permanent(text)) => JobOutcome::Permanent(text),
+        Err(Stop::Retry(text)) => JobOutcome::Failed(text),
+    }
+}
+
+fn internal(_: AppError) -> Stop {
+    Stop::Retry(fixed_text(&AppError::InternalError))
+}
+
+/// Maps a scanner fault to the way the job stops.
+fn stop_for(fault: ScannerFault) -> Stop {
+    let text = fault.text().to_owned();
+    match fault {
+        ScannerFault::TimedOut
+        | ScannerFault::OutputTooLarge
+        | ScannerFault::OutputNotRecognised => Stop::Permanent(text),
+        ScannerFault::Failed | ScannerFault::DatabaseNotAvailable => Stop::Retry(text),
+    }
+}
+
+/// Records the end of an attempt with a fixed text, and returns how the job stops. A run whose
+/// job will retry goes back to `queued` with the text kept (`last` is false), so it still holds
+/// its image against eviction and the image is not yet "all scans ended". The last attempt, and
+/// a failure that cannot heal, end the run as `failed`. A failure to record is logged without
+/// detail, and the stop is still returned.
+async fn fail_run(
+    pool: &SqlitePool,
+    run_id: &str,
+    text: &str,
+    now: i64,
+    last: bool,
+    stop: Stop,
+) -> Stop {
+    let retrying = matches!(stop, Stop::Retry(_)) && !last;
+    let recorded = async {
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        if retrying {
+            db::release_run(&mut conn, run_id, text).await
+        } else {
+            db::finish_failed(&mut conn, run_id, text, now).await
+        }
+    }
+    .await;
+    if recorded.is_err() {
+        tracing::warn!("could not record the end of a failed scan run");
+    }
+    stop
+}
+
+async fn scan_once(
+    pool: &SqlitePool,
+    env: &ScanEnv,
+    store: &StoreRoot,
+    payload: &ScanPayload,
+    scanner: Scanner,
+    attempts: i64,
+    now: i64,
+) -> Result<(), Stop> {
+    let run_id = payload.run_id.as_str();
+    let run = {
+        let mut conn = pool
+            .acquire()
+            .await
+            .map_err(|_| Stop::Retry(fixed_text(&AppError::InternalError)))?;
+        let found = db::find_run(&mut conn, run_id).await.map_err(internal)?;
+        let Some(run) = found else {
+            return Err(Stop::Permanent(MSG_BAD_PAYLOAD.to_owned()));
+        };
+        if run.image_platform_id != payload.platform_id || run.scanner != payload.scanner {
+            return Err(Stop::Permanent(MSG_BAD_PAYLOAD.to_owned()));
+        }
+        match run.status.as_str() {
+            "done" => return Err(Stop::AlreadyDone),
+            // A retry of a failed job, or a run a stopped process left `running`.
+            "failed" | "running" => {
+                db::requeue_run(&mut conn, run_id).await.map_err(internal)?;
+            }
+            _ => {}
+        }
+        run
+    };
+
+    let repo = SqlStoreRepository::new(pool.clone());
+    let limits = read_limits(&repo).await.map_err(internal)?;
+    // The run moves to `running` only while its image is `stored`, in one statement, so an
+    // eviction and a scan start cannot interleave (section 4).
+    let started = repo
+        .start_scan(run_id, &payload.platform_id, now)
+        .await
+        .map_err(internal)?;
+    let layout = store.layout_dir(&payload.platform_id).map_err(internal)?;
+    if !started || !layout.is_dir() {
+        return Err(fail_run(
+            pool,
+            run_id,
+            NO_LONGER_STORED,
+            now,
+            true,
+            Stop::Permanent(NO_LONGER_STORED.to_owned()),
+        )
+        .await);
+    }
+
+    let last = attempts + 1 >= MAX_ATTEMPTS;
+    let outcome = scan_and_store(pool, env, &repo, &run, &layout, scanner, (now, last)).await;
+    // The store may be over its maximum while this run held its image. The check runs again when
+    // a scan run ends (section 4), whatever the outcome.
+    match eviction::enforce(&repo, store, limits.max_stored, None, now).await {
+        Ok(_) => {}
+        Err(_) => tracing::warn!("eviction after a scan run did not complete"),
+    }
+    // A run that ended, whatever its outcome, may be the last open run of its image: a failed
+    // run does not hold the SARIF back (section 6 step 6). A run that will retry is `queued`
+    // again, so it keeps the image open.
+    match publish_ready(pool, &run.image_id, now).await {
+        Ok(true) => tracing::info!("every scan of an image has ended"),
+        Ok(false) => {}
+        Err(_) => tracing::warn!("could not check whether the scans of an image ended"),
+    }
+    if outcome.is_err() {
+        tracing::warn!("a scan run failed");
+    }
+    outcome
+}
+
+/// The part of a scan from the process to the commit. A failure ends the run as `failed`.
+async fn scan_and_store(
+    pool: &SqlitePool,
+    env: &ScanEnv,
+    repo: &SqlStoreRepository,
+    run: &db::RunRow,
+    layout: &Path,
+    scanner: Scanner,
+    (now, last): (i64, bool),
+) -> Result<(), Stop> {
+    let run_id = run.id.as_str();
+    let fail =
+        |fault: ScannerFault| fail_run(pool, run_id, fault.text(), now, last, stop_for(fault));
+
+    if !env.database_present(scanner) {
+        return Err(fail(ScannerFault::DatabaseNotAvailable).await);
+    }
+    let process_limits = process_limits(repo).await.map_err(internal)?;
+    let args: Vec<OsString> = scan_args(scanner, layout);
+    let vars = environment(&env.cache_root, scanner, true);
+    let result = env
+        .runner
+        .run(Invocation {
+            program: env.program(scanner),
+            args: &args,
+            env: &vars,
+            limits: process_limits,
+        })
+        .await;
+    let body = match result {
+        Ok(body) => body,
+        Err(AppError::Scanner(fault)) => return Err(fail(fault).await),
+        Err(_) => return Err(fail(ScannerFault::Failed).await),
+    };
+    let report = match parse_report(scanner, body).await {
+        Ok(report) => report,
+        Err(fault) => return Err(fail(fault).await),
+    };
+
+    let built_at = {
+        let mut conn = pool
+            .acquire()
+            .await
+            .map_err(|_| internal(AppError::InternalError))?;
+        db::database_built_at(&mut conn, scanner.key())
+            .await
+            .map_err(internal)?
+    };
+    let finished = crate::worker::now_secs().max(now);
+    match store_run(pool, run, &report, built_at, finished).await {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // The transaction rolled back, so nothing of the run was stored. The job retries.
+            Err(fail_run(
+                pool,
+                run_id,
+                ScannerFault::Failed.text(),
+                finished,
+                last,
+                Stop::Retry(fixed_text(&AppError::InternalError)),
+            )
+            .await)
+        }
+    }
+}
+
+/// Parses off the async threads: a 64 MiB report takes real CPU time.
+async fn parse_report(scanner: Scanner, body: Vec<u8>) -> Result<Report, ScannerFault> {
+    let parsed = tokio::task::spawn_blocking(move || match scanner {
+        Scanner::Trivy => parse::parse_trivy(&body),
+        Scanner::Grype => parse::parse_grype(&body),
+    })
+    .await;
+    match parsed {
+        Ok(Ok(report)) => Ok(report),
+        Ok(Err(AppError::Scanner(fault))) => Err(fault),
+        Ok(Err(_)) | Err(_) => Err(ScannerFault::OutputNotRecognised),
+    }
+}
+
+/// Stores a finished run and recomputes the merged findings, in one `BEGIN IMMEDIATE`
+/// transaction.
+async fn store_run(
+    pool: &SqlitePool,
+    run: &db::RunRow,
+    report: &Report,
+    built_at: Option<i64>,
+    finished: i64,
+) -> Result<(), AppError> {
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| AppError::InternalError)?;
+    db::finish_done(
+        &mut tx,
+        &run.id,
+        &report.scanner_version,
+        built_at,
+        finished,
+    )
+    .await?;
+    for finding in &report.findings {
+        db::insert_finding(
+            &mut tx,
+            &run.id,
+            &db::NewFinding {
+                cve_id: &finding.cve_id,
+                package: &finding.package,
+                version: finding.version.as_deref(),
+                fixed_in_version: finding.fixed_in_version.as_deref(),
+                severity: finding.severity,
+                cvss_v3: finding.cvss_v3,
+                description: finding.description.as_deref(),
+            },
+        )
+        .await?;
+    }
+    convert::recompute_image(&mut tx, &run.image_id, finished).await?;
+    tx.commit().await.map_err(|_| AppError::InternalError)
+}
+
+/// The publish hook. True when no run of any platform of `image_id` is `queued` or `running`
+/// and no platform of it still waits for its pull: every scan of the image has ended, whatever
+/// its outcome. When it is true, one `publish` job is queued for each source whose newest image
+/// this is (section 6 steps 6 and 7; [`publish::queue_publish`]). A job already open for the same
+/// source and image is not queued again.
+pub async fn publish_ready(pool: &SqlitePool, image_id: &str, now: i64) -> Result<bool, AppError> {
+    let ready = {
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        !db::image_has_open_runs(&mut conn, image_id).await?
+            && !crate::db::publish::image_has_pending_pull(&mut conn, image_id).await?
+    };
+    if ready {
+        publish::queue_publish(pool, image_id, now).await?;
+    }
+    Ok(ready)
+}

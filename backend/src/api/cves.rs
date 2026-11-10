@@ -47,7 +47,7 @@ fn path_of(path: Result<Path<String>, PathRejection>) -> Result<String, AppError
 /// `GET /api/v1/mappings/:id/cves`. One `CveSummary` per CVE of the mapping. A user reads
 /// only their own mapping (another tenant's is `404`); an admin reads any. Returns `200`;
 /// `400` for a bad list parameter; `404` for an unknown or foreign mapping.
-pub async fn list_for_mapping(
+pub async fn list_for_source(
     State(state): State<AppState>,
     user: AuthUser,
     path: Result<Path<String>, PathRejection>,
@@ -69,13 +69,13 @@ pub async fn list_for_mapping(
 /// `{"items": [{"image_tag","last_scan_at","open_cves"}]}`, most recently scanned first, at
 /// most 10. Same access as the CVE list: the owner or any admin; another tenant's or an
 /// unknown mapping is `404`. Returns `200`.
-pub async fn tags_for_mapping(
+pub async fn tags_for_source(
     State(state): State<AppState>,
     user: AuthUser,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mapping_id = path_of(path)?;
-    let items = cves::mapping_tags(&state.pool, &reader_of(&user), &mapping_id).await?;
+    let items = cves::source_tags(&state.pool, &reader_of(&user), &mapping_id).await?;
     Ok(Json(serde_json::json!({ "items": items })))
 }
 
@@ -227,9 +227,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::api::admin::test_support::{
-        seed_github, seed_harbor, seed_mapping, seed_user, test_state,
-    };
+    use crate::api::admin::test_support::{seed_github, seed_source, seed_user, test_state};
     use crate::db;
     use crate::models::role::Role;
     use crate::services::issue_lifecycle::test_support::{FakeGithub, FakeIssues};
@@ -248,8 +246,7 @@ mod tests {
             &mut conn,
             &db::findings::Finding {
                 id: &crate::services::ids::new_id().unwrap_or_default(),
-                mapping_id: "m1",
-                harbor_repository: "m1",
+                source_id: "m1",
                 image_tag: tag,
                 cve_id: cve,
                 package: Some("openssl"),
@@ -267,9 +264,8 @@ mod tests {
         let (state, dir) = test_state(name).await;
         seed_user(&state.pool, "u1", "user").await;
         seed_user(&state.pool, "u2", "user").await;
-        seed_harbor(&state.pool, "u1", "ch", "harbor", None).await;
         seed_github(&state.pool, "u1", "cg", "github").await;
-        seed_mapping(&state.pool, "u1", "m1", "ch", "cg", "octo", "app").await;
+        seed_source(&state.pool, "u1", "m1", "cg", "octo", "app").await;
         let github = Arc::new(FakeGithub::default());
         (state, dir, github.clone(), FakeIssues(github))
     }
@@ -436,7 +432,7 @@ mod tests {
         let (state, dir, github, gh) = setup("manual-accepted").await;
         finding(&state, "v1", "CVE-2026-0001", "CRITICAL").await;
         sqlx::query(
-            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username)
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username)
              VALUES ('a1', 'm1', 'CVE-2026-0001', 'accepted for the test', 'u1', 'u1')",
         )
         .execute(&state.pool)
@@ -555,8 +551,7 @@ mod tests {
             state,
             &db::findings::Finding {
                 id: &crate::services::ids::new_id().unwrap_or_default(),
-                mapping_id: mapping,
-                harbor_repository: mapping,
+                source_id: mapping,
                 image_tag: tag,
                 cve_id: cve,
                 package: Some("openssl"),
@@ -572,18 +567,76 @@ mod tests {
     async fn store(state: &AppState, finding: &db::findings::Finding<'_>) {
         let mut conn = state.pool.acquire().await.unwrap();
         db::findings::upsert(&mut conn, finding).await.unwrap();
-        // A tag with no report yet gets a successful one on the shared digest, so it is a
-        // newest-digest tag (#196). A test that wants another digest stores its report first.
-        sqlx::query(
-            "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest,
-                                       vulnerability_summary, sarif_status, synced_at)
-             SELECT ?1, ?2, ?2, ?3, 'sha256:00', '{}', 'success', ?4
-             WHERE NOT EXISTS (SELECT 1 FROM sync_reports WHERE mapping_id = ?2 AND image_tag = ?3)",
+        drop(conn);
+        // A tag with no observation yet is observed on the shared scanned image, so it is a
+        // newest-image tag (#196). A test that wants another image observes the tag first.
+        observe(
+            state,
+            finding.source_id,
+            finding.image_tag,
+            "sha256:00",
+            finding.now,
+            finding.now,
+            "done",
         )
-        .bind(crate::services::ids::new_id().unwrap_or_default())
-        .bind(finding.mapping_id)
-        .bind(finding.image_tag)
-        .bind(finding.now)
+        .await;
+    }
+
+    /// Observes `tag` of `source` on the image `digest`, once per (source, tag), and gives the
+    /// image a scan run in `status` finished at `finished`. `seen` is the observation's
+    /// `first_seen_at`. The newest image of a source is the one with the latest observation
+    /// among its scanned images (decision 49).
+    async fn observe(
+        state: &AppState,
+        source: &str,
+        tag: &str,
+        digest: &str,
+        seen: i64,
+        finished: i64,
+        status: &str,
+    ) {
+        let image = format!("img-{source}-{digest}");
+        let platform = format!("plat-{image}");
+        sqlx::query(
+            "INSERT OR IGNORE INTO images (id, hub_id, repository, digest, is_index)
+             VALUES (?, 'hub-default-ghcr', ?, ?, 0)",
+        )
+        .bind(&image)
+        .bind(source)
+        .bind(digest)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT OR IGNORE INTO image_platforms (id, image_id, platform, platform_digest, state)
+             VALUES (?, ?, 'linux/amd64', ?, 'stored')",
+        )
+        .bind(&platform)
+        .bind(&image)
+        .bind(digest)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT OR IGNORE INTO scan_runs (id, image_platform_id, scanner, trigger, status, finished_at)
+             VALUES (?, ?, 'grype', 'first_pull', ?, ?)",
+        )
+        .bind(format!("run-{image}-{tag}"))
+        .bind(&platform)
+        .bind(status)
+        .bind(finished)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tag_observations (source_id, tag, image_id, first_seen_at, last_seen_at)
+             SELECT ?1, ?2, ?3, ?4, ?4
+             WHERE NOT EXISTS (SELECT 1 FROM tag_observations WHERE source_id = ?1 AND tag = ?2)",
+        )
+        .bind(source)
+        .bind(tag)
+        .bind(&image)
+        .bind(seen)
         .execute(&state.pool)
         .await
         .unwrap();
@@ -593,7 +646,7 @@ mod tests {
     async fn fix(state: &AppState, mapping: &str, tag: &str, cve: &str) {
         let done = sqlx::query(
             "UPDATE cve_findings SET status = 'fixed'
-             WHERE mapping_id = ? AND image_tag = ? AND cve_id = ?",
+             WHERE source_id = ? AND image_tag = ? AND cve_id = ?",
         )
         .bind(mapping)
         .bind(tag)
@@ -604,8 +657,9 @@ mod tests {
         assert_eq!(done.rows_affected(), 1);
     }
 
-    /// Stores a `sync_reports` row for a tag, which makes the tag tracked when `sarif_status`
-    /// is `success`.
+    /// Scans a tag: a `success` observes it on the shared scanned image (it is tracked, with
+    /// a scan finished at `synced_at`); any other status is a failed scan on its own image,
+    /// which does not track the tag.
     async fn report(
         state: &AppState,
         mapping: &str,
@@ -613,20 +667,21 @@ mod tests {
         synced_at: i64,
         sarif_status: &str,
     ) {
-        sqlx::query(
-            "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest,
-                                       vulnerability_summary, sarif_status, synced_at)
-             VALUES (?, ?, ?, ?, 'sha256:00', '{}', ?, ?)",
-        )
-        .bind(crate::services::ids::new_id().unwrap_or_default())
-        .bind(mapping)
-        .bind(mapping)
-        .bind(tag)
-        .bind(sarif_status)
-        .bind(synced_at)
-        .execute(&state.pool)
-        .await
-        .unwrap();
+        if sarif_status == "success" {
+            observe(
+                state,
+                mapping,
+                tag,
+                "sha256:00",
+                synced_at,
+                synced_at,
+                "done",
+            )
+            .await;
+        } else {
+            let digest = format!("sha256:failed-{tag}");
+            observe(state, mapping, tag, &digest, synced_at, synced_at, "failed").await;
+        }
     }
 
     fn query(q: &str) -> Result<Query<ListParams>, QueryRejection> {
@@ -641,7 +696,7 @@ mod tests {
         mapping: &str,
         q: &str,
     ) -> Result<Page<CveSummary>, AppError> {
-        list_for_mapping(
+        list_for_source(
             State(state.clone()),
             who.clone(),
             Ok(Path(mapping.to_owned())),
@@ -698,7 +753,7 @@ mod tests {
             assert_eq!(page.items.len(), 2);
             let cve = item(&page, "CVE-2026-0001");
             assert_eq!(cve.id, "m1:CVE-2026-0001");
-            assert_eq!(cve.mapping_id, "m1");
+            assert_eq!(cve.source_id, "m1");
             assert_eq!(cve.severity, "CRITICAL", "the highest severity across tags");
             assert_eq!(cve.status, "open", "open while any tag is open");
             assert_eq!(cve.first_seen_at.as_deref(), Some("1970-01-01T00:01:40Z"));
@@ -808,8 +863,7 @@ mod tests {
                 &state,
                 &db::findings::Finding {
                     id: &crate::services::ids::new_id().unwrap_or_default(),
-                    mapping_id: "m1",
-                    harbor_repository: "m1",
+                    source_id: "m1",
                     image_tag: tag,
                     cve_id: "CVE-2026-0001",
                     package: Some("openssl"),
@@ -840,10 +894,10 @@ mod tests {
             tags,
             [
                 ("v3", "open", Some("2001-09-09T01:48:40Z"), Some("3.0.2")),
-                ("v2", "fixed", Some("2001-09-09T01:47:40Z"), None),
-                ("v1", "open", Some("2001-09-09T01:46:40Z"), Some("3.0.1")),
+                ("v2", "fixed", Some("2001-09-09T01:48:40Z"), None),
+                ("v1", "open", Some("2001-09-09T01:48:40Z"), Some("3.0.1")),
             ],
-            "the tags that report the CVE, most recently scanned first"
+            "the tags that report the CVE, most recently scanned first; tags on one image share its scan time, and the tag seen last comes first"
         );
         assert!(detail.acceptance.is_none());
         assert!(!detail.summary.accepted);
@@ -851,7 +905,7 @@ mod tests {
 
         // An active acceptance shows on the detail and in the list filters.
         sqlx::query(
-            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username, created_at)
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username, created_at)
              VALUES ('a1', 'm1', 'CVE-2026-0001', 'vendor fix scheduled', 'u1', 'u1', ?)",
         )
         .bind(AT)
@@ -879,7 +933,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(
-            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username, expires_at)
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username, expires_at)
              VALUES ('a2', 'm1', 'CVE-2026-0001', 'expired', 'u1', 'u1', 10)",
         )
         .execute(&state.pool)
@@ -917,12 +971,12 @@ mod tests {
         for q in ["", "page_size=201", "sort=bogus", "severity=nope", "page=x"] {
             let error = by_mapping(&state, &other, "m1", q).await.unwrap_err();
             assert_eq!(error.status(), StatusCode::NOT_FOUND, "{q}");
-            let error = all_cves(&state, &other, &format!("mapping_id=m1&{q}"))
+            let error = all_cves(&state, &other, &format!("source_id=m1&{q}"))
                 .await
                 .unwrap_err();
             assert_eq!(error.status(), StatusCode::NOT_FOUND, "{q}");
         }
-        let broken = list_for_mapping(
+        let broken = list_for_source(
             State(state.clone()),
             other.clone(),
             Ok(Path("m1".to_owned())),
@@ -935,7 +989,7 @@ mod tests {
         // owner is 400. On `GET /cves` the `mapping_id` is inside that query string, so the
         // ownership check cannot run and the answer is 400 for any mapping, existing or not.
         assert!(query("page=1&page=2").is_err());
-        let owner_broken = list_for_mapping(
+        let owner_broken = list_for_source(
             State(state.clone()),
             user("u1"),
             Ok(Path("m1".to_owned())),
@@ -948,7 +1002,7 @@ mod tests {
             let error = list(
                 State(state.clone()),
                 other.clone(),
-                query(&format!("mapping_id={mapping}&page=1&page=2")),
+                query(&format!("source_id={mapping}&page=1&page=2")),
             )
             .await
             .unwrap_err();
@@ -981,9 +1035,8 @@ mod tests {
     async fn scope_all_is_admin_only() {
         let (state, dir, _, _) = setup("read-scope").await;
         seed_user(&state.pool, "a1", "admin").await;
-        seed_harbor(&state.pool, "u2", "ch2", "harbor", None).await;
         seed_github(&state.pool, "u2", "cg2", "github").await;
-        seed_mapping(&state.pool, "u2", "m2", "ch2", "cg2", "octo", "other").await;
+        seed_source(&state.pool, "u2", "m2", "cg2", "octo", "other").await;
         seen(&state, "m1", "v1", "CVE-2026-0001", "CRITICAL", AT).await;
         seen(&state, "m2", "v1", "CVE-2026-0001", "HIGH", AT).await;
 
@@ -1019,32 +1072,18 @@ mod tests {
         // An admin may read any tenant's mapping and CVE (`specs/api.md`, Verification).
         let page = by_mapping(&state, &admin("a1"), "m1", "").await.unwrap();
         assert_eq!(page.total, 1);
-        let page = all_cves(&state, &admin("a1"), "mapping_id=m2")
+        let page = all_cves(&state, &admin("a1"), "source_id=m2")
             .await
             .unwrap();
         assert_eq!((page.total, page.items[0].severity.as_str()), (1, "HIGH"));
         let detail = one(&state, &admin("a1"), "m2:CVE-2026-0001").await.unwrap();
-        assert_eq!(detail.summary.mapping_id, "m2");
+        assert_eq!(detail.summary.source_id, "m2");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Stores a successful report for a tag on a digest with a push time, before its findings.
+    /// Scans a tag on a digest first seen at `pushed`, before its findings are stored.
     async fn report_on(state: &AppState, mapping: &str, tag: &str, digest: &str, pushed: i64) {
-        sqlx::query(
-            "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest,
-                                       vulnerability_summary, sarif_status, synced_at, image_push_time)
-             VALUES (?, ?, ?, ?, ?, '{}', 'success', ?, ?)",
-        )
-        .bind(crate::services::ids::new_id().unwrap_or_default())
-        .bind(mapping)
-        .bind(mapping)
-        .bind(tag)
-        .bind(digest)
-        .bind(pushed)
-        .bind(pushed)
-        .execute(&state.pool)
-        .await
-        .unwrap();
+        observe(state, mapping, tag, digest, pushed, pushed, "done").await;
     }
 
     /// The walley case (#196): `latest` is the newest digest and clean, `0.4` is older and
@@ -1096,7 +1135,7 @@ mod tests {
         report(&state, "m1", "v1", AT + 60, "success").await;
         seen(&state, "m1", "v1", "CVE-2026-0001", "CRITICAL", AT).await;
         sqlx::query(
-            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username, created_at, expires_at)
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username, created_at, expires_at)
              VALUES ('a1', 'm1', 'CVE-2026-0001', 'until the fix', 'u1', 'u1', ?, 4102444800)",
         )
         .bind(AT)
@@ -1119,7 +1158,7 @@ mod tests {
 
         // A tag with no successful sync has no last scan date.
         seen(&state, "m1", "v2", "CVE-2026-0001", "CRITICAL", AT + 5).await;
-        sqlx::query("DELETE FROM sync_reports WHERE mapping_id = 'm1' AND image_tag = 'v2'")
+        sqlx::query("DELETE FROM tag_observations WHERE source_id = 'm1' AND tag = 'v2'")
             .execute(&state.pool)
             .await
             .unwrap();
@@ -1170,7 +1209,7 @@ mod tests {
         who: &AuthUser,
         mapping: &str,
     ) -> Result<serde_json::Value, AppError> {
-        tags_for_mapping(
+        tags_for_source(
             State(state.clone()),
             who.clone(),
             Ok(Path(mapping.to_owned())),
@@ -1329,8 +1368,7 @@ mod tests {
                 &state,
                 &db::findings::Finding {
                     id: &crate::services::ids::new_id().unwrap_or_default(),
-                    mapping_id: "m1",
-                    harbor_repository: "m1",
+                    source_id: "m1",
                     image_tag: tag,
                     cve_id: "CVE-2026-0001",
                     package: Some("openssl"),
@@ -1466,8 +1504,7 @@ mod tests {
             state,
             &db::findings::Finding {
                 id: &crate::services::ids::new_id().unwrap_or_default(),
-                mapping_id: mapping,
-                harbor_repository: mapping,
+                source_id: mapping,
                 image_tag: tag,
                 cve_id: cve,
                 package: Some(package),
@@ -1513,15 +1550,14 @@ mod tests {
     #[tokio::test]
     async fn every_severity_is_listed_and_each_filter_matches_its_total() {
         let (state, dir, _, _) = setup("read-all-filters").await;
-        seed_mapping(&state.pool, "u1", "m2", "ch", "cg", "octo", "second").await;
-        sqlx::query("UPDATE repo_mappings SET harbor_project = 'team' WHERE id = 'm2'")
+        seed_source(&state.pool, "u1", "m2", "cg", "octo", "second").await;
+        sqlx::query("UPDATE image_sources SET repository = 'team/m2' WHERE id = 'm2'")
             .execute(&state.pool)
             .await
             .unwrap();
         // Another tenant's mapping with matching values must never appear.
-        seed_harbor(&state.pool, "u2", "ch2", "harbor", None).await;
         seed_github(&state.pool, "u2", "cg2", "github").await;
-        seed_mapping(&state.pool, "u2", "m3", "ch2", "cg2", "octo", "third").await;
+        seed_source(&state.pool, "u2", "m3", "cg2", "octo", "third").await;
 
         seen_pkg(&state, "m1", "v1", "CVE-2026-0001", "CRITICAL", "openssl").await;
         seen_pkg(&state, "m1", "v1", "CVE-2026-0002", "HIGH", "zlib").await;
@@ -1535,7 +1571,7 @@ mod tests {
         seen_pkg(&state, "m2", "v9", "CVE-2026-0007", "MEDIUM", "openssl").await;
         seen_pkg(&state, "m2", "v9", "CVE-2026-0008", "UNKNOWN", "OpenSSL").await;
         sqlx::query(
-            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username)
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username)
              VALUES ('a1', 'm2', 'CVE-2026-0007', 'accepted for the test', 'u1', 'u1')",
         )
         .execute(&state.pool)
@@ -1625,18 +1661,15 @@ mod tests {
             ("tag=v9", vec!["m2:CVE-2026-0007", "m2:CVE-2026-0008"]),
             ("tag=nope", vec![]),
             (
-                "harbor_project=team",
+                "namespace=team",
                 vec!["m2:CVE-2026-0007", "m2:CVE-2026-0008"],
             ),
             (
-                "harbor_repository=m2",
+                "repository=ghcr.io/team/m2",
                 vec!["m2:CVE-2026-0007", "m2:CVE-2026-0008"],
             ),
-            ("harbor_project=proj&harbor_repository=m2", vec![]),
-            (
-                "severity=MEDIUM&harbor_project=team",
-                vec!["m2:CVE-2026-0007"],
-            ),
+            ("namespace=proj&repository=ghcr.io/team/m2", vec![]),
+            ("severity=MEDIUM&namespace=team", vec!["m2:CVE-2026-0007"]),
             (
                 "severity=LOW&tag=v2&package=busybox",
                 vec!["m1:CVE-2026-0004"],
@@ -1712,8 +1745,7 @@ mod tests {
                 &state,
                 &db::findings::Finding {
                     id: &crate::services::ids::new_id().unwrap_or_default(),
-                    mapping_id: "m1",
-                    harbor_repository: "m1",
+                    source_id: "m1",
                     image_tag: "v1",
                     cve_id: cve,
                     package: Some("zlib"),
@@ -1761,14 +1793,13 @@ mod tests {
     #[tokio::test]
     async fn control_bar_filters() {
         let (state, dir, _, _) = setup("read-control-bar").await;
-        seed_mapping(&state.pool, "u1", "m2", "ch", "cg", "octo", "second").await;
-        sqlx::query("UPDATE repo_mappings SET harbor_project = 'team' WHERE id = 'm2'")
+        seed_source(&state.pool, "u1", "m2", "cg", "octo", "second").await;
+        sqlx::query("UPDATE image_sources SET repository = 'team/m2' WHERE id = 'm2'")
             .execute(&state.pool)
             .await
             .unwrap();
-        seed_harbor(&state.pool, "u2", "ch2", "harbor", None).await;
         seed_github(&state.pool, "u2", "cg2", "github").await;
-        seed_mapping(&state.pool, "u2", "m3", "ch2", "cg2", "octo", "third").await;
+        seed_source(&state.pool, "u2", "m3", "cg2", "octo", "third").await;
 
         // m1: 1 CRITICAL open with an open issue, 2 HIGH open with a closed issue,
         // 3 MEDIUM open and accepted, 4 LOW fixed, 5 LOW open with no issue.
@@ -1792,7 +1823,7 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username)
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username)
              VALUES ('a1', 'm1', 'CVE-2026-0003', 'accepted for the test', 'u1', 'u1')",
         )
         .execute(&state.pool)
@@ -1847,7 +1878,7 @@ mod tests {
             ["m1:1", "m1:4", "m1:5"]
         );
         assert_eq!(
-            ids(&state, &me, "severity=HIGH&status=open&project=team").await,
+            ids(&state, &me, "severity=HIGH&status=open&namespace=team").await,
             ["m2:6"]
         );
         // q matches id, package, project and repository; `%` and `_` are literal.
@@ -1862,25 +1893,31 @@ mod tests {
             ids(&state, &me, "q=curl&has_issue=false").await,
             ["m1:3", "m2:6"]
         );
-        // New names equal the old ones, and win when both are sent.
+        // The namespace is the first path segment of the repository (decision 38); the
+        // repository filter is `<hub host>/<repository>`; the removed Harbor names are not read.
+        assert_eq!(ids(&state, &me, "namespace=team").await, ["m2:6"]);
         assert_eq!(
-            ids(&state, &me, "project=team").await,
-            ids(&state, &me, "harbor_project=team").await
-        );
-        assert_eq!(
-            ids(&state, &me, "repository=m2").await,
-            ids(&state, &me, "harbor_repository=m2").await
-        );
-        assert_eq!(ids(&state, &me, "mapping=m2").await, ["m2:6"]);
-        assert_eq!(
-            ids(&state, &me, "mapping=m2").await,
-            ids(&state, &me, "mapping_id=m2").await
-        );
-        assert_eq!(
-            ids(&state, &me, "project=team&harbor_project=proj").await,
+            ids(&state, &me, "repository=ghcr.io/team/m2").await,
             ["m2:6"]
         );
-        assert_eq!(ids(&state, &me, "mapping=m1&mapping_id=m2").await.len(), 5);
+        assert_eq!(ids(&state, &me, "source_id=m2").await, ["m2:6"]);
+        assert_eq!(
+            ids(&state, &me, "namespace=Team").await,
+            none,
+            "case-sensitive"
+        );
+        assert_eq!(
+            ids(&state, &me, "namespace=te").await,
+            none,
+            "exact, not a prefix"
+        );
+        assert_eq!(
+            ids(&state, &me, "project=team&harbor_project=team&mapping=m2")
+                .await
+                .len(),
+            6,
+            "project, harbor_project and mapping are not read"
+        );
         assert_eq!(ids(&state, &me, "tag=v2").await, ["m1:1"]);
         // Old accepted parameters select the Accepted and Open pills.
         assert_eq!(
@@ -1901,7 +1938,7 @@ mod tests {
             ["m1:3"]
         );
         // n of m: CVE 1 is open on two of the two tracked tags, CVE 2 on one of two.
-        let page = all_cves(&state, &me, "mapping=m1").await.unwrap();
+        let page = all_cves(&state, &me, "source_id=m1").await.unwrap();
         let counts = |cve: &str| {
             let item = item(&page, cve);
             (item.open_tags, item.tracked_tags)
@@ -1909,19 +1946,19 @@ mod tests {
         assert_eq!(counts("CVE-2026-0001"), (2, 2));
         assert_eq!(counts("CVE-2026-0002"), (1, 2));
         assert_eq!(counts("CVE-2026-0004"), (0, 2));
-        // Access: another tenant's mapping is 404 by either name; a bad has_issue is 400.
-        for q in ["mapping=m3", "mapping_id=m3", "mapping=nope"] {
+        // Access: another tenant's source is 404; a bad has_issue is 400.
+        for q in ["source_id=m3", "source_id=nope"] {
             let error = all_cves(&state, &me, q).await.unwrap_err();
             assert_eq!(error.status(), StatusCode::NOT_FOUND, "{q}");
         }
         let error = all_cves(&state, &me, "has_issue=maybe").await.unwrap_err();
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
-        // The other tenant sees only their own row; the path route ignores `mapping`.
+        // The other tenant sees only their own row; the path route ignores `source_id`.
         assert_eq!(
             every_page(&state, &user("u2"), "has_issue=false").await.0,
             ["m3:CVE-2026-0001"]
         );
-        let path = by_mapping(&state, &me, "m1", "mapping=m2").await.unwrap();
+        let path = by_mapping(&state, &me, "m1", "source_id=m2").await.unwrap();
         assert_eq!(path.total, 5);
         let _ = std::fs::remove_dir_all(&dir);
     }

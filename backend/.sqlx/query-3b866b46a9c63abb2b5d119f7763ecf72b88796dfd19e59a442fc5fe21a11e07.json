@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.id AS \"id!\"\n           FROM image_platforms p JOIN scan_runs r ON r.image_platform_id = p.id\n           WHERE p.image_id = ? AND r.status = 'done'\n           GROUP BY p.id\n           ORDER BY MIN(COALESCE(r.finished_at, 0)), p.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "3b866b46a9c63abb2b5d119f7763ecf72b88796dfd19e59a442fc5fe21a11e07"
+}

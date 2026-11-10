@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT tag AS \"tag!\" FROM tag_observations WHERE source_id = ? ORDER BY tag",
+  "describe": {
+    "columns": [
+      {
+        "name": "tag!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tag_observations",
+            "name": "tag"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "18fc1214b7c844e877bc95a32f4db388403d8b9e4dc2d0eefd0ae83e6c12ad0c"
+}

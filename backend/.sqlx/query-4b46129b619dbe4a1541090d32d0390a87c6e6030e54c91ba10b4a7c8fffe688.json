@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE image_sources SET last_discovery_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "4b46129b619dbe4a1541090d32d0390a87c6e6030e54c91ba10b4a7c8fffe688"
+}

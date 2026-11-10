@@ -6,8 +6,10 @@
 //! an attempt. A panic in a handler fails that job only. The worker stops taking new jobs
 //! after the stop signal.
 //!
-//! The handler that runs real syncs is [`crate::services::sync::SyncHandler`]. Tests that
-//! only exercise the queue use [`NoopHandler`], which completes every job.
+//! The handlers for the spinoff job kinds live in `services::discovery::handler` (discover and
+//! the pull stub); the scan and publish kinds arrive with the later steps and fail with
+//! [`MSG_UNHANDLED`] until then. Tests that only exercise the queue use [`NoopHandler`], which
+//! completes every job.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -37,8 +39,10 @@ pub trait JobHandler: Send + Sync + 'static {
     fn on_give_up(&self, _job: &ClaimedJob, _now: i64) {}
 }
 
-/// What a handler reports for one job.
+/// What a handler reports for one job. Real handlers arrive with the later steps, so some
+/// variants are built by tests only until then.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum JobOutcome {
     /// The job is complete. It becomes `done`.
     Done,
@@ -56,6 +60,9 @@ pub enum JobOutcome {
     /// `reason` is logged, not stored.
     Deferred { until: i64, reason: String },
 }
+
+/// The fixed text stored when a job kind has no handler yet.
+pub const MSG_UNHANDLED: &str = "the job kind has no handler";
 
 /// A test handler that completes every job.
 #[cfg(test)]
@@ -311,7 +318,7 @@ mod tests {
         (pool, dir)
     }
 
-    /// Inserts a mapping row and one queued job for it. The mapping satisfies the foreign key.
+    /// Inserts a source row and one queued job for it. The source satisfies the foreign key.
     async fn queued_job(pool: &SqlitePool, job_id: &str) {
         sqlx::query(
             "INSERT OR IGNORE INTO users (id, username, password_hash, role, token_version)
@@ -321,21 +328,20 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
-             VALUES ('c1', 'u1', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
-                    ('c2', 'u1', 'github', 'g', NULL, NULL, 'v1:fake')",
+            "INSERT OR IGNORE INTO user_credentials (id, user_id, label, encrypted_token)
+             VALUES ('c2', 'u1', 'g', 'v1:fake')",
         )
         .execute(pool)
         .await
         .unwrap();
         sqlx::query(
-            "INSERT OR IGNORE INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash, auto_create_issues, min_issue_severity, default_branch)
-             VALUES ('m1', 'u1', 'c1', 'c2', 'https://harbor.example.com', 'p', 'r', 'o', 'g', 'h1', 'h2', 0, 'CRITICAL', 'main')",
+            "INSERT OR IGNORE INTO image_sources (id, user_id, hub_id, repository, tag_value, github_cred_id, github_owner, github_repo)
+             VALUES ('m1', 'u1', 'hub-default-ghcr', 'p/r', '*', 'c2', 'o', 'g')",
         )
         .execute(pool)
         .await
         .unwrap();
-        db::sync_jobs::enqueue(pool, job_id, "m1", "{}", 1_000)
+        db::sync_jobs::enqueue(pool, job_id, Some("m1"), "{}", 1_000)
             .await
             .unwrap();
     }
@@ -483,7 +489,7 @@ mod tests {
             alert.event,
             crate::services::alert_send::AlertEvent::SyncFailed
         );
-        assert_eq!(alert.harbor, "p/r");
+        assert_eq!(alert.harbor, "ghcr.io/p/r");
         assert_eq!(alert.github, "o/g");
         let key_used: String = sqlx::query_scalar("SELECT dedupe_key FROM alert_deliveries")
             .fetch_one(&pool)
@@ -571,7 +577,7 @@ mod tests {
         let (pool, dir) = fresh_pool("panic").await;
         queued_job(&pool, "j-panic").await;
         // Due one second later, so it is taken after `j-panic`.
-        db::sync_jobs::enqueue(&pool, "j-next", "m1", "{}", 1_001)
+        db::sync_jobs::enqueue(&pool, "j-next", Some("m1"), "{}", 1_001)
             .await
             .unwrap();
         let handler = Arc::new(PanicOnOne);

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username)\n             VALUES ('test-acc', 'test-src', 'CVE-2099-0001', 'test reason', ?, 'test-victim')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "4c10a5bfc6bfa23eab1dd5d9e6fb1935406a684c748e31d144a74caab6fcc4b1"
+}

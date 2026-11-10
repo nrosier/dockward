@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.state AS \"state!\", p.platform_digest AS \"platform_digest!\",\n                  h.host AS \"hub_host!\", h.pull_endpoint AS \"pull_endpoint?\",\n                  i.repository AS \"repository!\"\n           FROM image_platforms p\n           JOIN images i ON i.id = p.image_id\n           JOIN hubs h ON h.id = i.hub_id\n           WHERE p.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "state!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "platform_digest!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "platform_digest"
+          }
+        }
+      },
+      {
+        "name": "hub_host!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "host"
+          }
+        }
+      },
+      {
+        "name": "pull_endpoint?",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "pull_endpoint"
+          }
+        }
+      },
+      {
+        "name": "repository!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "repository"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "c783cadee34b2dde8091c2b57821f985b10b1d22c592c1ddd83381064b024608"
+}

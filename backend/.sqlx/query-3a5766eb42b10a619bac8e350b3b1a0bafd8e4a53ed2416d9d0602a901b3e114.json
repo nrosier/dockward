@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO scanner_databases (scanner, built_at, checked_at) VALUES (?, ?, ?)\n         ON CONFLICT (scanner) DO UPDATE SET built_at = excluded.built_at,\n                                             checked_at = excluded.checked_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "3a5766eb42b10a619bac8e350b3b1a0bafd8e4a53ed2416d9d0602a901b3e114"
+}

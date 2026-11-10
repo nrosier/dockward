@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM github_issues\n         WHERE github_owner = ? AND github_repo = ?\n           AND NOT EXISTS (\n               SELECT 1 FROM cve_findings f\n               JOIN image_sources s ON s.id = f.source_id\n               WHERE s.id <> ? AND s.github_owner = github_issues.github_owner\n                 AND s.github_repo = github_issues.github_repo\n                 AND f.cve_id = github_issues.cve_id AND f.status = 'open')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "2a26f19acccae5658b8f2f6a3116e5cc9ae0025ac7bfcd20b5808e504ffd7507"
+}

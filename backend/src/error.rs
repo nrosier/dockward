@@ -36,6 +36,55 @@ pub enum AppError {
     /// (`specs/security.md`, Backup and restore).
     BackupDirUnavailable,
     UpstreamUnreachable,
+    /// The upstream registry answered `401` or `403` and would not accept the credentials
+    /// (`specs/spinoff-local-scan.md`, section 6). Fixed text; no registry body or header.
+    UpstreamAuthRejected,
+    /// The upstream registry sent content that failed verification: a digest mismatch or a
+    /// malformed manifest or index (`specs/spinoff-local-scan.md`, sections 3 and 6).
+    UpstreamContentInvalid,
+    /// An image is larger than the pull cap (`specs/spinoff-local-scan.md`, sections 3 and 13).
+    ImageTooLarge,
+    /// The registry answered a status the client does not handle. Only the number is kept, and
+    /// the body and headers are discarded (`specs/spinoff-local-scan.md`, section 6).
+    UpstreamStatus(u16),
+    /// The free-disk guard refused a pull (`specs/spinoff-local-scan.md`, sections 4 and 13).
+    /// Not an HTTP response. The job maps it to its fixed `last_error` text.
+    InsufficientDisk,
+    /// A scanner run failed. Not an HTTP response: the job stores the fixed text of the fault
+    /// as its `last_error` (`specs/spinoff-local-scan.md`, section 6).
+    Scanner(ScannerFault),
+    /// The database file holds the table of an older HarborGate schema and cannot be used
+    /// (specs/spinoff-local-scan.md, section 9). Refused at pool open. Fixed text only.
+    LegacyDatabase,
+}
+
+/// A scanner run failure. Each variant has one fixed text from `specs/spinoff-local-scan.md`,
+/// section 6. No scanner stderr, output, path or argument is ever part of the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScannerFault {
+    /// The run exceeded its timeout and its process group was killed.
+    TimedOut,
+    /// The captured output went over the cap.
+    OutputTooLarge,
+    /// The scanner exited non-zero, or could not be started.
+    Failed,
+    /// The scanner output could not be parsed or failed the strict schema checks.
+    OutputNotRecognised,
+    /// The scanner vulnerability database is missing or unreadable.
+    DatabaseNotAvailable,
+}
+
+impl ScannerFault {
+    /// The fixed text stored as a job's `last_error`.
+    pub fn text(self) -> &'static str {
+        match self {
+            ScannerFault::TimedOut => "scanner timed out",
+            ScannerFault::OutputTooLarge => "scanner output too large",
+            ScannerFault::Failed => "scanner failed",
+            ScannerFault::OutputNotRecognised => "scanner output not recognised",
+            ScannerFault::DatabaseNotAvailable => "scanner database not available",
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -104,7 +153,14 @@ impl AppError {
             AppError::InternalError | AppError::BackupDirUnavailable => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
-            AppError::UpstreamUnreachable => StatusCode::BAD_GATEWAY,
+            AppError::UpstreamUnreachable
+            | AppError::UpstreamAuthRejected
+            | AppError::UpstreamContentInvalid => StatusCode::BAD_GATEWAY,
+            AppError::UpstreamStatus(_) => StatusCode::BAD_GATEWAY,
+            AppError::ImageTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            AppError::InsufficientDisk => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Scanner(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::LegacyDatabase => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -124,7 +180,14 @@ impl AppError {
             AppError::PayloadTooLarge => "payload_too_large",
             AppError::RateLimited => "rate_limited",
             AppError::InternalError | AppError::BackupDirUnavailable => "internal_error",
-            AppError::UpstreamUnreachable => "upstream_unreachable",
+            AppError::UpstreamUnreachable
+            | AppError::UpstreamAuthRejected
+            | AppError::UpstreamContentInvalid => "upstream_unreachable",
+            AppError::UpstreamStatus(_) => "upstream_unreachable",
+            AppError::ImageTooLarge => "payload_too_large",
+            AppError::InsufficientDisk => "internal_error",
+            AppError::Scanner(_) => "internal_error",
+            AppError::LegacyDatabase => "internal_error",
         }
     }
 
@@ -155,6 +218,20 @@ impl AppError {
                 "The backup directory is missing or not writable.".to_owned()
             }
             AppError::UpstreamUnreachable => "An upstream service could not be reached.".to_owned(),
+            AppError::UpstreamAuthRejected => {
+                "The upstream registry rejected the credentials.".to_owned()
+            }
+            AppError::UpstreamContentInvalid => {
+                "The upstream registry sent content that could not be verified.".to_owned()
+            }
+            AppError::UpstreamStatus(_) => "An upstream service could not be reached.".to_owned(),
+            AppError::ImageTooLarge => "The image is larger than the allowed size.".to_owned(),
+            AppError::InsufficientDisk => "An internal error occurred.".to_owned(),
+            AppError::Scanner(fault) => fault.text().to_owned(),
+            AppError::LegacyDatabase => {
+                "this database was created by HarborGate and cannot be used by this version"
+                    .to_owned()
+            }
         }
     }
 
@@ -215,6 +292,15 @@ mod tests {
             (AppError::InternalError, 500, "internal_error"),
             (AppError::BackupDirUnavailable, 500, "internal_error"),
             (AppError::UpstreamUnreachable, 502, "upstream_unreachable"),
+            (AppError::UpstreamAuthRejected, 502, "upstream_unreachable"),
+            (
+                AppError::UpstreamContentInvalid,
+                502,
+                "upstream_unreachable",
+            ),
+            (AppError::UpstreamStatus(503), 502, "upstream_unreachable"),
+            (AppError::ImageTooLarge, 413, "payload_too_large"),
+            (AppError::InsufficientDisk, 500, "internal_error"),
         ];
         for (err, status, code) in cases {
             assert_eq!(err.status().as_u16(), status, "status for {code}");

@@ -25,8 +25,6 @@ const ACTIONS = [
   "mapping.create",
   "mapping.update",
   "mapping.delete",
-  "mapping.webhook_token_rotate",
-  "mapping.auth_secret_rotate",
   "alert.config_change",
   "backup.run",
   "restore.run",

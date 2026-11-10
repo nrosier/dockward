@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT r.image_platform_id AS \"platform_id!\", r.scanner AS \"scanner!\"\n           FROM scan_runs r JOIN image_platforms p ON p.id = r.image_platform_id\n           WHERE p.image_id = ? AND r.status = 'done'",
+  "describe": {
+    "columns": [
+      {
+        "name": "platform_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "image_platform_id"
+          }
+        }
+      },
+      {
+        "name": "scanner!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "scanner"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "6705c00842011c77535ef981b6028dddc0fdb6dae7d9102cd132c98f8ce8355c"
+}

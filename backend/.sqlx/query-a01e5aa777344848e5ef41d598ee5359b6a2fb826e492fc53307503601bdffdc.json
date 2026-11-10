@@ -1,0 +1,40 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT ts.image_tag AS \"image_tag!: String\", ts.scan_at AS \"last_scan_at!: i64\",\n                  (SELECT COUNT(*) FROM cve_findings f\n                   WHERE f.source_id = ts.source_id AND f.image_tag = ts.image_tag\n                     AND f.status = 'open') AS \"open_cves!: i64\"\n           FROM (\n               SELECT source_id, image_tag, scan_at, seen_at, last_row\n               FROM tag_scan_times WHERE source_id = ?1\n           ) ts\n           ORDER BY ts.scan_at DESC, ts.seen_at DESC, ts.last_row DESC\n           LIMIT 10",
+  "describe": {
+    "columns": [
+      {
+        "name": "image_tag!: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tag_observations",
+            "name": "tag"
+          }
+        }
+      },
+      {
+        "name": "last_scan_at!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "open_cves!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "a01e5aa777344848e5ef41d598ee5359b6a2fb826e492fc53307503601bdffdc"
+}

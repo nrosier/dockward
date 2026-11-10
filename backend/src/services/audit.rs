@@ -27,6 +27,13 @@ pub const ACTIONS: &[&str] = &[
     "mapping.auth_secret_rotate",
     "mapping.pull",
     "mapping.scan",
+    "source.scan",
+    "source.create",
+    "source.update",
+    "source.delete",
+    "hub.create",
+    "hub.delete",
+    "settings.change",
     "project_webhook.create",
     "project_webhook.token_rotate",
     "project_webhook.secret_rotate",
@@ -40,6 +47,7 @@ pub const ACTIONS: &[&str] = &[
     "sync_job.purge",
     "log.level_change",
     "artifact.remove",
+    "image.evict",
 ];
 
 /// Key names (lowercased) that mark a value as a secret. Any key that contains

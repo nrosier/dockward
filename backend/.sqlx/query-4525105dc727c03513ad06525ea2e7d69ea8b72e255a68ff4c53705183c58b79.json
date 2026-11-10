@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", host AS \"host!\", pull_endpoint, kind AS \"kind!\"\n           FROM hubs\n           ORDER BY (kind = 'default') DESC, host ASC\n           LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "host!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "host"
+          }
+        }
+      },
+      {
+        "name": "pull_endpoint",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "pull_endpoint"
+          }
+        }
+      },
+      {
+        "name": "kind!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "kind"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "4525105dc727c03513ad06525ea2e7d69ea8b72e255a68ff4c53705183c58b79"
+}

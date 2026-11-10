@@ -16,7 +16,7 @@ const failed: SyncJob = {
   last_error: "GitHub rejected the SARIF upload (403).",
   created_at: "2026-10-01T14:46:00Z",
   updated_at: "2026-10-01T14:47:00Z",
-  trigger: "poll",
+  trigger: "discovery",
   image: { repo_full_name: "platform/billing-worker", tag: "3.8.1", digest: "sha256:51ab07d3ffff" },
   report: null,
 };
@@ -30,7 +30,7 @@ const retrying: SyncJob = {
   last_error: "Harbor returned 503 while fetching the report.",
   created_at: "2026-11-05T11:00:00Z",
   updated_at: "2026-11-05T12:00:00Z",
-  trigger: "webhook",
+  trigger: "first_pull",
   image: { repo_full_name: "platform/walley", tag: "2.4.0", digest: "sha256:0c9e1f" },
   report: null,
 };
@@ -62,7 +62,7 @@ describe("SyncJobsPage", () => {
   it("shows the trigger and the error row for a failed job", async () => {
     stub();
     renderAt(<SyncJobsPage />);
-    expect(await screen.findByText(t("syncJobs.trigger.poll"))).toBeInTheDocument();
+    expect(await screen.findByText(t("syncJobs.trigger.discovery"))).toBeInTheDocument();
     expect(screen.getByText("GitHub rejected the SARIF upload (403).")).toBeInTheDocument();
     expect(screen.getByText(t("syncJobs.attempts", { attempts: 5, max: 8 }))).toBeInTheDocument();
   });
@@ -77,34 +77,21 @@ describe("SyncJobsPage", () => {
       synced_at: "2026-11-05T12:00:00Z",
     };
     stub([
-      { ...failed, id: "s1", status: "done", last_error: null, trigger: "schedule", report: { ...report, new_cve_ids: ["CVE-2026-0003", "CVE-2026-0004"] } },
-      { ...failed, id: "s2", status: "done", last_error: null, trigger: "schedule", report: { ...report, new_cve_ids: [] } },
-      { ...failed, id: "s3", status: "done", last_error: null, trigger: "webhook", report: { ...report, new_cve_ids: null } },
+      { ...failed, id: "s1", status: "done", last_error: null, trigger: "db_update", report: { ...report, new_cve_ids: ["CVE-2026-0003", "CVE-2026-0004"] } },
+      { ...failed, id: "s2", status: "done", last_error: null, trigger: "db_update", report: { ...report, new_cve_ids: [] } },
+      { ...failed, id: "s3", status: "done", last_error: null, trigger: "tag_moved", report: { ...report, new_cve_ids: null } },
     ]);
     renderAt(<SyncJobsPage />);
     const table = await screen.findByRole("table");
-    expect(await within(table).findAllByText(t("syncJobs.trigger.schedule"))).toHaveLength(2);
+    expect(await within(table).findAllByText(t("syncJobs.trigger.dbUpdate"))).toHaveLength(2);
     expect(within(table).getByText(t("syncJobs.newVulns", { ids: "CVE-2026-0003, CVE-2026-0004" }))).toBeInTheDocument();
     expect(within(table).getAllByText(t("syncJobs.noNewVulns"))).toHaveLength(1);
-  });
-
-  it("a refused scheduled scan shows the fixed catalog message (#191)", async () => {
-    stub([
-      {
-        ...failed,
-        trigger: "schedule",
-        last_error: "Harbor refused to start the scan; grant the robot account the Scan permission",
-        image: { repo_full_name: "platform/billing-worker", tag: null, digest: null },
-      },
-    ]);
-    renderAt(<SyncJobsPage />);
-    expect(await screen.findByText(t("sync.note.scanForbidden"))).toBeInTheDocument();
   });
 
   it("a failed job still shows its error", async () => {
     stub([failed]);
     renderAt(<SyncJobsPage />);
-    expect(await screen.findByText(t("syncJobs.trigger.poll"))).toBeInTheDocument();
+    expect(await screen.findByText(t("syncJobs.trigger.discovery"))).toBeInTheDocument();
     expect(screen.getByText("GitHub rejected the SARIF upload (403).")).toBeInTheDocument();
     expect(within(screen.getByRole("table")).getByText(t("pill.failed"))).toBeInTheDocument();
   });
@@ -112,7 +99,7 @@ describe("SyncJobsPage", () => {
   it("a queued job with attempts 6 shows its retry state and its error", async () => {
     stub([retrying]);
     renderAt(<SyncJobsPage />);
-    expect(await screen.findByText(t("syncJobs.trigger.webhook"))).toBeInTheDocument();
+    expect(await screen.findByText(t("syncJobs.trigger.firstPull"))).toBeInTheDocument();
     const table = screen.getByRole("table");
     expect(within(table).getByText(t("syncJobs.retrying", { attempts: 6, max: 8 }))).toBeInTheDocument();
     expect(within(table).queryByText(t("pill.queued"))).not.toBeInTheDocument();
@@ -128,7 +115,7 @@ describe("SyncJobsPage", () => {
     expect(Array.from(full)).toHaveLength(400);
     stub([{ ...retrying, next_attempt_at: null, last_error: full }]);
     renderAt(<SyncJobsPage />);
-    expect(await screen.findByText(t("syncJobs.trigger.webhook"))).toBeInTheDocument();
+    expect(await screen.findByText(t("syncJobs.trigger.firstPull"))).toBeInTheDocument();
     const table = screen.getByRole("table");
     expect(within(table).getByText(`${kept}…`)).toBeInTheDocument();
     expect(within(table).queryByText(full)).not.toBeInTheDocument();
@@ -137,7 +124,7 @@ describe("SyncJobsPage", () => {
   it("a queued job with attempts 0 shows Queued and no error", async () => {
     stub([neverRun]);
     renderAt(<SyncJobsPage />);
-    expect(await screen.findByText(t("syncJobs.trigger.webhook"))).toBeInTheDocument();
+    expect(await screen.findByText(t("syncJobs.trigger.firstPull"))).toBeInTheDocument();
     const table = screen.getByRole("table");
     expect(within(table).getByText(t("pill.queued"))).toBeInTheDocument();
     expect(within(table).queryByText(t("syncJobs.retrying", { attempts: 0, max: 8 }))).not.toBeInTheDocument();
@@ -147,7 +134,7 @@ describe("SyncJobsPage", () => {
   it("status filter is kept in the URL", async () => {
     const fetchMock = stub();
     const { router } = renderAt(<SyncJobsPage />);
-    await screen.findByText(t("syncJobs.trigger.poll"));
+    await screen.findByText(t("syncJobs.trigger.discovery"));
     await userEvent.click(screen.getByRole("button", { name: t("pill.failed") }));
     expect(router.state.location.search).toContain("status=failed");
     await vi.waitFor(() =>

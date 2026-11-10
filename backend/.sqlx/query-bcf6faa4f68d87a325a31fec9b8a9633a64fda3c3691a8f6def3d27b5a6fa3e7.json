@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT user_id AS \"user_id!\", github_cred_id AS \"github_cred_id!\",\n                  github_owner AS \"github_owner!\", github_repo AS \"github_repo!\"\n           FROM image_sources\n           ORDER BY github_owner, github_repo, github_cred_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "github_cred_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "github_cred_id"
+          }
+        }
+      },
+      {
+        "name": "github_owner!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "github_owner"
+          }
+        }
+      },
+      {
+        "name": "github_repo!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "github_repo"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bcf6faa4f68d87a325a31fec9b8a9633a64fda3c3691a8f6def3d27b5a6fa3e7"
+}

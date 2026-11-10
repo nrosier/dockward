@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT built_at FROM scanner_databases WHERE scanner = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "built_at",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "scanner_databases",
+            "name": "built_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "7a833a2e48b10206f730a3f86683a3087ee19a1957e57ab86d13c0573c967e97"
+}

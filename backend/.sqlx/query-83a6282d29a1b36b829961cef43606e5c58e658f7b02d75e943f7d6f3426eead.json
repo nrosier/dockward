@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE image_sources SET hub_id = ?, repository = ?, tag_value = ?, github_cred_id = ?,\n                github_owner = ?, github_repo = ?, default_branch = ?, auto_create_issues = ?,\n                min_issue_severity = ?\n         WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "83a6282d29a1b36b829961cef43606e5c58e658f7b02d75e943f7d6f3426eead"
+}

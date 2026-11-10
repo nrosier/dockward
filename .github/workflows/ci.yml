@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, spinoff-local-scan]
   workflow_dispatch:
 
 # Deny all token permissions by default. Each job grants only what it needs.

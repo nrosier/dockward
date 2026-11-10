@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT o.image_id AS \"image_id!\" FROM tag_observations o\n           WHERE o.source_id = ?\n             AND EXISTS (\n                 SELECT 1 FROM image_platforms p\n                 JOIN scan_runs r ON r.image_platform_id = p.id AND r.status = 'done'\n                 WHERE p.image_id = o.image_id)\n           ORDER BY o.first_seen_at DESC, o.rowid DESC\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "image_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tag_observations",
+            "name": "image_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a2d2d681bcb744a3f26ff39739080c9eac4ff1e92c7db1feb63247973a862c93"
+}

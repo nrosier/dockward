@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT o.tag AS \"tag!\"\n           FROM tag_observations o JOIN image_sources s ON s.id = o.source_id\n           WHERE o.image_id = ? AND (? IS NULL OR s.user_id = ?) AND (? IS NULL OR s.id = ?)\n           ORDER BY o.tag",
+  "describe": {
+    "columns": [
+      {
+        "name": "tag!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tag_observations",
+            "name": "tag"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7bdca0ef6a6a81971051a0cc0c83da4f8e9844efc02e71964b15b22fb8eaf16e"
+}

@@ -141,12 +141,13 @@ pub async fn role_and_provider(
     Ok(row.map(|r| (r.role, r.auth_provider, r.username)))
 }
 
-/// Deletes a user's mappings. Step one of the user-deletion order in `specs/database.md`.
+/// Deletes a user's image sources. Step one of the user-deletion order. Their tag
+/// observations, findings, acceptances and source credentials cascade from the source row.
 pub async fn delete_mappings(
     conn: &mut sqlx::SqliteConnection,
     user_id: &str,
 ) -> Result<(), AppError> {
-    sqlx::query!("DELETE FROM repo_mappings WHERE user_id = ?", user_id)
+    sqlx::query!("DELETE FROM image_sources WHERE user_id = ?", user_id)
         .execute(&mut *conn)
         .await
         .map(|_| ())

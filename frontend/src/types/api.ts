@@ -13,9 +13,7 @@ export type IssueSeverity = "CRITICAL" | "HIGH";
 export interface Mapping {
   id: string;
   user_id: string;
-  harbor_cred_id: string;
   github_cred_id: string;
-  harbor_base_url: string;
   harbor_project: string;
   harbor_repository: string;
   github_owner: string;
@@ -24,15 +22,7 @@ export interface Mapping {
   auto_create_issues: boolean;
   min_issue_severity: IssueSeverity;
   created_at: string | null;
-  // Scheduled Harbor scan (#191). Off by default. Times are UTC.
-  scan_schedule: ScanSchedule;
-  // UTC time, HH:MM.
-  scan_time: string;
-  // ISO weekday of a weekly run, 1 (Monday) to 7 (Sunday).
-  scan_weekday: number;
 }
-
-export type ScanSchedule = "off" | "daily" | "weekly";
 
 // Open CVEs per severity, and their sum (#129).
 export interface OpenCves {
@@ -58,7 +48,7 @@ export interface MappingListItem extends Mapping {
 
 export interface Credential {
   id: string;
-  service_type: "harbor" | "github";
+  service_type: "github";
   label: string;
   base_url: string | null;
   username: string | null;
@@ -138,7 +128,8 @@ export interface SyncJob {
   last_error: string | null;
   created_at: string | null;
   updated_at: string | null;
-  trigger: "webhook" | "poll" | "schedule";
+  // The trigger the job was queued by, from its payload. Null when the payload has none.
+  trigger: string | null;
   image: {
     repo_full_name: string | null;
     tag: string | null;
@@ -156,60 +147,11 @@ export interface DashboardSummary {
   recent_syncs: SyncJob[];
 }
 
-// Scanner choice and tag scans (#224, specs/api.md "Scanners and tag scans").
-export interface Scanner {
-  uuid: string;
-  name: string;
-  vendor: string | null;
-  version: string | null;
-  is_current: boolean;
-}
-
-export interface ScannerList {
-  scanner_choice: "available" | "single" | "unavailable";
-  scanners: Scanner[];
-  switch: { scanner_name: string; state: "switched" | "restore_pending" } | null;
-}
-
-export type TagScanState = "queued" | "running" | "waiting" | "ok" | "failed" | "none";
-
 // One item of GET /mappings/:id/tags: the CVE view's tag set.
 export interface MappingTag {
   image_tag: string;
   last_scan_at: string;
   open_cves: number;
-}
-
-export interface TagScan {
-  scanner_uuid: string;
-  scanner_name: string;
-  // True when the report's scanner is not linked to a Harbor registration and
-  // scanner_name is the report's own name (#277).
-  unlinked: boolean;
-  state: TagScanState;
-  // A `sync.note.*` catalog key, or null.
-  note: string | null;
-  job_id: string | null;
-  updated_at: string | null;
-}
-
-export interface MappingCreated {
-  mapping: Mapping;
-  webhook_url: string;
-  auth_secret: string;
-  // True when HarborGate stores a project webhook for the mapping's Harbor project (#179).
-  project_webhook_exists: boolean;
-}
-
-// The `PUT /mappings/:id` response: the mapping plus the project webhook check (#179).
-export interface MappingSaved extends Mapping {
-  project_webhook_exists: boolean;
-}
-
-export interface ProjectWebhookCreated {
-  id: string;
-  webhook_url: string;
-  auth_secret: string;
 }
 
 export interface CheckResult {
@@ -256,17 +198,8 @@ export interface HealthCheck {
   detail: string;
 }
 
-export interface HealthRobot {
-  credential_id: string;
-  label: string;
-  expires_at: string | null;
-  days_left: number | null;
-}
-
 export interface HealthReport {
-  harbor: HealthCheck[];
   github: HealthCheck[];
-  robot_accounts: HealthRobot[];
   request: { client_ip: string; source: "peer" | "x-forwarded-for" };
 }
 
@@ -293,50 +226,11 @@ export interface AlertChannel {
   updated_at: string;
 }
 
-export interface ProjectWebhook {
-  id: string;
-  harbor_base_url: string;
-  harbor_project: string;
-  owner: string;
-  created_at: string | null;
-  rotated_at: string | null;
-  mappings: string[];
-}
-
-export interface ProjectWebhookTokenRotated {
-  webhook_url: string;
-  mappings: string[];
-}
-
-export interface ProjectWebhookSecretRotated {
-  auth_secret: string;
-  mappings: string[];
-}
-
-export interface UnmatchedRepository {
-  repository: string;
-  count: number;
-  last_seen_at: string;
-}
-
 // Mapping pickers (specs/api.md, "Pickers"). Names only: no token, no URL
 // with credentials.
 export interface PickerList<T> extends Page<T> {
   // True when the upstream list was cut at the 1,000-item fetch cap.
   truncated: boolean;
-}
-
-export interface HarborProject {
-  name: string;
-}
-
-export interface HarborRepository {
-  project: string;
-  repository: string;
-  // `<project>/<repository>`.
-  full_name: string;
-  // True when a mapping on the same Harbor instance already uses it (#189).
-  mapped: boolean;
 }
 
 export interface GitHubRepository {
@@ -346,39 +240,3 @@ export interface GitHubRepository {
   private: boolean;
   archived: boolean;
 }
-
-export type HiddenSource = "harbor" | "github";
-
-export interface HiddenItem {
-  id: string;
-  source: HiddenSource;
-  full_name: string;
-  // Null for GitHub items.
-  harbor_base_url: string | null;
-  created_at: string;
-}
-
-export interface HideRequest {
-  source: HiddenSource;
-  full_name: string;
-  // Required for `harbor`, rejected for `github`.
-  harbor_base_url?: string;
-}
-
-export interface SourceSuggestion {
-  github_owner: string;
-  github_repo: string;
-  image_tag: string;
-  // Null when no GitHub credential was sent.
-  github_listed: boolean | null;
-}
-
-export type SuggestionReason = "no_tagged_artifact" | "no_label" | "not_github" | "invalid_label";
-
-export interface SourceSuggestionResponse {
-  suggestion: SourceSuggestion | null;
-  reason: SuggestionReason | null;
-}
-
-// The `detail` codes of the picker 422 answers (error envelope).
-export type PickerErrorDetail = "harbor_identity" | "robot_scope" | "github_token" | "wrong_credential_type";

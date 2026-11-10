@@ -170,30 +170,30 @@ describe("CvesPage", () => {
     await vi.waitFor(() => expect(lastQuery(fetchMock).get("q")).toBeNull());
   });
 
-  it("narrows the Repository options to the chosen project", async () => {
+  it("narrows the Repository options to the chosen namespace", async () => {
     stub();
-    const { router } = renderAt(<CvesPage />, "/cves?repository=etl");
+    const { router } = renderAt(<CvesPage />, "/cves?repository=data/etl");
     await screen.findByText("CVE-2026-0002");
     const repository = screen.getByRole("combobox", { name: t("cves.filter.repository") });
     await userEvent.click(repository);
     expect(within(await screen.findByRole("listbox", { name: t("cves.filter.repository") })).getAllByRole("option").map((o) => o.textContent)).toEqual([
       t("cves.filter.allRepositories"),
-      "api",
-      "etl",
-      "web",
+      "data/etl",
+      "platform/api",
+      "platform/web",
     ]);
     await userEvent.keyboard("{Escape}");
-    // Choosing the project "platform" narrows the list and clears "etl", which is not in it.
-    const project = screen.getByRole("combobox", { name: t("cves.filter.project") });
-    await userEvent.click(project);
+    // Choosing the namespace "platform" narrows the list and clears "data/etl", which is not in it.
+    const namespace = screen.getByRole("combobox", { name: t("cves.filter.namespace") });
+    await userEvent.click(namespace);
     await userEvent.click(await screen.findByRole("option", { name: "platform" }));
-    expect(new URLSearchParams(router.state.location.search).get("project")).toBe("platform");
+    expect(new URLSearchParams(router.state.location.search).get("namespace")).toBe("platform");
     expect(new URLSearchParams(router.state.location.search).get("repository")).toBeNull();
     await userEvent.click(screen.getByRole("combobox", { name: t("cves.filter.repository") }));
     expect(within(await screen.findByRole("listbox")).getAllByRole("option").map((o) => o.textContent)).toEqual([
       t("cves.filter.allRepositories"),
-      "api",
-      "web",
+      "platform/api",
+      "platform/web",
     ]);
   });
 

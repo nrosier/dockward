@@ -113,11 +113,7 @@ export function CredentialsCard() {
                 <tr key={credential.id} className={ROW}>
                   <td className={TD}>{credential.label}</td>
                   <td className={TD}>
-                    <Tag>
-                      {credential.service_type === "harbor"
-                        ? t("credentials.service.harbor")
-                        : t("credentials.service.github")}
-                    </Tag>
+                    <Tag>{t("credentials.service.github")}</Tag>
                   </td>
                   <td className={`${TD} font-mono text-xs`}>{credential.base_url ?? ""}</td>
                   <td className={TD}>

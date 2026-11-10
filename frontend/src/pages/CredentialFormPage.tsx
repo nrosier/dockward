@@ -3,7 +3,7 @@ import { useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { ChecksList } from "../components/account/ChecksList";
 import { CREDENTIALS_KEY } from "../components/account/CredentialsCard";
-import { FormError, INPUT, messageOf, Segmented, statusOf } from "../components/admin/parts";
+import { FormError, INPUT, messageOf, statusOf } from "../components/admin/parts";
 import { Button, buttonClass } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Field } from "../components/ui/Field";
@@ -12,8 +12,6 @@ import { LoadingMessage } from "../components/ui/StatusMessage";
 import { t } from "../i18n";
 import { api } from "../lib/api";
 import type { Credential, Page, TestResult } from "../types/api";
-
-type Service = "harbor" | "github";
 
 // "2027-11-03" becomes the end of that day in UTC, as a unix timestamp.
 function endOfDayUnix(date: string): number | null {
@@ -45,10 +43,7 @@ function CredentialForm({ id, loaded }: { id: string | undefined; loaded: Creden
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
-  const [service, setService] = useState<Service>(loaded?.service_type ?? "harbor");
   const [label, setLabel] = useState(loaded?.label ?? "");
-  const [baseUrl, setBaseUrl] = useState(loaded?.base_url ?? "");
-  const [username, setUsername] = useState(loaded?.username ?? "");
   const [token, setToken] = useState("");
   const [expires, setExpires] = useState(loaded?.expires_at ? loaded.expires_at.slice(0, 10) : "");
   const [savedId, setSavedId] = useState<string | null>(id ?? null);
@@ -71,12 +66,6 @@ function CredentialForm({ id, loaded }: { id: string | undefined; loaded: Creden
   const save = useMutation({
     mutationFn: async () => {
       const body: Record<string, unknown> = { label: label.trim() };
-      if (service === "harbor") {
-        if (loaded === null || baseUrl.trim() !== loaded.base_url) {
-          body.base_url = baseUrl.trim();
-        }
-        body.username = username.trim();
-      }
       if (token !== "") {
         body.token = token;
       }
@@ -84,7 +73,7 @@ function CredentialForm({ id, loaded }: { id: string | undefined; loaded: Creden
         body.expires_at = endOfDayUnix(expires);
       }
       if (savedId === null) {
-        body.service_type = service;
+        body.service_type = "github";
         return api<Credential>("POST", "/credentials", { token: "", ...body });
       }
       return api<Credential>("PUT", `/credentials/${savedId}`, body);
@@ -104,12 +93,7 @@ function CredentialForm({ id, loaded }: { id: string | undefined; loaded: Creden
     },
   });
 
-  const isGithub = service === "github";
-  const canSubmit =
-    label.trim() !== "" &&
-    (editing || token !== "") &&
-    (isGithub || (baseUrl.trim() !== "" && username.trim() !== "")) &&
-    !save.isPending;
+  const canSubmit = label.trim() !== "" && (editing || token !== "") && !save.isPending;
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -131,48 +115,12 @@ function CredentialForm({ id, loaded }: { id: string | undefined; loaded: Creden
       </div>
       <form onSubmit={submit} className="flex flex-col gap-5">
         <Card className="flex flex-col gap-4 p-5">
-          <div className="flex flex-col gap-1.5">
-            <span id="cred-service" className="text-[13px] font-semibold">
-              {t("credentials.form.service")}
-            </span>
-            <Segmented
-              labelId="cred-service"
-              value={service}
-              disabled={editing}
-              onChange={(value) => setService(value === "github" ? "github" : "harbor")}
-              options={[
-                { value: "harbor", label: t("credentials.service.harbor") },
-                { value: "github", label: t("credentials.service.github") },
-              ]}
-            />
-          </div>
           <Field id="cred-label" label={t("credentials.form.label")} help={t("credentials.form.labelHelp")}>
             <input id="cred-label" className={INPUT} value={label} onChange={(event) => setLabel(event.target.value)} />
           </Field>
-          {isGithub ? null : (
-            <>
-              <Field id="cred-url" label={t("credentials.form.baseUrl")} help={t("credentials.form.baseUrlHelp")}>
-                <input
-                  id="cred-url"
-                  className={INPUT}
-                  value={baseUrl}
-                  onChange={(event) => setBaseUrl(event.target.value)}
-                />
-              </Field>
-              <Field id="cred-user" label={t("credentials.form.robot")}>
-                <input
-                  id="cred-user"
-                  className={INPUT}
-                  autoComplete="off"
-                  value={username}
-                  onChange={(event) => setUsername(event.target.value)}
-                />
-              </Field>
-            </>
-          )}
           <Field
             id="cred-token"
-            label={isGithub ? t("credentials.form.githubToken") : t("credentials.form.robotSecret")}
+            label={t("credentials.form.githubToken")}
             help={t("credentials.form.tokenHelp")}
           >
             <input

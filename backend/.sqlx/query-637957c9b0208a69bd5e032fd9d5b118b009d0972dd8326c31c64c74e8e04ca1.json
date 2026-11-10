@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT (EXISTS (SELECT 1 FROM image_platforms\n                           WHERE image_id = ? AND state IN ('pulling', 'evicting'))\n                   OR EXISTS (SELECT 1 FROM scan_runs r JOIN image_platforms p\n                                  ON p.id = r.image_platform_id\n                              WHERE p.image_id = ? AND r.status = 'running')) AS \"busy!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "busy!: bool",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "637957c9b0208a69bd5e032fd9d5b118b009d0972dd8326c31c64c74e8e04ca1"
+}

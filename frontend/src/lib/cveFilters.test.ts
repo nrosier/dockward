@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseFilters, toApiQuery, toUrlParams } from "./cveFilters";
+import { namespaceOf, parseFilters, toApiQuery, toUrlParams } from "./cveFilters";
 
 describe("cveFilters", () => {
   it("defaults to every severity and the Open status, with nothing in the URL", () => {
@@ -12,7 +12,7 @@ describe("cveFilters", () => {
 
   it("round-trips every control through the URL", () => {
     const params = new URLSearchParams(
-      "q=glibc&severity=LOW,CRITICAL&status=fixed,accepted&has_issue=false&fix=none,available&project=platform&repository=api&tag=1.42.0&mapping=m1",
+      "q=glibc&severity=LOW,CRITICAL&status=fixed,accepted&has_issue=false&fix=none,available&namespace=platform&repository=platform/api&tag=1.42.0&mapping=m1",
     );
     const state = parseFilters(params);
     expect(state.severities).toEqual(["CRITICAL", "LOW"]);
@@ -22,8 +22,8 @@ describe("cveFilters", () => {
       status: "fixed,accepted",
       has_issue: "false",
       fix: "available,none",
-      project: "platform",
-      repository: "api",
+      namespace: "platform",
+      repository: "platform/api",
       tag: "1.42.0",
       mapping: "m1",
     });
@@ -39,10 +39,25 @@ describe("cveFilters", () => {
     expect(parseFilters(new URLSearchParams("accepted=true")).statuses).toEqual(["accepted"]);
     expect(parseFilters(new URLSearchParams("accepted=false&status=open")).statuses).toEqual(["open"]);
     expect(parseFilters(new URLSearchParams("status=all")).statuses).toEqual(["open", "fixed", "accepted"]);
-    const old = parseFilters(new URLSearchParams("harbor_project=platform&harbor_repository=api&mapping_id=m1"));
-    expect([old.project, old.repository, old.mapping]).toEqual(["platform", "api", "m1"]);
+    const old = parseFilters(new URLSearchParams("mapping_id=m1"));
+    expect(old.mapping).toEqual("m1");
     // The new name wins when both are present.
-    const both = parseFilters(new URLSearchParams("project=new&harbor_project=old&mapping=m2&mapping_id=m1"));
-    expect([both.project, both.mapping]).toEqual(["new", "m2"]);
+    const both = parseFilters(new URLSearchParams("mapping=m2&mapping_id=m1"));
+    expect(both.mapping).toEqual("m2");
+  });
+
+  it("does not read the removed Harbor parameters", () => {
+    const state = parseFilters(new URLSearchParams("project=p&harbor_project=p&harbor_repository=r"));
+    expect(state.namespace).toBe("");
+    expect(state.repository).toBe("");
+    expect(toUrlParams(state)).toEqual({});
+  });
+});
+
+describe("namespaceOf", () => {
+  it("is the first path segment of the repository", () => {
+    expect(namespaceOf("nrosier/walley")).toBe("nrosier");
+    expect(namespaceOf("nrosier/team/app")).toBe("nrosier");
+    expect(namespaceOf("alpine")).toBe("alpine");
   });
 });

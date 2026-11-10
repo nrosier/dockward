@@ -1,0 +1,177 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.id AS \"id!\", s.user_id AS \"user_id!\", s.hub_id AS \"hub_id!\", h.host AS \"hub_host!\",\n                  s.repository AS \"repository!\", s.tag_value AS \"tag_value!\",\n                  s.github_cred_id AS \"github_cred_id!\", s.github_owner AS \"github_owner!\",\n                  s.github_repo AS \"github_repo!\", s.default_branch AS \"default_branch!\",\n                  s.auto_create_issues AS \"auto_create_issues!: bool\",\n                  s.min_issue_severity AS \"min_issue_severity!\", s.last_discovery_at,\n                  EXISTS (SELECT 1 FROM source_credentials c WHERE c.source_id = s.id)\n                      AS \"has_credential!: bool\"\n           FROM image_sources s JOIN hubs h ON h.id = s.hub_id WHERE s.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "user_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "hub_id!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "hub_id"
+          }
+        }
+      },
+      {
+        "name": "hub_host!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "host"
+          }
+        }
+      },
+      {
+        "name": "repository!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "repository"
+          }
+        }
+      },
+      {
+        "name": "tag_value!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "tag_value"
+          }
+        }
+      },
+      {
+        "name": "github_cred_id!",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "github_cred_id"
+          }
+        }
+      },
+      {
+        "name": "github_owner!",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "github_owner"
+          }
+        }
+      },
+      {
+        "name": "github_repo!",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "github_repo"
+          }
+        }
+      },
+      {
+        "name": "default_branch!",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "default_branch"
+          }
+        }
+      },
+      {
+        "name": "auto_create_issues!: bool",
+        "ordinal": 10,
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "auto_create_issues"
+          }
+        }
+      },
+      {
+        "name": "min_issue_severity!",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "min_issue_severity"
+          }
+        }
+      },
+      {
+        "name": "last_discovery_at",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "last_discovery_at"
+          }
+        }
+      },
+      {
+        "name": "has_credential!: bool",
+        "ordinal": 13,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "9ab49cc386d696e5594570b59ff57b662b2bc143740e4edc3880358dc5d05e9d"
+}

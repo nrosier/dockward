@@ -299,27 +299,27 @@ mod tests {
             login_limiter: RateLimiter::new(10, Duration::from_secs(60)),
             credentials_key: Arc::new(crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
-            allow_private_harbor: false,
             allow_private_alerts: false,
             jwks: Arc::new(JwksCache::new()),
-            webhook_token_limiter: crate::api::webhooks::new_token_limiter(),
-            webhook_failure_limiter: crate::api::webhooks::new_failure_limiter(),
             backup_key: Arc::new(crypto::backup_key(&root).unwrap()),
             data_dir: dir.clone(),
             backup_dir: dir.join("backups"),
             issues_client: std::sync::Arc::new(
                 crate::services::github_issues::GithubIssues::new(Default::default()).unwrap(),
             ),
-            harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
             app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
                 crate::services::app_log::REVERT_AFTER,
             )),
-            harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
-            pull_limiter: crate::api::mappings::new_pull_limiter(),
-            scanner_launch: Default::default(),
-            pickers: crate::services::pickers::PickerState::outbound(false, Default::default())
-                .unwrap(),
             github: Default::default(),
+            discovery: crate::services::discovery::Discovery::for_test(),
+            scan_limiter: crate::api::hardening::RateLimiter::new(
+                1,
+                std::time::Duration::from_secs(300),
+            ),
+            registry_limiter: crate::api::hardening::RateLimiter::new(
+                60,
+                std::time::Duration::from_secs(60),
+            ),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }

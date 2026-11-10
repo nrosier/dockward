@@ -1,8 +1,6 @@
-//! Credential test probes. The Harbor robot test calls `GET /api/v2.0/users/current`:
-//! `412` means a working robot account, `401` a wrong, disabled, or expired robot, and
-//! `200` a human account (rejected). The GitHub probes check the repository and code
-//! scanning access. Sources: `specs/integrations.md` (Test button), `specs/api.md`
-//! (Credentials), `specs/security.md` (GitHub token scope).
+//! Credential test probes. The GitHub probes check the repository, code scanning and issues
+//! access. Sources: `specs/integrations.md` (Test button), `specs/api.md` (Credentials),
+//! `specs/security.md` (GitHub token scope).
 //!
 //! Every request goes through [`OutboundClient`], so the address check applies.
 
@@ -10,7 +8,7 @@ use reqwest::Url;
 
 use crate::error::AppError;
 use crate::services::github_url::GithubTarget;
-use crate::services::outbound::{self, OutboundClient, TargetClass};
+use crate::services::outbound::{self, OutboundClient};
 
 /// One check in the test response: `{"name","ok","detail","warning"?}`. `warning` is
 /// present only when a check passed with a caveat (`specs/api.md`, Credentials).
@@ -21,185 +19,6 @@ pub struct Check {
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<&'static str>,
-}
-
-/// The status a probe got back. The request itself is the only network effect.
-#[allow(async_fn_in_trait)]
-pub trait HarborProbe {
-    /// Sends the robot test and returns the HTTP status code.
-    async fn users_current(
-        &self,
-        base: &Url,
-        username: &str,
-        secret: &[u8],
-    ) -> Result<u16, AppError>;
-    /// Sends `GET /api/v2.0/projects/{project}/repositories/{repository}/artifacts?page_size=1`
-    /// and returns the HTTP status. Names are encoded, and a `/` in the repository is
-    /// encoded twice (`specs/integrations.md`, Harbor API).
-    async fn artifacts_status(
-        &self,
-        base: &Url,
-        username: &str,
-        secret: &[u8],
-        project: &str,
-        repository: &str,
-    ) -> Result<u16, AppError>;
-}
-
-/// Production probe: the guarded client, HTTP Basic with the robot credential.
-pub struct OutboundHarborProbe {
-    client: OutboundClient,
-}
-
-impl OutboundHarborProbe {
-    pub fn new(allow_private: bool) -> Result<Self, AppError> {
-        let client = outbound::client(TargetClass::Harbor, allow_private)
-            .map_err(|_| AppError::InternalError)?;
-        Ok(Self { client })
-    }
-}
-
-impl HarborProbe for OutboundHarborProbe {
-    async fn users_current(
-        &self,
-        base: &Url,
-        username: &str,
-        secret: &[u8],
-    ) -> Result<u16, AppError> {
-        let url = base
-            .join("api/v2.0/users/current")
-            .map_err(|_| AppError::InternalError)?;
-        self.send_get(&url, username, secret).await
-    }
-
-    async fn artifacts_status(
-        &self,
-        base: &Url,
-        username: &str,
-        secret: &[u8],
-        project: &str,
-        repository: &str,
-    ) -> Result<u16, AppError> {
-        let url = artifacts_url(base, project, repository)?;
-        self.send_get(&url, username, secret).await
-    }
-}
-
-impl OutboundHarborProbe {
-    async fn send_get(&self, url: &Url, username: &str, secret: &[u8]) -> Result<u16, AppError> {
-        let secret = std::str::from_utf8(secret).map_err(|_| AppError::InternalError)?;
-        let sent = self
-            .client
-            .get(url)
-            .map_err(|_| AppError::UpstreamUnreachable)?
-            .basic_auth(username, Some(secret))
-            .send()
-            .await;
-        let status = sent.as_ref().ok().map(|r| r.status().as_u16());
-        crate::services::app_log::log_outbound("GET", url, status);
-        let response = sent.map_err(|_| AppError::UpstreamUnreachable)?;
-        Ok(response.status().as_u16())
-    }
-}
-
-/// Checks a Harbor project or repository name against Harbor's naming rule. The name
-/// splits on `/`, and each component is lowercase alphanumerics separated by single
-/// `.`, `_`, or `-`. The whole name is 1 to 255 bytes. Anything else is refused before
-/// a request is made (`specs/integrations.md`, Harbor API).
-pub fn valid_harbor_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 255 {
-        return false;
-    }
-    name.split('/').all(valid_harbor_component)
-}
-
-/// One component of a Harbor name: `[a-z0-9]+([._-][a-z0-9]+)*`. An empty component is
-/// refused, so a leading, trailing, or doubled `/` fails.
-fn valid_harbor_component(component: &str) -> bool {
-    let bytes = component.as_bytes();
-    if bytes.is_empty() {
-        return false;
-    }
-    let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    let is_separator = |b: u8| b == b'.' || b == b'_' || b == b'-';
-    // The first and last byte are alphanumeric. Every separator sits between two of them.
-    if !is_alnum(bytes[0]) || !is_alnum(bytes[bytes.len() - 1]) {
-        return false;
-    }
-    let mut previous_separator = false;
-    for &byte in bytes {
-        if is_separator(byte) {
-            if previous_separator {
-                return false;
-            }
-            previous_separator = true;
-        } else if is_alnum(byte) {
-            previous_separator = false;
-        } else {
-            return false;
-        }
-    }
-    true
-}
-
-/// Builds the artifacts URL. The project is encoded as one segment. The repository is
-/// encoded per component, and the components are joined with `%252F`, which is the
-/// double encoding Harbor requires (`specs/integrations.md`).
-pub fn artifacts_url(base: &Url, project: &str, repository: &str) -> Result<Url, AppError> {
-    let path = format!(
-        "api/v2.0/projects/{}/repositories/{}/artifacts?page_size=1",
-        encode_segment(project),
-        encode_repository_path(repository)
-    );
-    base.join(&path).map_err(|_| {
-        AppError::ValidationFailed("the Harbor project or repository name is not valid.".to_owned())
-    })
-}
-
-/// Encodes a repository name for a URL path. Each `/`-separated component is encoded on
-/// its own, and the components are joined with `%252F`, so the name keeps its slashes
-/// through Harbor's double encoding.
-pub fn encode_repository_path(repository: &str) -> String {
-    repository
-        .split('/')
-        .map(encode_segment)
-        .collect::<Vec<_>>()
-        .join("%252F")
-}
-
-/// Percent-encodes one path segment. Unreserved characters are kept as they are.
-pub fn encode_segment(text: &str) -> String {
-    text.bytes()
-        .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (byte as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect()
-}
-
-/// Maps the `users/current` status to the test result. Only `412` passes.
-pub fn harbor_check(status: u16) -> Check {
-    let (ok, detail) = match status {
-        412 => (true, "the robot account credential works".to_owned()),
-        401 => (
-            false,
-            "the robot secret is wrong, or the robot is disabled or expired".to_owned(),
-        ),
-        200 => (
-            false,
-            "the credentials belong to a human account; only robot accounts are accepted"
-                .to_owned(),
-        ),
-        other => (false, format!("unexpected status {other} from Harbor")),
-    };
-    Check {
-        name: "harbor_robot",
-        ok,
-        detail,
-        warning: None,
-    }
 }
 
 /// What GitHub answered: the status, the error `message` (used to classify `403` and
@@ -540,74 +359,6 @@ fn missing_permission_detail(response: &GithubResponse) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn only_412_passes() {
-        assert!(harbor_check(412).ok);
-        assert!(!harbor_check(401).ok);
-        assert!(!harbor_check(200).ok);
-        assert!(!harbor_check(500).ok);
-    }
-
-    #[test]
-    fn repository_slash_is_encoded_twice() {
-        let base = Url::parse("https://harbor.example.com").unwrap();
-        let url = artifacts_url(&base, "proj", "team/app").unwrap();
-        assert!(
-            url.as_str()
-                .contains("/repositories/team%252Fapp/artifacts"),
-            "{url}"
-        );
-        assert!(url.as_str().ends_with("?page_size=1"));
-    }
-
-    #[test]
-    fn harbor_names_are_validated() {
-        // Valid: lowercase alphanumerics, with single `.`, `_`, or `-` between them.
-        assert!(valid_harbor_name("proj"));
-        assert!(valid_harbor_name("my-proj.v2_x"));
-        assert!(valid_harbor_name("team/app"));
-        assert!(valid_harbor_name("a/b/c"));
-        // Refused: empty, uppercase, a `/` in a project, separators at the edges or doubled.
-        assert!(!valid_harbor_name(""));
-        assert!(!valid_harbor_name("Proj"));
-        assert!(!valid_harbor_name("-proj"));
-        assert!(!valid_harbor_name("proj-"));
-        assert!(!valid_harbor_name("a..b"));
-        assert!(!valid_harbor_name("a--b"));
-        assert!(!valid_harbor_name("a//b"));
-        assert!(!valid_harbor_name("/a"));
-        assert!(!valid_harbor_name("a/"));
-        assert!(!valid_harbor_name("a?b"));
-        assert!(!valid_harbor_name("a#b"));
-        assert!(!valid_harbor_name("a%b"));
-        assert!(!valid_harbor_name("a b"));
-        // Length: 255 bytes is the most a name may have.
-        let at_limit = "a".repeat(255);
-        assert!(valid_harbor_name(&at_limit));
-        assert!(!valid_harbor_name(&format!("{at_limit}a")));
-    }
-
-    #[test]
-    fn repository_components_are_encoded() {
-        // Each component is encoded on its own, and the components join with %252F.
-        assert_eq!(encode_repository_path("team/app"), "team%252Fapp");
-        assert_eq!(encode_repository_path("a/b/c"), "a%252Fb%252Fc");
-        let base = Url::parse("https://harbor.example.com").unwrap();
-        let url = artifacts_url(&base, "proj", "team/app").unwrap();
-        assert!(
-            url.as_str()
-                .contains("/repositories/team%252Fapp/artifacts"),
-            "{url}"
-        );
-    }
-
-    #[test]
-    fn project_name_is_percent_encoded() {
-        let base = Url::parse("https://harbor.example.com").unwrap();
-        let url = artifacts_url(&base, "my proj", "app").unwrap();
-        assert!(url.as_str().contains("/projects/my%20proj/"), "{url}");
-    }
-
     fn github(status: u16, message: &str, needed: Option<&str>) -> GithubResponse {
         GithubResponse {
             status,
@@ -726,19 +477,12 @@ mod tests {
 
     #[test]
     fn warning_is_omitted_from_json_when_absent() {
-        let plain = harbor_check(412);
+        let plain = github_repo_check(&github(200, "", None));
         let json = serde_json::to_value(&plain).unwrap();
         assert!(json.get("warning").is_none(), "{json}");
         let warned = github_issues_check(&github(403, "", None));
         let json = serde_json::to_value(&warned).unwrap();
         assert_eq!(json["warning"], "issues_permission_missing");
-    }
-
-    #[test]
-    fn human_account_is_rejected_with_a_reason() {
-        let check = harbor_check(200);
-        assert_eq!(check.name, "harbor_robot");
-        assert!(check.detail.contains("human account"));
     }
 
     /// #184: every GitHub credential test request (first repository, repository, code
