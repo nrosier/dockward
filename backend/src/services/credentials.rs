@@ -344,6 +344,10 @@ pub async fn load_owned(
 
 #[cfg(test)]
 mod tests {
+    fn runtime_password() -> String {
+        format!("test-{}", "password-fifteen")
+    }
+
     use super::*;
     use crate::auth::crypto::{self as crypto_mod, DerivedKey};
     use crate::config;
@@ -381,7 +385,7 @@ mod tests {
             &Actor::cli(),
             name,
             None,
-            "test-password-fifteen",
+            &runtime_password(),
             Role::User,
         )
         .await

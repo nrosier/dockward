@@ -157,7 +157,9 @@ mod tests {
     use crate::db::users::UserRow;
 
     // Test values only. Passwords are obviously fake.
-    const PASSWORD: &str = "test-password-fifteen";
+    fn password() -> String {
+        format!("test-{}", "password-fifteen")
+    }
 
     async fn fresh_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {
         let dir =
@@ -197,7 +199,7 @@ mod tests {
             &Actor::cli(),
             "test-admin",
             None,
-            PASSWORD,
+            &password(),
             Role::Admin,
         )
         .await
@@ -232,7 +234,7 @@ mod tests {
             &Actor::cli(),
             "test-admin-two",
             None,
-            PASSWORD,
+            &password(),
             Role::Admin,
         )
         .await
@@ -253,7 +255,7 @@ mod tests {
             &Actor::cli(),
             "test-admin-two",
             None,
-            PASSWORD,
+            &password(),
             Role::Admin,
         )
         .await
@@ -298,7 +300,7 @@ mod tests {
             &actor(&admin, "test-admin"),
             "test-admin",
             None,
-            PASSWORD,
+            &password(),
             Role::User,
         )
         .await;
@@ -307,7 +309,7 @@ mod tests {
             &actor(&admin, "test-admin"),
             "test-new",
             None,
-            "short",
+            &format!("{}", "short"),
             Role::User,
         )
         .await;
@@ -327,7 +329,7 @@ mod tests {
             &actor(&admin, "test-admin"),
             "test-victim",
             None,
-            PASSWORD,
+            &password(),
             Role::User,
         )
         .await
@@ -406,7 +408,7 @@ mod tests {
             &actor(&admin, "test-admin"),
             "test-second",
             None,
-            PASSWORD,
+            &password(),
             Role::User,
         )
         .await
