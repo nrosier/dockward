@@ -179,11 +179,12 @@ fn a_timeout_kills_the_whole_process_group() {
     let dir = scratch_dir("timeout");
     let pidfile = dir.join("grandchild.pid");
     // The shell starts a long-running grandchild and records its pid, then waits. Only a group
-    // kill stops the grandchild too.
+    // kill stops the grandchild too. The pid is written to a temporary file and renamed, so the
+    // test never reads a half-written file.
     let script = write_script(
         &dir,
         "hang.sh",
-        "/bin/sleep 60 &\necho $! > \"$1\"\n/bin/sleep 60",
+        "/bin/sleep 60 &\necho $! > \"$1.tmp\"\n/bin/mv \"$1.tmp\" \"$1\"\n/bin/sleep 60",
     );
     let args: Vec<OsString> = vec![pidfile.as_os_str().to_owned()];
     let env: Vec<(OsString, OsString)> = Vec::new();
@@ -192,7 +193,10 @@ fn a_timeout_kills_the_whole_process_group() {
         program: &script,
         args: &args,
         env: &env,
-        limits: limits(400, 1_024),
+        // The timeout starts when the child is spawned, so it must be long enough that the shell
+        // has forked the grandchild and written its pid first, even on a loaded machine. A short
+        // timeout let the kill land before the grandchild existed, and the pid file was missing.
+        limits: limits(8_000, 1_024),
     }));
     assert!(
         started.elapsed() < Duration::from_secs(30),

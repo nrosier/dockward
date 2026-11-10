@@ -90,11 +90,21 @@ impl ScanEnv {
         }
     }
 
-    fn program(&self, scanner: Scanner) -> &Path {
+    pub(crate) fn program(&self, scanner: Scanner) -> &Path {
         match scanner {
             Scanner::Trivy => &self.trivy,
             Scanner::Grype => &self.grype,
         }
+    }
+
+    /// The runner that holds the one-scanner-process-at-a-time lock.
+    pub(crate) fn runner(&self) -> &ScannerRunner {
+        &self.runner
+    }
+
+    /// The root of the scanner caches.
+    pub(crate) fn cache_root(&self) -> &Path {
+        &self.cache_root
     }
 
     /// True when the scanner's database is in its cache. Without it a scan run fails before any
@@ -112,6 +122,23 @@ impl ScanEnv {
                 .unwrap_or(false),
         }
     }
+}
+
+/// The timeout and output cap of one scanner process, from the operator settings or the defaults
+/// (section 13). A database refresh uses the same limits as a scan.
+pub(crate) async fn process_limits<R: StoreRepository>(repo: &R) -> Result<Limits, AppError> {
+    let timeout = parse_positive_u64(
+        repo.setting(TIMEOUT_KEY).await?.as_deref(),
+        crate::services::scanner::process::DEFAULT_TIMEOUT.as_secs(),
+    );
+    let output_max = parse_positive_u64(
+        repo.setting(OUTPUT_MAX_KEY).await?.as_deref(),
+        crate::services::scanner::process::DEFAULT_OUTPUT_MAX_BYTES,
+    );
+    Ok(Limits {
+        timeout: Duration::from_secs(timeout),
+        output_max_bytes: output_max,
+    })
 }
 
 /// How a scan attempt stopped short of `done`.
@@ -288,20 +315,7 @@ async fn scan_and_store(
     if !env.database_present(scanner) {
         return Err(fail(ScannerFault::DatabaseNotAvailable).await);
     }
-    let timeout = parse_positive_u64(
-        repo.setting(TIMEOUT_KEY)
-            .await
-            .map_err(internal)?
-            .as_deref(),
-        crate::services::scanner::process::DEFAULT_TIMEOUT.as_secs(),
-    );
-    let output_max = parse_positive_u64(
-        repo.setting(OUTPUT_MAX_KEY)
-            .await
-            .map_err(internal)?
-            .as_deref(),
-        crate::services::scanner::process::DEFAULT_OUTPUT_MAX_BYTES,
-    );
+    let process_limits = process_limits(repo).await.map_err(internal)?;
     let args: Vec<OsString> = scan_args(scanner, layout);
     let vars = environment(&env.cache_root, scanner, true);
     let result = env
@@ -310,10 +324,7 @@ async fn scan_and_store(
             program: env.program(scanner),
             args: &args,
             env: &vars,
-            limits: Limits {
-                timeout: Duration::from_secs(timeout),
-                output_max_bytes: output_max,
-            },
+            limits: process_limits,
         })
         .await;
     let body = match result {

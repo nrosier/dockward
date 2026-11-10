@@ -3,8 +3,8 @@
 //!
 //! `discover` runs the discovery service. `pull` runs the pull job (`services::storage::job`),
 //! which queues the scans. `scan` runs the scan job and the convert step (`services::scan`).
-//! `publish` runs the publish job (`services::publish`). Every other kind (`db_update`) has no
-//! handler yet and fails once, permanently.
+//! `publish` runs the publish job (`services::publish`). `db_update` runs the daily database refresh
+//! (`services::scanner::db_update`). Any other kind fails once, permanently.
 
 use std::sync::Arc;
 
@@ -15,6 +15,7 @@ use crate::services::alerts::Notifier;
 use crate::services::discovery::Discovery;
 use crate::services::publish::Publisher;
 use crate::services::scan::{ScanEnv, run_scan};
+use crate::services::scanner::db_update::run_db_update;
 use crate::services::storage::StoreRoot;
 use crate::services::storage::job::run_pull;
 use crate::worker::{JobHandler, JobOutcome, MSG_UNHANDLED};
@@ -87,6 +88,7 @@ impl JobHandler for SpinoffJobs {
                 .await
             }
             Some("publish") => self.publisher.run(&job).await,
+            Some("db_update") => run_db_update(&self.pool, &self.scan, &job.payload).await,
             _ => JobOutcome::Permanent(MSG_UNHANDLED.to_owned()),
         }
     }
