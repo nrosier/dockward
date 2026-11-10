@@ -153,7 +153,7 @@ jobs:
           push: false
           load: true
           provenance: false
-          tags: harborgate:security-scan
+          tags: dockward:security-scan
           build-args: |
             REVISION=${{ github.sha }}
 
@@ -164,7 +164,7 @@ jobs:
         id: syft
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
-          image: docker:harborgate:security-scan
+          image: docker:dockward:security-scan
           format: cyclonedx-json
           output-file: ${{ runner.temp }}/security-scan/sbom.cyclonedx.json
           syft-version: ${{ env.SYFT_VERSION }}
@@ -201,7 +201,7 @@ jobs:
           TRIVY_IMAGE_SRC: docker
         with:
           scan-type: image
-          image-ref: harborgate:security-scan
+          image-ref: dockward:security-scan
           scanners: vuln,secret,misconfig
           format: sarif
           output: ${{ runner.temp }}/security-scan/trivy-results.sarif
@@ -254,7 +254,7 @@ jobs:
       - name: Pull published image
         id: pull
         env:
-          IMAGE: ghcr.io/nrosier/harborgate:latest
+          IMAGE: ghcr.io/nrosier/dockward:latest
         run: |
           mkdir -p "$RUNNER_TEMP/security-scan"
           if err=$(docker pull "$IMAGE" 2>&1 >/dev/null); then
@@ -278,7 +278,7 @@ jobs:
         if: ${{ steps.pull.outputs.pulled == 'true' }}
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
-          image: docker:ghcr.io/nrosier/harborgate:latest
+          image: docker:ghcr.io/nrosier/dockward:latest
           output-format: sarif
           output-file: ${{ runner.temp }}/security-scan/grype-results.sarif
           fail-build: "false"
@@ -293,7 +293,7 @@ jobs:
           TRIVY_IMAGE_SRC: docker
         with:
           scan-type: image
-          image-ref: ghcr.io/nrosier/harborgate:latest
+          image-ref: ghcr.io/nrosier/dockward:latest
           scanners: vuln,secret,misconfig
           format: sarif
           output: ${{ runner.temp }}/security-scan/trivy-results.sarif

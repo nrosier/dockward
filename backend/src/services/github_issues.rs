@@ -402,7 +402,7 @@ pub fn with_found_by(body: &str, line: &str) -> Option<String> {
         next[index] = line;
         return Some(next.join("\n"));
     }
-    // The table is the run of `|` lines that starts at the header row HarborGate wrote. A table-like
+    // The table is the run of `|` lines that starts at the header row Dockward wrote. A table-like
     // line in the description fence, further down, is never taken for it.
     let header = lines.iter().position(|l| *l == "| Field | Value |")?;
     let last_row = lines[header..]
@@ -1046,7 +1046,7 @@ mod tests {
         let two = with_found_by(&one, "Found by 2 scanners: `Grype`, `Trivy`").unwrap();
         assert_eq!(two.matches("Found by ").count(), 1);
         assert!(two.contains("Found by 2 scanners: `Grype`, `Trivy`"));
-        // A body without HarborGate's table is left alone.
+        // A body without Dockward's table is left alone.
         assert_eq!(with_found_by("just text", "Found by 1 scanner: `a`"), None);
     }
 }

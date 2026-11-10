@@ -676,8 +676,7 @@ mod tests {
 
     /// A migrated database. Test values only.
     async fn fresh_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {
-        let dir =
-            std::env::temp_dir().join(format!("harborgate-oidc-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dockward-oidc-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = crate::db::open(&dir).await.unwrap();

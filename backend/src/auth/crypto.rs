@@ -1,6 +1,6 @@
 //! Key derivation and AES-256-GCM encryption for stored secrets.
 //!
-//! The raw `HARBORGATE_ENCRYPTION_KEY` is input key material only. Every key used
+//! The raw `DOCKWARD_ENCRYPTION_KEY` is input key material only. Every key used
 //! to encrypt or sign is derived from it with HKDF-SHA256 under a distinct label.
 //! See `specs/security.md` (Encryption and keys, Derived keys).
 

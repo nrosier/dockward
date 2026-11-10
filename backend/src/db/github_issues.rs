@@ -80,7 +80,7 @@ pub async fn insert(conn: &mut SqliteConnection, row: &NewIssue<'_>) -> Result<b
 }
 
 /// Sets the row's status to `open` or `closed`. It clears `closed_manually`: the status is
-/// now HarborGate's own.
+/// now Dockward's own.
 pub async fn set_status(
     conn: &mut SqliteConnection,
     id: &str,
@@ -336,7 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn second_insert_for_the_same_cve_is_not_an_error() {
-        let dir = std::env::temp_dir().join(format!("harborgate-gi-dup-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dockward-gi-dup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = db::open(&dir).await.unwrap();

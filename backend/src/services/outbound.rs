@@ -234,7 +234,7 @@ impl OutboundClient {
 
 /// Builds the guarded client for one target class.
 ///
-/// `allow_private` is the class opt-out (`HARBORGATE_ALLOW_PRIVATE_*`). It is false by
+/// `allow_private` is the class opt-out (`DOCKWARD_ALLOW_PRIVATE_*`). It is false by
 /// default. GitHub ignores it and uses [`github_client`].
 pub fn client(class: TargetClass, allow_private: bool) -> Result<OutboundClient, OutboundError> {
     Ok(OutboundClient {

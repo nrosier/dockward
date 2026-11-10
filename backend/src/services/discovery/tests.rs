@@ -240,7 +240,7 @@ impl Drop for Env {
 /// `u1` with a GitHub credential `c1`.
 pub(crate) async fn env(name: &str) -> Env {
     let dir = std::env::temp_dir().join(format!(
-        "harborgate-discovery-{name}-{}-{}",
+        "dockward-discovery-{name}-{}-{}",
         std::process::id(),
         crate::worker::now_secs()
     ));

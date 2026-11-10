@@ -7,8 +7,44 @@ use std::path::{Path, PathBuf};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use zeroize::{Zeroize, Zeroizing};
 
+/// Prefix of every current environment variable.
+const ENV_PREFIX: &str = "DOCKWARD_";
+/// Prefix of the legacy names read as a fallback in release 0.2 only (decision 57).
+const LEGACY_ENV_PREFIX: &str = "HARBORGATE_";
+
+/// Reads a `DOCKWARD_*` variable from `lookup`. When it is unset, falls back to the matching
+/// `HARBORGATE_*` name and logs a deprecation warning that names both variables and never
+/// the value. `DOCKWARD_*` wins when both are set. Remove the fallback after release 0.2.
+pub fn lookup_with_fallback<F>(lookup: &F, name: &str) -> Result<String, VarError>
+where
+    F: Fn(&str) -> Result<String, VarError>,
+{
+    match lookup(name) {
+        Err(VarError::NotPresent) => {}
+        other => return other,
+    }
+    let Some(rest) = name.strip_prefix(ENV_PREFIX) else {
+        return Err(VarError::NotPresent);
+    };
+    let legacy = format!("{LEGACY_ENV_PREFIX}{rest}");
+    let found = lookup(&legacy);
+    if !matches!(found, Err(VarError::NotPresent)) {
+        tracing::warn!(
+            legacy = %legacy,
+            current = %name,
+            "{legacy} is deprecated and is read as a fallback in release 0.2 only; rename it to {name}"
+        );
+    }
+    found
+}
+
+/// Reads a variable from the process environment, with the `HARBORGATE_*` fallback.
+pub fn env_var(name: &str) -> Result<String, VarError> {
+    lookup_with_fallback(&|n: &str| env::var(n), name)
+}
+
 /// Name of the environment variable that holds the base64-encoded 32-byte key.
-pub const ENCRYPTION_KEY_VAR: &str = "HARBORGATE_ENCRYPTION_KEY";
+pub const ENCRYPTION_KEY_VAR: &str = "DOCKWARD_ENCRYPTION_KEY";
 
 /// Required length of the decoded encryption key in bytes (AES-256).
 pub const ENCRYPTION_KEY_LEN: usize = 32;
@@ -92,9 +128,9 @@ impl fmt::Debug for EncryptionKey {
     }
 }
 
-/// Reads `HARBORGATE_ENCRYPTION_KEY` and returns the decoded 32-byte key.
+/// Reads `DOCKWARD_ENCRYPTION_KEY` and returns the decoded 32-byte key.
 pub fn load_encryption_key() -> Result<EncryptionKey, ConfigError> {
-    load_encryption_key_with(|name| env::var(name))
+    load_encryption_key_with(env_var)
 }
 
 /// Same as [`load_encryption_key`], with the variable lookup injected for testing.
@@ -112,12 +148,12 @@ where
 
 /// Name of the environment variable that holds the key that wrote the current values.
 /// Read only by the offline `rotate-key` command.
-pub const OLD_ENCRYPTION_KEY_VAR: &str = "HARBORGATE_OLD_ENCRYPTION_KEY";
+pub const OLD_ENCRYPTION_KEY_VAR: &str = "DOCKWARD_OLD_ENCRYPTION_KEY";
 
-/// Reads `HARBORGATE_OLD_ENCRYPTION_KEY` the same way as the new key. Errors name this
+/// Reads `DOCKWARD_OLD_ENCRYPTION_KEY` the same way as the new key. Errors name this
 /// variable and never include the value.
 pub fn load_old_encryption_key() -> Result<EncryptionKey, ConfigError> {
-    load_old_encryption_key_with(|name| env::var(name))
+    load_old_encryption_key_with(env_var)
 }
 
 /// Same as [`load_old_encryption_key`], with the variable lookup injected for testing.
@@ -166,13 +202,13 @@ pub fn parse_encryption_key(encoded: &str) -> Result<EncryptionKey, ConfigError>
     Ok(EncryptionKey(bytes))
 }
 
-pub const PUBLIC_URL_VAR: &str = "HARBORGATE_PUBLIC_URL";
-pub const TRUSTED_PROXIES_VAR: &str = "HARBORGATE_TRUSTED_PROXIES";
-pub const DATA_DIR_VAR: &str = "HARBORGATE_DATA_DIR";
-pub const BACKUP_DIR_VAR: &str = "HARBORGATE_BACKUP_DIR";
-pub const ALLOW_PRIVATE_HARBOR_VAR: &str = "HARBORGATE_ALLOW_PRIVATE_HARBOR";
-pub const ALLOW_PRIVATE_OIDC_VAR: &str = "HARBORGATE_ALLOW_PRIVATE_OIDC";
-pub const ALLOW_PRIVATE_ALERTS_VAR: &str = "HARBORGATE_ALLOW_PRIVATE_ALERTS";
+pub const PUBLIC_URL_VAR: &str = "DOCKWARD_PUBLIC_URL";
+pub const TRUSTED_PROXIES_VAR: &str = "DOCKWARD_TRUSTED_PROXIES";
+pub const DATA_DIR_VAR: &str = "DOCKWARD_DATA_DIR";
+pub const BACKUP_DIR_VAR: &str = "DOCKWARD_BACKUP_DIR";
+pub const ALLOW_PRIVATE_HARBOR_VAR: &str = "DOCKWARD_ALLOW_PRIVATE_HARBOR";
+pub const ALLOW_PRIVATE_OIDC_VAR: &str = "DOCKWARD_ALLOW_PRIVATE_OIDC";
+pub const ALLOW_PRIVATE_ALERTS_VAR: &str = "DOCKWARD_ALLOW_PRIVATE_ALERTS";
 
 const DEFAULT_DATA_DIR: &str = "/data";
 const DEFAULT_BACKUP_DIR: &str = "/data/backups";
@@ -296,7 +332,7 @@ where
     }
 }
 
-/// Parses `HARBORGATE_TRUSTED_PROXIES`: a comma-separated CIDR list. Unset or blank means empty.
+/// Parses `DOCKWARD_TRUSTED_PROXIES`: a comma-separated CIDR list. Unset or blank means empty.
 fn parse_trusted_proxies(raw: Option<String>) -> Result<Vec<Cidr>, ConfigError> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
@@ -314,12 +350,12 @@ fn parse_trusted_proxies(raw: Option<String>) -> Result<Vec<Cidr>, ConfigError> 
         .collect()
 }
 
-/// Checks `HARBORGATE_PUBLIC_URL` and returns its canonical origin: no trailing slash,
+/// Checks `DOCKWARD_PUBLIC_URL` and returns its canonical origin: no trailing slash,
 /// a lowercase host, and the scheme's default port removed. Browsers send `Origin` in
 /// this form, so the login same-origin check compares against it (`specs/security.md`).
 /// Accepts `https://<host>[:port]`, and `http://localhost[:port]` for development only.
 fn validate_public_url(raw: &str) -> Result<String, &'static str> {
-    const SHAPE: &str = "must be an https:// origin such as https://harborgate.example.com, or http://localhost for development";
+    const SHAPE: &str = "must be an https:// origin such as https://dockward.example.com, or http://localhost for development";
     let origin = raw.strip_suffix('/').unwrap_or(raw);
     if let Some(rest) = origin.strip_prefix("https://") {
         return if valid_host_and_port(rest) {
@@ -418,7 +454,7 @@ pub fn prepare_data_dir(path: &Path) -> Result<(), ConfigError> {
             format!("could not be created ({:?})", err.kind()),
         )
     })?;
-    let probe = path.join(format!(".harborgate-startup-check-{}", std::process::id()));
+    let probe = path.join(format!(".dockward-startup-check-{}", std::process::id()));
     let not_writable =
         |err: std::io::Error| invalid(DATA_DIR_VAR, format!("is not writable ({:?})", err.kind()));
     OpenOptions::new()
@@ -469,7 +505,7 @@ pub fn prepare_backup_dir(path: &Path) -> Result<(), ConfigError> {
 /// Loads the settings from the process environment and prepares the data directory.
 /// Call this before binding the port.
 pub fn load_settings() -> Result<Settings, ConfigError> {
-    let settings = load_settings_with(|name| env::var(name))?;
+    let settings = load_settings_with(env_var)?;
     prepare_data_dir(&settings.data_dir)?;
     Ok(settings)
 }
@@ -570,7 +606,7 @@ mod tests {
         }
     }
 
-    const PUBLIC: (&str, &str) = (PUBLIC_URL_VAR, "https://harborgate.example.com");
+    const PUBLIC: (&str, &str) = (PUBLIC_URL_VAR, "https://dockward.example.com");
 
     fn settings_err(pairs: &[(&str, &str)]) -> String {
         match load_settings_with(env_of(pairs)) {
@@ -582,13 +618,13 @@ mod tests {
     #[test]
     fn public_url_is_required() {
         let msg = settings_err(&[]);
-        assert_eq!(msg, "HARBORGATE_PUBLIC_URL is required.");
+        assert_eq!(msg, "DOCKWARD_PUBLIC_URL is required.");
     }
 
     #[test]
     fn public_url_accepts_https_origin() {
         let settings = load_settings_with(env_of(&[PUBLIC])).expect_test_ok();
-        assert_eq!(settings.public_url, "https://harborgate.example.com");
+        assert_eq!(settings.public_url, "https://dockward.example.com");
     }
 
     #[test]
@@ -602,12 +638,12 @@ mod tests {
     fn public_url_host_is_lowercased_and_default_port_dropped() {
         let cases = [
             (
-                "https://Harborgate.Example.COM:443/",
-                "https://harborgate.example.com",
+                "https://Dockward.Example.COM:443/",
+                "https://dockward.example.com",
             ),
             (
-                "https://harborgate.example.com:8443",
-                "https://harborgate.example.com:8443",
+                "https://dockward.example.com:8443",
+                "https://dockward.example.com:8443",
             ),
             // 80 is not the default for https, so it stays.
             ("https://h.example.com:80", "https://h.example.com:80"),
@@ -631,13 +667,13 @@ mod tests {
     #[test]
     fn public_url_rejects_plain_http_for_other_hosts_and_loopback_ips() {
         for url in [
-            "http://harborgate.example.com",
+            "http://dockward.example.com",
             "http://127.0.0.1:8080",
             "http://[::1]:8080",
             "http://localhost.example.com",
         ] {
             let msg = settings_err(&[(PUBLIC_URL_VAR, url)]);
-            assert!(msg.starts_with("HARBORGATE_PUBLIC_URL is invalid"), "{msg}");
+            assert!(msg.starts_with("DOCKWARD_PUBLIC_URL is invalid"), "{msg}");
             assert!(!msg.contains(url), "error echoed the value: {msg}");
         }
     }
@@ -652,7 +688,7 @@ mod tests {
             "https://h:0",
         ] {
             let msg = settings_err(&[(PUBLIC_URL_VAR, url)]);
-            assert!(msg.starts_with("HARBORGATE_PUBLIC_URL is invalid"), "{msg}");
+            assert!(msg.starts_with("DOCKWARD_PUBLIC_URL is invalid"), "{msg}");
             assert!(!msg.contains(url), "error echoed the value: {msg}");
         }
     }
@@ -703,14 +739,14 @@ mod tests {
     #[test]
     fn empty_path_variables_are_rejected_by_name() {
         let msg = settings_err(&[PUBLIC, (DATA_DIR_VAR, "  ")]);
-        assert_eq!(msg, "HARBORGATE_DATA_DIR is invalid: must not be empty.");
+        assert_eq!(msg, "DOCKWARD_DATA_DIR is invalid: must not be empty.");
         let msg = settings_err(&[PUBLIC, (BACKUP_DIR_VAR, "")]);
-        assert_eq!(msg, "HARBORGATE_BACKUP_DIR is invalid: must not be empty.");
+        assert_eq!(msg, "DOCKWARD_BACKUP_DIR is invalid: must not be empty.");
     }
 
     fn temp_base(tag: &str) -> PathBuf {
         let base =
-            std::env::temp_dir().join(format!("harborgate-backupdir-{tag}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("dockward-backupdir-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         base
     }
@@ -782,7 +818,7 @@ mod tests {
             .map(|e| e.to_string())
             .unwrap_or_default();
         assert!(
-            msg.starts_with("HARBORGATE_BACKUP_DIR is invalid: could not be created"),
+            msg.starts_with("DOCKWARD_BACKUP_DIR is invalid: could not be created"),
             "{msg}"
         );
         let _ = fs::remove_file(&blocker);
@@ -792,12 +828,12 @@ mod tests {
     fn load_settings_does_not_create_the_backup_dir() {
         let settings = load_settings_with(env_of(&[
             PUBLIC,
-            (BACKUP_DIR_VAR, "/nonexistent-harborgate-test/backups"),
+            (BACKUP_DIR_VAR, "/nonexistent-dockward-test/backups"),
         ]))
         .expect_test_ok();
         assert_eq!(
             settings.backup_dir,
-            PathBuf::from("/nonexistent-harborgate-test/backups")
+            PathBuf::from("/nonexistent-dockward-test/backups")
         );
     }
 
@@ -836,7 +872,7 @@ mod tests {
         ] {
             let msg = settings_err(&[PUBLIC, (TRUSTED_PROXIES_VAR, entry)]);
             assert!(
-                msg.starts_with("HARBORGATE_TRUSTED_PROXIES is invalid: entry 1 "),
+                msg.starts_with("DOCKWARD_TRUSTED_PROXIES is invalid: entry 1 "),
                 "{msg}"
             );
         }
@@ -847,7 +883,7 @@ mod tests {
         let msg = settings_err(&[PUBLIC, (TRUSTED_PROXIES_VAR, "10.0.0.0/8,10.0.0.1/8")]);
         assert_eq!(
             msg,
-            "HARBORGATE_TRUSTED_PROXIES is invalid: entry 2 has host bits set; use the network address."
+            "DOCKWARD_TRUSTED_PROXIES is invalid: entry 2 has host bits set; use the network address."
         );
     }
 
@@ -867,7 +903,7 @@ mod tests {
     #[test]
     fn data_dir_is_created_when_missing_and_is_writable() {
         let base = std::env::temp_dir().join(format!(
-            "harborgate-config-test-{}-create",
+            "dockward-config-test-{}-create",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&base);
@@ -879,15 +915,13 @@ mod tests {
 
     #[test]
     fn data_dir_that_cannot_be_created_fails_by_name() {
-        let blocker = std::env::temp_dir().join(format!(
-            "harborgate-config-test-{}-file",
-            std::process::id()
-        ));
+        let blocker =
+            std::env::temp_dir().join(format!("dockward-config-test-{}-file", std::process::id()));
         fs::write(&blocker, b"test").expect_test_ok();
         let err = prepare_data_dir(&blocker.join("data")).err();
         let msg = err.map(|e| e.to_string()).unwrap_or_default();
         assert!(
-            msg.starts_with("HARBORGATE_DATA_DIR is invalid: could not be created"),
+            msg.starts_with("DOCKWARD_DATA_DIR is invalid: could not be created"),
             "{msg}"
         );
         let _ = fs::remove_file(&blocker);
@@ -904,6 +938,34 @@ mod tests {
                 Err(err) => panic!("expected Ok in test, got {err:?}"),
             }
         }
+    }
+
+    #[test]
+    fn legacy_name_is_a_fallback_and_the_new_name_wins() {
+        let only_legacy = |name: &str| match name {
+            "HARBORGATE_DATA_DIR" => Ok("/old".to_owned()),
+            _ => Err(VarError::NotPresent),
+        };
+        assert_eq!(
+            lookup_with_fallback(&only_legacy, DATA_DIR_VAR)
+                .ok()
+                .as_deref(),
+            Some("/old")
+        );
+        let both = |name: &str| match name {
+            "HARBORGATE_DATA_DIR" => Ok("/old".to_owned()),
+            "DOCKWARD_DATA_DIR" => Ok("/new".to_owned()),
+            _ => Err(VarError::NotPresent),
+        };
+        assert_eq!(
+            lookup_with_fallback(&both, DATA_DIR_VAR).ok().as_deref(),
+            Some("/new")
+        );
+        let neither = |_: &str| Err(VarError::NotPresent);
+        assert!(matches!(
+            lookup_with_fallback(&neither, DATA_DIR_VAR),
+            Err(VarError::NotPresent)
+        ));
     }
 
     #[test]

@@ -271,16 +271,16 @@ impl RotateFailure {
     fn message(&self) -> &'static str {
         match self {
             RotateFailure::NoDatabase => {
-                "no database was found in HARBORGATE_DATA_DIR; nothing was changed"
+                "no database was found in DOCKWARD_DATA_DIR; nothing was changed"
             }
             RotateFailure::SameKey => {
-                "HARBORGATE_OLD_ENCRYPTION_KEY and HARBORGATE_ENCRYPTION_KEY are the same key; \
+                "DOCKWARD_OLD_ENCRYPTION_KEY and DOCKWARD_ENCRYPTION_KEY are the same key; \
                  nothing was changed"
             }
             RotateFailure::CouldNotOpen => "could not open the database; nothing was changed",
             RotateFailure::Failed => {
                 "the rotation failed and the database was not changed. Check that \
-                 HARBORGATE_OLD_ENCRYPTION_KEY is the key that wrote the data, and that this \
+                 DOCKWARD_OLD_ENCRYPTION_KEY is the key that wrote the data, and that this \
                  image version is the one the app last ran on."
             }
         }
@@ -332,7 +332,7 @@ fn ensure_app_stopped(activity: &str) -> Result<(), String> {
             drop(listener);
             Ok(())
         }
-        Err(_) => Err(format!("stop HarborGate before {activity}")),
+        Err(_) => Err(format!("stop Dockward before {activity}")),
     }
 }
 
@@ -445,7 +445,7 @@ async fn restore_database(
     let backup_key = auth::crypto::backup_key(encryption_key)
         .map_err(|_| "could not derive the backup key".to_owned())?;
     let plain = services::backup::open(&backup_key, &sealed).map_err(|_| {
-        "the backup file failed verification; check the file and that HARBORGATE_ENCRYPTION_KEY \
+        "the backup file failed verification; check the file and that DOCKWARD_ENCRYPTION_KEY \
          is the key that created it. The live database was not changed."
             .to_owned()
     })?;
@@ -483,10 +483,10 @@ async fn stage_and_swap(data_dir: &Path, temp_path: &Path, plain: &[u8]) -> Resu
         .create_new(true)
         .mode(0o600)
         .open(temp_path)
-        .map_err(|_| "could not create the temporary file in HARBORGATE_DATA_DIR".to_owned())?;
+        .map_err(|_| "could not create the temporary file in DOCKWARD_DATA_DIR".to_owned())?;
     out.write_all(plain)
         .and_then(|()| out.sync_all())
-        .map_err(|_| "could not write the temporary file in HARBORGATE_DATA_DIR".to_owned())?;
+        .map_err(|_| "could not write the temporary file in DOCKWARD_DATA_DIR".to_owned())?;
     drop(out);
 
     let checked = check_candidate(temp_path).await;
@@ -525,7 +525,7 @@ async fn check_candidate(temp_path: &Path) -> Result<(), String> {
         .await;
     let result = match verdict {
         Ok(text) if text == "ok" => db::migrate(&pool).await.map_err(|_| {
-            "the backup database could not be migrated; it may come from a newer HarborGate"
+            "the backup database could not be migrated; it may come from a newer Dockward"
                 .to_owned()
         }),
         _ => Err("the backup database failed the integrity check".to_owned()),
@@ -565,7 +565,7 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
     auth::password::warm_dummy_hash().map_err(|_| "could not compute the dummy password hash")?;
     let pool = db::open(&settings.data_dir)
         .await
-        .map_err(|_| "could not open or migrate the database in HARBORGATE_DATA_DIR")?;
+        .map_err(|_| "could not open or migrate the database in DOCKWARD_DATA_DIR")?;
     let session_key = Arc::new(
         auth::crypto::session_key(&encryption_key)
             .map_err(|_| "could not derive the session key")?,
@@ -626,7 +626,7 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         // an audit secret fragment (`specs/security.md`, Application log).
         oidc_range_opt_out = settings.allow_private_oidc,
         alerts_range_opt_out = settings.allow_private_alerts,
-        "HarborGate starting"
+        "Dockward starting"
     );
 
     // Jobs left `running` by a previous process go back to `queued` before the worker
@@ -864,7 +864,7 @@ pub(crate) mod tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
-        let dir = std::env::temp_dir().join(format!("harborgate-app-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dockward-app-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = db::open(&dir).await.unwrap();
@@ -876,7 +876,7 @@ pub(crate) mod tests {
             pool: pool.clone(),
             session_key,
             csrf_key,
-            public_url: "https://harborgate.example.com".to_owned(),
+            public_url: "https://dockward.example.com".to_owned(),
             login_throttle: services::throttle::LoginThrottle::new(),
             login_limiter: api::hardening::RateLimiter::new(10, Duration::from_secs(60)),
             credentials_key: Arc::new(auth::crypto::credentials_key(&root).unwrap()),
@@ -932,7 +932,7 @@ pub(crate) mod tests {
         name: &str,
         login_throttle: services::throttle::LoginThrottle,
     ) -> (Router, sqlx::SqlitePool, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("harborgate-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dockward-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = db::open(&dir).await.unwrap();
@@ -942,7 +942,7 @@ pub(crate) mod tests {
             pool: pool.clone(),
             session_key: Arc::new(auth::crypto::session_key(&root).unwrap()),
             csrf_key: Arc::new(auth::crypto::csrf_key(&root).unwrap()),
-            public_url: "https://harborgate.example.com".to_owned(),
+            public_url: "https://dockward.example.com".to_owned(),
             login_throttle,
             login_limiter: api::hardening::RateLimiter::new(10, Duration::from_secs(60)),
             credentials_key: Arc::new(auth::crypto::credentials_key(&root).unwrap()),
@@ -1049,7 +1049,7 @@ pub(crate) mod tests {
         let request = Request::builder()
             .method("POST")
             .uri("/api/v1/auth/login")
-            .header("origin", "https://harborgate.example.com")
+            .header("origin", "https://dockward.example.com")
             .header("content-type", "application/json")
             .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
                 peer, 8080,
@@ -1155,7 +1155,7 @@ pub(crate) mod tests {
         let login = Request::builder()
             .method("POST")
             .uri("/api/v1/auth/login")
-            .header("origin", "https://harborgate.example.com")
+            .header("origin", "https://dockward.example.com")
             .header("content-type", "application/json")
             .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
                 [127, 0, 0, 1],
@@ -1166,7 +1166,7 @@ pub(crate) mod tests {
         let setup = Request::builder()
             .method("POST")
             .uri("/api/v1/auth/setup")
-            .header("origin", "https://harborgate.example.com")
+            .header("origin", "https://dockward.example.com")
             .header("content-type", "application/json")
             .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
                 [127, 0, 0, 1],
@@ -1515,7 +1515,7 @@ pub(crate) mod tests {
 
     fn restore_dir(name: &str) -> std::path::PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("harborgate-restore-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("dockward-restore-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

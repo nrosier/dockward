@@ -385,10 +385,8 @@ mod purge_tests {
     /// `stranger` has `m2`. Jobs: two failed, queued, running, retrying (queued with
     /// attempts) and done on `m1`, plus a failed job on `m2`.
     async fn seed(name: &str) -> (SqlitePool, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "harborgate-sync-purge-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("dockward-sync-purge-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = db::open(&dir).await.unwrap();
@@ -600,10 +598,8 @@ mod retry_tests {
     }
 
     async fn fresh_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "harborgate-sync-retry-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("dockward-sync-retry-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = db::open(&dir).await.unwrap();

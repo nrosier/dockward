@@ -274,7 +274,7 @@ mod db_tests {
     /// A migrated database in a fresh temp directory. Values are test-only.
     async fn fresh_pool(name: &str) -> Result<(SqlitePool, std::path::PathBuf), AppError> {
         let dir =
-            std::env::temp_dir().join(format!("harborgate-audit-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("dockward-audit-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|_| AppError::InternalError)?;
         let pool = crate::db::open(&dir).await?;

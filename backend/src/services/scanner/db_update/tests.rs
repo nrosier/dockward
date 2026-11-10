@@ -72,7 +72,7 @@ impl Fx {
     async fn new(name: &str, trivy_updated_at: &str) -> Self {
         let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "harborgate-dbupdate-{name}-{}-{seq}",
+            "dockward-dbupdate-{name}-{}-{seq}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -375,17 +375,17 @@ fn the_child_sees_the_cache_path_and_no_secret() {
         Err(poison) => poison.into_inner(),
     };
     // SAFETY: ENV_LOCK serialises environment access in this test binary; removed below.
-    unsafe { std::env::set_var("HARBORGATE_ENCRYPTION_KEY", "canary-key-5d2") };
+    unsafe { std::env::set_var("DOCKWARD_ENCRYPTION_KEY", "canary-key-5d2") };
 
     let outcome = runtime.block_on(fx.run(Scanner::Trivy));
 
     // SAFETY: as above; the lock is still held.
-    unsafe { std::env::remove_var("HARBORGATE_ENCRYPTION_KEY") };
+    unsafe { std::env::remove_var("DOCKWARD_ENCRYPTION_KEY") };
     assert!(matches!(outcome, JobOutcome::Done), "got {outcome:?}");
     let listing = std::fs::read_to_string(fx.dir.join("env.txt")).unwrap_or_default();
     assert!(listing.contains("TRIVY_CACHE_DIR"));
     assert!(!listing.contains("canary-key-5d2"));
-    assert!(!listing.contains("HARBORGATE_ENCRYPTION_KEY"));
+    assert!(!listing.contains("DOCKWARD_ENCRYPTION_KEY"));
     assert!(!listing.contains("PATH="));
 }
 

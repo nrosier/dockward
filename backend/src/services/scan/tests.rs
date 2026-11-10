@@ -36,7 +36,7 @@ const P_ARM: &str = "000000000000000000000000000000b3";
 const NOW: i64 = 1_800_000_000;
 
 /// A parent variable no child may see, and that no stored text may hold.
-const CANARY_VAR: &str = "HARBORGATE_ENCRYPTION_KEY";
+const CANARY_VAR: &str = "DOCKWARD_ENCRYPTION_KEY";
 const CANARY: &str = "canary-secret-7f3a9";
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -108,10 +108,8 @@ impl Fx {
     /// both scanner databases present. `trivy` and `grype` are the script bodies.
     async fn new(name: &str, trivy: &str, grype: &str) -> Self {
         let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "harborgate-scan-{name}-{}-{seq}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("dockward-scan-{name}-{}-{seq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         if let Err(err) = std::fs::create_dir_all(&dir) {
             panic!("dir: {err}");

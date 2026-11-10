@@ -510,10 +510,8 @@ mod tests {
             crate::config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
                 .unwrap();
         // The probe reads the credentials key only. The pool is not used here.
-        let dir = std::env::temp_dir().join(format!(
-            "harborgate-api-creds-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("dockward-api-creds-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = crate::db::open(&dir).await.unwrap();
@@ -521,7 +519,7 @@ mod tests {
             pool,
             session_key: std::sync::Arc::new(crate::auth::crypto::session_key(&root).unwrap()),
             csrf_key: std::sync::Arc::new(crate::auth::crypto::csrf_key(&root).unwrap()),
-            public_url: "https://harborgate.example.com".to_owned(),
+            public_url: "https://dockward.example.com".to_owned(),
             login_throttle: crate::services::throttle::LoginThrottle::new(),
             login_limiter: crate::api::hardening::RateLimiter::new(
                 10,

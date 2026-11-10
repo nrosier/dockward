@@ -32,7 +32,7 @@ pub const TRUNCATED_MARKER: &str = "… [truncated]";
 /// A level above `info` reverts to `info` after this long.
 pub const REVERT_AFTER: Duration = Duration::from_secs(30 * 60);
 /// The crate's own tracing target. `debug` and `trace` apply below it only.
-const OWN_TARGET: &str = "harborgate";
+const OWN_TARGET: &str = "dockward";
 /// Longest accepted text search, in characters.
 const MAX_QUERY_CHARS: usize = 200;
 /// Shown instead of a value that looks like a ciphertext or a password hash.
@@ -67,7 +67,7 @@ impl LogLevel {
         }
     }
 
-    /// The filter for this level. Every target stays at `info`; only HarborGate's own
+    /// The filter for this level. Every target stays at `info`; only Dockward's own
     /// target is raised, so dependency crates never log below `info`.
     pub fn targets(self) -> Targets {
         let own = match self {
@@ -687,13 +687,13 @@ mod tests {
     #[test]
     fn level_targets_keep_dependencies_at_info() {
         let filter = LogLevel::Trace.targets();
-        assert!(filter.would_enable("harborgate::services::sync", &Level::TRACE));
+        assert!(filter.would_enable("dockward::services::sync", &Level::TRACE));
         assert!(!filter.would_enable("hyper::proto", &Level::DEBUG));
         assert!(!filter.would_enable("sqlx::query", &Level::DEBUG));
         assert!(filter.would_enable("reqwest", &Level::INFO));
         let info = LogLevel::Info.targets();
-        assert!(!info.would_enable("harborgate::api", &Level::DEBUG));
-        assert!(info.would_enable("harborgate::api", &Level::INFO));
+        assert!(!info.would_enable("dockward::api", &Level::DEBUG));
+        assert!(info.would_enable("dockward::api", &Level::INFO));
     }
 
     #[test]
@@ -707,7 +707,7 @@ mod tests {
 
     async fn fresh_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {
         let dir =
-            std::env::temp_dir().join(format!("harborgate-applog-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("dockward-applog-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         (crate::db::open(&dir).await.unwrap(), dir)

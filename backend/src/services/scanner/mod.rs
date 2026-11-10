@@ -91,7 +91,7 @@ pub fn update_args(scanner: Scanner) -> Vec<Vec<OsString>> {
 
 /// The environment allow-list for a scanner run or update (section 7). Only the cache location,
 /// the offline settings and the home directory are set. No secret is ever added here, and
-/// `HARBORGATE_ENCRYPTION_KEY` and the old key are never read.
+/// `DOCKWARD_ENCRYPTION_KEY` and the old key are never read.
 ///
 /// `scan` is `true` for a scan run: its database download is off. An update run leaves the
 /// downloads on, so the database can be fetched.

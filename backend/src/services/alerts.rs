@@ -83,7 +83,7 @@ pub struct Notifier {
 }
 
 impl Notifier {
-    /// The production notifier. `allow_private` is `HARBORGATE_ALLOW_PRIVATE_ALERTS`.
+    /// The production notifier. `allow_private` is `DOCKWARD_ALLOW_PRIVATE_ALERTS`.
     pub fn new(pool: SqlitePool, credentials_key: Arc<DerivedKey>, allow_private: bool) -> Self {
         Self::with_sender(pool, credentials_key, move |config, alert| {
             Box::pin(async move {
@@ -288,7 +288,7 @@ mod tests {
 
     async fn fresh_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {
         let dir =
-            std::env::temp_dir().join(format!("harborgate-alerts-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("dockward-alerts-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = crate::db::open(&dir).await.unwrap();

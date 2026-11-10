@@ -195,7 +195,7 @@ pub struct TrustedProxies(pub Arc<Vec<Cidr>>);
 
 /// Where the resolved client IP came from: the TCP peer, or a trusted
 /// `X-Forwarded-For` entry. Shown on the admin health route so operators can check
-/// `HARBORGATE_TRUSTED_PROXIES` (`specs/api.md`, Health).
+/// `DOCKWARD_TRUSTED_PROXIES` (`specs/api.md`, Health).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientIpSource {
     Peer,

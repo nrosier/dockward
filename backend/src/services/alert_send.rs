@@ -75,18 +75,18 @@ impl Alert {
     pub fn text(&self) -> String {
         match self.event {
             AlertEvent::SyncFailed => format!(
-                "HarborGate sync failed for {} to {}.",
+                "Dockward sync failed for {} to {}.",
                 self.harbor, self.github
             ),
             AlertEvent::CriticalCve => {
                 let cve = self.cve_id.as_deref().unwrap_or("unknown CVE");
                 match self.image_tag.as_deref() {
                     Some(tag) => format!(
-                        "HarborGate found new CRITICAL {cve} in {}:{tag} for {}.",
+                        "Dockward found new CRITICAL {cve} in {}:{tag} for {}.",
                         self.harbor, self.github
                     ),
                     None => format!(
-                        "HarborGate found new CRITICAL {cve} in {} for {}.",
+                        "Dockward found new CRITICAL {cve} in {} for {}.",
                         self.harbor, self.github
                     ),
                 }
@@ -96,7 +96,7 @@ impl Alert {
 
     fn subject(&self) -> String {
         // Line breaks cannot appear in a header, whatever the mapping names contain.
-        format!("[HarborGate] {} {}", self.event.as_str(), self.harbor).replace(['\r', '\n'], " ")
+        format!("[Dockward] {} {}", self.event.as_str(), self.harbor).replace(['\r', '\n'], " ")
     }
 }
 
@@ -366,7 +366,7 @@ mod tests {
             tls,
             username: Some("mailer".to_owned()),
             password: Some("pw-for-test".to_owned()),
-            from: "harborgate@example.com".to_owned(),
+            from: "dockward@example.com".to_owned(),
             to: vec!["a@example.com".to_owned(), "b@example.com".to_owned()],
         }
     }
@@ -434,7 +434,7 @@ mod tests {
         item.harbor = "a\r\nBcc: x".to_owned();
         let subject = item.subject();
         assert!(!subject.contains('\r') && !subject.contains('\n'));
-        assert_eq!(subject, "[HarborGate] sync_failed a  Bcc: x");
+        assert_eq!(subject, "[Dockward] sync_failed a  Bcc: x");
 
         // In the built message the text stays inside the Subject header: there is no
         // header of its own named Bcc.
@@ -450,14 +450,14 @@ mod tests {
             !headers.lines().any(|line| line.starts_with("Bcc:")),
             "a line break in the name started a new header"
         );
-        assert!(headers.contains("Subject: [HarborGate] sync_failed a  Bcc: x"));
+        assert!(headers.contains("Subject: [Dockward] sync_failed a  Bcc: x"));
     }
 
     #[test]
     fn subject_has_the_event_and_the_harbor_repository() {
         assert_eq!(
             alert(AlertEvent::SyncFailed).subject(),
-            "[HarborGate] sync_failed proj/repo"
+            "[Dockward] sync_failed proj/repo"
         );
     }
 
@@ -537,7 +537,7 @@ mod tests {
             Err(_) => panic!("message build failed"),
         };
         let raw = String::from_utf8_lossy(&message.formatted()).into_owned();
-        assert!(raw.contains("Subject: [HarborGate] sync_failed proj/repo"));
+        assert!(raw.contains("Subject: [Dockward] sync_failed proj/repo"));
         assert!(raw.contains("a@example.com"));
         assert!(raw.contains("b@example.com"));
     }

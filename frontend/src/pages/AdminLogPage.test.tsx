@@ -9,7 +9,7 @@ const LINE = {
   seq: 1,
   timestamp: "2026-11-05T11:14:09Z",
   level: "warn",
-  target: "harborgate::services::sync",
+  target: "dockward::services::sync",
   message: "report not yet available… [truncated]",
 };
 
@@ -36,7 +36,7 @@ describe("AdminLogPage", () => {
   it("renders lines with the truncated marker", async () => {
     stubApi(api("info", null));
     renderAt(<AdminLogPage />, "/admin/log");
-    expect(await screen.findByText("harborgate::services::sync")).toBeInTheDocument();
+    expect(await screen.findByText("dockward::services::sync")).toBeInTheDocument();
     expect(screen.getByText(t("adminLog.line.truncated"))).toBeInTheDocument();
   });
 
@@ -49,7 +49,7 @@ describe("AdminLogPage", () => {
   it("hides the debug banner when reverts_at is null", async () => {
     stubApi(api("info", null));
     renderWithRoutes([{ element: <AdminLayout />, children: [{ path: "*", element: <AdminLogPage /> }] }], "/admin/log");
-    await screen.findByText("harborgate::services::sync");
+    await screen.findByText("dockward::services::sync");
     expect(screen.queryByText(t("adminLog.debugBanner.title"))).toBeNull();
   });
 
@@ -69,7 +69,7 @@ describe("AdminLogPage", () => {
   it("sends the filters as the level and q query", async () => {
     const fetchMock = stubApi(api("info", null));
     renderAt(<AdminLogPage />, "/admin/log");
-    await screen.findByText("harborgate::services::sync");
+    await screen.findByText("dockward::services::sync");
     fireEvent.change(screen.getByLabelText(t("adminLog.filter.level")), { target: { value: "warn" } });
     fireEvent.change(screen.getByLabelText(t("adminLog.filter.text")), { target: { value: "backing" } });
     await waitFor(() => {

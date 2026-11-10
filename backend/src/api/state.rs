@@ -17,7 +17,7 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub session_key: Arc<DerivedKey>,
     pub csrf_key: Arc<DerivedKey>,
-    /// `HARBORGATE_PUBLIC_URL`, the origin that login and setup requests must match.
+    /// `DOCKWARD_PUBLIC_URL`, the origin that login and setup requests must match.
     pub public_url: String,
     /// Failed-login delay per (account, client IP).
     pub login_throttle: LoginThrottle,
@@ -25,17 +25,17 @@ pub struct AppState {
     pub login_limiter: RateLimiter,
     /// Derived credential key. It decrypts the OIDC client secret.
     pub credentials_key: Arc<DerivedKey>,
-    /// `HARBORGATE_ALLOW_PRIVATE_OIDC`. The private-range opt-out for OIDC targets.
+    /// `DOCKWARD_ALLOW_PRIVATE_OIDC`. The private-range opt-out for OIDC targets.
     pub allow_private_oidc: bool,
     /// The JWKS cache for ID token verification.
     pub jwks: Arc<JwksCache>,
-    /// `HARBORGATE_ALLOW_PRIVATE_ALERTS`. The private-range opt-out for alert webhook targets.
+    /// `DOCKWARD_ALLOW_PRIVATE_ALERTS`. The private-range opt-out for alert webhook targets.
     pub allow_private_alerts: bool,
     /// Derived backup key. It seals and opens backup files (`specs/security.md`, Derived keys).
     pub backup_key: Arc<DerivedKey>,
-    /// `HARBORGATE_DATA_DIR`. The temporary `VACUUM INTO` copy is written here.
+    /// `DOCKWARD_DATA_DIR`. The temporary `VACUUM INTO` copy is written here.
     pub data_dir: PathBuf,
-    /// `HARBORGATE_BACKUP_DIR`. Encrypted backups are written here.
+    /// `DOCKWARD_BACKUP_DIR`. Encrypted backups are written here.
     pub backup_dir: PathBuf,
     /// The GitHub Issues client, built once. The manual issue route uses it.
     pub issues_client: Arc<crate::services::github_issues::GithubIssues>,

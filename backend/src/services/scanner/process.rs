@@ -5,7 +5,7 @@
 //! - The program is an absolute path and the arguments are an argument vector. No shell runs,
 //!   and no `PATH` is searched.
 //! - The environment is cleared first. Only the variables a caller passes in the allow-list are
-//!   set, so `HARBORGATE_ENCRYPTION_KEY` and the other secrets never reach the child.
+//!   set, so `DOCKWARD_ENCRYPTION_KEY` and the other secrets never reach the child.
 //! - The child leads its own process group. On timeout, or when its captured output goes over
 //!   the cap, the whole group is killed.
 //! - stdout is captured up to the cap. stderr is drained and discarded: it is never stored, and

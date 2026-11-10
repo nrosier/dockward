@@ -14,8 +14,8 @@ const oidc = {
   issuer_url: null,
   client_id: null,
   role_claim: "groups",
-  admin_group: "harborgate-admins",
-  user_group: "harborgate-users",
+  admin_group: "dockward-admins",
+  user_group: "dockward-users",
   client_secret_set: true,
   oidc_only_users: false,
 };
@@ -51,7 +51,7 @@ describe("AdminUsersPage", () => {
     render();
     const row = (await screen.findByText("m.kaya")).closest("tr") as HTMLElement;
     expect(within(row).queryByRole("combobox")).toBeNull();
-    expect(await within(row).findByText(t("admin.users.fromGroup", { group: "harborgate-admins" }))).toBeInTheDocument();
+    expect(await within(row).findByText(t("admin.users.fromGroup", { group: "dockward-admins" }))).toBeInTheDocument();
     const localRow = screen.getByText("j.devries").closest("tr") as HTMLElement;
     expect(within(localRow).getByRole("combobox")).toBeInTheDocument();
     // Delete is disabled for yourself.

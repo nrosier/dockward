@@ -43,7 +43,7 @@ fn unique_dir(tag: &str) -> PathBuf {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     std::env::temp_dir().join(format!(
-        "harborgate-storage-{tag}-{}-{nanos}",
+        "dockward-storage-{tag}-{}-{nanos}",
         std::process::id()
     ))
 }

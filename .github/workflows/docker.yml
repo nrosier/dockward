@@ -40,7 +40,7 @@ jobs:
           context: .
           push: false
           load: true
-          tags: harborgate:ci
+          tags: dockward:ci
           # The revision build argument is required by the Dockerfile, so every image carries the label.
           build-args: |
             REVISION=${{ github.sha }}
@@ -50,14 +50,14 @@ jobs:
       # Each job runs on its own runner, so the image is passed to the scan job as an artifact.
       - name: Save image archive
         env:
-          IMAGE: harborgate:ci
-        run: docker save "$IMAGE" -o "$RUNNER_TEMP/harborgate-ci.tar"
+          IMAGE: dockward:ci
+        run: docker save "$IMAGE" -o "$RUNNER_TEMP/dockward-ci.tar"
 
       - name: Upload image archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: harborgate-ci-image
-          path: ${{ runner.temp }}/harborgate-ci.tar
+          name: dockward-ci-image
+          path: ${{ runner.temp }}/dockward-ci.tar
           retention-days: 1
           if-no-files-found: error
 
@@ -78,18 +78,18 @@ jobs:
       - name: Download image archive
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: harborgate-ci-image
+          name: dockward-ci-image
           path: ${{ runner.temp }}/image
 
       - name: Load image
         env:
           IMAGE_DIR: ${{ runner.temp }}/image
-        run: docker load -i "$IMAGE_DIR/harborgate-ci.tar"
+        run: docker load -i "$IMAGE_DIR/dockward-ci.tar"
 
       - name: Trivy scan (fails on CRITICAL/HIGH)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: harborgate:ci
+          image-ref: dockward:ci
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: table
@@ -133,7 +133,7 @@ jobs:
         id: meta-digest
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/harborgate
+          images: ghcr.io/${{ github.repository_owner }}/dockward
           flavor: |
             latest=false
           tags: |
@@ -148,13 +148,13 @@ jobs:
         with:
           context: .
           # The Dockerfile requires REVISION, and it also sets the label from it. The label stays set
-          # explicitly here, so HarborGate can read the source commit (org.opencontainers.image.revision).
+          # explicitly here, so Dockward can read the source commit (org.opencontainers.image.revision).
           build-args: |
             REVISION=${{ github.sha }}
           labels: |
             ${{ steps.meta-digest.outputs.labels }}
             org.opencontainers.image.revision=${{ github.sha }}
-          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/harborgate,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/dockward,push-by-digest=true,name-canonical=true,push=true
           provenance: mode=max
           sbom: true
 
@@ -177,7 +177,7 @@ jobs:
       - name: Trivy scan (fails on CRITICAL/HIGH)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/harborgate@${{ needs.publish-digest.outputs.digest }}
+          image-ref: ghcr.io/${{ github.repository_owner }}/dockward@${{ needs.publish-digest.outputs.digest }}
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: table
@@ -187,7 +187,7 @@ jobs:
         if: ${{ always() }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/harborgate@${{ needs.publish-digest.outputs.digest }}
+          image-ref: ghcr.io/${{ github.repository_owner }}/dockward@${{ needs.publish-digest.outputs.digest }}
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: sarif
@@ -233,7 +233,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/harborgate
+          images: ghcr.io/${{ github.repository_owner }}/dockward
           flavor: |
             latest=false
           tags: |
@@ -244,7 +244,7 @@ jobs:
       # Adds each tag to the scanned digest. No new image is built, so the digest does not change.
       - name: Apply tags to digest
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/harborgate
+          IMAGE: ghcr.io/${{ github.repository_owner }}/dockward
           DIGEST: ${{ needs.publish-digest.outputs.digest }}
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
@@ -262,7 +262,7 @@ jobs:
       # Keyless signing using the workflow's OIDC identity (id-token: write). Signs the digest that was scanned.
       - name: Sign image (keyless)
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/harborgate
+          IMAGE: ghcr.io/${{ github.repository_owner }}/dockward
           DIGEST: ${{ needs.publish-digest.outputs.digest }}
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
 
@@ -270,7 +270,7 @@ jobs:
       # A failed verification fails the job. Output goes to /dev/null to keep the Rekor and certificate detail out of the log.
       - name: Verify image signature
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/harborgate
+          IMAGE: ghcr.io/${{ github.repository_owner }}/dockward
           DIGEST: ${{ needs.publish-digest.outputs.digest }}
         run: |
           cosign verify \
@@ -281,6 +281,6 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/harborgate # must be lowercase
+          subject-name: ghcr.io/${{ github.repository_owner }}/dockward # must be lowercase
           subject-digest: ${{ needs.publish-digest.outputs.digest }}
           push-to-registry: true

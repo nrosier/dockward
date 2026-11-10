@@ -21,7 +21,7 @@ describe("AdminBackupPage", () => {
     expect(await screen.findByText(t("admin.backup.written"))).toBeInTheDocument();
     const path = "/data/backups/harborgate-20261103T140512Z.hgbk";
     expect(screen.getByText(path)).toBeInTheDocument();
-    expect(screen.getByText(`harborgate restore ${path}`)).toBeInTheDocument();
+    expect(screen.getByText(`dockward restore ${path}`)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /restore/i })).toBeNull();
   });
 

@@ -67,7 +67,7 @@ mod tests {
     /// A fresh migrated database holding one admin, `test-admin`. Values are test-only.
     async fn seeded_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {
         let dir =
-            std::env::temp_dir().join(format!("harborgate-sessions-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("dockward-sessions-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = crate::db::open(&dir).await.unwrap();

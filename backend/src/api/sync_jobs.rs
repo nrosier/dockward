@@ -130,7 +130,7 @@ mod tests {
 
     async fn fresh_pool(name: &str) -> (sqlx::SqlitePool, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "harborgate-api-sync-jobs-{name}-{}",
+            "dockward-api-sync-jobs-{name}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);

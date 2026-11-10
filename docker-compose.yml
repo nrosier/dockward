@@ -1,14 +1,14 @@
-# EXAMPLE compose file for HarborGate. Copy it, then:
-#   1. Set the hostname (harborgate.example.com) in the labels below.
+# EXAMPLE compose file for Dockward. Copy it, then:
+#   1. Set the hostname (dockward.example.com) in the labels below.
 #   2. Set the image tag (latest is used here; pin a version tag for production).
-#   3. Create a .env file next to this file that contains HARBORGATE_ENCRYPTION_KEY.
+#   3. Create a .env file next to this file that contains DOCKWARD_ENCRYPTION_KEY.
 #      Do not put any key value in this file.
 # .env must not be committed.
 services:
-  harborgate:
+  dockward:
     # Pin a version tag for production instead of latest.
-    image: ghcr.io/nrosier/harborgate:latest
-    container_name: harborgate
+    image: ghcr.io/nrosier/dockward:latest
+    container_name: dockward
     restart: unless-stopped
     # PID 1 does not reap children or forward signals on its own.
     init: true
@@ -23,7 +23,7 @@ services:
     env_file:
       - .env
     healthcheck:
-      test: ["CMD", "/usr/local/bin/harborgate", "healthcheck"]
+      test: ["CMD", "/usr/local/bin/dockward", "healthcheck"]
       interval: 30s
       timeout: 3s
       retries: 3
@@ -41,18 +41,18 @@ services:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
 
-      # Router (replace harborgate.example.com with your hostname)
-      - "traefik.http.routers.harborgate.rule=Host(`harborgate.example.com`)"
-      - "traefik.http.routers.harborgate.entrypoints=websecure"
-      - "traefik.http.routers.harborgate.tls.certresolver=cloudflare"
-      - "traefik.http.routers.harborgate.priority=100"
+      # Router (replace dockward.example.com with your hostname)
+      - "traefik.http.routers.dockward.rule=Host(`dockward.example.com`)"
+      - "traefik.http.routers.dockward.entrypoints=websecure"
+      - "traefik.http.routers.dockward.tls.certresolver=cloudflare"
+      - "traefik.http.routers.dockward.priority=100"
 
       # Service
-      - "traefik.http.services.harborgate.loadbalancer.server.port=8080"
+      - "traefik.http.services.dockward.loadbalancer.server.port=8080"
 
-      # Cloudflare tunnel (replace harborgate.example.com with your hostname)
+      # Cloudflare tunnel (replace dockward.example.com with your hostname)
       - "dockflare.enable=true"
-      - "dockflare.hostname=harborgate.example.com"
+      - "dockflare.hostname=dockward.example.com"
       # Replace https://192.168.1.2 with the Traefik or origin address for this host.
       - "dockflare.service=https://192.168.1.2"
       - "dockflare.http2_origin=true"

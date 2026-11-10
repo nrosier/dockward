@@ -594,6 +594,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "dockward"
+version = "0.16.0"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "aws-lc-rs",
+ "axum",
+ "base64 0.23.1",
+ "flate2",
+ "hkdf",
+ "hmac",
+ "jsonschema",
+ "jsonwebtoken",
+ "lettre",
+ "nix",
+ "rand",
+ "rcgen",
+ "reqwest",
+ "rust-embed",
+ "rustix",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "sqlx",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "zeroize",
+]
+
+[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -884,40 +918,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2eecf2d5dc9b66b732b97707a0210906b1d30523eb773193ab777c0c84b3e8d5"
 dependencies = [
  "polyval",
-]
-
-[[package]]
-name = "harborgate"
-version = "0.16.0"
-dependencies = [
- "aes-gcm",
- "argon2",
- "aws-lc-rs",
- "axum",
- "base64 0.23.1",
- "flate2",
- "hkdf",
- "hmac",
- "jsonschema",
- "jsonwebtoken",
- "lettre",
- "nix",
- "rand",
- "rcgen",
- "reqwest",
- "rust-embed",
- "rustix",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "sqlx",
- "tokio",
- "tokio-rustls",
- "tower",
- "tracing",
- "tracing-subscriber",
- "zeroize",
 ]
 
 [[package]]

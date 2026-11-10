@@ -39,13 +39,13 @@ const ALL_SCANNERS: [&str; 2] = ["grype", "trivy"];
 const UNKNOWN_PACKAGE: &str = "unknown package";
 
 /// The comment when the manual route reopens a closed issue.
-const MANUAL_REOPEN_COMMENT: &str = "CVE reopened manually from HarborGate.";
+const MANUAL_REOPEN_COMMENT: &str = "CVE reopened manually from Dockward.";
 
 /// The longest CVE id or source id the manual route and the lifecycle accept, in bytes.
 const MAX_ID_BYTES: usize = 128;
 
 /// Serialises "look for a row, look for a marked issue, create an issue, store the row".
-/// HarborGate runs as one instance (`specs/architecture.md`), so one process-wide lock is
+/// Dockward runs as one instance (`specs/architecture.md`), so one process-wide lock is
 /// enough to stop a sync and a manual click from both creating the issue for one CVE.
 static CREATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -850,7 +850,7 @@ impl<G: IssueApi> Ctx<'_, G> {
                 }
             }
             (None, None) => {}
-            // (b) A row HarborGate closed, and the newest digest reports the CVE again: reopen
+            // (b) A row Dockward closed, and the newest digest reports the CVE again: reopen
             // the same issue. A row closed by hand is only reopened if someone reopened the
             // issue on GitHub (then only the row is updated).
             (Some(row), Some(_)) if row.status == "closed" => {
@@ -1622,10 +1622,8 @@ mod tests {
 
     impl Fixture {
         async fn new(name: &str, min: &str, auto: bool) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "harborgate-lifecycle-{name}-{}",
-                std::process::id()
-            ));
+            let dir = std::env::temp_dir()
+                .join(format!("dockward-lifecycle-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let pool = db::open(&dir).await.unwrap();
@@ -2252,7 +2250,7 @@ mod tests {
     }
 
     /// An issue closed by hand on GitHub while the CVE is still reported stays closed, and
-    /// HarborGate posts nothing.
+    /// Dockward posts nothing.
     #[tokio::test]
     async fn a_manual_close_is_honoured_without_reopen_or_comment() {
         let fx = Fixture::new("manual-close", "CRITICAL", true).await;
