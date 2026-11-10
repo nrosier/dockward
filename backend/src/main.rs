@@ -956,39 +956,23 @@ mod tests {
         let frozen = std::time::Instant::now();
         let throttle = services::throttle::LoginThrottle::with_clock(Arc::new(move || frozen));
         let (router, pool, dir) = test_router_with_throttle("login-throttle", throttle).await;
-        services::auth::create_first_admin(&pool, "test-admin", None, "test-password-fifteen")
+        let password = runtime_password();
+        let wrong_password = runtime_password();
+        services::auth::create_first_admin(&pool, "test-admin", None, &password)
             .await
             .unwrap();
 
         for _ in 0..5 {
-            let r = post_login(
-                &router,
-                [192, 0, 2, 10],
-                "test-admin",
-                "test-wrong-password-xyz",
-            )
-            .await;
+            let r = post_login(&router, [192, 0, 2, 10], "test-admin", &wrong_password).await;
             assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         }
         // Inside the 1-second wait: refused without a password check, same 401 body.
-        let blocked = post_login(
-            &router,
-            [192, 0, 2, 10],
-            "test-admin",
-            "test-password-fifteen",
-        )
-        .await;
+        let blocked = post_login(&router, [192, 0, 2, 10], "test-admin", &password).await;
         assert_eq!(blocked.status(), StatusCode::UNAUTHORIZED);
         let blocked_body = axum::body::to_bytes(blocked.into_body(), 4096)
             .await
             .unwrap();
-        let wrong = post_login(
-            &router,
-            [198, 51, 100, 7],
-            "test-admin",
-            "test-wrong-password-xyz",
-        )
-        .await;
+        let wrong = post_login(&router, [198, 51, 100, 7], "test-admin", &wrong_password).await;
         assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
         let wrong_body = axum::body::to_bytes(wrong.into_body(), 4096).await.unwrap();
         // Responses for a blocked attempt and a wrong password look the same.
@@ -1001,13 +985,7 @@ mod tests {
             "invalid_credentials"
         );
         // Another IP is not delayed: the right password signs in.
-        let other_ip = post_login(
-            &router,
-            [198, 51, 100, 7],
-            "test-admin",
-            "test-password-fifteen",
-        )
-        .await;
+        let other_ip = post_login(&router, [198, 51, 100, 7], "test-admin", &password).await;
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(other_ip.status(), StatusCode::OK);
@@ -1019,7 +997,9 @@ mod tests {
         use axum::http::StatusCode;
 
         let (router, pool, dir) = test_router("login-rate").await;
-        services::auth::create_first_admin(&pool, "test-admin", None, "test-password-fifteen")
+        let password = runtime_password();
+        let wrong_password = runtime_password();
+        services::auth::create_first_admin(&pool, "test-admin", None, &password)
             .await
             .unwrap();
         for n in 0..10 {
@@ -1027,7 +1007,7 @@ mod tests {
                 &router,
                 [203, 0, 113, 5],
                 &format!("test-nobody-{n}"),
-                "test-wrong-password-xyz",
+                &wrong_password,
             )
             .await;
             assert_eq!(
@@ -1036,13 +1016,7 @@ mod tests {
                 "attempt {n} should reach the password check"
             );
         }
-        let limited = post_login(
-            &router,
-            [203, 0, 113, 5],
-            "test-nobody-x",
-            "test-wrong-password-xyz",
-        )
-        .await;
+        let limited = post_login(&router, [203, 0, 113, 5], "test-nobody-x", &wrong_password).await;
         let retry = limited.headers().get("retry-after").cloned();
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -1060,7 +1034,8 @@ mod tests {
         use tower::ServiceExt;
 
         let (router, pool, dir) = test_router("csrf-exempt").await;
-        let body = r#"{"username":"test-x","password":"test-password-fifteen"}"#;
+        let body =
+            serde_json::json!({"username": "test-x", "password": runtime_password()}).to_string();
         let login = Request::builder()
             .method("POST")
             .uri("/api/v1/auth/login")
@@ -1070,7 +1045,7 @@ mod tests {
                 [127, 0, 0, 1],
                 8080,
             ))))
-            .body(Body::from(body))
+            .body(Body::from(body.clone()))
             .unwrap();
         let setup = Request::builder()
             .method("POST")
@@ -1081,7 +1056,7 @@ mod tests {
                 [127, 0, 0, 1],
                 8080,
             ))))
-            .body(Body::from(body))
+            .body(Body::from(body.clone()))
             .unwrap();
         let login_status = router.clone().oneshot(login).await.unwrap().status();
         let setup_status = router.oneshot(setup).await.unwrap().status();
