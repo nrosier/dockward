@@ -18,8 +18,6 @@ pub mod github_issues;
 pub mod job_runs;
 pub mod key_rotation;
 pub mod mappings;
-pub mod picker_hidden;
-pub mod project_webhooks;
 pub mod retention;
 #[allow(dead_code)] // Used by the scanner services added in later parts of #224.
 pub mod scanner_reports;
