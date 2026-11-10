@@ -14,6 +14,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub mod db_refresh;
+pub mod db_update;
 pub mod parse;
 pub mod process;
 

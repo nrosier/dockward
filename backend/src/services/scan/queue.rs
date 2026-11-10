@@ -10,7 +10,7 @@
 //! only while the scanner has a queued or running run for the platform.
 
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::db::scans as db;
 use crate::error::AppError;
@@ -56,44 +56,57 @@ pub async fn queue_scans(
     trigger: &str,
     now: i64,
 ) -> Result<usize, AppError> {
-    if !TRIGGERS.contains(&trigger) {
-        return Err(AppError::InternalError);
-    }
     let mut tx = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|_| AppError::InternalError)?;
+    let queued = queue_scans_in(&mut tx, platform_id, source_id, trigger, None, now).await?;
+    tx.commit().await.map_err(|_| AppError::InternalError)?;
+    Ok(queued)
+}
+
+/// [`queue_scans`] on a connection the caller holds, so the queueing can join a larger
+/// transaction (the database refresh stores the new build time in the same one). `only` limits
+/// the queueing to one scanner key; `None` queues every enabled scanner.
+pub async fn queue_scans_in(
+    conn: &mut SqliteConnection,
+    platform_id: &str,
+    source_id: Option<&str>,
+    trigger: &str,
+    only: Option<&str>,
+    now: i64,
+) -> Result<usize, AppError> {
+    if !TRIGGERS.contains(&trigger) {
+        return Err(AppError::InternalError);
+    }
     // Runs whose job was deleted with its source can never start. They would hold their image
     // against eviction for ever, so they are failed here.
-    db::fail_orphan_runs(&mut tx, now).await?;
+    db::fail_orphan_runs(conn, now).await?;
     // An image that is no longer stored (evicted between its pull and this call) has nothing to
     // scan.
-    if db::platform_state_in(&mut tx, platform_id)
-        .await?
-        .as_deref()
-        != Some("stored")
-    {
-        tx.commit().await.map_err(|_| AppError::InternalError)?;
+    if db::platform_state_in(conn, platform_id).await?.as_deref() != Some("stored") {
         return Ok(0);
     }
-    let enabled = enabled_scanner_keys(&mut tx).await?;
+    let enabled = enabled_scanner_keys(conn).await?;
     // A first pull or a moved tag is scanned once per platform and trigger. A database rescan
     // happens again after every newer database, so it skips only a scanner whose run is still
     // waiting or running.
     let known = if trigger == "db_update" {
-        db::scanners_with_open_run(&mut tx, platform_id).await?
+        db::scanners_with_open_run(conn, platform_id).await?
     } else {
-        db::scanners_with_run(&mut tx, platform_id, trigger).await?
+        db::scanners_with_run(conn, platform_id, trigger).await?
     };
     let mut queued = 0usize;
-    for scanner in enabled.iter().filter(|key| !known.contains(key)) {
+    for scanner in enabled
+        .iter()
+        .filter(|key| !known.contains(key) && only.is_none_or(|one| one == key.as_str()))
+    {
         let job_id = ids::new_id()?;
         let run_id = ids::new_id()?;
         let payload = ScanPayload::new(&run_id, platform_id, scanner).to_text()?;
-        crate::db::sync_jobs::enqueue_in(&mut tx, &job_id, source_id, &payload, now).await?;
-        db::insert_queued_run(&mut tx, &run_id, platform_id, scanner, trigger, &job_id).await?;
+        crate::db::sync_jobs::enqueue_in(conn, &job_id, source_id, &payload, now).await?;
+        db::insert_queued_run(conn, &run_id, platform_id, scanner, trigger, &job_id).await?;
         queued += 1;
     }
-    tx.commit().await.map_err(|_| AppError::InternalError)?;
     Ok(queued)
 }
