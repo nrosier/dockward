@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO image_platforms (id, image_id, platform, platform_digest, state, created_at)\n         VALUES (?, ?, ?, ?, 'queued', ?)\n         ON CONFLICT (image_id, platform_digest) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "3cd391e249fbaa6f3b0d70961f2fa36aea3e27dbb1acf3a16d858e9626d27d73"
+}

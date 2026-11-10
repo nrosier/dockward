@@ -1,0 +1,45 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT hub_id AS \"hub_id!\", repository AS \"repository!\",\n                  MIN(id) AS \"first_source_id!: String\"\n           FROM image_sources GROUP BY hub_id, repository ORDER BY hub_id, repository",
+  "describe": {
+    "columns": [
+      {
+        "name": "hub_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "hub_id"
+          }
+        }
+      },
+      {
+        "name": "repository!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "repository"
+          }
+        }
+      },
+      {
+        "name": "first_source_id!: String",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "84094e047565bd06ca1e4912a5d1bb2325a3ef778a82aa2fce1e547c808a09d6"
+}

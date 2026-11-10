@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO images (id, hub_id, repository, digest, is_index, created_at)\n         VALUES (?, ?, ?, ?, ?, ?)\n         ON CONFLICT (hub_id, repository, digest) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "0d20bc753456f3c6cc44f4499de16d27b57cc53b1898c0d787ad972d3007e61c"
+}

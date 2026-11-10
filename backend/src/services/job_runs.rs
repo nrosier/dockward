@@ -13,7 +13,7 @@ use crate::services::time;
 const SORTS: &[&str] = &["started_at"];
 
 /// The run kinds a `kind` filter may name (`job_runs.job_kind`).
-const KINDS: &[&str] = &["cleanup", "retention", "poll"];
+const KINDS: &[&str] = &["cleanup", "retention", "discover", "db_update"];
 
 /// One run in the `GET /admin/jobs` response. `error_summary` is capped in SQL, and the
 /// timestamps are RFC 3339 strings.

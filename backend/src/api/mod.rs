@@ -10,6 +10,7 @@ pub mod github_url;
 pub mod hardening;
 #[allow(dead_code)] // The OIDC routes are mounted by the app router.
 pub mod oidc;
+pub mod scan;
 #[allow(dead_code)] // Shared by the extractor and the routes.
 pub mod state;
 pub mod static_files;

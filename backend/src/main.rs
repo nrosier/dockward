@@ -79,6 +79,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/image-sources/{id}/tags",
             get(api::cves::tags_for_source),
         )
+        .route("/api/v1/image-sources/{id}/scan", post(api::scan::scan))
         .route("/api/v1/sync-jobs", get(api::sync_jobs::list))
         .route(
             "/api/v1/sync-jobs/failed-count",
@@ -545,6 +546,11 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
     let github = services::github_url::load_target(&pool)
         .await
         .map_err(|_| "could not read the GitHub base URL settings")?;
+    let discovery = Arc::new(
+        services::discovery::Discovery::from_env(pool.clone(), credentials_key.clone()).map_err(
+            |_| "could not build the registry client (check DOCKWARD_ALLOW_PRIVATE_REGISTRIES)",
+        )?,
+    );
     let state = api::state::AppState {
         pool,
         session_key,
@@ -565,6 +571,8 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         ),
         app_log,
         github,
+        discovery,
+        scan_limiter: api::hardening::RateLimiter::new(1, Duration::from_secs(300)),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -606,12 +614,26 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
     // The worker stops taking jobs on the same signal. A job it already took finishes.
     let worker_pool = state.pool.clone();
     let worker_stop = stop_rx.clone();
-    // No job kind has a handler on this branch yet: the discovery, pull, scan and publish
-    // handlers arrive with the later steps. Until then the worker fails any job it claims,
-    // permanently and with fixed text, rather than leaving it running.
+    // `discover` has a handler. `pull` fails with a fixed message until the pull step lands,
+    // and the scan and publish kinds fail permanently as before.
+    let notifier = services::alerts::Notifier::new(
+        state.pool.clone(),
+        state.credentials_key.clone(),
+        state.allow_private_alerts,
+    );
+    let handler = Arc::new(services::discovery::handler::SpinoffJobs::new(
+        state.discovery.clone(),
+        notifier,
+    ));
     let worker_task = tokio::spawn(async move {
-        worker::run(worker_pool, Arc::new(worker::UnhandledJobs), worker_stop).await;
+        worker::run(worker_pool, handler, worker_stop).await;
     });
+
+    // Discovery runs hourly per (hub, repository) (decision 16).
+    let discovery_task = tokio::spawn(services::discovery::schedule::run(
+        state.pool.clone(),
+        stop_rx.clone(),
+    ));
 
     // Retention deletes rows past their age limit, 5 minutes after start and then daily.
     let retention_task = tokio::spawn(services::retention::run(
@@ -625,7 +647,7 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
     let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
         let _ = graceful.wait_for(|stopped| *stopped).await;
     });
-    let tasks = vec![worker_task, retention_task];
+    let tasks = vec![worker_task, retention_task, discovery_task];
 
     let mut serve = Box::pin(std::future::IntoFuture::into_future(serve));
     let first = tokio::select! {
@@ -795,6 +817,11 @@ mod tests {
                 crate::services::app_log::REVERT_AFTER,
             )),
             github: Default::default(),
+            discovery: crate::services::discovery::Discovery::for_test(),
+            scan_limiter: crate::api::hardening::RateLimiter::new(
+                1,
+                std::time::Duration::from_secs(300),
+            ),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -852,6 +879,11 @@ mod tests {
                 crate::services::app_log::REVERT_AFTER,
             )),
             github: Default::default(),
+            discovery: crate::services::discovery::Discovery::for_test_with_pool(pool.clone()),
+            scan_limiter: crate::api::hardening::RateLimiter::new(
+                1,
+                std::time::Duration::from_secs(300),
+            ),
         };
         (app(Vec::new(), state), pool, dir)
     }
@@ -2310,6 +2342,165 @@ mod tests {
         assert_eq!(owner_status, StatusCode::OK);
         assert_eq!(retried["status"], "queued");
         assert!(retried["created_at"].as_str().unwrap().ends_with('Z'));
+    }
+
+    /// The manual scan route: no session is `401`, a POST without a CSRF token is `403`, another
+    /// user's source is `404` (the same as a missing one), the owner's scan queues discovery and
+    /// returns `{"queued": n}`, an admin may scan any source, and a second scan of the same
+    /// source inside 5 minutes is `429` with `Retry-After` (another source is not limited).
+    #[tokio::test]
+    async fn manual_scan_route_checks_session_tenancy_and_the_rate_limit() {
+        use crate::services::discovery::tests as fake;
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, pool, dir) = test_router("scan-route").await;
+        let script = Arc::new(fake::Script::default());
+        let authority = fake::serve(script.clone()).await;
+        fake::set_tags(&script, "team/app", &["1.0"]);
+        fake::put_single(&script, "team/app", "1.0", "amd64", "route");
+        let mut conn = pool.acquire().await.unwrap();
+        for (id, role) in [
+            ("owner-1", "user"),
+            ("other-2", "user"),
+            ("admin-3", "admin"),
+        ] {
+            db::users::insert_local(&mut conn, id, id, None, "h", role)
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        sqlx::query("INSERT INTO hubs (id, host, kind) VALUES ('hub-fake', ?, 'custom')")
+            .bind(&authority)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO user_credentials (id, user_id, label, encrypted_token)
+             VALUES ('rc2', 'owner-1', 'g', 'v1:fake')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for id in ["rm1", "rm2"] {
+            sqlx::query(
+                "INSERT INTO image_sources (id, user_id, hub_id, repository, tag_value, github_cred_id, github_owner, github_repo)
+                 VALUES (?, 'owner-1', 'hub-fake', 'team/app', ?, 'rc2', 'octo', 'app')",
+            )
+            .bind(id)
+            .bind(if id == "rm1" { "1.*" } else { "latest" })
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let key = auth::crypto::csrf_key(
+            &config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap(),
+        )
+        .unwrap();
+        let csrf = auth::csrf::issue(&key).unwrap();
+        let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+        let cookie_for =
+            |user: &str, role: &str| format!("{}; {csrf_cookie}", session_cookie(user, role, 0));
+        let post = |uri: &str, cookie: Option<&str>, token: bool| {
+            let mut builder = with_peer(Request::builder().method("POST").uri(uri));
+            if let Some(cookie) = cookie {
+                builder = builder.header("cookie", cookie);
+            }
+            if token {
+                builder = builder.header("x-csrf-token", csrf.as_str());
+            }
+            builder.body(Body::empty()).unwrap()
+        };
+        let owner = cookie_for("owner-1", "user");
+        let other = cookie_for("other-2", "user");
+        let admin = cookie_for("admin-3", "admin");
+        let uri = "/api/v1/image-sources/rm1/scan";
+
+        let anonymous = router
+            .clone()
+            .oneshot(post(uri, Some(&csrf_cookie), true))
+            .await
+            .unwrap();
+        let no_csrf = router
+            .clone()
+            .oneshot(post(uri, Some(&owner), false))
+            .await
+            .unwrap();
+        let foreign = router
+            .clone()
+            .oneshot(post(uri, Some(&other), true))
+            .await
+            .unwrap();
+        let missing = router
+            .clone()
+            .oneshot(post("/api/v1/image-sources/nope/scan", Some(&owner), true))
+            .await
+            .unwrap();
+        let first = router
+            .clone()
+            .oneshot(post(uri, Some(&owner), true))
+            .await
+            .unwrap();
+        let first_status = first.status();
+        let first_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(first.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let limited = router
+            .clone()
+            .oneshot(post(uri, Some(&owner), true))
+            .await
+            .unwrap();
+        let limited_status = limited.status();
+        let retry_after = limited
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
+        // The admin may scan another user's source, and that source has its own budget.
+        let admin_scan = router
+            .clone()
+            .oneshot(post("/api/v1/image-sources/rm2/scan", Some(&admin), true))
+            .await
+            .unwrap();
+        let admin_status = admin_scan.status();
+        let admin_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(admin_scan.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let pulls: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sync_jobs WHERE json_extract(payload, '$.kind') = 'pull'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let audited: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'source.scan'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(no_csrf.status(), StatusCode::FORBIDDEN);
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(first_status, StatusCode::OK);
+        assert_eq!(first_body["queued"], 1);
+        assert_eq!(limited_status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(retry_after.is_some_and(|secs| (1..=300).contains(&secs)));
+        assert_eq!(admin_status, StatusCode::OK);
+        // `latest` is not in the tag list, so the admin's source queues nothing.
+        assert_eq!(admin_body["queued"], 0);
+        assert_eq!(pulls, 1);
+        assert_eq!(audited, 2);
     }
 
     /// The purge routes: no session is `401`, a POST without a CSRF token is `403`

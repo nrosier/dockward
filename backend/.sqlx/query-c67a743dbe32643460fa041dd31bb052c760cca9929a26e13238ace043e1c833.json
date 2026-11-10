@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tag_observations SET last_seen_at = ?\n         WHERE source_id = ? AND tag = ? AND image_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "c67a743dbe32643460fa041dd31bb052c760cca9929a26e13238ace043e1c833"
+}

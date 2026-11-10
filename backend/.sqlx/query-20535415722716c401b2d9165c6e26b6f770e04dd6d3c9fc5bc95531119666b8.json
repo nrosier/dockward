@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT user_id AS \"user_id!\", hub_id AS \"hub_id!\", repository AS \"repository!\"\n           FROM image_sources WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "hub_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "hub_id"
+          }
+        }
+      },
+      {
+        "name": "repository!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "repository"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "20535415722716c401b2d9165c6e26b6f770e04dd6d3c9fc5bc95531119666b8"
+}

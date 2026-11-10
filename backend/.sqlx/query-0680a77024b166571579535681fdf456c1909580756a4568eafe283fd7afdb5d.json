@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO tag_observations (source_id, tag, image_id, first_seen_at, last_seen_at)\n         VALUES (?, ?, ?, ?, ?)\n         ON CONFLICT (source_id, tag, image_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "0680a77024b166571579535681fdf456c1909580756a4568eafe283fd7afdb5d"
+}

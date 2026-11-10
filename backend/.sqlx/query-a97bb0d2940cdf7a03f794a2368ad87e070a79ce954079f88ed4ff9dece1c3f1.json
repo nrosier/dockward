@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", username AS \"username!\", encrypted_token AS \"encrypted_token!\"\n           FROM source_credentials WHERE source_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "source_credentials",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "username!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "source_credentials",
+            "name": "username"
+          }
+        }
+      },
+      {
+        "name": "encrypted_token!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "source_credentials",
+            "name": "encrypted_token"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "a97bb0d2940cdf7a03f794a2368ad87e070a79ce954079f88ed4ff9dece1c3f1"
+}

@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT h.host AS \"hub_host!\", h.pull_endpoint AS \"pull_endpoint?\",\n                  i.repository AS \"repository!\", i.digest AS \"digest!\"\n           FROM images i JOIN hubs h ON h.id = i.hub_id WHERE i.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "hub_host!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "host"
+          }
+        }
+      },
+      {
+        "name": "pull_endpoint?",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "pull_endpoint"
+          }
+        }
+      },
+      {
+        "name": "repository!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "repository"
+          }
+        }
+      },
+      {
+        "name": "digest!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "digest"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "eb2c0446f5f1852c87f846a6be2562cc57993f8b327940c701ab1171932b70f0"
+}
