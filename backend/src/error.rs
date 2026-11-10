@@ -50,6 +50,38 @@ pub enum AppError {
     /// The free-disk guard refused a pull (`specs/spinoff-local-scan.md`, sections 4 and 13).
     /// Not an HTTP response. The job maps it to its fixed `last_error` text.
     InsufficientDisk,
+    /// A scanner run failed. Not an HTTP response: the job stores the fixed text of the fault
+    /// as its `last_error` (`specs/spinoff-local-scan.md`, section 6).
+    Scanner(ScannerFault),
+}
+
+/// A scanner run failure. Each variant has one fixed text from `specs/spinoff-local-scan.md`,
+/// section 6. No scanner stderr, output, path or argument is ever part of the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScannerFault {
+    /// The run exceeded its timeout and its process group was killed.
+    TimedOut,
+    /// The captured output went over the cap.
+    OutputTooLarge,
+    /// The scanner exited non-zero, or could not be started.
+    Failed,
+    /// The scanner output could not be parsed or failed the strict schema checks.
+    OutputNotRecognised,
+    /// The scanner vulnerability database is missing or unreadable.
+    DatabaseNotAvailable,
+}
+
+impl ScannerFault {
+    /// The fixed text stored as a job's `last_error`.
+    pub fn text(self) -> &'static str {
+        match self {
+            ScannerFault::TimedOut => "scanner timed out",
+            ScannerFault::OutputTooLarge => "scanner output too large",
+            ScannerFault::Failed => "scanner failed",
+            ScannerFault::OutputNotRecognised => "scanner output not recognised",
+            ScannerFault::DatabaseNotAvailable => "scanner database not available",
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -124,6 +156,7 @@ impl AppError {
             AppError::UpstreamStatus(_) => StatusCode::BAD_GATEWAY,
             AppError::ImageTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::InsufficientDisk => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Scanner(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -149,6 +182,7 @@ impl AppError {
             AppError::UpstreamStatus(_) => "upstream_unreachable",
             AppError::ImageTooLarge => "payload_too_large",
             AppError::InsufficientDisk => "internal_error",
+            AppError::Scanner(_) => "internal_error",
         }
     }
 
@@ -188,6 +222,7 @@ impl AppError {
             AppError::UpstreamStatus(_) => "An upstream service could not be reached.".to_owned(),
             AppError::ImageTooLarge => "The image is larger than the allowed size.".to_owned(),
             AppError::InsufficientDisk => "An internal error occurred.".to_owned(),
+            AppError::Scanner(fault) => fault.text().to_owned(),
         }
     }
 

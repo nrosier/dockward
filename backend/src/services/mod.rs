@@ -47,6 +47,8 @@ pub mod resolve;
 pub mod retention;
 #[allow(dead_code)] // Used by the sync pipeline.
 pub mod sarif;
+#[allow(dead_code)] // The spinoff scan and refresh jobs call the scanner runner (Step 4+).
+pub mod scanner;
 pub mod scanner_launch;
 pub mod scanner_scan;
 pub mod scanner_store;
