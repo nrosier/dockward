@@ -79,7 +79,15 @@ struct RawIndexEntry {
     descriptor: RawDescriptor,
     #[serde(default)]
     platform: Option<RawPlatform>,
+    #[serde(default)]
+    annotations: Option<std::collections::BTreeMap<String, String>>,
 }
+
+/// The index annotation that marks an attestation entry (`specs/spinoff-local-scan.md`,
+/// decision 30; verified on a real index built with `--provenance=mode=min --sbom=true`).
+pub const REFERENCE_TYPE_ANNOTATION: &str = "vnd.docker.reference.type";
+/// The value of [`REFERENCE_TYPE_ANNOTATION`] on an attestation entry.
+pub const ATTESTATION_MANIFEST: &str = "attestation-manifest";
 
 #[derive(Deserialize)]
 struct RawIndex {
@@ -142,6 +150,14 @@ fn parse_index(body: &[u8]) -> Result<Parsed, AppError> {
         if platform.os == "unknown" && platform.architecture == "unknown" {
             continue;
         }
+        let is_attestation = entry
+            .annotations
+            .as_ref()
+            .and_then(|map| map.get(REFERENCE_TYPE_ANNOTATION))
+            .is_some_and(|value| value == ATTESTATION_MANIFEST);
+        if is_attestation {
+            continue;
+        }
         let descriptor = descriptor(entry.descriptor)?;
         if kind_of(&descriptor.media_type) == Some(Kind::Index) {
             return Err(invalid());
@@ -192,6 +208,26 @@ mod tests {
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIGEST_B: &str =
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn index_skips_an_attestation_marked_by_its_annotation() {
+        // Decision 30: an entry whose annotation names an attestation is skipped even when its
+        // platform is a real one.
+        let body = format!(
+            r#"{{"schemaVersion":2,"manifests":[
+                {{"mediaType":"{OCI_MANIFEST}","digest":"{DIGEST_A}","size":10,
+                  "platform":{{"os":"linux","architecture":"amd64"}}}},
+                {{"mediaType":"{OCI_MANIFEST}","digest":"{DIGEST_B}","size":11,
+                  "platform":{{"os":"linux","architecture":"amd64"}},
+                  "annotations":{{"vnd.docker.reference.type":"attestation-manifest"}}}}
+            ]}}"#
+        );
+        let Ok(Parsed::Index(entries)) = parse(OCI_INDEX, body.as_bytes()) else {
+            panic!("index should parse");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].descriptor.digest, DIGEST_A);
+    }
 
     #[test]
     fn index_keeps_platforms_and_skips_attestations() {
