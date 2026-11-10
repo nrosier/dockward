@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.id AS \"id!\", s.tag_value AS \"tag_value!\", h.host AS \"hub_host!\",\n                  h.pull_endpoint AS \"pull_endpoint?\"\n           FROM image_sources s JOIN hubs h ON h.id = s.hub_id\n           WHERE s.hub_id = ? AND s.repository = ? AND (? IS NULL OR s.id = ?)\n           ORDER BY s.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "tag_value!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "tag_value"
+          }
+        }
+      },
+      {
+        "name": "hub_host!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "host"
+          }
+        }
+      },
+      {
+        "name": "pull_endpoint?",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "pull_endpoint"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "6ab502799c733135f94dd67a1f6034f2702b62e1945438055d4900a3eca6a1dd"
+}

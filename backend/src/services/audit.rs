@@ -27,6 +27,7 @@ pub const ACTIONS: &[&str] = &[
     "mapping.auth_secret_rotate",
     "mapping.pull",
     "mapping.scan",
+    "source.scan",
     "project_webhook.create",
     "project_webhook.token_rotate",
     "project_webhook.secret_rotate",

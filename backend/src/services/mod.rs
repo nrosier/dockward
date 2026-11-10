@@ -18,6 +18,7 @@ pub mod credential_probe;
 pub mod credentials;
 pub mod cves;
 pub mod dashboard;
+pub mod discovery;
 #[allow(dead_code)] // The publish step creates and closes issues (Step 4+).
 pub mod github_issues;
 #[allow(dead_code)] // The publish step uploads SARIF (Step 4+).

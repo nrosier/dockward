@@ -45,4 +45,8 @@ pub struct AppState {
     /// The live GitHub API base URL and web URL (`specs/integrations.md`, "GitHub base URL").
     /// Every GitHub client holds a clone, so an admin change applies without a restart.
     pub github: crate::services::github_url::GithubTarget,
+    /// Discovery for the manual scan route (`specs/spinoff-local-scan.md`, section 10).
+    pub discovery: Arc<crate::services::discovery::Discovery>,
+    /// Manual scans: 1 per source per 5 minutes, held in memory (section 10, decision 17).
+    pub scan_limiter: RateLimiter,
 }

@@ -6,9 +6,10 @@
 //! an attempt. A panic in a handler fails that job only. The worker stops taking new jobs
 //! after the stop signal.
 //!
-//! The handlers for the spinoff job kinds arrive with the later steps. Until then
-//! [`UnhandledJobs`] fails every job it is given. Tests that only exercise the queue use
-//! [`NoopHandler`], which completes every job.
+//! The handlers for the spinoff job kinds live in `services::discovery::handler` (discover and
+//! the pull stub); the scan and publish kinds arrive with the later steps and fail with
+//! [`MSG_UNHANDLED`] until then. Tests that only exercise the queue use [`NoopHandler`], which
+//! completes every job.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -60,19 +61,8 @@ pub enum JobOutcome {
     Deferred { until: i64, reason: String },
 }
 
-/// The fixed text stored when a job has no handler.
+/// The fixed text stored when a job kind has no handler yet.
 pub const MSG_UNHANDLED: &str = "the job kind has no handler";
-
-/// The handler used while no job kind has a real handler: every job fails once, permanently,
-/// with [`MSG_UNHANDLED`]. It reads nothing from the payload, so nothing secret can reach the
-/// stored text.
-pub struct UnhandledJobs;
-
-impl JobHandler for UnhandledJobs {
-    async fn run(&self, _job: ClaimedJob) -> JobOutcome {
-        JobOutcome::Permanent(MSG_UNHANDLED.into())
-    }
-}
 
 /// A test handler that completes every job.
 #[cfg(test)]

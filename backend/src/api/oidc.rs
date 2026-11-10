@@ -311,6 +311,11 @@ mod tests {
                 crate::services::app_log::REVERT_AFTER,
             )),
             github: Default::default(),
+            discovery: crate::services::discovery::Discovery::for_test(),
+            scan_limiter: crate::api::hardening::RateLimiter::new(
+                1,
+                std::time::Duration::from_secs(300),
+            ),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }
