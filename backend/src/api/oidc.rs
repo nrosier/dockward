@@ -102,7 +102,7 @@ impl fmt::Debug for CallbackQuery {
     }
 }
 
-/// The redirect URI sent to the provider. It is built from `HARBORGATE_PUBLIC_URL`.
+/// The redirect URI sent to the provider. It is built from `DOCKWARD_PUBLIC_URL`.
 fn redirect_uri(state: &AppState) -> String {
     redirect_uri_for(&state.public_url)
 }
@@ -282,10 +282,8 @@ mod tests {
     const TEST_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
     async fn router(name: &str) -> (axum::Router, sqlx::SqlitePool, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "harborgate-oidc-route-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("dockward-oidc-route-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = crate::db::open(&dir).await.unwrap();
@@ -294,7 +292,7 @@ mod tests {
             pool: pool.clone(),
             session_key: Arc::new(crypto::session_key(&root).unwrap()),
             csrf_key: Arc::new(crypto::csrf_key(&root).unwrap()),
-            public_url: "https://harborgate.example.com".to_owned(),
+            public_url: "https://dockward.example.com".to_owned(),
             login_throttle: LoginThrottle::new(),
             login_limiter: RateLimiter::new(10, Duration::from_secs(60)),
             credentials_key: Arc::new(crypto::credentials_key(&root).unwrap()),
@@ -409,7 +407,7 @@ mod tests {
         // Issuer and client ID are set, but there is no secret, role claim, or group.
         let body = serde_json::json!({
             "issuer_url": "https://issuer.example.com",
-            "client_id": "harborgate-test",
+            "client_id": "dockward-test",
             "oidc_only_users": true,
         });
         let request = peer(
@@ -438,11 +436,11 @@ mod tests {
 
     #[test]
     fn redirect_uri_is_built_from_the_public_url() {
-        // `config` strips the trailing slash from HARBORGATE_PUBLIC_URL before it reaches
+        // `config` strips the trailing slash from DOCKWARD_PUBLIC_URL before it reaches
         // AppState, so the redirect URI is the origin plus the callback path.
         assert_eq!(
-            super::redirect_uri_for("https://harborgate.example.com"),
-            "https://harborgate.example.com/api/v1/auth/oidc/callback"
+            super::redirect_uri_for("https://dockward.example.com"),
+            "https://dockward.example.com/api/v1/auth/oidc/callback"
         );
         assert_eq!(
             super::redirect_uri_for("http://localhost:8080"),
@@ -474,7 +472,7 @@ mod tests {
         let mut conn = pool.acquire().await.unwrap();
         for (name, value) in [
             (crate::services::oidc::ISSUER_KEY, "https://idp.example.com"),
-            (crate::services::oidc::CLIENT_ID_KEY, "harborgate-test"),
+            (crate::services::oidc::CLIENT_ID_KEY, "dockward-test"),
             (crate::services::oidc::ROLE_CLAIM_KEY, "groups"),
             (crate::services::oidc::USER_GROUP_KEY, "test-users"),
         ] {

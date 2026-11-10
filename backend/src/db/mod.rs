@@ -37,10 +37,10 @@ pub mod users;
 
 use crate::error::AppError;
 
-/// File name of the SQLite database inside `HARBORGATE_DATA_DIR`.
+/// File name of the SQLite database inside `DOCKWARD_DATA_DIR`.
 pub const DB_FILE_NAME: &str = "harborgate.db";
 
-/// Table that marks a HarborGate `main` database. Its presence refuses the file (decision 21).
+/// Table that marks a Dockward `main` database. Its presence refuses the file (decision 21).
 pub const LEGACY_TABLE: &str = "repo_mappings";
 
 /// The fixed refusal text for a legacy database (specs/spinoff-local-scan.md, section 9).
@@ -282,8 +282,7 @@ mod tests {
     /// schema is created in it.
     #[tokio::test]
     async fn open_refuses_a_legacy_file_and_creates_no_tables() -> Result<(), AppError> {
-        let dir =
-            std::env::temp_dir().join(format!("harborgate-legacy-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dockward-legacy-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|_| AppError::InternalError)?;
         let legacy = SqlitePoolOptions::new()
@@ -305,7 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_database_uses_wal() -> Result<(), AppError> {
-        let dir = std::env::temp_dir().join(format!("harborgate-db-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dockward-db-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|_| AppError::InternalError)?;
         let pool = open(&dir).await?;

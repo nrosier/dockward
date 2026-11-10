@@ -1,6 +1,6 @@
 //! Offline key rotation: re-encrypts every stored ciphertext from the credential key
-//! derived from `HARBORGATE_OLD_ENCRYPTION_KEY` to the one derived from
-//! `HARBORGATE_ENCRYPTION_KEY`. See `specs/security.md` (Key rotation).
+//! derived from `DOCKWARD_OLD_ENCRYPTION_KEY` to the one derived from
+//! `DOCKWARD_ENCRYPTION_KEY`. See `specs/security.md` (Key rotation).
 //!
 //! Every value keeps its AAD and stays in the `v1:` format. All rewrites and the
 //! `key.rotate` audit row share one transaction, so any failure leaves the database
@@ -188,7 +188,7 @@ mod tests {
 
     fn unique_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "harborgate-key-rotation-{name}-{}",
+            "dockward-key-rotation-{name}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);

@@ -9,10 +9,10 @@ fn healthcheck_prints_no_secret() {
     // so any value proves the point, and the secret scan does not flag these.
     let current = "marker-current-aaaaaaaaaaaaaaaa";
     let previous = "marker-previous-bbbbbbbbbbbbbbbb";
-    let output = Command::new(env!("CARGO_BIN_EXE_harborgate"))
+    let output = Command::new(env!("CARGO_BIN_EXE_dockward"))
         .arg("healthcheck")
-        .env("HARBORGATE_ENCRYPTION_KEY", current)
-        .env("HARBORGATE_OLD_ENCRYPTION_KEY", previous)
+        .env("DOCKWARD_ENCRYPTION_KEY", current)
+        .env("DOCKWARD_OLD_ENCRYPTION_KEY", previous)
         .output()
         .unwrap();
     let text = format!(

@@ -1,4 +1,4 @@
-//! Command-line subcommands. `harborgate` with no arguments serves; `restore <file>`
+//! Command-line subcommands. `dockward` with no arguments serves; `restore <file>`
 //! and `rotate-key` are offline commands run with the app stopped. See
 //! `specs/security.md` (Backup and restore, Key rotation). `healthcheck` probes the
 //! running server for the container healthcheck (`specs/deployment.md`, Health).
@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::error::AppError;
 
-/// The URL `harborgate healthcheck` probes: the liveness endpoint on the loopback
+/// The URL `dockward healthcheck` probes: the liveness endpoint on the loopback
 /// address and the port the server binds (`BIND_ADDR` in `main.rs`).
 pub const HEALTHCHECK_URL: &str = "http://127.0.0.1:8080/healthz";
 
@@ -30,10 +30,10 @@ pub enum Command {
 
 /// The text printed when the arguments are not understood.
 pub const USAGE: &str = "usage:
-  harborgate                  run the server
-  harborgate restore <file>   replace the database from a backup (stop the app first)
-  harborgate rotate-key       re-encrypt stored credentials under a new key (stop the app first)
-  harborgate healthcheck      exit 0 if the running server answers /healthz with 200";
+  dockward                  run the server
+  dockward restore <file>   replace the database from a backup (stop the app first)
+  dockward rotate-key       re-encrypt stored credentials under a new key (stop the app first)
+  dockward healthcheck      exit 0 if the running server answers /healthz with 200";
 
 /// Reads the arguments after the program name. No arguments means `Serve`. Anything
 /// that is not a known command, or a known command with the wrong arguments, returns

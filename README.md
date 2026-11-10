@@ -1,4 +1,4 @@
-# HarborGate
+# Dockward
 
 <p align="center">
   <a href="https://github.com/nrosier/harborgate/actions/workflows/docker.yml"><img alt="Docker" src="https://github.com/nrosier/harborgate/actions/workflows/docker.yml/badge.svg"></a>
@@ -6,7 +6,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/nrosier/harborgate"></a>
 </p>
 
-HarborGate is a local-first, multi-tenant security relay. It receives container vulnerability reports from Harbor, primarily through webhooks with polling as a backup, converts them to the SARIF 2.1.0 format, and pushes them to GitHub Code Scanning. It can also open GitHub Issues for high-severity findings. The backend is written in Rust (Axum) and the frontend in React (Vite and TypeScript).
+Dockward is a local-first, multi-tenant security relay. It receives container vulnerability reports from Harbor, primarily through webhooks with polling as a backup, converts them to the SARIF 2.1.0 format, and pushes them to GitHub Code Scanning. It can also open GitHub Issues for high-severity findings. The backend is written in Rust (Axum) and the frontend in React (Vite and TypeScript).
 
 ## Status
 
@@ -28,7 +28,7 @@ The planned v1 functionality, summarized from the specification. Items listed he
 - **Secure credential storage:** user credentials (GitHub tokens, Harbor robot tokens, OIDC client secrets) are encrypted at rest with AES-256-GCM.
 - **Setup and login:** a first-run wizard creates the initial admin account, and OIDC sign-in can be configured from the admin UI. A local break-glass login remains available as a fallback.
 - **Role-based access:** admins manage system configuration, users, and global logs. Regular users manage their own credentials, repository mappings, and Sync jobs.
-- **Scoped webhook relay:** each repository mapping has its own webhook endpoint. On receipt, HarborGate fetches the vulnerability report from the Harbor REST API and converts Trivy output to SARIF.
+- **Scoped webhook relay:** each repository mapping has its own webhook endpoint. On receipt, Dockward fetches the vulnerability report from the Harbor REST API and converts Trivy output to SARIF.
 - **GitHub delivery:** SARIF is gzipped, Base64-encoded, and submitted to the GitHub code-scanning API. The commit SHA comes only from the `org.opencontainers.image.revision` OCI label; the sync fails if it is missing. The branch comes from the `io.github.nrosier.harborgate.branch` label if present, otherwise from the mapping's default branch (default `main`).
 - **Optional issue creation:** GitHub Issues are created automatically for CRITICAL and HIGH findings, or triggered manually. `min_issue_severity` defaults to CRITICAL and may be lowered to HIGH.
 - **Dashboard and logs:** a web UI covers Dashboard, Mappings, CVEs, Sync jobs, and Account.
@@ -48,20 +48,20 @@ Set these in a `.env` file kept out of git, and pass it to the container with `-
 
 | Name | Required | Default | Purpose |
 | --- | --- | --- | --- |
-| `HARBORGATE_ENCRYPTION_KEY` | Yes | none | Base64 of 32 random bytes. Encrypts stored credentials and derives the session and CSRF keys. The app refuses to start without it. Format in [specs/security.md](specs/security.md). |
-| `HARBORGATE_PUBLIC_URL` | Yes | none | The external origin users open, for example `https://harborgate.example.com`. Must be `https://`; `http://localhost` with any port is allowed for development. Used for the OIDC redirect URI, the webhook URLs, and the login origin check. The app refuses to start without it. |
-| `HARBORGATE_TRUSTED_PROXIES` | No | empty | Comma-separated CIDRs (no host bits set) for the reverse proxies whose `X-Forwarded-For` header is trusted. Setup in [specs/deployment.md](specs/deployment.md), "Client IP behind Cloudflare and Traefik". |
-| `HARBORGATE_DATA_DIR` | No | `/data` | Data directory, which holds the SQLite database. Keep it on a persistent volume. |
-| `HARBORGATE_BACKUP_DIR` | No | `/data/backups` | Backup directory. See [specs/security.md](specs/security.md), "Backup and restore". |
-| `HARBORGATE_ALLOW_PRIVATE_HARBOR` | No | `false` | Allows a Harbor address in a loopback, link-local, or private range. For private Harbor deployments only. See [specs/security.md](specs/security.md), "Outbound HTTP (SSRF)". |
-| `HARBORGATE_ALLOW_PRIVATE_OIDC` | No | `false` | The same opt-out for the OIDC issuer and its endpoints. |
-| `HARBORGATE_ALLOW_PRIVATE_ALERTS` | No | `false` | The same opt-out for alert SMTP and webhook hosts. |
+| `DOCKWARD_ENCRYPTION_KEY` | Yes | none | Base64 of 32 random bytes. Encrypts stored credentials and derives the session and CSRF keys. The app refuses to start without it. Format in [specs/security.md](specs/security.md). |
+| `DOCKWARD_PUBLIC_URL` | Yes | none | The external origin users open, for example `https://dockward.example.com`. Must be `https://`; `http://localhost` with any port is allowed for development. Used for the OIDC redirect URI, the webhook URLs, and the login origin check. The app refuses to start without it. |
+| `DOCKWARD_TRUSTED_PROXIES` | No | empty | Comma-separated CIDRs (no host bits set) for the reverse proxies whose `X-Forwarded-For` header is trusted. Setup in [specs/deployment.md](specs/deployment.md), "Client IP behind Cloudflare and Traefik". |
+| `DOCKWARD_DATA_DIR` | No | `/data` | Data directory, which holds the SQLite database. Keep it on a persistent volume. |
+| `DOCKWARD_BACKUP_DIR` | No | `/data/backups` | Backup directory. See [specs/security.md](specs/security.md), "Backup and restore". |
+| `DOCKWARD_ALLOW_PRIVATE_HARBOR` | No | `false` | Allows a Harbor address in a loopback, link-local, or private range. For private Harbor deployments only. See [specs/security.md](specs/security.md), "Outbound HTTP (SSRF)". |
+| `DOCKWARD_ALLOW_PRIVATE_OIDC` | No | `false` | The same opt-out for the OIDC issuer and its endpoints. |
+| `DOCKWARD_ALLOW_PRIVATE_ALERTS` | No | `false` | The same opt-out for alert SMTP and webhook hosts. |
 
-Planned, not built yet: the key re-encryption command (`HARBORGATE_OLD_ENCRYPTION_KEY` and `HARBORGATE_ENCRYPTION_KEY`), which runs offline with the app stopped. See [specs/security.md](specs/security.md), "Key rotation".
+Planned, not built yet: the key re-encryption command (`DOCKWARD_OLD_ENCRYPTION_KEY` and `DOCKWARD_ENCRYPTION_KEY`), which runs offline with the app stopped. See [specs/security.md](specs/security.md), "Key rotation".
 
 ## Development
 
-The commands below run from the directory shown. Backend commands need no environment. Starting the app with `cargo watch -x run` needs `HARBORGATE_ENCRYPTION_KEY` and `HARBORGATE_PUBLIC_URL` set, as above. Build and design details are in [`specs/`](specs/README.md).
+The commands below run from the directory shown. Backend commands need no environment. Starting the app with `cargo watch -x run` needs `DOCKWARD_ENCRYPTION_KEY` and `DOCKWARD_PUBLIC_URL` set, as above. Build and design details are in [`specs/`](specs/README.md).
 
 ```bash
 # Backend (from backend/): run in development mode with file watching
@@ -83,8 +83,8 @@ npm run dev
 npm run build
 
 # Docker (from the repo root): build the image, then run it with the .env file
-docker build -t harborgate:latest .
-docker run --init --env-file .env -p 8080:8080 -v harborgate_data:/data harborgate:latest
+docker build -t dockward:latest .
+docker run --init --env-file .env -p 8080:8080 -v dockward_data:/data dockward:latest
 ```
 
 ## Documentation
@@ -95,4 +95,4 @@ For operator setup (Harbor robot account, webhook, GitHub token, OCI labels, and
 
 ## License
 
-HarborGate is licensed under the MIT License. See [`LICENSE`](./LICENSE) for the full text.
+Dockward is licensed under the MIT License. See [`LICENSE`](./LICENSE) for the full text.

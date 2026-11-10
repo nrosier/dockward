@@ -52,7 +52,7 @@ export default function AdminBackupPage() {
           <li>
             {t("admin.restore.run")}
             <pre className="mt-2 overflow-x-auto rounded-lg border border-border bg-bg p-3 font-mono text-[12.5px]">
-              {`harborgate restore ${last ?? t("admin.restore.placeholder")}`}
+              {`dockward restore ${last ?? t("admin.restore.placeholder")}`}
             </pre>
           </li>
           <li>{t("admin.restore.start")}</li>

@@ -22,9 +22,9 @@ ENV SQLX_OFFLINE=true
 # A cache mount is not part of the layer, so the binary is copied out of target/.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/backend/target \
-    cargo auditable build --release --locked && cp target/release/harborgate /harborgate
+    cargo auditable build --release --locked && cp target/release/dockward /dockward
 # The source commit. Required: the build fails without it, so every image carries
-# org.opencontainers.image.revision. HarborGate reads that label on the image it scans.
+# org.opencontainers.image.revision. Dockward reads that label on the image it scans.
 # Checked in the builder because the scratch runtime stage has no shell. Declared after the
 # build, so a new commit does not invalidate the cargo layer.
 ARG REVISION
@@ -56,16 +56,16 @@ ARG REVISION
 # /tmp at 1777. Copying a directory on its own copies only its contents, and --chmod
 # drops the sticky bit.
 COPY --from=rootfs-with-scanners /rootfs/ /
-COPY --from=backend /harborgate /usr/local/bin/harborgate
+COPY --from=backend /dockward /usr/local/bin/dockward
 USER 65532:65532
 EXPOSE 8080
-ENV HARBORGATE_DATA_DIR=/data
+ENV DOCKWARD_DATA_DIR=/data
 VOLUME ["/data"]
 # Same values as docker-compose.yml. Exec form: the image has no shell.
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD ["/usr/local/bin/harborgate", "healthcheck"]
-LABEL org.opencontainers.image.title="HarborGate" \
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD ["/usr/local/bin/dockward", "healthcheck"]
+LABEL org.opencontainers.image.title="Dockward" \
       org.opencontainers.image.source="https://github.com/nrosier/harborgate" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.description="Harbor to GitHub Code Scanning relay" \
       org.opencontainers.image.revision="$REVISION"
-ENTRYPOINT ["/usr/local/bin/harborgate"]
+ENTRYPOINT ["/usr/local/bin/dockward"]

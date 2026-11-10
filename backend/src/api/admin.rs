@@ -272,7 +272,7 @@ pub async fn update_alert_channel(
     Ok(Json(channel))
 }
 
-/// `POST /api/v1/admin/backup`. Writes an encrypted backup to `HARBORGATE_BACKUP_DIR`
+/// `POST /api/v1/admin/backup`. Writes an encrypted backup to `DOCKWARD_BACKUP_DIR`
 /// and audits `backup.run` after the file exists. Returns `201` with the file name
 /// and the directory. A missing or unwritable directory is `500 internal_error`.
 pub async fn backup(
@@ -560,7 +560,7 @@ pub(crate) mod test_support {
     /// A fresh migrated database under a per-test directory, and the state built on it.
     pub async fn test_state(name: &str) -> (AppState, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "harborgate-admin-health-{name}-{}",
+            "dockward-admin-health-{name}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -571,7 +571,7 @@ pub(crate) mod test_support {
             pool,
             session_key: Arc::new(crypto::session_key(&root).unwrap()),
             csrf_key: Arc::new(crypto::csrf_key(&root).unwrap()),
-            public_url: "https://harborgate.example.com".to_owned(),
+            public_url: "https://dockward.example.com".to_owned(),
             login_throttle: crate::services::throttle::LoginThrottle::new(),
             login_limiter: RateLimiter::new(10, std::time::Duration::from_secs(60)),
             credentials_key: Arc::new(crypto::credentials_key(&root).unwrap()),
@@ -786,7 +786,7 @@ mod tests {
     /// with a valid session token, and a CSRF token that matches its cookie.
     async fn router(name: &str) -> (axum::Router, sqlx::SqlitePool, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "harborgate-admin-backup-{name}-{}",
+            "dockward-admin-backup-{name}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -797,7 +797,7 @@ mod tests {
             pool: pool.clone(),
             session_key: Arc::new(crypto::session_key(&root).unwrap()),
             csrf_key: Arc::new(crypto::csrf_key(&root).unwrap()),
-            public_url: "https://harborgate.example.com".to_owned(),
+            public_url: "https://dockward.example.com".to_owned(),
             login_throttle: LoginThrottle::new(),
             login_limiter: RateLimiter::new(10, std::time::Duration::from_secs(60)),
             credentials_key: Arc::new(crypto::credentials_key(&root).unwrap()),

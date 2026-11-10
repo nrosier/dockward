@@ -23,7 +23,7 @@ pub const TEST_ISSUER: &str = "https://idp.example.com";
 /// Test client id. Fixed fake value.
 pub const TEST_CLIENT_ID: &str = "test-client-id";
 /// Test redirect URI. Fixed fake value.
-pub const TEST_REDIRECT: &str = "https://harborgate.example.com/api/v1/auth/oidc/callback";
+pub const TEST_REDIRECT: &str = "https://dockward.example.com/api/v1/auth/oidc/callback";
 
 /// The generated test keys: a 2048-bit RSA key and a P-256 EC key.
 pub struct TestKeys {

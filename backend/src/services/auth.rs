@@ -107,7 +107,7 @@ mod tests {
     use axum::http::HeaderValue;
 
     // Test values only. Passwords are generated at runtime, so none is a source literal.
-    const URL: &str = "https://harborgate.example.com";
+    const URL: &str = "https://dockward.example.com";
     static PASSWORD: std::sync::LazyLock<String> =
         std::sync::LazyLock::new(|| crate::auth::password::random_test_password(20));
     static WRONG: std::sync::LazyLock<String> =
@@ -139,7 +139,7 @@ mod tests {
     fn origin_matches_after_normalisation() {
         // An operator writes an uppercase host and the default port. The browser sends
         // `Origin` in canonical form, so the startup value must match it.
-        let raw = "https://Harborgate.Example.com:443/";
+        let raw = "https://Dockward.Example.com:443/";
         let settings = crate::config::load_settings_with(|name| {
             if name == crate::config::PUBLIC_URL_VAR {
                 Ok(raw.to_owned())
@@ -148,8 +148,8 @@ mod tests {
             }
         })
         .unwrap();
-        assert_eq!(settings.public_url, "https://harborgate.example.com");
-        let browser = headers(&[("origin", "https://harborgate.example.com")]);
+        assert_eq!(settings.public_url, "https://dockward.example.com");
+        let browser = headers(&[("origin", "https://dockward.example.com")]);
         assert!(check_same_origin(&browser, &settings.public_url).is_ok());
         // The raw operator value is not what a browser sends, so it must not be stored.
         assert_ne!(settings.public_url, raw.trim_end_matches('/'));
@@ -178,8 +178,7 @@ mod tests {
 
     /// A fresh migrated database. Test values only.
     async fn fresh_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {
-        let dir =
-            std::env::temp_dir().join(format!("harborgate-auth-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dockward-auth-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = crate::db::open(&dir).await.unwrap();

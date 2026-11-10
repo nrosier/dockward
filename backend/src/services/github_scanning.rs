@@ -222,7 +222,7 @@ fn authorized(
         .bearer_auth(token)
         .header("accept", "application/vnd.github+json")
         .header("x-github-api-version", "2022-11-28")
-        .header("user-agent", "HarborGate"))
+        .header("user-agent", "Dockward"))
 }
 
 async fn read_response(response: reqwest::Response) -> Result<ScanResponse, ScanError> {

@@ -31,7 +31,7 @@ pub enum AppError {
     PayloadTooLarge,
     RateLimited,
     InternalError,
-    /// `HARBORGATE_BACKUP_DIR` is missing, not a directory, or not writable. Returned
+    /// `DOCKWARD_BACKUP_DIR` is missing, not a directory, or not writable. Returned
     /// as `500 internal_error` with a safe message that names the cause
     /// (`specs/security.md`, Backup and restore).
     BackupDirUnavailable,

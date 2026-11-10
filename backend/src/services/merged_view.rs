@@ -425,7 +425,7 @@ mod tests {
     /// failed run never counts, and a scanner whose run found nothing is still listed.
     #[tokio::test]
     async fn load_reads_the_latest_done_run_of_each_scanner() -> Result<(), AppError> {
-        let dir = std::env::temp_dir().join(format!("harborgate-merged-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dockward-merged-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|_| AppError::InternalError)?;
         let pool = db::open(&dir).await?;

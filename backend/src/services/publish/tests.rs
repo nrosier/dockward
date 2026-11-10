@@ -169,7 +169,7 @@ impl Fx {
     async fn new(name: &str) -> Self {
         let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "harborgate-publish-{name}-{}-{seq}",
+            "dockward-publish-{name}-{}-{seq}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);

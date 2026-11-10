@@ -343,7 +343,7 @@ mod tests {
 
     async fn fresh_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "harborgate-alert-channels-{name}-{}",
+            "dockward-alert-channels-{name}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -377,7 +377,7 @@ mod tests {
         json!({
             "host": "smtp.example.test", "port": 465, "tls": "implicit",
             "username": "mailer", "password": FAKE_PASSWORD,
-            "from": "harborgate@example.test", "to": ["ops@example.test"]
+            "from": "dockward@example.test", "to": ["ops@example.test"]
         })
     }
 

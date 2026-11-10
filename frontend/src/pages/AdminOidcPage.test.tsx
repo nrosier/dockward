@@ -9,8 +9,8 @@ const settings = {
   issuer_url: "https://login.example.org/realms/platform",
   client_id: "harborgate",
   role_claim: "groups",
-  admin_group: "harborgate-admins",
-  user_group: "harborgate-users",
+  admin_group: "dockward-admins",
+  user_group: "dockward-users",
   client_secret_set: true,
   oidc_only_users: false,
 };

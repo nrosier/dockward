@@ -311,7 +311,7 @@ mod tests {
 
     async fn fresh_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {
         let dir =
-            std::env::temp_dir().join(format!("harborgate-worker-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("dockward-worker-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pool = db::open(&dir).await.unwrap();

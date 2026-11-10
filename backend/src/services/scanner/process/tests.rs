@@ -24,7 +24,7 @@ fn scratch_dir(name: &str) -> PathBuf {
         .unwrap_or_default();
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "harborgate-scanner-{name}-{}-{seq}-{nanos}",
+        "dockward-scanner-{name}-{}-{seq}-{nanos}",
         std::process::id()
     ));
     if let Err(err) = std::fs::create_dir_all(&dir) {
@@ -129,7 +129,7 @@ fn the_child_sees_only_the_allow_list_and_not_a_parent_variable() {
         Err(poison) => poison.into_inner(),
     };
     // A canary set in the parent. The child must not see it, because the environment is cleared.
-    let canary = "HARBORGATE_SCANNER_TEST_CANARY";
+    let canary = "DOCKWARD_SCANNER_TEST_CANARY";
     // SAFETY: ENV_LOCK serialises environment access in this test binary, and the variable is
     // removed below before any assertion can panic.
     unsafe { std::env::set_var(canary, "canary-value") };

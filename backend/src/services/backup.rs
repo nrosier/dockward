@@ -1,5 +1,5 @@
 //! Encrypted backups. The database is copied with `VACUUM INTO`, sealed with the
-//! derived backup key, and written to `HARBORGATE_BACKUP_DIR`. The file format and
+//! derived backup key, and written to `DOCKWARD_BACKUP_DIR`. The file format and
 //! the rules are in `specs/security.md` (Backup and restore) and `specs/api.md`
 //! (`POST /admin/backup`).
 //!
@@ -229,7 +229,7 @@ mod tests {
 
     fn unique_dir(name: &str) -> std::path::PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("harborgate-backup-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("dockward-backup-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
