@@ -128,7 +128,8 @@ export interface SyncJob {
   last_error: string | null;
   created_at: string | null;
   updated_at: string | null;
-  trigger: "webhook" | "poll" | "schedule";
+  // The trigger the job was queued by, from its payload. Null when the payload has none.
+  trigger: string | null;
   image: {
     repo_full_name: string | null;
     tag: string | null;

@@ -1,22 +1,18 @@
 {
   "app.name": "HarborGate",
-
   "common.loading": "Loading…",
   "common.copy": "Copy",
   "common.copied": "Copied",
   "common.close": "Close",
-
   "errors.generic": "Something went wrong. Try again.",
   "errors.notFound.title": "Page not found",
   "errors.notFound.body": "This page does not exist, or you do not have access to it.",
-
   "nav.dashboard": "Dashboard",
   "nav.sources": "Sources",
   "nav.cves": "CVEs",
   "nav.syncJobs": "Sync jobs",
   "nav.admin": "Admin",
   "nav.account": "Account",
-
   "rail.label": "Main",
   "rail.collapse": "Collapse sidebar",
   "rail.expand": "Expand sidebar",
@@ -24,28 +20,22 @@
   "rail.accountLine": "{role} · {provider} account",
   "rail.providerLocal": "local",
   "rail.providerOidc": "OIDC",
-
   "role.admin": "Admin",
   "role.user": "User",
-
   "header.openMenu": "Open menu",
   "header.environmentStatus": "Environment status",
   "header.githubReachable": "GitHub reachable",
   "header.githubUnreachable": "GitHub unreachable",
   "header.version": "v{version}",
   "header.signOut": "Sign out",
-
   "scope.label": "Scope",
   "scope.mine": "My mappings",
   "scope.all": "All mappings",
-
   "pagination.label": "Pagination",
   "pagination.range": "{from}–{to} of {total}",
   "pagination.previous": "Previous",
   "pagination.next": "Next",
-
   "sha.copyTitle": "Copy digest",
-
   "pill.critical": "Critical",
   "pill.high": "High",
   "pill.medium": "Medium",
@@ -58,7 +48,6 @@
   "pill.running": "Running",
   "pill.queued": "Queued",
   "pill.unknown": "Unknown",
-
   "admin.tabs.label": "Admin",
   "admin.tabs.jobs": "Jobs",
   "admin.tabs.failed": "Failed syncs",
@@ -72,7 +61,6 @@
   "admin.settings.alerts": "Alerts",
   "admin.settings.backup": "Backup and restore",
   "admin.settings.github": "GitHub",
-
   "login.tagline": "Image scan results, delivered to GitHub.",
   "login.sso": "Sign in with single sign-on",
   "login.divider": "or use a local account",
@@ -84,7 +72,6 @@
   "login.error.failed": "Sign-in failed. Check your username and password, or use single sign-on.",
   "login.error.rateLimited": "Too many attempts. Wait a minute and try again.",
   "login.error.sso": "Single sign-on failed. Try again, or ask your administrator to check your group membership.",
-
   "setup.eyebrow": "First-run setup",
   "setup.intro": "This page is only available until the first account exists. This account is a local admin and can always sign in, even after single sign-on is set up.",
   "setup.username": "Username",
@@ -100,7 +87,6 @@
   "setup.error.done": "Setup is already done.",
   "setup.error.doneLink": "Go to sign in",
   "setup.error.generic": "Setup failed. Try again.",
-
   "dashboard.subtitle": "Open findings and the latest syncs across your mappings.",
   "dashboard.openCves": "Open CVEs",
   "dashboard.openCvesTotal": "Open CVEs, all severities",
@@ -114,7 +100,6 @@
   "dashboard.noSyncs": "No syncs yet. They appear here after the first scan result.",
   "dashboard.col.target": "GitHub target",
   "dashboard.col.when": "When",
-
   "mappings.col.github": "GitHub target",
   "mappings.col.openCves": "Open CVEs",
   "mappings.col.lastSync": "Last sync",
@@ -124,7 +109,6 @@
   "mappings.form.githubOwner": "GitHub owner",
   "mappings.form.githubRepository": "GitHub repository",
   "mappings.form.readOnly": "This mapping belongs to another user. You can view it but not change it.",
-
   "cves.subtitle": "One row per CVE per mapping, for the newest image.",
   "cves.empty": "No CVEs match these filters.",
   "cves.unknown": "Unknown",
@@ -175,7 +159,6 @@
   "cves.accept.submit": "Accept risk",
   "cves.revoke.title": "Revoke acceptance for {cve}",
   "cves.revoke.body": "The CVE counts again, and a new issue can be created for it.",
-
   "cves.filter.group": "CVE filters",
   "cves.filter.tag": "Tag",
   "cves.filter.namespace": "Namespace",
@@ -210,7 +193,6 @@
   "cves.createDialog.cve": "CVE",
   "cves.createDialog.package": "Package",
   "cves.createDialog.confirm": "Confirm",
-
   "sources.subtitle": "The registry images HarborGate scans, and where the results go.",
   "sources.add": "Add source",
   "sources.back": "Back to sources",
@@ -288,8 +270,6 @@
   "syncJobs.attempts": "{attempts} of {max}",
   "syncJobs.retrying": "Retrying (attempt {attempts} of {max})",
   "syncJobs.nextAttempt": "Next attempt {time}",
-  "syncJobs.trigger.webhook": "Webhook",
-  "syncJobs.trigger.poll": "Poll",
   "syncJobs.filter.status": "Status",
   "syncJobs.filter.all": "All",
   "syncJobs.col.image": "Image",
@@ -302,8 +282,7 @@
   "syncJobs.time.justNow": "Just now",
   "syncJobs.time.minutesAgo": "{n} min ago",
   "syncJobs.time.hoursAgo": "{n} h ago",
-
-  "page.login":"Sign in",
+  "page.login": "Sign in",
   "page.setup": "Create the first admin",
   "page.dashboard": "Dashboard",
   "page.sources": "Sources",
@@ -315,7 +294,6 @@
   "page.account": "Account",
   "page.credentialNew": "Add credential",
   "page.credentialEdit": "Edit credential",
-
   "common.cancel": "Cancel",
   "account.tabs.label": "Account",
   "account.tabs.profile": "Profile",
@@ -548,7 +526,6 @@
   "admin.restore.placeholder": "<path>/<file>",
   "admin.restore.start": "Start HarborGate again. The audit log records the restore.",
   "admin.restore.docs": "Full steps are in docs/SETUP.md.",
-
   "admin.tabs.log": "Log",
   "adminLog.title": "Application log",
   "adminLog.subtitle": "Recent log lines from this HarborGate instance. Secrets are redacted before they are stored.",
@@ -577,7 +554,6 @@
   "adminLog.line.truncated": "(line truncated)",
   "adminLog.empty": "No log lines match this filter.",
   "adminLog.forbidden": "You need an administrator account to view the application log.",
-
   "mapping.picker.searchPlaceholder": "Search by name",
   "mapping.picker.repositoryHint": "Pick a project first. Repositories are shown without the project prefix; the saved value keeps it.",
   "mapping.picker.pageSize": "Page size",
@@ -612,7 +588,12 @@
   "sync.note.coveredByParent": "Covered by parent index",
   "sync.note.noTaggedImage": "No tagged image to scan.",
   "sync.note.scanAlreadyRunning": "A scan of this image is already running.",
-  "syncJobs.trigger.schedule": "Schedule",
   "syncJobs.newVulns": "New vulnerabilities: {ids}",
-  "syncJobs.noNewVulns": "No new vulnerabilities"
+  "syncJobs.noNewVulns": "No new vulnerabilities",
+  "syncJobs.trigger.discovery": "Discovery",
+  "syncJobs.trigger.firstPull": "First pull",
+  "syncJobs.trigger.tagMoved": "Tag moved",
+  "syncJobs.trigger.dbUpdate": "Database update",
+  "syncJobs.trigger.manual": "Manual",
+  "syncJobs.trigger.none": "None"
 }

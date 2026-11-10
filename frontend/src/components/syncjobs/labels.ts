@@ -1,15 +1,21 @@
 import { t, type MessageKey } from "../../i18n";
 import type { SyncJob } from "../../types/api";
 
-// The catalog key for a job's trigger. A trigger the client does not know shows as Webhook,
-// the API's default.
+// The label for a job's trigger, from the payload. A trigger the client does not know shows as
+// its raw value, never as a made-up label: an unknown trigger is shown, not hidden as Webhook.
 export function triggerLabel(trigger: SyncJob["trigger"]): string {
-  const keys: Record<SyncJob["trigger"], MessageKey> = {
-    webhook: "syncJobs.trigger.webhook",
-    poll: "syncJobs.trigger.poll",
-    schedule: "syncJobs.trigger.schedule",
+  const keys: Record<string, MessageKey> = {
+    discovery: "syncJobs.trigger.discovery",
+    first_pull: "syncJobs.trigger.firstPull",
+    tag_moved: "syncJobs.trigger.tagMoved",
+    db_update: "syncJobs.trigger.dbUpdate",
+    manual: "syncJobs.trigger.manual",
   };
-  return t(keys[trigger] ?? "syncJobs.trigger.webhook");
+  if (trigger === null) {
+    return t("syncJobs.trigger.none");
+  }
+  const key = keys[trigger];
+  return key === undefined ? trigger : t(key);
 }
 
 // Fixed notes and messages the server keeps in last_error, shown as catalog text. Any other
