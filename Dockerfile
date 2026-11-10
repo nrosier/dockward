@@ -41,12 +41,21 @@ RUN apk add --no-cache ca-certificates \
     && chown 65532:65532 /rootfs/data \
     && chmod 1777 /rootfs/tmp
 
+# Pinned scanner binaries (decisions 28-29). Taken from the verified release images by digest,
+# never a floating tag. Each binary is static (CGO_ENABLED=0), so it runs on scratch.
+FROM aquasec/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb AS trivy
+FROM anchore/grype@sha256:6a36234da13f9faa327306ac0b3dab3405cfa2b4eb20c8f904125a8707863913 AS grype
+
+FROM rootfs AS rootfs-with-scanners
+COPY --from=trivy /usr/local/bin/trivy /rootfs/usr/local/bin/trivy
+COPY --from=grype /grype /rootfs/usr/local/bin/grype
+
 FROM scratch
 ARG REVISION
 # One COPY of the tree keeps the owner and mode of each entry: /data owned by 65532 and
 # /tmp at 1777. Copying a directory on its own copies only its contents, and --chmod
 # drops the sticky bit.
-COPY --from=rootfs /rootfs/ /
+COPY --from=rootfs-with-scanners /rootfs/ /
 COPY --from=backend /harborgate /usr/local/bin/harborgate
 USER 65532:65532
 EXPOSE 8080
