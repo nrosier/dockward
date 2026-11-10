@@ -147,8 +147,14 @@ pub(crate) fn set_tags(script: &Script, repo: &str, tags: &[&str]) {
 }
 
 /// Publishes a single-platform image under `tag`. Returns its manifest digest.
-pub(crate) fn put_single(script: &Script, repo: &str, tag: &str, arch: &str, salt: &str) -> String {
-    let config = serde_json::json!({ "os": "linux", "architecture": arch, "salt": salt })
+pub(crate) fn put_single(
+    script: &Script,
+    repo: &str,
+    tag: &str,
+    arch: &str,
+    build: &str,
+) -> String {
+    let config = serde_json::json!({ "os": "linux", "architecture": arch, "build": build })
         .to_string()
         .into_bytes();
     let config_digest = digest_of(&config);
