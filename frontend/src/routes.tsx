@@ -5,7 +5,6 @@ import { NotFoundMessage } from "./components/ui/StatusMessage";
 import { RequireAdmin, RequireAuth } from "./lib/session";
 import { ProfileTab } from "./pages/ProfileTab";
 import { AppearanceTab } from "./pages/AppearanceTab";
-import HiddenTab from "./pages/HiddenTab";
 import CredentialsTab from "./pages/CredentialsTab";
 import { AccountLayout } from "./components/shell/AccountLayout";
 import AdminAlertsPage from "./pages/AdminAlertsPage";
@@ -23,9 +22,6 @@ import CveDetailPage from "./pages/CveDetailPage";
 import CvesPage from "./pages/CvesPage";
 import DashboardPage from "./pages/DashboardPage";
 import LoginPage from "./pages/LoginPage";
-import MappingFormPage from "./pages/MappingFormPage";
-import MappingsPage from "./pages/MappingsPage";
-import ProjectWebhookPage from "./pages/ProjectWebhookPage";
 import SetupPage from "./pages/SetupPage";
 import SyncJobsPage from "./pages/SyncJobsPage";
 
@@ -41,10 +37,6 @@ export const routes: RouteObject[] = [
         element: <AppShell />,
         children: [
           { index: true, element: <DashboardPage /> },
-          { path: "mappings", element: <MappingsPage /> },
-          { path: "mappings/new", element: <MappingFormPage /> },
-          { path: "mappings/:id", element: <MappingFormPage /> },
-          { path: "project-webhooks/:id", element: <ProjectWebhookPage /> },
           { path: "cves", element: <CvesPage /> },
           { path: "cves/:id", element: <CveDetailPage /> },
           { path: "sync-jobs", element: <SyncJobsPage /> },
@@ -56,7 +48,6 @@ export const routes: RouteObject[] = [
               { path: "profile", element: <ProfileTab /> },
               { path: "appearance", element: <AppearanceTab /> },
               { path: "credentials", element: <CredentialsTab /> },
-              { path: "hidden", element: <HiddenTab /> },
             ],
           },
           { path: "account/credentials/new", element: <CredentialFormPage /> },

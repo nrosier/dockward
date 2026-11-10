@@ -1,4 +1,4 @@
-import { Anchor, ArrowLeftRight, LayoutDashboard, PanelLeftClose, PanelLeftOpen, RefreshCw, ShieldAlert, ShieldCheck, User } from "lucide-react";
+import { Anchor, LayoutDashboard, PanelLeftClose, PanelLeftOpen, RefreshCw, ShieldAlert, ShieldCheck, User } from "lucide-react";
 import type { ComponentType } from "react";
 import { NavLink } from "react-router";
 import { t, type MessageKey } from "../../i18n";
@@ -13,7 +13,6 @@ interface Item {
 
 const TOP: Item[] = [
   { to: "/", label: "nav.dashboard", icon: LayoutDashboard, end: true },
-  { to: "/mappings", label: "nav.mappings", icon: ArrowLeftRight },
   { to: "/cves", label: "nav.cves", icon: ShieldAlert },
   { to: "/sync-jobs", label: "nav.syncJobs", icon: RefreshCw },
 ];

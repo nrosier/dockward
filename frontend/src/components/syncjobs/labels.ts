@@ -16,10 +16,8 @@ export function triggerLabel(trigger: SyncJob["trigger"]): string {
 // text is shown as the server stored it (fixed server text, no upstream content).
 const NOTES: Record<string, MessageKey> = {
   "covered by parent index": "sync.note.coveredByParent",
-  "artifact no longer in Harbor": "sync.note.artifactGone",
   "no tagged image to scan": "sync.note.noTaggedImage",
   "a scan of this image is already running": "sync.note.scanAlreadyRunning",
-  "Harbor refused to start the scan; grant the robot account the Scan permission": "sync.note.scanForbidden",
 };
 
 export function noteText(lastError: string): string {

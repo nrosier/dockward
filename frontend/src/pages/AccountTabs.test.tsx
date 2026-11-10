@@ -59,7 +59,7 @@ describe("Account tabs", () => {
     window.localStorage.clear();
   });
 
-  it("shows the four account tabs and marks the open one", async () => {
+  it("shows the three account tabs and marks the open one", async () => {
     stub([]);
     render("admin", "local", "appearance");
     const tabs = await screen.findByRole("navigation", { name: t("account.tabs.label") });
@@ -68,7 +68,6 @@ describe("Account tabs", () => {
       t("account.tabs.profile"),
       t("account.tabs.appearance"),
       t("account.tabs.credentials"),
-      t("account.tabs.hidden"),
     ]);
     expect(within(tabs).getByRole("link", { name: t("account.tabs.appearance") })).toHaveClass("text-text");
   });

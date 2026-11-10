@@ -5,7 +5,6 @@ const TABS: { to: string; label: MessageKey }[] = [
   { to: "/account/profile", label: "account.tabs.profile" },
   { to: "/account/appearance", label: "account.tabs.appearance" },
   { to: "/account/credentials", label: "account.tabs.credentials" },
-  { to: "/account/hidden", label: "account.tabs.hidden" },
 ];
 
 // The Account tabs. Each tab is its own route, so it can be bookmarked and back works.

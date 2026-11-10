@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Menu, TriangleAlert } from "lucide-react";
-import { Link, useNavigate } from "react-router";
+import { Menu } from "lucide-react";
+import { useNavigate } from "react-router";
 import { t } from "../../i18n";
 import { api } from "../../lib/api";
 import { useMe } from "../../lib/session";
@@ -9,24 +9,14 @@ import { Button } from "../ui/Button";
 // `GET /admin/health` makes outbound calls, so it is fetched at most once every
 // 10 minutes (specs/frontend.md, "Screen designs").
 export const HEALTH_INTERVAL_MS = 600_000;
-const ROBOT_WARNING_DAYS = 14;
 
 interface Check {
   ok: boolean;
   reachable: boolean;
 }
 
-interface RobotAccount {
-  credential_id: string;
-  label: string;
-  expires_at: string | null;
-  days_left: number | null;
-}
-
 export interface AdminHealth {
-  harbor: Check[];
   github: Check[];
-  robot_accounts: RobotAccount[];
 }
 
 export function useAdminHealth(enabled: boolean) {
@@ -39,24 +29,9 @@ export function useAdminHealth(enabled: boolean) {
   });
 }
 
-// The robot account that lapses first, when it is within the warning window.
-export function soonestRobotExpiry(accounts: RobotAccount[]): RobotAccount | undefined {
-  let soonest: RobotAccount | undefined;
-  for (const account of accounts) {
-    if (account.days_left === null || account.days_left > ROBOT_WARNING_DAYS) {
-      continue;
-    }
-    if (soonest === undefined || (soonest.days_left ?? Infinity) > account.days_left) {
-      soonest = account;
-    }
-  }
-  return soonest;
-}
-
 const BADGE = "inline-flex h-6 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium";
 const GOOD = `${BADGE} border-ok/45 bg-ok/12 text-ok-ink`;
 const BAD = `${BADGE} border-crit/45 bg-crit/12 text-crit-ink`;
-const WARN = `${BADGE} border-high/45 bg-high/12 text-high-ink`;
 
 function ReachBadge({ checks, up, down }: { checks: Check[]; up: string; down: string }) {
   if (checks.length === 0) {
@@ -76,21 +51,7 @@ function HealthBadges() {
   if (!health.data) {
     return null;
   }
-  const robot = soonestRobotExpiry(health.data.robot_accounts);
-  return (
-    <>
-      <ReachBadge checks={health.data.harbor} up={t("header.harborReachable")} down={t("header.harborUnreachable")} />
-      <ReachBadge checks={health.data.github} up={t("header.githubReachable")} down={t("header.githubUnreachable")} />
-      {robot === undefined || robot.days_left === null ? null : (
-        <Link to="/admin/health" className={`${WARN} hover:underline`}>
-          <TriangleAlert aria-hidden="true" size={13} />
-          {robot.days_left < 0
-            ? t("header.robotExpired")
-            : t("header.robotExpires", { days: robot.days_left })}
-        </Link>
-      )}
-    </>
-  );
+  return <ReachBadge checks={health.data.github} up={t("header.githubReachable")} down={t("header.githubUnreachable")} />;
 }
 
 export function Topbar({ onMenu }: { onMenu: () => void }) {

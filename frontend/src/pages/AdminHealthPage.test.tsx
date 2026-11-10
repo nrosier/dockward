@@ -27,7 +27,6 @@ describe("AdminHealthPage", () => {
     stubApi((path) =>
       path === "/api/v1/admin/health"
         ? json({
-            harbor: [check({ credential_id: "h", label: "harbor-robot", code_scanning: null })],
             github: [
               check({
                 credential_id: "g1",
@@ -39,7 +38,6 @@ describe("AdminHealthPage", () => {
               check({ credential_id: "g2", target: "example-org/etl", code_scanning: "no_analysis_yet" }),
               check({ credential_id: "g3", target: "example-org/web", code_scanning: "ok" }),
             ],
-            robot_accounts: [{ credential_id: "h", label: "harbor-robot", expires_at: "2026-11-12T00:00:00Z", days_left: 9 }],
             request: { client_ip: "203.0.113.24", source: "x-forwarded-for" },
           })
         : undefined,
@@ -50,7 +48,6 @@ describe("AdminHealthPage", () => {
     expect(screen.getByText(t("admin.health.scan.unavailable"))).toBeInTheDocument();
     expect(screen.getByText(t("admin.health.scan.none"))).toBeInTheDocument();
     expect(screen.getByText(t("admin.health.scan.ok"))).toBeInTheDocument();
-    expect(screen.getByText(t("account.credentials.days", { n: 9 }))).toBeInTheDocument();
     expect(screen.getByText("203.0.113.24")).toBeInTheDocument();
     expect(screen.getByText(t("admin.health.source.xff"))).toBeInTheDocument();
   });

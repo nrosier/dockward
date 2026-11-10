@@ -11,8 +11,8 @@ const routes = [
   { path: "/account", element: <p>account</p> },
 ];
 
-const saved = { id: "c9", service_type: "harbor", label: "x", base_url: null, username: null, expires_at: null };
-const passed = { ok: true, checks: [{ name: "harbor_robot", ok: true, detail: "the robot account credential works" }] };
+const saved = { id: "c9", service_type: "github", label: "x", base_url: null, username: null, expires_at: null };
+const passed = { ok: true, checks: [{ name: "github_repo", ok: true, detail: "the token works" }] };
 
 function bodyOf(call: unknown[] | undefined): Record<string, unknown> {
   return JSON.parse(String(((call ?? [])[1] as RequestInit).body)) as Record<string, unknown>;
@@ -34,20 +34,18 @@ describe("CredentialFormPage", () => {
       return undefined;
     });
     renderWithRoutes(routes, "/account/credentials/new");
-    fireEvent.change(screen.getByLabelText(t("credentials.form.label")), { target: { value: "harbor-robot" } });
-    fireEvent.change(screen.getByLabelText(t("credentials.form.baseUrl")), { target: { value: "https://harbor.example.org" } });
-    fireEvent.change(screen.getByLabelText(t("credentials.form.robot")), { target: { value: "robot$hg" } });
-    fireEvent.change(screen.getByLabelText(t("credentials.form.robotSecret")), { target: { value: "s3cret-value" } });
+    fireEvent.change(screen.getByLabelText(t("credentials.form.label")), { target: { value: "gh" } });
+    fireEvent.change(screen.getByLabelText(t("credentials.form.githubToken")), { target: { value: "s3cret-value" } });
     fireEvent.change(screen.getByLabelText(t("credentials.form.expires")), { target: { value: "2027-11-03" } });
     await userEvent.click(screen.getByRole("button", { name: t("credentials.saveAndTest") }));
 
-    expect(await screen.findByText("the robot account credential works")).toBeInTheDocument();
+    expect(await screen.findByText("the token works")).toBeInTheDocument();
     expect(screen.getByText(t("credentials.test.title"))).toBeInTheDocument();
     expect(screen.getByRole("link", { name: t("credentials.done") })).toBeInTheDocument();
     const post = fetchMock.mock.calls.find((call) => (call[1] as RequestInit).method === "POST");
     expect(bodyOf(post).expires_at).toBe(Date.parse("2027-11-03T23:59:59Z") / 1000);
     // The secret is cleared from the form after the save.
-    expect(screen.getByLabelText(t("credentials.form.robotSecret"))).toHaveValue("");
+    expect(screen.getByLabelText(t("credentials.form.githubToken"))).toHaveValue("");
   });
 
   it("GitHub form has no owner or repository field and the test sends no body", async () => {
@@ -61,7 +59,6 @@ describe("CredentialFormPage", () => {
       return undefined;
     });
     renderWithRoutes(routes, "/account/credentials/new");
-    await userEvent.click(screen.getByRole("button", { name: t("credentials.service.github") }));
     expect(document.getElementById("cred-owner")).toBeNull();
     expect(document.getElementById("cred-repo")).toBeNull();
     fireEvent.change(screen.getByLabelText(t("credentials.form.label")), { target: { value: "gh" } });
@@ -79,7 +76,7 @@ describe("CredentialFormPage", () => {
   });
 
   it("editing sends no token when the field is empty", async () => {
-    const existing = { ...saved, id: "c1", label: "old", base_url: "https://harbor.example.org", username: "robot$hg" };
+    const existing = { ...saved, id: "c1", label: "old" };
     const fetchMock = stubApi((path, init) => {
       if (path.startsWith("/api/v1/credentials?")) {
         return json({ items: [existing], page: 1, page_size: 200, total: 1 });
@@ -94,7 +91,7 @@ describe("CredentialFormPage", () => {
     });
     renderWithRoutes(routes, "/account/credentials/c1");
     const label = await screen.findByLabelText(t("credentials.form.label"));
-    expect(screen.getByLabelText(t("credentials.form.robotSecret"))).toHaveAttribute(
+    expect(screen.getByLabelText(t("credentials.form.githubToken"))).toHaveAttribute(
       "placeholder",
       t("credentials.form.keepToken"),
     );
