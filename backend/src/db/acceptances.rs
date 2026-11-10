@@ -41,11 +41,11 @@ pub async fn active(
 ) -> Result<Option<AcceptanceRow>, AppError> {
     sqlx::query_as!(
         AcceptanceRow,
-        r#"SELECT id AS "id!", mapping_id AS "mapping_id!", cve_id AS "cve_id!",
+        r#"SELECT id AS "id!", source_id AS "mapping_id!", cve_id AS "cve_id!",
                   reason AS "reason!", created_by_username AS "created_by_username!",
                   created_at, expires_at
            FROM cve_acceptances
-           WHERE mapping_id = ? AND cve_id = ? AND revoked_at IS NULL
+           WHERE source_id = ? AND cve_id = ? AND revoked_at IS NULL
              AND (expires_at IS NULL OR expires_at > ?)"#,
         mapping_id,
         cve_id,
@@ -67,7 +67,7 @@ pub async fn expired_unrevoked(
 ) -> Result<Vec<String>, AppError> {
     sqlx::query_scalar!(
         r#"SELECT id AS "id!" FROM cve_acceptances
-           WHERE mapping_id = ? AND cve_id = ? AND revoked_at IS NULL
+           WHERE source_id = ? AND cve_id = ? AND revoked_at IS NULL
              AND expires_at IS NOT NULL AND expires_at <= ?"#,
         mapping_id,
         cve_id,
@@ -86,7 +86,7 @@ pub async fn insert(
 ) -> Result<bool, AppError> {
     sqlx::query!(
         "INSERT INTO cve_acceptances
-            (id, mapping_id, cve_id, reason, created_by, created_by_username, created_at, expires_at)
+            (id, source_id, cve_id, reason, created_by, created_by_username, created_at, expires_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT DO NOTHING",
         row.id,
