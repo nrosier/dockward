@@ -25,6 +25,8 @@ pub mod retention;
 pub mod scanner_reports;
 #[allow(dead_code)] // Used by the setup and login services.
 pub mod setup;
+#[allow(dead_code)] // Used by the pull and eviction jobs (Steps 4 and 5).
+pub mod storage;
 #[allow(dead_code)] // Used by the job worker and the retry route.
 pub mod sync_jobs;
 pub mod sync_reports;

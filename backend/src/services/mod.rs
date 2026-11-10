@@ -55,6 +55,8 @@ pub mod scanner_store;
 pub mod scheduled_scan;
 #[allow(dead_code)] // Used by the session extractor and logout routes.
 pub mod sessions;
+#[allow(dead_code)] // The pull and eviction jobs call the store (Steps 4 and 5).
+pub mod storage;
 pub mod sync;
 #[allow(dead_code)] // Used by the job worker and the retry route.
 pub mod sync_jobs;
