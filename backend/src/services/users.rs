@@ -338,36 +338,27 @@ mod tests {
         )
         .await
         .unwrap();
-        // The victim owns a credential pair, a mapping, and an acceptance on that mapping.
+        // The victim owns a GitHub credential, a source that uses it, and an acceptance on that source.
         sqlx::query!(
-            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, encrypted_token)
-             VALUES ('test-cred-h', ?, 'harbor', 'h', 'https://harbor.example.com', 'v1:test')",
+            "INSERT INTO user_credentials (id, user_id, label, encrypted_token)
+             VALUES ('test-cred-g', ?, 'g', 'v1:test')",
             victim
         )
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query!(
-            "INSERT INTO user_credentials (id, user_id, service_type, label, encrypted_token)
-             VALUES ('test-cred-g', ?, 'github', 'g', 'v1:test')",
+            "INSERT INTO image_sources (id, user_id, hub_id, repository, tag_value, github_cred_id,
+                github_owner, github_repo)
+             VALUES ('test-src', ?, 'hub-default-ghcr', 'o/walley', 'latest', 'test-cred-g', 'o', 'repo')",
             victim
         )
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query!(
-            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url,
-                harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
-             VALUES ('test-map', ?, 'test-cred-h', 'test-cred-g', 'https://harbor.example.com',
-                'p', 'r', 'o', 'repo', 'hash-token-test', 'hash-secret-test')",
-            victim
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query!(
-            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username)
-             VALUES ('test-acc', 'test-map', 'CVE-2099-0001', 'test reason', ?, 'test-victim')",
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username)
+             VALUES ('test-acc', 'test-src', 'CVE-2099-0001', 'test reason', ?, 'test-victim')",
             victim
         )
         .execute(&pool)
@@ -375,7 +366,7 @@ mod tests {
         .unwrap();
 
         let result = delete_user(&pool, &actor(&admin, "test-admin"), &victim).await;
-        let mappings = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "n: i64" FROM repo_mappings"#)
+        let sources = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "n: i64" FROM image_sources"#)
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -383,7 +374,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        // The acceptance is on the victim's mapping, so the mapping cascade removes it.
+        // The acceptance is on the victim's source, so the source cascade removes it.
         let acceptances =
             sqlx::query_scalar!(r#"SELECT COUNT(*) AS "n: i64" FROM cve_acceptances"#)
                 .fetch_one(&pool)
@@ -403,8 +394,8 @@ mod tests {
         // The ids come back so the handler can drop each credential's picker cache.
         let mut deleted = result.unwrap_or_default();
         deleted.sort();
-        assert_eq!(deleted, ["test-cred-g", "test-cred-h"]);
-        assert_eq!(mappings, 0);
+        assert_eq!(deleted, ["test-cred-g"]);
+        assert_eq!(sources, 0);
         assert_eq!(creds, 0);
         assert_eq!(acceptances, 0);
         assert_eq!(delete_row.actor_username, "test-admin");
