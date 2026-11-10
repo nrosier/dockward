@@ -44,7 +44,7 @@ RUN apk add --no-cache ca-certificates \
 # Pinned scanner binaries (decisions 28-29). Taken from the verified release images by digest,
 # never a floating tag. Each binary is static (CGO_ENABLED=0), so it runs on scratch.
 FROM aquasec/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb AS trivy
-FROM anchore/grype@sha256:6a36234da13f9faa327306ac0b3dab3405cfa2b4eb20c8f904125a8707863913 AS grype
+FROM anchore/grype@sha256:13113eeceab017260370cf540e1d25442c59665fd07d1b09b66d63bb0c282887 AS grype
 
 FROM rootfs AS rootfs-with-scanners
 COPY --from=trivy /usr/local/bin/trivy /rootfs/usr/local/bin/trivy
