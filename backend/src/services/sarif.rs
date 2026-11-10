@@ -1,5 +1,6 @@
-//! Converts a Harbor (Trivy) vulnerability report to SARIF 2.1.0
-//! (`specs/integrations.md`, "SARIF conversion and upload", "Converter rules").
+//! Converts the merged vulnerability report of an image to SARIF 2.1.0
+//! (`specs/integrations.md`, "SARIF conversion and upload", "Converter rules";
+//! `specs/spinoff-local-scan.md`, section 13; decisions 36 and 46).
 //!
 //! Pure: the report JSON goes in, the SARIF JSON comes out. No network and no database.
 
@@ -20,6 +21,8 @@ pub const FINGERPRINT_KEY: &str = "harborgate/v1";
 /// The result property keys for the scanner count and names.
 pub const SCANNER_COUNT_KEY: &str = "harborgate/scannerCount";
 pub const SCANNER_NAMES_KEY: &str = "harborgate/scannerNames";
+/// The result property key for the platforms (`os/arch[/variant]`) that report the finding.
+pub const PLATFORMS_KEY: &str = "harborgate/platforms";
 
 /// Upper-cases a Trivy severity (`Critical` becomes `CRITICAL`). Unknown values map to
 /// `UNKNOWN`, so a new Trivy severity cannot break the converter.
@@ -55,40 +58,57 @@ pub fn fingerprint(vuln_id: &str, package: &str) -> String {
         .collect()
 }
 
-/// `automationDetails.id` (SARIF 2.1.0 run property): `harborgate/<project>/<repository>/`.
-/// The trailing `/` keeps the whole path as the category (`specs/integrations.md`).
-pub fn automation_id(project: &str, repository: &str) -> String {
-    format!("harborgate/{project}/{repository}/")
+/// `automationDetails.id` (SARIF 2.1.0 run property):
+/// `harborgate/<hub host>/<repository>/<tag value>/`. The trailing `/` keeps the whole path as
+/// the category, `harborgate/<hub host>/<repository>/<tag value>` (decision 46;
+/// `specs/integrations.md`). The prefix `harborgate` is kept by decision 27.
+pub fn automation_id(hub_host: &str, repository: &str, tag_value: &str) -> String {
+    format!("harborgate/{hub_host}/{repository}/{tag_value}/")
 }
 
 /// The result property bag for a merged finding (#224 d6): `harborgate/scannerCount` (an integer,
-/// at least 1) and `harborgate/scannerNames` (unique names, in the merged-view order). A finding
-/// with no `scanner_names` list (a plain Harbor report) has none. The keys use the `harborgate/`
-/// prefix, like the fingerprint key, as SARIF 2.1.0 section 3.8.1 advises for custom properties.
+/// at least 1) and `harborgate/scannerNames` (unique names, in the merged-view order), and
+/// `harborgate/platforms` (the platforms that report the finding, spinoff section 6 step 6). A
+/// finding with none of these lists has no bag. The keys use the `harborgate/` prefix, like the
+/// fingerprint key, as SARIF 2.1.0 section 3.8.1 advises for custom properties.
 fn scanner_properties(vuln: &Value) -> Option<Value> {
-    let names: Vec<&str> = vuln
-        .get("scanner_names")?
-        .as_array()?
-        .iter()
-        .filter_map(Value::as_str)
-        .collect();
-    if names.is_empty() {
-        return None;
+    let strings = |key: &str| -> Vec<&str> {
+        vuln.get(key)
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    };
+    let names = strings("scanner_names");
+    let platforms = strings("platforms");
+    let mut bag = serde_json::Map::new();
+    if !names.is_empty() {
+        let count = vuln
+            .get("scanner_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(names.len() as u64)
+            .max(1);
+        bag.insert(SCANNER_COUNT_KEY.to_owned(), json!(count));
+        bag.insert(SCANNER_NAMES_KEY.to_owned(), json!(names));
     }
-    let count = vuln
-        .get("scanner_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(names.len() as u64)
-        .max(1);
-    Some(json!({
-        SCANNER_COUNT_KEY: count,
-        SCANNER_NAMES_KEY: names,
-    }))
+    if !platforms.is_empty() {
+        bag.insert(PLATFORMS_KEY.to_owned(), json!(platforms));
+    }
+    if bag.is_empty() {
+        None
+    } else {
+        Some(Value::Object(bag))
+    }
 }
 
-/// Converts the report. `project` and `repository` name the Harbor repository. Returns the
-/// SARIF document as a JSON value, ready to serialize.
-pub fn convert(report: &Value, project: &str, repository: &str) -> Result<Value, AppError> {
+/// Converts the report. `hub_host` and `repository` name the image (decision 36) and `tag_value`
+/// is the source's tag value (decision 46). Returns the SARIF document as a JSON value, ready to
+/// serialize.
+pub fn convert(
+    report: &Value,
+    hub_host: &str,
+    repository: &str,
+    tag_value: &str,
+) -> Result<Value, AppError> {
     let vulns = report
         .get("vulnerabilities")
         .and_then(Value::as_array)
@@ -97,7 +117,7 @@ pub fn convert(report: &Value, project: &str, repository: &str) -> Result<Value,
     // One rule per vulnerability id. The first occurrence supplies the text.
     let mut rules: BTreeMap<String, Value> = BTreeMap::new();
     let mut results: Vec<Value> = Vec::new();
-    let location_uri = format!("{project}/{repository}");
+    let location_uri = format!("{hub_host}/{repository}");
 
     for vuln in vulns {
         let id = vuln.get("id").and_then(Value::as_str).unwrap_or("UNKNOWN");
@@ -168,7 +188,7 @@ pub fn convert(report: &Value, project: &str, repository: &str) -> Result<Value,
                     "rules": rules.into_values().collect::<Vec<Value>>()
                 }
             },
-            "automationDetails": { "id": automation_id(project, repository) },
+            "automationDetails": { "id": automation_id(hub_host, repository, tag_value) },
             "results": results
         }]
     }))
@@ -205,7 +225,7 @@ mod tests {
 
     #[test]
     fn document_has_schema_version_one_run_and_driver_name() {
-        let doc = convert(&report(), "proj", "app").unwrap();
+        let doc = convert(&report(), "ghcr.io", "app", "v1").unwrap();
         assert_eq!(doc["version"], "2.1.0");
         assert_eq!(doc["$schema"], SARIF_SCHEMA);
         assert_eq!(doc["runs"].as_array().unwrap().len(), 1);
@@ -214,30 +234,36 @@ mod tests {
 
     #[test]
     fn automation_id_keeps_the_repository_path_as_category() {
-        let doc = convert(&report(), "proj", "team/app").unwrap();
+        let doc = convert(&report(), "ghcr.io", "team/app", "v1").unwrap();
         assert_eq!(
             doc["runs"][0]["automationDetails"]["id"],
-            "harborgate/proj/team/app/"
+            "harborgate/ghcr.io/team/app/v1/"
         );
     }
 
-    /// #185: the category is `harborgate/<project>/<repository>`, one per Harbor repository,
-    /// so two mappings on one GitHub repository upload under two different categories.
+    /// Decision 46: the category is `harborgate/<hub host>/<repository>/<tag value>`, so two
+    /// tags of one repository, and one repository on two hubs, get different categories.
     #[test]
-    fn category_is_per_harbor_repository() {
-        let category = |id: &str| id.rsplit_once('/').map(|(c, _)| c.to_owned()).unwrap();
-        let api = convert(&report(), "proj", "api").unwrap();
-        let web = convert(&report(), "proj", "web").unwrap();
-        let api_id = api["runs"][0]["automationDetails"]["id"].as_str().unwrap();
-        let web_id = web["runs"][0]["automationDetails"]["id"].as_str().unwrap();
-        assert_eq!(category(api_id), "harborgate/proj/api");
-        assert_eq!(category(web_id), "harborgate/proj/web");
-        assert_ne!(category(api_id), category(web_id));
+    fn category_includes_the_hub_host_and_the_tag_value() {
+        let category = |doc: &Value| {
+            let id = doc["runs"][0]["automationDetails"]["id"].as_str().unwrap();
+            id.rsplit_once('/').map(|(c, _)| c.to_owned()).unwrap()
+        };
+        let v1 = convert(&report(), "ghcr.io", "o/api", "v1").unwrap();
+        let v2 = convert(&report(), "ghcr.io", "o/api", "v2").unwrap();
+        let glob = convert(&report(), "ghcr.io", "o/api", "1.*").unwrap();
+        let hub = convert(&report(), "docker.io", "o/api", "v1").unwrap();
+        assert_eq!(category(&v1), "harborgate/ghcr.io/o/api/v1");
+        assert_eq!(category(&v2), "harborgate/ghcr.io/o/api/v2");
+        assert_eq!(category(&glob), "harborgate/ghcr.io/o/api/1.*");
+        assert_eq!(category(&hub), "harborgate/docker.io/o/api/v1");
+        assert_ne!(category(&v1), category(&v2));
+        assert_ne!(category(&v1), category(&hub));
     }
 
     #[test]
     fn cvss_v3_score_is_used_when_present() {
-        let doc = convert(&report(), "proj", "app").unwrap();
+        let doc = convert(&report(), "ghcr.io", "app", "v1").unwrap();
         let rules = doc["runs"][0]["tool"]["driver"]["rules"]
             .as_array()
             .unwrap();
@@ -247,7 +273,7 @@ mod tests {
 
     #[test]
     fn severity_fallback_applies_without_a_cvss_score() {
-        let doc = convert(&report(), "proj", "app").unwrap();
+        let doc = convert(&report(), "ghcr.io", "app", "v1").unwrap();
         let rules = doc["runs"][0]["tool"]["driver"]["rules"]
             .as_array()
             .unwrap();
@@ -257,7 +283,7 @@ mod tests {
 
     #[test]
     fn rule_has_the_required_text_fields() {
-        let doc = convert(&report(), "proj", "app").unwrap();
+        let doc = convert(&report(), "ghcr.io", "app", "v1").unwrap();
         let rule = &doc["runs"][0]["tool"]["driver"]["rules"][0];
         assert!(rule["shortDescription"]["text"].is_string());
         assert!(rule["fullDescription"]["text"].is_string());
@@ -266,17 +292,17 @@ mod tests {
 
     #[test]
     fn result_location_is_the_repository_at_line_one_column_one() {
-        let doc = convert(&report(), "proj", "app").unwrap();
+        let doc = convert(&report(), "ghcr.io", "app", "v1").unwrap();
         let loc = &doc["runs"][0]["results"][0]["locations"][0]["physicalLocation"];
-        assert_eq!(loc["artifactLocation"]["uri"], "proj/app");
+        assert_eq!(loc["artifactLocation"]["uri"], "ghcr.io/app");
         assert_eq!(loc["region"]["startLine"], 1);
         assert_eq!(loc["region"]["startColumn"], 1);
     }
 
     #[test]
     fn fingerprint_is_stable_and_uses_the_v1_key() {
-        let a = convert(&report(), "proj", "app").unwrap();
-        let b = convert(&report(), "proj", "app").unwrap();
+        let a = convert(&report(), "ghcr.io", "app", "v1").unwrap();
+        let b = convert(&report(), "ghcr.io", "app", "v1").unwrap();
         let fp_a = &a["runs"][0]["results"][0]["partialFingerprints"][FINGERPRINT_KEY];
         let fp_b = &b["runs"][0]["results"][0]["partialFingerprints"][FINGERPRINT_KEY];
         assert_eq!(fp_a, fp_b);
@@ -313,7 +339,7 @@ mod tests {
 
     #[test]
     fn a_report_without_vulnerabilities_is_an_error() {
-        assert!(convert(&json!({}), "proj", "app").is_err());
+        assert!(convert(&json!({}), "ghcr.io", "app", "v1").is_err());
     }
 
     #[test]
@@ -324,7 +350,7 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(copy);
-        let doc = convert(&doc_report, "proj", "app").unwrap();
+        let doc = convert(&doc_report, "ghcr.io", "app", "v1").unwrap();
         assert_eq!(
             doc["runs"][0]["tool"]["driver"]["rules"]
                 .as_array()
@@ -377,7 +403,7 @@ mod tests {
                 "preferred_cvss": { "score_v3": 9.8 }
             }]
         });
-        assert_schema_valid(&convert(&single, "proj", "app").unwrap());
+        assert_schema_valid(&convert(&single, "ghcr.io", "app", "v1").unwrap());
 
         // Fixture 2: several CVEs, one of them a duplicate id, with and without a fix.
         let mut several = report();
@@ -386,13 +412,13 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(copy);
-        assert_schema_valid(&convert(&several, "proj", "team/app").unwrap());
+        assert_schema_valid(&convert(&several, "ghcr.io", "team/app", "v1").unwrap());
     }
 
     #[test]
     fn empty_report_validates_against_the_sarif_schema() {
         let empty = json!({ "vulnerabilities": [] });
-        assert_schema_valid(&convert(&empty, "proj", "app").unwrap());
+        assert_schema_valid(&convert(&empty, "ghcr.io", "app", "v1").unwrap());
     }
 
     /// A merged report has one item per (CVE, package) with the scanners that found it. The SARIF
@@ -414,7 +440,7 @@ mod tests {
                 { "id": "CVE-2026-0002", "package": "zlib", "severity": "LOW" }
             ]
         });
-        let doc = convert(&merged, "proj", "app").unwrap();
+        let doc = convert(&merged, "ghcr.io", "app", "v1").unwrap();
         assert_schema_valid(&doc);
         let results = doc["runs"][0]["results"].as_array().unwrap();
         assert_eq!(results.len(), 3, "one result per CVE and package");
@@ -438,7 +464,7 @@ mod tests {
     #[test]
     fn schema_rejects_a_broken_document() {
         // Removing the required `version` must fail. This proves the validator really runs.
-        let mut doc = convert(&report(), "proj", "app").unwrap();
+        let mut doc = convert(&report(), "ghcr.io", "app", "v1").unwrap();
         doc.as_object_mut().unwrap().remove("version");
         assert!(
             !schema_errors(&doc).is_empty(),

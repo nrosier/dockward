@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (\n               SELECT 1 FROM sync_jobs WHERE payload = ? AND status IN ('queued', 'running')\n           ) AS \"open!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "open!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "170e1a36536a5dbd509235b766b9aba1cfc35ea679b2ce6bfdf4d71f5bff4e4f"
+}

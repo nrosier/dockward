@@ -227,6 +227,14 @@ impl Fx {
             let Some(job) = claimed else {
                 break;
             };
+            // The publish hook queues a `publish` job when an image's scans end. It has its own
+            // tests (`services::publish`); here it is only marked done.
+            if job.payload.contains(r#""kind":"publish""#) {
+                if let Err(err) = crate::db::sync_jobs::mark_done(&self.pool, &job.id, NOW).await {
+                    panic!("mark publish: {err:?}");
+                }
+                continue;
+            }
             let scanner = serde_json::from_str::<ScanPayload>(&job.payload)
                 .map(|payload| payload.scanner)
                 .unwrap_or_default();
@@ -917,9 +925,12 @@ async fn the_publish_hook_waits_for_every_scan() {
     let (trivy, grype) = ok_scripts("");
     let fx = Fx::new("publish", &trivy, &grype).await;
     fx.queue(P_OLD).await;
-    assert_eq!(publish_ready(&fx.pool, IMG_OLD).await.ok(), Some(false));
+    assert_eq!(
+        publish_ready(&fx.pool, IMG_OLD, NOW).await.ok(),
+        Some(false)
+    );
     fx.drain().await;
-    assert_eq!(publish_ready(&fx.pool, IMG_OLD).await.ok(), Some(true));
+    assert_eq!(publish_ready(&fx.pool, IMG_OLD, NOW).await.ok(), Some(true));
 }
 
 /// A bad payload is refused permanently and runs nothing.

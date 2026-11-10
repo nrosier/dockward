@@ -12,6 +12,8 @@ pub struct NewReport<'a> {
     pub id: &'a str,
     /// The image source the report belongs to (`publish_reports.source_id`).
     pub source_id: &'a str,
+    /// The image the report publishes (`publish_reports.image_id`).
+    pub image_id: Option<&'a str>,
     pub sync_job_id: &'a str,
     pub image_tag: &'a str,
     pub image_digest: &'a str,
@@ -35,11 +37,12 @@ pub async fn insert_pending(
 ) -> Result<(), AppError> {
     sqlx::query!(
         "INSERT INTO publish_reports
-            (id, source_id, sync_job_id, image_tag, image_digest,
+            (id, source_id, image_id, sync_job_id, image_tag, image_digest,
              commit_sha, vulnerability_summary, sarif_status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
         report.id,
         report.source_id,
+        report.image_id,
         report.sync_job_id,
         report.image_tag,
         report.image_digest,

@@ -19,27 +19,23 @@ pub mod credentials;
 pub mod cves;
 pub mod dashboard;
 pub mod discovery;
-#[allow(dead_code)] // The publish step creates and closes issues (Step 4+).
 pub mod github_issues;
-#[allow(dead_code)] // The publish step uploads SARIF (Step 4+).
 pub mod github_scanning;
 #[allow(dead_code)] // Some accessors are used by the publish step only (Step 4+).
 pub mod github_url;
 pub mod health;
 #[allow(dead_code)] // Used by the admin routes and the auth paths added in later issues.
 pub mod ids;
-#[allow(dead_code)] // The publish step runs the issue rules after each scan (Step 4+).
 pub mod issue_lifecycle;
 pub mod job_runs;
 pub mod key_rotation;
-#[allow(dead_code)] // The publish and issue steps read the merged view (Step 4+).
 pub mod merged_view;
 #[allow(dead_code)] // The list routes that use this are added with the admin routes.
 pub mod pagination;
+pub mod publish;
 #[allow(dead_code)] // The spinoff pull and discovery jobs call the registry client (Step 3+).
 pub mod registry;
 pub mod retention;
-#[allow(dead_code)] // The publish step converts the merged view to SARIF (Step 4+).
 pub mod sarif;
 pub mod scan;
 #[allow(dead_code)] // The spinoff refresh job calls the scanner runner (the next step).

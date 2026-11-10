@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT image_id AS \"image_id!\" FROM image_platforms WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "image_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "image_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "46de8bc018710d5c4ddcd45b766c86a9d820007cfa1f21835aee45e894c29d59"
+}

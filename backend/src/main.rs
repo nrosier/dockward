@@ -635,19 +635,27 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
     let worker_pool = state.pool.clone();
     let worker_stop = stop_rx.clone();
     // `discover` has a handler. `pull` pulls into `<data dir>/images` and queues the scans,
-    // `scan` runs the scanners and the convert step, and `publish` fails permanently until the
-    // publish step lands.
+    // `scan` runs the scanners and the convert step, and `publish` uploads the merged SARIF and
+    // runs the issue rules.
     let notifier = services::alerts::Notifier::new(
         state.pool.clone(),
         state.credentials_key.clone(),
         state.allow_private_alerts,
     );
+    let publisher = services::publish::Publisher::new(
+        state.pool.clone(),
+        state.credentials_key.clone(),
+        services::storage::StoreRoot::under(&state.data_dir),
+        state.github.clone(),
+    )
+    .map_err(|_| "could not build the GitHub publish clients")?;
     let handler = Arc::new(services::discovery::handler::SpinoffJobs::new(
         state.discovery.clone(),
         notifier,
         state.pool.clone(),
         services::storage::StoreRoot::under(&state.data_dir),
         services::scan::ScanEnv::under(&state.data_dir),
+        publisher,
     ));
     let worker_task = tokio::spawn(async move {
         worker::run(worker_pool, handler, worker_stop).await;

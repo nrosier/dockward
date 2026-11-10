@@ -17,6 +17,7 @@ pub mod findings;
 pub mod github_issues;
 pub mod job_runs;
 pub mod key_rotation;
+pub mod publish;
 pub mod retention;
 pub mod scan_runs;
 pub mod scans;
@@ -27,6 +28,7 @@ pub mod sources;
 pub mod storage;
 #[allow(dead_code)] // Used by the job worker and the retry route.
 pub mod sync_jobs;
+pub mod sync_reports;
 #[allow(dead_code)] // Used by the session service and the account and admin routes.
 pub mod users;
 

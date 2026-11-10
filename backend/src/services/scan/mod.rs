@@ -19,7 +19,9 @@
 //! Timeouts, an oversized output and unreadable output cannot heal by retrying and fail the job
 //! at once. A non-zero exit and a missing database are retried on the backoff.
 //!
-//! The publish step is not here. [`publish_ready`] is the hook it will consume.
+//! The publish step is `services::publish`. [`publish_ready`] is the hook that queues it: when a
+//! run ends and no run or pull of its image is open, one `publish` job is queued for each source
+//! whose newest image it is (section 6 steps 6 and 7).
 
 pub mod convert;
 pub mod queue;
@@ -36,6 +38,7 @@ use crate::db::scans as db;
 use crate::db::sync_jobs::ClaimedJob;
 use crate::error::{AppError, ScannerFault};
 use crate::services::discovery::{MSG_BAD_PAYLOAD, fixed_text};
+use crate::services::publish;
 use crate::services::scanner::parse::{self, Report};
 use crate::services::scanner::process::{Invocation, Limits, ScannerRunner};
 use crate::services::scanner::{Scanner, cache_dir, environment, scan_args};
@@ -254,13 +257,16 @@ async fn scan_once(
         Ok(_) => {}
         Err(_) => tracing::warn!("eviction after a scan run did not complete"),
     }
-    match &outcome {
-        Ok(()) => match publish_ready(pool, &run.image_id).await {
-            Ok(true) => tracing::info!("every scan of an image has ended"),
-            Ok(false) => {}
-            Err(_) => tracing::warn!("could not check whether the scans of an image ended"),
-        },
-        Err(_) => tracing::warn!("a scan run failed"),
+    // A run that ended, whatever its outcome, may be the last open run of its image: a failed
+    // run does not hold the SARIF back (section 6 step 6). A run that will retry is `queued`
+    // again, so it keeps the image open.
+    match publish_ready(pool, &run.image_id, now).await {
+        Ok(true) => tracing::info!("every scan of an image has ended"),
+        Ok(false) => {}
+        Err(_) => tracing::warn!("could not check whether the scans of an image ended"),
+    }
+    if outcome.is_err() {
+        tracing::warn!("a scan run failed");
     }
     outcome
 }
@@ -402,11 +408,19 @@ async fn store_run(
     tx.commit().await.map_err(|_| AppError::InternalError)
 }
 
-/// The publish hook. True when no run of any platform of `image_id` is `queued` or `running`:
-/// every scan of the image has ended, whatever its outcome. The publish step (the next PR)
-/// queues its `publish` job from here, for a source's newest image only (section 6 step 7). This
-/// PR queues nothing, because a `publish` job with no handler would fail and raise an alert.
-pub async fn publish_ready(pool: &SqlitePool, image_id: &str) -> Result<bool, AppError> {
-    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
-    Ok(!db::image_has_open_runs(&mut conn, image_id).await?)
+/// The publish hook. True when no run of any platform of `image_id` is `queued` or `running`
+/// and no platform of it still waits for its pull: every scan of the image has ended, whatever
+/// its outcome. When it is true, one `publish` job is queued for each source whose newest image
+/// this is (section 6 steps 6 and 7; [`publish::queue_publish`]). A job already open for the same
+/// source and image is not queued again.
+pub async fn publish_ready(pool: &SqlitePool, image_id: &str, now: i64) -> Result<bool, AppError> {
+    let ready = {
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        !db::image_has_open_runs(&mut conn, image_id).await?
+            && !crate::db::publish::image_has_pending_pull(&mut conn, image_id).await?
+    };
+    if ready {
+        publish::queue_publish(pool, image_id, now).await?;
+    }
+    Ok(ready)
 }

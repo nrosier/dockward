@@ -231,25 +231,6 @@ pub fn names_of(scanners: &[ScannerRef]) -> Vec<String> {
         .collect()
 }
 
-/// The report with only the first item of each CVE id. `cve_findings` has one row per CVE id,
-/// and its package is the first by the merged-view order (`specs/cve-lifecycle.md`, "Per tag").
-pub fn first_per_cve(report: &Value) -> Value {
-    let mut seen = HashSet::new();
-    let items: Vec<Value> = report
-        .get("vulnerabilities")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-        .iter()
-        .filter(|item| {
-            let id = item.get("id").and_then(Value::as_str).unwrap_or("");
-            seen.insert(id.to_owned())
-        })
-        .cloned()
-        .collect();
-    json!({ "vulnerabilities": items })
-}
-
 /// The scanners per CVE id over the whole merged view, in the merged-view order.
 pub fn scanners_by_cve(digest: &MergedDigest) -> HashMap<String, Vec<ScannerRef>> {
     let mut by_cve: HashMap<String, Vec<ScannerRef>> = HashMap::new();
@@ -408,22 +389,6 @@ mod tests {
             Some("Found by 1 scanner: `Trivy`")
         );
         assert_eq!(found_by_line(&[]), None);
-    }
-
-    #[test]
-    fn first_per_cve_keeps_the_first_package_of_each_id() {
-        let report = json!({"vulnerabilities": [
-            {"id": "CVE-1", "package": "a"},
-            {"id": "CVE-1", "package": "b"},
-            {"id": "CVE-2", "package": "c"},
-        ]});
-        let unique = first_per_cve(&report);
-        let items = unique["vulnerabilities"].as_array();
-        assert_eq!(items.map(Vec::len), Some(2));
-        assert_eq!(
-            items.and_then(|items| items.first()).map(|i| &i["package"]),
-            Some(&json!("a"))
-        );
     }
 
     async fn seed(pool: &SqlitePool) -> Result<(), AppError> {
