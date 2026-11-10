@@ -83,3 +83,5 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 
 46. Code Scanning category includes the tag value: `harborgate/<hub host>/<repository>/<tag value>` (the spec's category prefix is kept, per decision 22). Each source has its own alerts; two tags of one repository never overwrite each other.
 47. GitHub issues are keyed by GitHub repository and CVE, as today. Sources that target the same GitHub repository share one issue per CVE. The issue closes only when no source for that GitHub repository reports the CVE. This supersedes the per-source-issue reading of decision 37 for issues; decision 37 still gives each source its own alerts and findings.
+
+48. Step 1 part 1 ports the kept code to the new tables in the same part: issue_lifecycle and merged_view read scan_runs and scanner_findings, and the kept tests are ported, not ignored or deleted. Harbor-only tests are removed with their code in part 3. The build stays green at each merge.
