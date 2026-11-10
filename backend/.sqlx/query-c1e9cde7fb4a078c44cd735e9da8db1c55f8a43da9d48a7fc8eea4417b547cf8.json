@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO source_credentials (id, source_id, username, encrypted_token, expires_at)\n         VALUES (?, ?, ?, ?, ?)\n         ON CONFLICT(source_id) DO UPDATE SET\n             username = excluded.username,\n             encrypted_token = excluded.encrypted_token,\n             expires_at = excluded.expires_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "c1e9cde7fb4a078c44cd735e9da8db1c55f8a43da9d48a7fc8eea4417b547cf8"
+}

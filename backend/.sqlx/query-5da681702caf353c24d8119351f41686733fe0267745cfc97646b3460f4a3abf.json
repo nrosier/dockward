@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.image_platform_id AS \"image_platform_id!\", r.scanner AS \"scanner!\",\n                  r.status AS \"status!\", r.scanner_version, r.error, r.db_built_at\n           FROM scan_runs r JOIN image_platforms p ON p.id = r.image_platform_id\n           WHERE p.image_id = ?\n             AND r.rowid = (SELECT MAX(r2.rowid) FROM scan_runs r2\n                            WHERE r2.image_platform_id = r.image_platform_id\n                              AND r2.scanner = r.scanner)\n           ORDER BY r.image_platform_id, r.scanner",
+  "describe": {
+    "columns": [
+      {
+        "name": "image_platform_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "image_platform_id"
+          }
+        }
+      },
+      {
+        "name": "scanner!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "scanner"
+          }
+        }
+      },
+      {
+        "name": "status!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "scanner_version",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "scanner_version"
+          }
+        }
+      },
+      {
+        "name": "error",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "error"
+          }
+        }
+      },
+      {
+        "name": "db_built_at",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "db_built_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "5da681702caf353c24d8119351f41686733fe0267745cfc97646b3460f4a3abf"
+}

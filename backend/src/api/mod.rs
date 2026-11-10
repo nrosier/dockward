@@ -8,9 +8,15 @@ pub mod dashboard;
 pub mod github_url;
 #[allow(dead_code)] // The limiter and client IP are attached to routes in later issues.
 pub mod hardening;
+pub mod hubs;
+pub mod json;
 #[allow(dead_code)] // The OIDC routes are mounted by the app router.
 pub mod oidc;
+#[cfg(test)]
+mod route_tests;
 pub mod scan;
+pub mod scan_settings;
+pub mod sources;
 #[allow(dead_code)] // Shared by the extractor and the routes.
 pub mod state;
 pub mod static_files;

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM source_credentials WHERE source_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "d97c4bd565b00ce4f2550c2ddfba738ecef6e2e5419d5035ea6e174dae1bec8d"
+}

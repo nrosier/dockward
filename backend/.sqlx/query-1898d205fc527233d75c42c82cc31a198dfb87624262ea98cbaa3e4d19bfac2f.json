@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", platform AS \"platform!\", state AS \"state!\", size_bytes, pulled_at\n           FROM image_platforms\n           WHERE image_id = ? AND (? IS NULL OR state = ?)\n           ORDER BY platform, id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "platform!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "platform"
+          }
+        }
+      },
+      {
+        "name": "state!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "size_bytes",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "size_bytes"
+          }
+        }
+      },
+      {
+        "name": "pulled_at",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "pulled_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "1898d205fc527233d75c42c82cc31a198dfb87624262ea98cbaa3e4d19bfac2f"
+}

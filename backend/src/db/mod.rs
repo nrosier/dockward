@@ -15,6 +15,8 @@ pub mod dashboard;
 pub mod discovery;
 pub mod findings;
 pub mod github_issues;
+pub mod hubs;
+pub mod image_sources;
 pub mod job_runs;
 pub mod key_rotation;
 pub mod publish;

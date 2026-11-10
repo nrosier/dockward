@@ -49,4 +49,7 @@ pub struct AppState {
     pub discovery: Arc<crate::services::discovery::Discovery>,
     /// Manual scans: 1 per source per 5 minutes, held in memory (section 10, decision 17).
     pub scan_limiter: RateLimiter,
+    /// Routes that call a registry for a list or a test, or resolve an entered host: 60 per
+    /// minute per user, held in memory (section 10).
+    pub registry_limiter: RateLimiter,
 }
