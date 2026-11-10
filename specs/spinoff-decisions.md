@@ -88,3 +88,6 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 
 49. The newest image of a source is the tag observation with the latest first_seen_at for that tag (tag_observations.first_seen_at). A tag that moves to a new digest becomes newest on the next discovery. Used by findings, mappings, sync_jobs, github_issues and dashboard.
 50. The kept callers merged_view and issue_lifecycle are ported to scan_runs and scanner_findings (per decision 48). scanner_reports and artifact_removal are Harbor-only and are deleted once their kept callers no longer reference them.
+
+51. Minimal Sources and Images screens are built now, reusing the existing filter and table patterns with no new visual system. The user reviews them in the browser and approves them before release.
+52. A releasable version requires: the full pipeline (discover, pull, scan, publish), the db_update job, the minimal Sources and Images screens, and a passing gate set on the spinoff branch. The live checks against a real registry, GitHub and Code Scanning are the release's verification and are recorded with the release.
