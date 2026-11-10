@@ -22,6 +22,8 @@ import CveDetailPage from "./pages/CveDetailPage";
 import CvesPage from "./pages/CvesPage";
 import DashboardPage from "./pages/DashboardPage";
 import LoginPage from "./pages/LoginPage";
+import SourceFormPage from "./pages/SourceFormPage";
+import SourcesPage from "./pages/SourcesPage";
 import SetupPage from "./pages/SetupPage";
 import SyncJobsPage from "./pages/SyncJobsPage";
 
@@ -37,6 +39,9 @@ export const routes: RouteObject[] = [
         element: <AppShell />,
         children: [
           { index: true, element: <DashboardPage /> },
+          { path: "sources", element: <SourcesPage /> },
+          { path: "sources/new", element: <SourceFormPage /> },
+          { path: "sources/:id", element: <SourceFormPage /> },
           { path: "cves", element: <CvesPage /> },
           { path: "cves/:id", element: <CveDetailPage /> },
           { path: "sync-jobs", element: <SyncJobsPage /> },
