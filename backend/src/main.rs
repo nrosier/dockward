@@ -80,6 +80,43 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             get(api::cves::tags_for_source),
         )
         .route("/api/v1/image-sources/{id}/scan", post(api::scan::scan))
+        .route("/api/v1/hubs", get(api::hubs::list).post(api::hubs::create))
+        .route(
+            "/api/v1/hubs/{id}",
+            axum::routing::delete(api::hubs::delete),
+        )
+        .route(
+            "/api/v1/image-sources",
+            get(api::sources::list).post(api::sources::create),
+        )
+        .route(
+            "/api/v1/image-sources/{id}",
+            get(api::sources::get)
+                .put(api::sources::update)
+                .delete(api::sources::delete),
+        )
+        .route(
+            "/api/v1/image-sources/{id}/credential",
+            axum::routing::put(api::sources::put_credential)
+                .delete(api::sources::delete_credential),
+        )
+        .route(
+            "/api/v1/image-sources/{id}/credential/test",
+            post(api::sources::test_credential),
+        )
+        .route(
+            "/api/v1/image-sources/{id}/tag-preview",
+            get(api::sources::tag_preview),
+        )
+        .route(
+            "/api/v1/image-sources/{id}/images",
+            get(api::sources::source_images),
+        )
+        .route("/api/v1/images", get(api::sources::all_images))
+        .route(
+            "/api/v1/admin/scan-settings",
+            get(api::scan_settings::get).put(api::scan_settings::put),
+        )
         .route("/api/v1/sync-jobs", get(api::sync_jobs::list))
         .route(
             "/api/v1/sync-jobs/failed-count",
@@ -573,6 +610,7 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         github,
         discovery,
         scan_limiter: api::hardening::RateLimiter::new(1, Duration::from_secs(300)),
+        registry_limiter: api::hardening::RateLimiter::new(60, std::time::Duration::from_secs(60)),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -736,7 +774,7 @@ async fn drain(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -860,6 +898,10 @@ mod tests {
                 1,
                 std::time::Duration::from_secs(300),
             ),
+            registry_limiter: crate::api::hardening::RateLimiter::new(
+                60,
+                std::time::Duration::from_secs(60),
+            ),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -881,7 +923,7 @@ mod tests {
 
     /// A router over a fresh database, with the session and CSRF keys derived from
     /// the test key. Test values only.
-    async fn test_router(name: &str) -> (Router, sqlx::SqlitePool, std::path::PathBuf) {
+    pub(crate) async fn test_router(name: &str) -> (Router, sqlx::SqlitePool, std::path::PathBuf) {
         test_router_with_throttle(name, services::throttle::LoginThrottle::new()).await
     }
 
@@ -922,11 +964,15 @@ mod tests {
                 1,
                 std::time::Duration::from_secs(300),
             ),
+            registry_limiter: crate::api::hardening::RateLimiter::new(
+                60,
+                std::time::Duration::from_secs(60),
+            ),
         };
         (app(Vec::new(), state), pool, dir)
     }
 
-    fn with_peer(builder: axum::http::request::Builder) -> axum::http::request::Builder {
+    pub(crate) fn with_peer(builder: axum::http::request::Builder) -> axum::http::request::Builder {
         builder.extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
             [127, 0, 0, 1],
             8080,
@@ -1147,7 +1193,7 @@ mod tests {
     }
 
     /// A JSON request with optional cookie and CSRF header. Returns status and parsed body.
-    async fn send_json(
+    pub(crate) async fn send_json(
         router: &Router,
         method: &str,
         uri: &str,
@@ -1408,7 +1454,7 @@ mod tests {
     }
 
     /// A signed session cookie for `user_id`, issued the way login issues one. Test key only.
-    fn session_cookie(user_id: &str, role: &str, token_version: i64) -> String {
+    pub(crate) fn session_cookie(user_id: &str, role: &str, token_version: i64) -> String {
         let root =
             config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
         let key = auth::crypto::session_key(&root).unwrap();
@@ -1418,7 +1464,7 @@ mod tests {
     }
 
     /// A GET with the given `cookie` header. Returns the status and the parsed JSON body.
-    async fn get_json(
+    pub(crate) async fn get_json(
         router: &Router,
         uri: &str,
         cookie: &str,
@@ -2844,7 +2890,7 @@ mod tests {
     }
     /// A `MakeWriter` into a shared buffer, to read what the log layer wrote.
     #[derive(Clone, Default)]
-    struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    pub(crate) struct LogSink(pub(crate) std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
     impl std::io::Write for LogSink {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {

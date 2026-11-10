@@ -593,6 +593,10 @@ pub(crate) mod test_support {
                 1,
                 std::time::Duration::from_secs(300),
             ),
+            registry_limiter: crate::api::hardening::RateLimiter::new(
+                60,
+                std::time::Duration::from_secs(60),
+            ),
         };
         (state, dir)
     }
@@ -814,6 +818,10 @@ mod tests {
             scan_limiter: crate::api::hardening::RateLimiter::new(
                 1,
                 std::time::Duration::from_secs(300),
+            ),
+            registry_limiter: crate::api::hardening::RateLimiter::new(
+                60,
+                std::time::Duration::from_secs(60),
             ),
         };
         (crate::app(Vec::new(), state), pool, dir)

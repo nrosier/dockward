@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM image_sources WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "d82ac9e8154ff21cbc0d3d4d31e89e10469cbec91a2e5168825ecbd04ad3dc60"
+}

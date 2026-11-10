@@ -21,7 +21,8 @@ use zeroize::Zeroize;
 
 use crate::error::AppError;
 use crate::services::registry::grammar::{
-    Reference, hub_name, is_sha256_digest, parse_reference, pull_host, validate_repository,
+    Reference, hub_name, is_sha256_digest, parse_reference, pull_host, validate_hub_host,
+    validate_repository,
 };
 use crate::services::registry::manifest::{self, MANIFEST_ACCEPT, Parsed};
 use crate::services::registry::policy::{AddressPolicy, PolicyResolver};
@@ -149,6 +150,16 @@ impl RegistryClient {
         })
     }
 
+    /// Checks that a hub host (or pull endpoint) may be contacted: HTTPS, and every address it
+    /// resolves to passes the deny-list, unless the environment opt-out names it. Used when an
+    /// admin adds a hub. The error never names the host or an address.
+    pub async fn check_host(&self, host: &str) -> Result<(), AppError> {
+        validate_hub_host(host)?;
+        let url =
+            Url::parse(&format!("https://{host}/")).map_err(|_| AppError::UpstreamUnreachable)?;
+        self.policy.check_url(&url).await
+    }
+
     /// Sends one request, following redirects. Returns the final response.
     async fn send(
         &self,
@@ -241,6 +252,16 @@ impl PullSession<'_> {
         let url = self.url("/v2/")?;
         let response = self.client.send(Method::GET, url, None, None).await?;
         Ok(response.status())
+    }
+
+    /// The credential test (decision 41): `GET /v2/`, then a pull token for this session's
+    /// repository, proven by listing one tag. The credential, if any, is used only for the token
+    /// request. Nothing is returned but success or the fixed error.
+    pub async fn check_access(&mut self) -> Result<(), AppError> {
+        self.get("/v2/", None).await?;
+        let path = format!("/v2/{}/tags/list?n=1", self.repository);
+        self.get(&path, Some("application/json")).await?;
+        Ok(())
     }
 
     /// Fetches the manifest or index for `reference` (an exact tag or a `sha256:` digest).

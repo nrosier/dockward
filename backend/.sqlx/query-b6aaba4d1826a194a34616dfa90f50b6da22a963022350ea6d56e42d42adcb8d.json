@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO hubs (id, host, pull_endpoint, kind, created_by)\n         VALUES (?, ?, ?, 'custom', ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "b6aaba4d1826a194a34616dfa90f50b6da22a963022350ea6d56e42d42adcb8d"
+}

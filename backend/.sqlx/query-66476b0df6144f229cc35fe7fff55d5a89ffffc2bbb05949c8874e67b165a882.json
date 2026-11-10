@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (SELECT 1 FROM tag_observations WHERE image_id = ?) AS \"seen!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "seen!: bool",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "66476b0df6144f229cc35fe7fff55d5a89ffffc2bbb05949c8874e67b165a882"
+}

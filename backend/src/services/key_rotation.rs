@@ -25,7 +25,7 @@ pub struct EncryptedColumn {
 ///
 /// The row id in the AAD: `user_credentials` and `alert_channels` use the row id;
 /// `system_config` uses the key name and only rows with `is_encrypted = 1`.
-pub const ENCRYPTED_COLUMNS: [EncryptedColumn; 3] = [
+pub const ENCRYPTED_COLUMNS: [EncryptedColumn; 4] = [
     EncryptedColumn {
         table: "user_credentials",
         column: "encrypted_token",
@@ -37,6 +37,10 @@ pub const ENCRYPTED_COLUMNS: [EncryptedColumn; 3] = [
     EncryptedColumn {
         table: "alert_channels",
         column: "config_encrypted",
+    },
+    EncryptedColumn {
+        table: "source_credentials",
+        column: "encrypted_token",
     },
 ];
 
@@ -59,7 +63,7 @@ pub async fn rotate(
 
     let mut count: u64 = 0;
     // The order follows `ENCRYPTED_COLUMNS`.
-    let [credentials, config, channels] = &ENCRYPTED_COLUMNS;
+    let [credentials, config, channels, source_tokens] = &ENCRYPTED_COLUMNS;
 
     for row in rows::list_credential_tokens(&mut tx).await? {
         let sealed = reseal(old, new, credentials, &row)?;
@@ -74,6 +78,11 @@ pub async fn rotate(
     for row in rows::list_alert_configs(&mut tx).await? {
         let sealed = reseal(old, new, channels, &row)?;
         expect_one(rows::set_alert_config(&mut tx, &row.id, &sealed).await?)?;
+        count += 1;
+    }
+    for row in rows::list_source_credential_tokens(&mut tx).await? {
+        let sealed = reseal(old, new, source_tokens, &row)?;
+        expect_one(rows::set_source_credential_token(&mut tx, &row.id, &sealed).await?)?;
         count += 1;
     }
 
@@ -134,7 +143,7 @@ mod tests {
 
     const CONFIG_KEY: &str = "oidc.client_secret_encrypted";
     // (table, column, row id, fake plaintext), in `rotate` order.
-    const SEEDS: [(&str, &str, &str, &str); 5] = [
+    const SEEDS: [(&str, &str, &str, &str); 6] = [
         (
             "user_credentials",
             "encrypted_token",
@@ -165,6 +174,12 @@ mod tests {
             "chan-2",
             "{\"url\":\"FAKE_WEBHOOK_URL_5\"}",
         ),
+        (
+            "source_credentials",
+            "encrypted_token",
+            "srccred-1",
+            "FAKE_REGISTRY_TOKEN_6",
+        ),
     ];
 
     fn derived(b64: &str) -> DerivedKey {
@@ -191,8 +206,10 @@ mod tests {
             .await
             .unwrap();
         drop(conn);
-
         for (table, column, id, plain) in SEEDS {
+            if table == "source_credentials" {
+                continue;
+            }
             let sealed =
                 crypto::encrypt(&key, &crypto::aad(table, column, id), plain.as_bytes()).unwrap();
             let query = match table {
@@ -210,6 +227,27 @@ mod tests {
             };
             query.bind(id).bind(sealed).execute(&pool).await.unwrap();
         }
+        // The source and its credential come last: the credential row references the source.
+        sqlx::query(
+            "INSERT INTO image_sources
+                (id, user_id, hub_id, repository, tag_value, github_cred_id, github_owner, github_repo)
+             VALUES ('src-1', 'user-1', 'hub-default-ghcr', 'team/app', '1.0', 'cred-2', 'o', 'r')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (table, column, id, plain) = SEEDS[SEEDS.len() - 1];
+        let sealed =
+            crypto::encrypt(&key, &crypto::aad(table, column, id), plain.as_bytes()).unwrap();
+        sqlx::query(
+            "INSERT INTO source_credentials (id, source_id, username, encrypted_token)
+             VALUES (?, 'src-1', 'robot', ?)",
+        )
+        .bind(id)
+        .bind(sealed)
+        .execute(&pool)
+        .await
+        .unwrap();
         // A plain setting that rotation must not touch.
         sqlx::query(
             "INSERT INTO system_config (key, value, is_encrypted) VALUES ('oidc.client_id', 'fake-client-id', 0)",
@@ -231,6 +269,13 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        let sql = "SELECT encrypted_token FROM source_credentials ORDER BY id";
+        all.extend(
+            sqlx::query_scalar::<_, String>(sql)
+                .fetch_all(pool)
+                .await
+                .unwrap(),
+        );
         let sql = "SELECT config_encrypted FROM alert_channels ORDER BY id";
         all.extend(
             sqlx::query_scalar::<_, String>(sql)
@@ -245,6 +290,7 @@ mod tests {
         let sql = match table {
             "user_credentials" => "SELECT encrypted_token FROM user_credentials WHERE id = ?",
             "system_config" => "SELECT value FROM system_config WHERE key = ?",
+            "source_credentials" => "SELECT encrypted_token FROM source_credentials WHERE id = ?",
             _ => "SELECT config_encrypted FROM alert_channels WHERE id = ?",
         };
         sqlx::query_scalar(sql)
@@ -268,7 +314,7 @@ mod tests {
         let before = snapshot(&pool).await;
 
         let rows = rotate(&pool, &old, &new).await.unwrap();
-        assert_eq!(rows, 5, "wrong row count");
+        assert_eq!(rows, 6, "wrong row count");
 
         for (table, column, id, plain) in SEEDS {
             let ciphertext = stored(&pool, table, id).await;
@@ -365,7 +411,7 @@ mod tests {
         let details = details.clone().unwrap_or_default();
         let parsed: serde_json::Value = serde_json::from_str(&details).unwrap();
         assert!(
-            parsed == serde_json::json!({ "rows": 5 }),
+            parsed == serde_json::json!({ "rows": 6 }),
             "details hold more than the row count"
         );
 

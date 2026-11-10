@@ -1,0 +1,1033 @@
+//! Route tests for the spinoff routes of section 10: hubs, sources, source credentials, the
+//! credential test, the tag preview, the image lists and the admin scan settings. Each route is
+//! checked for the success shape, `401` with no session, the role or tenancy answer, and its
+//! error codes. A canary token proves a credential never reaches a response or a log line.
+
+use std::sync::Arc;
+
+use axum::Router;
+use axum::http::StatusCode;
+use serde_json::{Value, json};
+
+use crate::services::discovery::tests as fake;
+use crate::tests::{get_json, send_json, session_cookie, test_router};
+use crate::{auth, config, db};
+
+/// A canary registry token. It must appear in no response, log line or audit row.
+const CANARY: &str = "dckr_pat_CANARY-0a1b2c3d4e5f";
+
+struct Fixture {
+    router: Router,
+    pool: sqlx::SqlitePool,
+    dir: std::path::PathBuf,
+    csrf: String,
+    owner: String,
+    other: String,
+    admin: String,
+    anonymous: String,
+    script: Arc<fake::Script>,
+}
+
+async fn fixture(name: &str) -> Fixture {
+    let (router, pool, dir) = test_router(name).await;
+    let mut conn = pool.acquire().await.unwrap();
+    for (id, role) in [("o1", "user"), ("x2", "user"), ("a3", "admin")] {
+        db::users::insert_local(&mut conn, id, id, None, "h", role)
+            .await
+            .unwrap();
+    }
+    drop(conn);
+    sqlx::query(
+        "INSERT INTO user_credentials (id, user_id, label, encrypted_token)
+         VALUES ('gc1', 'o1', 'g', 'v1:fake'), ('gc2', 'x2', 'g', 'v1:fake')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let script = Arc::new(fake::Script::default());
+    let authority = fake::serve(script.clone()).await;
+    sqlx::query("INSERT INTO hubs (id, host, kind) VALUES ('hub-fake', ?, 'custom')")
+        .bind(&authority)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let root =
+        config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+    let csrf = auth::csrf::issue(&auth::crypto::csrf_key(&root).unwrap()).unwrap();
+    let csrf_cookie = format!("{}={csrf}", auth::csrf::CSRF_COOKIE);
+    let cookie =
+        |user: &str, role: &str| format!("{}; {csrf_cookie}", session_cookie(user, role, 0));
+    Fixture {
+        owner: cookie("o1", "user"),
+        other: cookie("x2", "user"),
+        admin: cookie("a3", "admin"),
+        anonymous: csrf_cookie.clone(),
+        router,
+        pool,
+        dir,
+        csrf,
+        script,
+    }
+}
+
+impl Fixture {
+    async fn call(&self, method: &str, uri: &str, who: &str, body: Value) -> (StatusCode, Value) {
+        let text = if body.is_null() {
+            String::new()
+        } else {
+            body.to_string()
+        };
+        send_json(
+            &self.router,
+            method,
+            uri,
+            Some(who),
+            Some(&self.csrf),
+            &text,
+        )
+        .await
+    }
+
+    async fn read(&self, uri: &str, who: &str) -> (StatusCode, Value) {
+        get_json(&self.router, uri, who).await
+    }
+
+    async fn finish(self) {
+        self.pool.close().await;
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn source_body(hub_id: &str, tag: &str) -> Value {
+    json!({
+        "hub_id": hub_id,
+        "repository": "team/app",
+        "tag_value": tag,
+        "github_cred_id": "gc1",
+        "github_owner": "octo",
+        "github_repo": "app",
+        "default_branch": "main",
+        "auto_create_issues": true,
+        "min_issue_severity": "HIGH",
+    })
+}
+
+/// Creates a source for the owner and returns its id.
+async fn make_source(fx: &Fixture, tag: &str) -> String {
+    let (status, body) = fx
+        .call(
+            "POST",
+            "/api/v1/image-sources",
+            &fx.owner,
+            source_body("hub-fake", tag),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    body["id"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn hubs_list_create_delete() {
+    let fx = fixture("rt-hubs").await;
+    // 401 without a session.
+    let (status, _) = fx.read("/api/v1/hubs", &fx.anonymous).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // Any session lists; the shape has no display name.
+    let (status, body) = fx.read("/api/v1/hubs", &fx.owner).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert!(items.len() >= 3);
+    for hub in items {
+        let mut keys: Vec<&str> = hub
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["host", "id", "kind", "pull_endpoint"]);
+    }
+    assert_eq!(items[0]["kind"], "default");
+
+    // Create: admin only.
+    let new_hub = json!({ "host": "127.0.0.1:5000", "pull_endpoint": "127.0.0.1:5001" });
+    let (status, _) = fx
+        .call("POST", "/api/v1/hubs", &fx.anonymous, new_hub.clone())
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = fx
+        .call("POST", "/api/v1/hubs", &fx.owner, new_hub.clone())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = fx
+        .call("POST", "/api/v1/hubs", &fx.admin, new_hub.clone())
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["kind"], "custom");
+    assert_eq!(body["pull_endpoint"], "127.0.0.1:5001");
+    let hub_id = body["id"].as_str().unwrap().to_owned();
+    // A second add of the same host is 409.
+    let (status, _) = fx.call("POST", "/api/v1/hubs", &fx.admin, new_hub).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // Grammar errors are 422; a malformed body is 400.
+    for bad in ["https://x.example", "UPPER.example", "a b", ""] {
+        let (status, _) = fx
+            .call("POST", "/api/v1/hubs", &fx.admin, json!({ "host": bad }))
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+    }
+    let (status, _) = fx
+        .call("POST", "/api/v1/hubs", &fx.admin, json!({ "nope": 1 }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Delete: admin only, 404 for a missing hub, 204 for an unused custom hub.
+    let uri = format!("/api/v1/hubs/{hub_id}");
+    let (status, _) = fx.call("DELETE", &uri, &fx.anonymous, Value::Null).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = fx.call("DELETE", &uri, &fx.owner, Value::Null).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = fx.call("DELETE", &uri, &fx.admin, Value::Null).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = fx.call("DELETE", &uri, &fx.admin, Value::Null).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log WHERE action IN ('hub.create', 'hub.delete')",
+    )
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 2);
+    fx.finish().await;
+}
+
+#[tokio::test]
+async fn hub_delete_is_409_for_a_default_hub_and_a_hub_in_use() {
+    let fx = fixture("rt-hub-409").await;
+    for id in ["hub-default-ghcr", "hub-default-docker"] {
+        let (status, _) = fx
+            .call(
+                "DELETE",
+                &format!("/api/v1/hubs/{id}"),
+                &fx.admin,
+                Value::Null,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{id}");
+    }
+    make_source(&fx, "1.0").await;
+    let (status, _) = fx
+        .call("DELETE", "/api/v1/hubs/hub-fake", &fx.admin, Value::Null)
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hubs")
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 3);
+    fx.finish().await;
+}
+
+#[tokio::test]
+async fn a_private_address_hub_host_is_refused_at_create() {
+    let fx = fixture("rt-hub-private").await;
+    for host in [
+        "10.0.0.5",
+        "169.254.169.254",
+        "192.168.1.1:5000",
+        "localhost",
+    ] {
+        let (status, _) = fx
+            .call("POST", "/api/v1/hubs", &fx.admin, json!({ "host": host }))
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{host}");
+    }
+    // A private pull endpoint is refused too.
+    let (status, _) = fx
+        .call(
+            "POST",
+            "/api/v1/hubs",
+            &fx.admin,
+            json!({ "host": "registry.example.org", "pull_endpoint": "10.0.0.5" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let custom: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hubs WHERE kind = 'custom'")
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(custom, 1, "only the fixture hub exists");
+    fx.finish().await;
+}
+
+#[tokio::test]
+async fn hub_create_is_limited_to_60_per_minute_per_user() {
+    let fx = fixture("rt-hub-limit").await;
+    let mut last = StatusCode::OK;
+    for _ in 0..61 {
+        let (status, _) = fx
+            .call(
+                "POST",
+                "/api/v1/hubs",
+                &fx.admin,
+                json!({ "host": "10.0.0.5" }),
+            )
+            .await;
+        last = status;
+    }
+    assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
+    fx.finish().await;
+}
+
+#[tokio::test]
+async fn source_crud_tenancy_and_errors() {
+    let fx = fixture("rt-sources").await;
+    let uri = "/api/v1/image-sources";
+    let (status, _) = fx.read(uri, &fx.anonymous).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = fx
+        .call("POST", uri, &fx.anonymous, source_body("hub-fake", "1.0"))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Create: 201, has_credential false, no token field.
+    let (status, created) = fx
+        .call("POST", uri, &fx.owner, source_body("hub-fake", "1.*"))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["has_credential"], false);
+    assert_eq!(created["anonymous_pull"], false);
+    assert!(created.get("token").is_none());
+    let id = created["id"].as_str().unwrap().to_owned();
+    // The same hub, repository and tag value is 409.
+    let (status, _) = fx
+        .call("POST", uri, &fx.owner, source_body("hub-fake", "1.*"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // 422: bad repository, bad tag, bad severity; 404: unknown hub, foreign GitHub credential.
+    let mut bad = source_body("hub-fake", "1.0");
+    bad["repository"] = json!("Team/App");
+    assert_eq!(
+        fx.call("POST", uri, &fx.owner, bad).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        fx.call(
+            "POST",
+            uri,
+            &fx.owner,
+            source_body("hub-fake", "sha256:abc")
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let mut bad = source_body("hub-fake", "2.0");
+    bad["min_issue_severity"] = json!("LOW");
+    assert_eq!(
+        fx.call("POST", uri, &fx.owner, bad).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        fx.call("POST", uri, &fx.owner, source_body("no-hub", "2.0"))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let mut foreign = source_body("hub-fake", "2.0");
+    foreign["github_cred_id"] = json!("gc2");
+    assert_eq!(
+        fx.call("POST", uri, &fx.owner, foreign).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        fx.call("POST", uri, &fx.owner, json!({ "x": 1 })).await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // List: the owner sees it, another user does not, an admin needs scope=all.
+    let (_, mine) = fx.read(uri, &fx.owner).await;
+    assert_eq!(mine["total"], 1);
+    let (_, theirs) = fx.read(uri, &fx.other).await;
+    assert_eq!(theirs["total"], 0);
+    let (_, admin_default) = fx.read(uri, &fx.admin).await;
+    assert_eq!(admin_default["total"], 0);
+    let (_, admin_all) = fx.read(&format!("{uri}?scope=all"), &fx.admin).await;
+    assert_eq!(admin_all["total"], 1);
+    assert_eq!(
+        fx.read(&format!("{uri}?scope=all"), &fx.owner).await.0,
+        StatusCode::FORBIDDEN
+    );
+
+    // Get: owner 200, admin 200 (read), other user 404, missing 404.
+    let one = format!("{uri}/{id}");
+    assert_eq!(fx.read(&one, &fx.owner).await.0, StatusCode::OK);
+    assert_eq!(fx.read(&one, &fx.admin).await.0, StatusCode::OK);
+    assert_eq!(fx.read(&one, &fx.other).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        fx.read(&one, &fx.anonymous).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        fx.read(&format!("{uri}/nope"), &fx.owner).await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Update: owner 200; other 404; admin 403 (read only); duplicate 409.
+    let mut edit = source_body("hub-fake", "2.*");
+    edit["default_branch"] = json!("release");
+    let (status, updated) = fx.call("PUT", &one, &fx.owner, edit.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["tag_value"], "2.*");
+    assert_eq!(updated["default_branch"], "release");
+    assert_eq!(
+        fx.call("PUT", &one, &fx.other, edit.clone()).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        fx.call("PUT", &one, &fx.admin, edit.clone()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        fx.call("PUT", &one, &fx.anonymous, edit).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, second) = fx
+        .call("POST", uri, &fx.owner, source_body("hub-fake", "3.0"))
+        .await;
+    let second_uri = format!("{uri}/{}", second["id"].as_str().unwrap());
+    assert_eq!(
+        fx.call(
+            "PUT",
+            &second_uri,
+            &fx.owner,
+            source_body("hub-fake", "2.*")
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+
+    // Delete: anonymous 401, other 404, admin 403, owner 204 then 404.
+    assert_eq!(
+        fx.call("DELETE", &one, &fx.anonymous, Value::Null).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        fx.call("DELETE", &one, &fx.other, Value::Null).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        fx.call("DELETE", &one, &fx.admin, Value::Null).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        fx.call("DELETE", &one, &fx.owner, Value::Null).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        fx.call("DELETE", &one, &fx.owner, Value::Null).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let audited: Vec<String> = sqlx::query_scalar(
+        "SELECT action FROM audit_log WHERE action LIKE 'source.%' ORDER BY rowid",
+    )
+    .fetch_all(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        audited,
+        [
+            "source.create",
+            "source.update",
+            "source.create",
+            "source.delete"
+        ]
+    );
+    fx.finish().await;
+}
+
+#[tokio::test]
+async fn editing_a_value_keeps_recorded_data_and_delete_removes_unobserved_images() {
+    let fx = fixture("rt-source-data").await;
+    let id = make_source(&fx, "1.*").await;
+    for sql in [
+        "INSERT INTO images (id, hub_id, repository, digest, is_index)
+         VALUES ('img1', 'hub-fake', 'team/app', 'sha256:aa', 0),
+                ('img2', 'hub-fake', 'team/app', 'sha256:bb', 0)",
+        "INSERT INTO image_platforms (id, image_id, platform, platform_digest, state)
+         VALUES ('ffffffffffffffffffffffffffffff01', 'img1', 'linux/amd64', 'sha256:a1', 'stored'),
+                ('ffffffffffffffffffffffffffffff02', 'img2', 'linux/amd64', 'sha256:b1', 'stored')",
+    ] {
+        sqlx::query(sql).execute(&fx.pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO tag_observations (source_id, tag, image_id) VALUES (?, ?, ?)")
+        .bind(&id)
+        .bind("1.0")
+        .bind("img1")
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    // Another source also observes img2 only, so it must survive the first delete.
+    let (_, other_source) = fx
+        .call(
+            "POST",
+            "/api/v1/image-sources",
+            &fx.owner,
+            source_body("hub-fake", "9.9"),
+        )
+        .await;
+    let other_id = other_source["id"].as_str().unwrap().to_owned();
+    sqlx::query("INSERT INTO tag_observations (source_id, tag, image_id) VALUES (?, ?, ?)")
+        .bind(&other_id)
+        .bind("9.9")
+        .bind("img2")
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+
+    // An edit that no longer matches the recorded tag deletes nothing.
+    let one = format!("/api/v1/image-sources/{id}");
+    let (status, _) = fx
+        .call("PUT", &one, &fx.owner, source_body("hub-fake", "7.*"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tag_observations")
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(kept, 2);
+
+    // Deleting removes img1 (nobody observes it) and keeps img2.
+    assert_eq!(
+        fx.call("DELETE", &one, &fx.owner, Value::Null).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let images: Vec<String> = sqlx::query_scalar("SELECT id FROM images")
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(images, ["img2"]);
+    fx.finish().await;
+}
+
+#[tokio::test]
+async fn credential_put_delete_test_and_the_canary() {
+    let fx = fixture("rt-credential").await;
+    let id = make_source(&fx, "1.0").await;
+    let uri = format!("/api/v1/image-sources/{id}/credential");
+    let body = json!({ "username": "robot", "token": CANARY, "expires_at": 1_900_000_000 });
+
+    let sink = crate::tests::LogSink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    // 401, 404 for another user, 403 for an admin (owner only).
+    assert_eq!(
+        fx.call("PUT", &uri, &fx.anonymous, body.clone()).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        fx.call("PUT", &uri, &fx.other, body.clone()).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        fx.call("PUT", &uri, &fx.admin, body.clone()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        fx.call(
+            "PUT",
+            "/api/v1/image-sources/nope/credential",
+            &fx.owner,
+            body.clone()
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    // 422: empty username, empty token.
+    for bad in [
+        json!({ "username": "", "token": CANARY }),
+        json!({ "username": "robot", "token": "" }),
+    ] {
+        let (status, response) = fx.call("PUT", &uri, &fx.owner, bad).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!response.to_string().contains(CANARY));
+    }
+    // 201 on create, 200 on replace.
+    let (status, created) = fx.call("PUT", &uri, &fx.owner, body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["source_id"], id);
+    assert_eq!(created["username"], "robot");
+    assert!(created["expires_at"].is_string());
+    assert!(created.get("token").is_none());
+    let (status, replaced) = fx.call("PUT", &uri, &fx.owner, body.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!replaced.to_string().contains(CANARY));
+
+    // The stored value is a v1: ciphertext bound to the row, and it decrypts to the token.
+    let stored: (String, String) =
+        sqlx::query_as("SELECT id, encrypted_token FROM source_credentials WHERE source_id = ?")
+            .bind(&id)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert!(stored.1.starts_with("v1:"));
+    assert!(!stored.1.contains(CANARY));
+    let root =
+        config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+    let key = auth::crypto::credentials_key(&root).unwrap();
+    let plain = auth::crypto::decrypt(
+        &key,
+        &auth::crypto::aad("source_credentials", "encrypted_token", &stored.0),
+        &stored.1,
+    )
+    .unwrap();
+    assert_eq!(plain.as_slice(), CANARY.as_bytes());
+
+    // The source reports has_credential, never the token.
+    let (_, source) = fx
+        .read(&format!("/api/v1/image-sources/{id}"), &fx.owner)
+        .await;
+    assert_eq!(source["has_credential"], true);
+
+    // The test route: owner only, fixed result, never the token.
+    fake::set_tags(&fx.script, "team/app", &["1.0"]);
+    fx.script.route("/v2/", fake::Reply::new(200, b"{}"));
+    fx.script.route(
+        "/v2/team/app/tags/list?n=1",
+        fake::Reply::new(200, br#"{"tags":["1.0"]}"#),
+    );
+    let test_uri = format!("{uri}/test");
+    let test_body = json!({ "repository": "team/app" });
+    assert_eq!(
+        fx.call("POST", &test_uri, &fx.anonymous, test_body.clone())
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        fx.call("POST", &test_uri, &fx.other, test_body.clone())
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        fx.call("POST", &test_uri, &fx.admin, test_body.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        fx.call(
+            "POST",
+            &test_uri,
+            &fx.owner,
+            json!({ "repository": "Bad Name" })
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let (status, ok) = fx
+        .call("POST", &test_uri, &fx.owner, test_body.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{ok}");
+    assert_eq!(ok["ok"], true);
+    assert!(ok["detail"].is_string());
+    // A registry that refuses the credential is a 200 with ok false and a fixed text.
+    fx.script.route(
+        "/v2/team/app/tags/list?n=1",
+        fake::Reply::new(401, b"{}").header("Www-Authenticate", "Bearer"),
+    );
+    let (status, refused) = fx
+        .call("POST", &test_uri, &fx.owner, test_body.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refused["ok"], false);
+    assert!(!refused.to_string().contains(CANARY));
+    // A registry that cannot be reached is 502.
+    fx.script
+        .route("/v2/team/app/tags/list?n=1", fake::Reply::new(500, b"{}"));
+    let (status, down) = fx.call("POST", &test_uri, &fx.owner, test_body).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(!down.to_string().contains(CANARY));
+
+    // Delete: 401, 404 for another user, 204, then 404 (none left).
+    assert_eq!(
+        fx.call("DELETE", &uri, &fx.anonymous, Value::Null).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        fx.call("DELETE", &uri, &fx.other, Value::Null).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        fx.call("DELETE", &uri, &fx.owner, Value::Null).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        fx.call("DELETE", &uri, &fx.owner, Value::Null).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, source) = fx
+        .read(&format!("/api/v1/image-sources/{id}"), &fx.owner)
+        .await;
+    assert_eq!(source["has_credential"], false);
+
+    // The canary is in no log line and no audit row.
+    let logged = String::from_utf8_lossy(&sink.0.lock().unwrap()).to_string();
+    assert!(!logged.contains(CANARY), "the token reached the log");
+    let audit: Vec<String> =
+        sqlx::query_scalar("SELECT COALESCE(details, '') || target FROM audit_log")
+            .fetch_all(&fx.pool)
+            .await
+            .unwrap();
+    assert!(audit.iter().all(|row| !row.contains(CANARY)));
+    let actions: Vec<String> = sqlx::query_scalar(
+        "SELECT action FROM audit_log WHERE action LIKE 'credential.%' ORDER BY rowid",
+    )
+    .fetch_all(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        actions,
+        [
+            "credential.create",
+            "credential.rotate",
+            "credential.delete"
+        ]
+    );
+    fx.finish().await;
+}
+
+#[tokio::test]
+async fn ghcr_refuses_a_fine_grained_token_and_docker_hub_works_anonymously() {
+    let fx = fixture("rt-ghcr").await;
+    let (status, ghcr) = fx
+        .call(
+            "POST",
+            "/api/v1/image-sources",
+            &fx.owner,
+            source_body("hub-default-ghcr", "1.0"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let uri = format!(
+        "/api/v1/image-sources/{}/credential",
+        ghcr["id"].as_str().unwrap()
+    );
+    let (status, response) = fx
+        .call(
+            "PUT",
+            &uri,
+            &fx.owner,
+            json!({ "username": "u", "token": format!("github_pat_{CANARY}") }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(!response.to_string().contains(CANARY));
+    let (status, _) = fx
+        .call(
+            "PUT",
+            &uri,
+            &fx.owner,
+            json!({ "username": "u", "token": "ghp_classic" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // A Docker Hub source with no credential is anonymous and says so.
+    let (status, docker) = fx
+        .call(
+            "POST",
+            "/api/v1/image-sources",
+            &fx.owner,
+            source_body("hub-default-docker", "1.0"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(docker["has_credential"], false);
+    assert_eq!(docker["anonymous_pull"], true);
+    fx.finish().await;
+}
+
+#[tokio::test]
+async fn tag_preview_reads_observations_without_the_registry() {
+    let fx = fixture("rt-preview").await;
+    let id = make_source(&fx, "1.*").await;
+    sqlx::query(
+        "INSERT INTO images (id, hub_id, repository, digest, is_index)
+         VALUES ('img1', 'hub-fake', 'team/app', 'sha256:aa', 0)",
+    )
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    for tag in ["1.0", "1.2.3", "2.0", "latest"] {
+        sqlx::query(
+            "INSERT INTO tag_observations (source_id, tag, image_id) VALUES (?, ?, 'img1')",
+        )
+        .bind(&id)
+        .bind(tag)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    }
+    let uri = format!("/api/v1/image-sources/{id}/tag-preview");
+    assert_eq!(
+        fx.read(&uri, &fx.anonymous).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(fx.read(&uri, &fx.other).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(fx.read(&uri, &fx.admin).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(
+        fx.read("/api/v1/image-sources/nope/tag-preview", &fx.owner)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, body) = fx.read(&uri, &fx.owner).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["matches"], json!(["1.0", "1.2.3"]));
+    assert_eq!(body["truncated"], false);
+    assert!(fx.script.hits().is_empty(), "the registry was contacted");
+    fx.finish().await;
+}
+
+#[tokio::test]
+async fn tag_preview_is_limited_to_60_per_minute_per_user() {
+    let fx = fixture("rt-preview-limit").await;
+    let id = make_source(&fx, "1.*").await;
+    let uri = format!("/api/v1/image-sources/{id}/tag-preview");
+    let mut last = StatusCode::OK;
+    for _ in 0..61 {
+        last = fx.read(&uri, &fx.owner).await.0;
+    }
+    assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
+    fx.finish().await;
+}
+
+#[tokio::test]
+async fn image_lists_show_platform_state_and_scan_status() {
+    let fx = fixture("rt-images").await;
+    let id = make_source(&fx, "1.*").await;
+    let other_id = {
+        let mut body = source_body("hub-fake", "5.*");
+        body["github_cred_id"] = json!("gc2");
+        let (status, created) = fx
+            .call("POST", "/api/v1/image-sources", &fx.other, body)
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        created["id"].as_str().unwrap().to_owned()
+    };
+    for sql in [
+        "INSERT INTO images (id, hub_id, repository, digest, is_index)
+         VALUES ('img1', 'hub-fake', 'team/app', 'sha256:aa', 0),
+                ('img2', 'hub-fake', 'team/app', 'sha256:bb', 0)",
+        "INSERT INTO image_platforms (id, image_id, platform, platform_digest, state, size_bytes, pulled_at)
+         VALUES ('p1', 'img1', 'linux/amd64', 'sha256:a1', 'stored', 1234, 1700000000),
+                ('p2', 'img2', 'linux/arm64', 'sha256:b1', 'evicted', 99, 1700000100)",
+        "INSERT INTO scan_runs (id, image_platform_id, scanner, scanner_version, db_built_at, trigger, status, error)
+         VALUES ('r1', 'p1', 'grype', '0.1', 1700000000, 'first_pull', 'failed', 'scanner failed'),
+                ('r2', 'p1', 'grype', '0.1', 1700000500, 'db_update', 'done', NULL),
+                ('r3', 'p1', 'trivy', '0.2', 1700000000, 'first_pull', 'queued', NULL)",
+    ] {
+        sqlx::query(sql).execute(&fx.pool).await.unwrap();
+    }
+    for (source, tag, image) in [(&id, "1.0", "img1"), (&other_id, "5.0", "img2")] {
+        sqlx::query("INSERT INTO tag_observations (source_id, tag, image_id) VALUES (?, ?, ?)")
+            .bind(source)
+            .bind(tag)
+            .bind(image)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+    }
+    let per_source = format!("/api/v1/image-sources/{id}/images");
+    assert_eq!(
+        fx.read(&per_source, &fx.anonymous).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        fx.read(&per_source, &fx.other).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        fx.read("/api/v1/images", &fx.anonymous).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, body) = fx.read(&per_source, &fx.owner).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 1);
+    let image = &body["items"][0];
+    assert_eq!(image["tags"], json!(["1.0"]));
+    let platform = &image["platforms"][0];
+    assert_eq!(platform["platform"], "linux/amd64");
+    assert_eq!(platform["state"], "stored");
+    assert_eq!(platform["size_bytes"], 1234);
+    assert!(platform["pulled_at"].is_string());
+    let scans = platform["scans"].as_array().unwrap();
+    assert_eq!(scans.len(), 2, "the latest run of each scanner");
+    assert_eq!(scans[0]["scanner"], "grype");
+    assert_eq!(scans[0]["status"], "done");
+    assert_eq!(scans[0]["version"], "0.1");
+    assert!(scans[0]["db_built_at"].is_string());
+    assert_eq!(scans[1]["scanner"], "trivy");
+    assert_eq!(scans[1]["status"], "queued");
+
+    // The admin reads any source's images.
+    assert_eq!(fx.read(&per_source, &fx.admin).await.0, StatusCode::OK);
+    // GET /images is the caller's own, filters by state, and admin scope=all sees both.
+    let (_, mine) = fx.read("/api/v1/images", &fx.owner).await;
+    assert_eq!(mine["total"], 1);
+    let (_, evicted) = fx.read("/api/v1/images?state=evicted", &fx.owner).await;
+    assert_eq!(evicted["total"], 0);
+    let (_, all) = fx.read("/api/v1/images?scope=all", &fx.admin).await;
+    assert_eq!(all["total"], 2);
+    let (_, only_other) = fx
+        .read(
+            &format!("/api/v1/images?scope=all&source_id={other_id}"),
+            &fx.admin,
+        )
+        .await;
+    assert_eq!(only_other["total"], 1);
+    assert_eq!(only_other["items"][0]["platforms"][0]["state"], "evicted");
+    // A user cannot widen the scope; a bad state is 400.
+    assert_eq!(
+        fx.read("/api/v1/images?scope=all", &fx.owner).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        fx.read("/api/v1/images?state=zzz", &fx.owner).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    fx.finish().await;
+}
+
+#[tokio::test]
+async fn admin_scan_settings_get_put_and_bounds() {
+    let fx = fixture("rt-settings").await;
+    let uri = "/api/v1/admin/scan-settings";
+    assert_eq!(
+        fx.read(uri, &fx.anonymous).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(fx.read(uri, &fx.owner).await.0, StatusCode::FORBIDDEN);
+    let (status, current) = fx.read(uri, &fx.admin).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(current["max_stored"], 20);
+    assert_eq!(current["scanners_enabled"], json!(["grype", "trivy"]));
+    assert_eq!(current["scanner_timeout_s"], 600);
+    assert_eq!(current["scanner_output_max_bytes"], 64u64 * 1024 * 1024);
+    assert_eq!(current["pull_cap_bytes"], 10u64 * 1024 * 1024 * 1024);
+    assert_eq!(current["min_free_disk_bytes"], 10u64 * 1024 * 1024 * 1024);
+
+    let mut next = current.clone();
+    next["max_stored"] = json!(5);
+    next["scanners_enabled"] = json!(["trivy"]);
+    next["scanner_timeout_s"] = json!(120);
+    assert_eq!(
+        fx.call("PUT", uri, &fx.anonymous, next.clone()).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        fx.call("PUT", uri, &fx.owner, next.clone()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, saved) = fx.call("PUT", uri, &fx.admin, next.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved, next);
+    let (_, reread) = fx.read(uri, &fx.admin).await;
+    assert_eq!(reread, next);
+    // The worker reads the same keys.
+    let stored: String =
+        sqlx::query_scalar("SELECT value FROM system_config WHERE key = 'images.max_stored'")
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, "5");
+    let details: String =
+        sqlx::query_scalar("SELECT details FROM audit_log WHERE action = 'settings.change'")
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    let details: Value = serde_json::from_str(&details).unwrap();
+    assert_eq!(details["old"]["max_stored"], 20);
+    assert_eq!(details["new"]["max_stored"], 5);
+
+    // 422 for every bound, an unknown scanner and an empty scanner list; 400 for a bad body.
+    for (field, value) in [
+        ("max_stored", json!(0)),
+        ("max_stored", json!(1_000_000)),
+        ("scanner_timeout_s", json!(1)),
+        ("scanner_output_max_bytes", json!(10)),
+        ("pull_cap_bytes", json!(0)),
+        ("min_free_disk_bytes", json!(u64::MAX / 2)),
+        ("scanners_enabled", json!([])),
+        ("scanners_enabled", json!(["clair"])),
+    ] {
+        let mut bad = next.clone();
+        bad[field] = value;
+        assert_eq!(
+            fx.call("PUT", uri, &fx.admin, bad).await.0,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{field}"
+        );
+    }
+    assert_eq!(
+        fx.call("PUT", uri, &fx.admin, json!({ "max_stored": 3 }))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (_, unchanged) = fx.read(uri, &fx.admin).await;
+    assert_eq!(unchanged, next);
+    fx.finish().await;
+}
+
+/// Every route of section 10's table is mounted: a request with no session is `401`, not `404`
+/// or `405`.
+#[tokio::test]
+async fn every_section_10_route_is_mounted() {
+    let fx = fixture("rt-coverage").await;
+    let routes = [
+        ("GET", "/api/v1/hubs"),
+        ("POST", "/api/v1/hubs"),
+        ("DELETE", "/api/v1/hubs/x"),
+        ("GET", "/api/v1/image-sources"),
+        ("POST", "/api/v1/image-sources"),
+        ("GET", "/api/v1/image-sources/x"),
+        ("PUT", "/api/v1/image-sources/x"),
+        ("DELETE", "/api/v1/image-sources/x"),
+        ("PUT", "/api/v1/image-sources/x/credential"),
+        ("DELETE", "/api/v1/image-sources/x/credential"),
+        ("POST", "/api/v1/image-sources/x/credential/test"),
+        ("GET", "/api/v1/image-sources/x/tag-preview"),
+        ("POST", "/api/v1/image-sources/x/scan"),
+        ("GET", "/api/v1/image-sources/x/images"),
+        ("GET", "/api/v1/images"),
+        ("GET", "/api/v1/admin/scan-settings"),
+        ("PUT", "/api/v1/admin/scan-settings"),
+    ];
+    for (method, uri) in routes {
+        let (status, _) = fx.call(method, uri, &fx.anonymous, Value::Null).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {uri}");
+    }
+    // A state-changing route without the CSRF token is 403.
+    let (status, _) = send_json(
+        &fx.router,
+        "POST",
+        "/api/v1/hubs",
+        Some(&fx.admin),
+        None,
+        r#"{"host":"x.example"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    fx.finish().await;
+}

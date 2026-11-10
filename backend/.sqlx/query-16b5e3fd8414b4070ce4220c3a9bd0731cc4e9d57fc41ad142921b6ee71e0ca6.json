@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.id AS \"id!\", i.digest AS \"digest!\", i.is_index AS \"is_index!: bool\",\n                  h.host AS \"hub_host!\", i.repository AS \"repository!\"\n           FROM images i JOIN hubs h ON h.id = i.hub_id\n           WHERE EXISTS (SELECT 1 FROM tag_observations o JOIN image_sources s ON s.id = o.source_id\n                         WHERE o.image_id = i.id AND (? IS NULL OR s.user_id = ?)\n                           AND (? IS NULL OR s.id = ?))\n             AND (? IS NULL OR EXISTS (SELECT 1 FROM image_platforms p\n                                       WHERE p.image_id = i.id AND p.state = ?))\n           ORDER BY i.created_at DESC, i.id ASC\n           LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "digest!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "digest"
+          }
+        }
+      },
+      {
+        "name": "is_index!: bool",
+        "ordinal": 2,
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "is_index"
+          }
+        }
+      },
+      {
+        "name": "hub_host!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "host"
+          }
+        }
+      },
+      {
+        "name": "repository!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "repository"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "16b5e3fd8414b4070ce4220c3a9bd0731cc4e9d57fc41ad142921b6ee71e0ca6"
+}

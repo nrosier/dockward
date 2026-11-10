@@ -24,8 +24,10 @@ pub mod github_scanning;
 #[allow(dead_code)] // Some accessors are used by the publish step only (Step 4+).
 pub mod github_url;
 pub mod health;
+pub mod hubs;
 #[allow(dead_code)] // Used by the admin routes and the auth paths added in later issues.
 pub mod ids;
+pub mod images;
 pub mod issue_lifecycle;
 pub mod job_runs;
 pub mod key_rotation;
@@ -38,9 +40,12 @@ pub mod registry;
 pub mod retention;
 pub mod sarif;
 pub mod scan;
+pub mod scan_settings;
 pub mod scanner;
 #[allow(dead_code)] // Used by the session extractor and logout routes.
 pub mod sessions;
+pub mod source_credentials;
+pub mod sources;
 #[allow(dead_code)] // The pull and eviction jobs call the store (Steps 4 and 5).
 pub mod storage;
 #[allow(dead_code)] // Used by the job worker and the retry route.

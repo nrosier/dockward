@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT image_id AS \"image_id!\" FROM tag_observations WHERE source_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "image_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tag_observations",
+            "name": "image_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "87b7b21a9fb7a8db5386592710f1af374302fb39c105a4542d010b2eed2787de"
+}

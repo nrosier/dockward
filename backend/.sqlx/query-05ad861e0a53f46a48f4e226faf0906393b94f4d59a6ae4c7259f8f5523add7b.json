@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE source_credentials SET encrypted_token = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "05ad861e0a53f46a48f4e226faf0906393b94f4d59a6ae4c7259f8f5523add7b"
+}

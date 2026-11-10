@@ -548,6 +548,10 @@ mod tests {
                 1,
                 std::time::Duration::from_secs(300),
             ),
+            registry_limiter: crate::api::hardening::RateLimiter::new(
+                60,
+                std::time::Duration::from_secs(60),
+            ),
         }
     }
 }

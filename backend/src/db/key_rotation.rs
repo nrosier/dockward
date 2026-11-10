@@ -115,3 +115,34 @@ pub async fn set_alert_config(
     .map(|done| done.rows_affected())
     .map_err(|_| AppError::InternalError)
 }
+
+/// Every `source_credentials.encrypted_token`. The id is the credential row id.
+pub async fn list_source_credential_tokens(
+    conn: &mut SqliteConnection,
+) -> Result<Vec<SealedValue>, AppError> {
+    sqlx::query_as!(
+        SealedValue,
+        r#"SELECT id AS "id!", encrypted_token AS "value!"
+           FROM source_credentials ORDER BY id"#
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Replaces one source credential's ciphertext. Returns the number of rows changed.
+pub async fn set_source_credential_token(
+    conn: &mut SqliteConnection,
+    id: &str,
+    value: &str,
+) -> Result<u64, AppError> {
+    sqlx::query!(
+        "UPDATE source_credentials SET encrypted_token = ? WHERE id = ?",
+        value,
+        id
+    )
+    .execute(&mut *conn)
+    .await
+    .map(|done| done.rows_affected())
+    .map_err(|_| AppError::InternalError)
+}
