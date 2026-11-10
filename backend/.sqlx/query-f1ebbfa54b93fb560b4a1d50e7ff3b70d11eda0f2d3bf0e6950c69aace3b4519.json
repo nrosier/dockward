@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT scanner AS \"scanner!\" FROM scan_runs\n           WHERE image_platform_id = ? AND status IN ('queued', 'running')",
+  "describe": {
+    "columns": [
+      {
+        "name": "scanner!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "scanner"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f1ebbfa54b93fb560b4a1d50e7ff3b70d11eda0f2d3bf0e6950c69aace3b4519"
+}

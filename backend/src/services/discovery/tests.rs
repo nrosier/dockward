@@ -753,6 +753,7 @@ async fn the_job_handler_maps_pull_errors_to_fixed_text_and_other_kinds_permanen
         notifier,
         env.pool.clone(),
         crate::services::storage::StoreRoot::at(env.dir.join("images")),
+        crate::services::scan::ScanEnv::under(&env.dir),
     );
     let job = |payload: &str| crate::db::sync_jobs::ClaimedJob {
         id: "j".to_owned(),
@@ -779,6 +780,10 @@ async fn the_job_handler_maps_pull_errors_to_fixed_text_and_other_kinds_permanen
     );
     assert_eq!(
         handler.run(job(r#"{"kind":"scan"}"#)).await,
+        JobOutcome::Permanent("job payload is not valid".to_owned())
+    );
+    assert_eq!(
+        handler.run(job(r#"{"kind":"publish"}"#)).await,
         JobOutcome::Permanent(crate::worker::MSG_UNHANDLED.to_owned())
     );
     assert_eq!(

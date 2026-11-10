@@ -218,4 +218,4 @@ fn kill_group(pid: Option<u32>) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT o.source_id AS \"source_id!\", o.tag AS \"tag!\" FROM tag_observations o\n           WHERE o.image_id = ?\n             AND NOT EXISTS (\n                 SELECT 1 FROM tag_observations n\n                 WHERE n.source_id = o.source_id AND n.tag = o.tag\n                   AND (n.first_seen_at > o.first_seen_at\n                        OR (n.first_seen_at = o.first_seen_at AND n.rowid > o.rowid)))\n           ORDER BY o.source_id, o.tag",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tag_observations",
+            "name": "source_id"
+          }
+        }
+      },
+      {
+        "name": "tag!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tag_observations",
+            "name": "tag"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "371eb56c68197469b82e41433937382af167fc5d087a68cecc30ff45c67ba604"
+}

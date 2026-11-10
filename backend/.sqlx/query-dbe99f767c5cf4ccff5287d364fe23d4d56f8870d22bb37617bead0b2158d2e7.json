@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (\n               SELECT 1 FROM scan_runs r JOIN image_platforms p ON p.id = r.image_platform_id\n               WHERE p.image_id = ? AND r.status IN ('queued', 'running')\n           ) AS \"open!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "open!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dbe99f767c5cf4ccff5287d364fe23d4d56f8870d22bb37617bead0b2158d2e7"
+}

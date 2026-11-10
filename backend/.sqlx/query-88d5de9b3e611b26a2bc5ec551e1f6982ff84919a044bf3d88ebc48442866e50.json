@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE cve_findings SET status = 'fixed'\n         WHERE source_id = ? AND image_tag = ? AND cve_id = ? AND status = 'open'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "88d5de9b3e611b26a2bc5ec551e1f6982ff84919a044bf3d88ebc48442866e50"
+}

@@ -41,7 +41,8 @@ pub mod registry;
 pub mod retention;
 #[allow(dead_code)] // The publish step converts the merged view to SARIF (Step 4+).
 pub mod sarif;
-#[allow(dead_code)] // The spinoff scan and refresh jobs call the scanner runner (Step 4+).
+pub mod scan;
+#[allow(dead_code)] // The spinoff refresh job calls the scanner runner (the next step).
 pub mod scanner;
 #[allow(dead_code)] // Used by the session extractor and logout routes.
 pub mod sessions;

@@ -12,7 +12,7 @@ use crate::error::{AppError, ScannerFault};
 
 /// Serialises the tests that change this process's environment. In edition 2024 `set_var` is
 /// unsafe, because another thread may read the environment at the same time.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cve_id AS \"cve_id!\" FROM cve_findings\n           WHERE source_id = ? AND image_tag = ? AND status = 'open'",
+  "describe": {
+    "columns": [
+      {
+        "name": "cve_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "cve_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "10ef4f00b6ecd45324522c8c96e32f95f5b123f7f5260a5600089bf9cd70e911"
+}

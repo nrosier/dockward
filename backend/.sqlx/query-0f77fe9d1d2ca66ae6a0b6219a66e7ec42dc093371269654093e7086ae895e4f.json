@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.id AS \"id!\", r.image_platform_id AS \"image_platform_id!\",\n                  p.image_id AS \"image_id!\", r.scanner AS \"scanner!\", r.status AS \"status!\"\n           FROM scan_runs r JOIN image_platforms p ON p.id = r.image_platform_id\n           WHERE r.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "image_platform_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "image_platform_id"
+          }
+        }
+      },
+      {
+        "name": "image_id!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "image_id"
+          }
+        }
+      },
+      {
+        "name": "scanner!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "scanner"
+          }
+        }
+      },
+      {
+        "name": "status!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scan_runs",
+            "name": "status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0f77fe9d1d2ca66ae6a0b6219a66e7ec42dc093371269654093e7086ae895e4f"
+}
