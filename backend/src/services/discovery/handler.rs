@@ -3,7 +3,8 @@
 //!
 //! `discover` runs the discovery service. `pull` runs the pull job (`services::storage::job`),
 //! which queues the scans. `scan` runs the scan job and the convert step (`services::scan`).
-//! Every other kind (`publish`, `db_update`) has no handler yet and fails once, permanently.
+//! `publish` runs the publish job (`services::publish`). Every other kind (`db_update`) has no
+//! handler yet and fails once, permanently.
 
 use std::sync::Arc;
 
@@ -12,6 +13,7 @@ use serde::Deserialize;
 use crate::db::sync_jobs::ClaimedJob;
 use crate::services::alerts::Notifier;
 use crate::services::discovery::Discovery;
+use crate::services::publish::Publisher;
 use crate::services::scan::{ScanEnv, run_scan};
 use crate::services::storage::StoreRoot;
 use crate::services::storage::job::run_pull;
@@ -30,6 +32,7 @@ pub struct SpinoffJobs {
     pool: SqlitePool,
     store: StoreRoot,
     scan: ScanEnv,
+    publisher: Publisher,
 }
 
 impl SpinoffJobs {
@@ -39,6 +42,7 @@ impl SpinoffJobs {
         pool: SqlitePool,
         store: StoreRoot,
         scan: ScanEnv,
+        publisher: Publisher,
     ) -> Self {
         Self {
             discovery,
@@ -46,6 +50,7 @@ impl SpinoffJobs {
             pool,
             store,
             scan,
+            publisher,
         }
     }
 }
@@ -81,6 +86,7 @@ impl JobHandler for SpinoffJobs {
                 )
                 .await
             }
+            Some("publish") => self.publisher.run(&job).await,
             _ => JobOutcome::Permanent(MSG_UNHANDLED.to_owned()),
         }
     }

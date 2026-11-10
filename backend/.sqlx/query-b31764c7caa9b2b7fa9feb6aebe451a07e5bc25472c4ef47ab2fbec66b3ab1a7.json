@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT o.source_id AS \"source_id!\" FROM tag_observations o\n           WHERE o.image_id = ?\n             AND o.rowid = (SELECT o2.rowid FROM tag_observations o2\n                            WHERE o2.source_id = o.source_id\n                            ORDER BY o2.first_seen_at DESC, o2.rowid DESC LIMIT 1)\n           ORDER BY o.source_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tag_observations",
+            "name": "source_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b31764c7caa9b2b7fa9feb6aebe451a07e5bc25472c4ef47ab2fbec66b3ab1a7"
+}

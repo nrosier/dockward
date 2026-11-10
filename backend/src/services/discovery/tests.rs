@@ -747,13 +747,20 @@ async fn the_job_handler_maps_pull_errors_to_fixed_text_and_other_kinds_permanen
         )
         .unwrap(),
     );
-    let notifier = crate::services::alerts::Notifier::new(env.pool.clone(), key, false);
+    let notifier = crate::services::alerts::Notifier::new(env.pool.clone(), key.clone(), false);
     let handler = SpinoffJobs::new(
         env.discovery.clone(),
         notifier,
         env.pool.clone(),
         crate::services::storage::StoreRoot::at(env.dir.join("images")),
         crate::services::scan::ScanEnv::under(&env.dir),
+        crate::services::publish::Publisher::new(
+            env.pool.clone(),
+            key.clone(),
+            crate::services::storage::StoreRoot::at(env.dir.join("images")),
+            crate::services::github_url::GithubTarget::default(),
+        )
+        .unwrap(),
     );
     let job = |payload: &str| crate::db::sync_jobs::ClaimedJob {
         id: "j".to_owned(),
@@ -784,7 +791,7 @@ async fn the_job_handler_maps_pull_errors_to_fixed_text_and_other_kinds_permanen
     );
     assert_eq!(
         handler.run(job(r#"{"kind":"publish"}"#)).await,
-        JobOutcome::Permanent(crate::worker::MSG_UNHANDLED.to_owned())
+        JobOutcome::Permanent("job payload is not valid".to_owned())
     );
     assert_eq!(
         handler.run(job("{}")).await,
