@@ -12,7 +12,7 @@ use crate::error::AppError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptanceRow {
     pub id: String,
-    pub mapping_id: String,
+    pub source_id: String,
     pub cve_id: String,
     pub reason: String,
     pub created_by_username: String,
@@ -23,7 +23,7 @@ pub struct AcceptanceRow {
 /// A new acceptance. It starts active.
 pub struct NewAcceptance<'a> {
     pub id: &'a str,
-    pub mapping_id: &'a str,
+    pub source_id: &'a str,
     pub cve_id: &'a str,
     pub reason: &'a str,
     pub created_by: &'a str,
@@ -32,22 +32,22 @@ pub struct NewAcceptance<'a> {
     pub expires_at: Option<i64>,
 }
 
-/// The active acceptance of the CVE in the mapping, if one exists.
+/// The active acceptance of the CVE in the source, if one exists.
 pub async fn active(
     conn: &mut SqliteConnection,
-    mapping_id: &str,
+    source_id: &str,
     cve_id: &str,
     now: i64,
 ) -> Result<Option<AcceptanceRow>, AppError> {
     sqlx::query_as!(
         AcceptanceRow,
-        r#"SELECT id AS "id!", source_id AS "mapping_id!", cve_id AS "cve_id!",
+        r#"SELECT id AS "id!", source_id AS "source_id!", cve_id AS "cve_id!",
                   reason AS "reason!", created_by_username AS "created_by_username!",
                   created_at, expires_at
            FROM cve_acceptances
            WHERE source_id = ? AND cve_id = ? AND revoked_at IS NULL
              AND (expires_at IS NULL OR expires_at > ?)"#,
-        mapping_id,
+        source_id,
         cve_id,
         now
     )
@@ -56,12 +56,12 @@ pub async fn active(
     .map_err(|_| AppError::InternalError)
 }
 
-/// Ids of acceptances of the CVE in the mapping whose expiry has passed and that are not
+/// Ids of acceptances of the CVE in the source whose expiry has passed and that are not
 /// revoked yet. They still hold the partial unique index, so a new acceptance revokes them
 /// first. The index allows at most one.
 pub async fn expired_unrevoked(
     conn: &mut SqliteConnection,
-    mapping_id: &str,
+    source_id: &str,
     cve_id: &str,
     now: i64,
 ) -> Result<Vec<String>, AppError> {
@@ -69,7 +69,7 @@ pub async fn expired_unrevoked(
         r#"SELECT id AS "id!" FROM cve_acceptances
            WHERE source_id = ? AND cve_id = ? AND revoked_at IS NULL
              AND expires_at IS NOT NULL AND expires_at <= ?"#,
-        mapping_id,
+        source_id,
         cve_id,
         now
     )
@@ -78,7 +78,7 @@ pub async fn expired_unrevoked(
     .map_err(|_| AppError::InternalError)
 }
 
-/// Stores a new active row. Returns `false` and changes nothing when the mapping already has
+/// Stores a new active row. Returns `false` and changes nothing when the source already has
 /// an unrevoked acceptance for the CVE (the partial unique index).
 pub async fn insert(
     conn: &mut SqliteConnection,
@@ -90,7 +90,7 @@ pub async fn insert(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT DO NOTHING",
         row.id,
-        row.mapping_id,
+        row.source_id,
         row.cve_id,
         row.reason,
         row.created_by,

@@ -1,7 +1,7 @@
 //! CVE acceptance (`specs/cve-lifecycle.md`, "Acceptance"; `specs/api.md`, CVEs).
 //!
-//! [`accept`] records a risk acceptance for a CVE on a mapping the caller owns, and
-//! [`unaccept`] revokes it softly. An acceptance applies to the whole mapping, never to one
+//! [`accept`] records a risk acceptance for a CVE on a source the caller owns, and
+//! [`unaccept`] revokes it softly. An acceptance applies to the whole source, never to one
 //! tag. Accepting does not close an open GitHub issue: it adds a comment. Both actions are
 //! audited, in the same transaction as the change.
 //!
@@ -15,7 +15,7 @@ use crate::auth::crypto::DerivedKey;
 use crate::db::acceptances::{self as acceptance_db, AcceptanceRow, NewAcceptance};
 use crate::db::credentials as credential_db;
 use crate::db::github_issues as issue_db;
-use crate::db::mappings::{self as mapping_db, MappingRow};
+use crate::db::sources::{self as source_db, SourceRow};
 use crate::error::AppError;
 use crate::services::audit::{self, Actor};
 use crate::services::credentials::decrypt_token;
@@ -28,7 +28,7 @@ const MAX_REASON_CHARS: usize = 1000;
 /// `9999-12-31T23:59:59Z`, the last instant [`time::rfc3339`] can format.
 const MAX_UNIX_SECS: i64 = 253_402_300_799;
 
-/// The longest CVE id or mapping id the routes accept, in bytes. Same as the issue route.
+/// The longest CVE id or source id the routes accept, in bytes. Same as the issue route.
 const MAX_ID_BYTES: usize = 128;
 
 /// The body of `POST /api/v1/cves/:id/accept`. `expires_at` is an RFC 3339 `date-time`
@@ -45,7 +45,7 @@ pub struct AcceptInput {
 #[derive(Debug, Serialize)]
 pub struct Acceptance {
     pub id: String,
-    pub mapping_id: String,
+    pub source_id: String,
     pub cve_id: String,
     pub reason: String,
     pub created_by: String,
@@ -57,7 +57,7 @@ impl Acceptance {
     fn from_row(row: AcceptanceRow) -> Result<Self, AppError> {
         Ok(Self {
             id: row.id,
-            mapping_id: row.mapping_id,
+            source_id: row.source_id,
             cve_id: row.cve_id,
             reason: row.reason,
             created_by: row.created_by_username,
@@ -91,7 +91,7 @@ fn valid_cve_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':'))
 }
 
-fn valid_mapping_id(id: &str) -> bool {
+fn valid_source_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_ID_BYTES
         && id
@@ -99,13 +99,13 @@ fn valid_mapping_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// Splits the route id `<mapping_id>:<cve_id>`, with the same rules as the issue route: any
+/// Splits the route id `<source_id>:<cve_id>`, with the same rules as the issue route: any
 /// other shape, an empty part, a part over 128 bytes, or a character outside the allowed set
 /// is `404`, before any database call.
 fn split_id(id: &str) -> Result<(&str, &str), AppError> {
     match id.split_once(':') {
-        Some((mapping_id, cve_id)) if valid_mapping_id(mapping_id) && valid_cve_id(cve_id) => {
-            Ok((mapping_id, cve_id))
+        Some((source_id, cve_id)) if valid_source_id(source_id) && valid_cve_id(cve_id) => {
+            Ok((source_id, cve_id))
         }
         _ => Err(AppError::NotFound),
     }
@@ -205,18 +205,18 @@ fn comment_text(username: &str, reason: &str) -> String {
     format!("Risk accepted by {username}: {reason}").replace('@', "@\u{200b}")
 }
 
-/// The audit target for a CVE on a mapping: the route id.
-fn audit_target(mapping_id: &str, cve_id: &str) -> String {
-    format!("cve:{mapping_id}:{cve_id}")
+/// The audit target for a CVE on a source: the route id.
+fn audit_target(source_id: &str, cve_id: &str) -> String {
+    format!("cve:{source_id}:{cve_id}")
 }
 
-async fn owned_mapping(
+async fn owned_source(
     pool: &SqlitePool,
     user_id: &str,
-    mapping_id: &str,
-) -> Result<MappingRow, AppError> {
+    source_id: &str,
+) -> Result<SourceRow, AppError> {
     let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
-    mapping_db::find_owned(&mut conn, user_id, mapping_id)
+    source_db::find_owned(&mut conn, user_id, source_id)
         .await?
         .ok_or(AppError::NotFound)
 }
@@ -229,9 +229,9 @@ async fn begin(pool: &SqlitePool) -> Result<sqlx::Transaction<'static, sqlx::Sql
         .map_err(|_| AppError::InternalError)
 }
 
-/// `POST /api/v1/cves/:id/accept` for the owner of the mapping.
+/// `POST /api/v1/cves/:id/accept` for the owner of the source.
 ///
-/// - `404` for a malformed id, a mapping the caller does not own, or a CVE the mapping has
+/// - `404` for a malformed id, a source the caller does not own, or a CVE the source has
 ///   no finding for.
 /// - `422` for an empty reason, a reason over 1000 characters, an `expires_at` that is not an
 ///   RFC 3339 time, or one that is not in the future.
@@ -250,8 +250,8 @@ pub async fn accept<G: IssueApi>(
     input: AcceptInput,
     now: i64,
 ) -> Result<Acceptance, AppError> {
-    let (mapping_id, cve_id) = split_id(id)?;
-    let mapping = owned_mapping(pool, caller.id, mapping_id).await?;
+    let (source_id, cve_id) = split_id(id)?;
+    let source = owned_source(pool, caller.id, source_id).await?;
 
     let reason = input.reason.trim();
     if reason.is_empty() {
@@ -283,12 +283,12 @@ pub async fn accept<G: IssueApi>(
     };
 
     let actor = caller.actor();
-    let target = audit_target(&mapping.id, cve_id);
+    let target = audit_target(&source.id, cve_id);
     let new_id = ids::new_id()?;
     // Read before the write lock, so a 404 does not take it.
     {
         let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
-        if issue_db::findings_for_cve(&mut conn, &mapping.id, cve_id)
+        if issue_db::findings_for_cve(&mut conn, &source.id, cve_id)
             .await?
             .is_empty()
         {
@@ -296,7 +296,7 @@ pub async fn accept<G: IssueApi>(
         }
     }
     let mut tx = begin(pool).await?;
-    for expired in acceptance_db::expired_unrevoked(&mut tx, &mapping.id, cve_id, now).await? {
+    for expired in acceptance_db::expired_unrevoked(&mut tx, &source.id, cve_id, now).await? {
         acceptance_db::revoke(&mut tx, &expired, caller.id, now).await?;
         audit::record(
             &mut tx,
@@ -308,7 +308,7 @@ pub async fn accept<G: IssueApi>(
         .await?;
     }
     let already = || AppError::Conflict("This CVE is already accepted.".to_owned());
-    if acceptance_db::active(&mut tx, &mapping.id, cve_id, now)
+    if acceptance_db::active(&mut tx, &source.id, cve_id, now)
         .await?
         .is_some()
     {
@@ -318,7 +318,7 @@ pub async fn accept<G: IssueApi>(
         &mut tx,
         &NewAcceptance {
             id: &new_id,
-            mapping_id: &mapping.id,
+            source_id: &source.id,
             cve_id,
             reason,
             created_by: caller.id,
@@ -338,12 +338,12 @@ pub async fn accept<G: IssueApi>(
         &target,
         Some(&serde_json::json!({
             "cve_id": cve_id,
-            "mapping_id": mapping.id,
+            "source_id": source.id,
             "expires_at": expires_at.map(time::rfc3339).transpose()?,
         })),
     )
     .await?;
-    let row = acceptance_db::active(&mut tx, &mapping.id, cve_id, now)
+    let row = acceptance_db::active(&mut tx, &source.id, cve_id, now)
         .await?
         .ok_or(AppError::InternalError)?;
     tx.commit().await.map_err(|_| AppError::InternalError)?;
@@ -352,7 +352,7 @@ pub async fn accept<G: IssueApi>(
         pool,
         credentials_key,
         gh,
-        &mapping,
+        &source,
         cve_id,
         &comment_text(caller.username, reason),
         now,
@@ -368,7 +368,7 @@ async fn comment_on_open_issue<G: IssueApi>(
     pool: &SqlitePool,
     credentials_key: &DerivedKey,
     gh: &G,
-    mapping: &MappingRow,
+    source: &SourceRow,
     cve_id: &str,
     text: &str,
     now: i64,
@@ -376,15 +376,10 @@ async fn comment_on_open_issue<G: IssueApi>(
     let sent = async {
         let (row, credential) = {
             let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
-            let row = issue_db::find(
-                &mut conn,
-                &mapping.github_owner,
-                &mapping.github_repo,
-                cve_id,
-            )
-            .await?;
+            let row = issue_db::find(&mut conn, &source.github_owner, &source.github_repo, cve_id)
+                .await?;
             let credential =
-                credential_db::find_owned(&mut conn, &mapping.user_id, &mapping.github_cred_id)
+                credential_db::find_owned(&mut conn, &source.user_id, &source.github_cred_id)
                     .await?;
             (row, credential)
         };
@@ -396,8 +391,8 @@ async fn comment_on_open_issue<G: IssueApi>(
         let token = decrypt_token(credentials_key, &credential)?;
         gh.comment(
             &token,
-            &mapping.github_owner,
-            &mapping.github_repo,
+            &source.github_owner,
+            &source.github_repo,
             number,
             text,
             now,
@@ -412,8 +407,8 @@ async fn comment_on_open_issue<G: IssueApi>(
     }
 }
 
-/// `POST /api/v1/cves/:id/unaccept` for the owner of the mapping. `404` when the id is
-/// malformed, the mapping is not the caller's, or no acceptance is active. Soft revoke with
+/// `POST /api/v1/cves/:id/unaccept` for the owner of the source. `404` when the id is
+/// malformed, the source is not the caller's, or no acceptance is active. Soft revoke with
 /// `revoked_by` the caller, audited as `cve.unaccept` (`{"reason":"manual"}`). No GitHub call.
 pub async fn unaccept(
     pool: &SqlitePool,
@@ -421,10 +416,10 @@ pub async fn unaccept(
     id: &str,
     now: i64,
 ) -> Result<(), AppError> {
-    let (mapping_id, cve_id) = split_id(id)?;
-    let mapping = owned_mapping(pool, caller.id, mapping_id).await?;
+    let (source_id, cve_id) = split_id(id)?;
+    let source = owned_source(pool, caller.id, source_id).await?;
     let mut tx = begin(pool).await?;
-    let active = acceptance_db::active(&mut tx, &mapping.id, cve_id, now)
+    let active = acceptance_db::active(&mut tx, &source.id, cve_id, now)
         .await?
         .ok_or(AppError::NotFound)?;
     if !acceptance_db::revoke(&mut tx, &active.id, caller.id, now).await? {
@@ -434,7 +429,7 @@ pub async fn unaccept(
         &mut tx,
         &caller.actor(),
         "cve.unaccept",
-        &audit_target(&mapping.id, cve_id),
+        &audit_target(&source.id, cve_id),
         Some(&serde_json::json!({"reason": "manual"})),
     )
     .await?;
@@ -448,9 +443,7 @@ mod tests {
     use axum::http::StatusCode;
 
     use super::*;
-    use crate::api::admin::test_support::{
-        seed_github, seed_harbor, seed_mapping, seed_user, test_state,
-    };
+    use crate::api::admin::test_support::{seed_github, seed_source, seed_user, test_state};
     use crate::api::state::AppState;
     use crate::db;
     use crate::services::issue_lifecycle::test_support::{FakeGithub, FakeIssues};
@@ -472,16 +465,14 @@ mod tests {
             for id in ["u1", "u2", "u9"] {
                 seed_user(&state.pool, id, "user").await;
             }
-            seed_harbor(&state.pool, "u1", "ch", "harbor", None).await;
             seed_github(&state.pool, "u1", "cg", "github").await;
-            seed_mapping(&state.pool, "u1", "m1", "ch", "cg", "octo", "app").await;
+            seed_source(&state.pool, "u1", "m1", "cg", "octo", "app").await;
             let mut conn = state.pool.acquire().await.unwrap();
             db::findings::upsert(
                 &mut conn,
                 &db::findings::Finding {
                     id: &ids::new_id().unwrap_or_default(),
-                    mapping_id: "m1",
-                    harbor_repository: "m1",
+                    source_id: "m1",
                     image_tag: "v1",
                     cve_id: CVE,
                     package: Some("openssl"),
@@ -644,7 +635,7 @@ mod tests {
         let f = Fixture::new("expired").await;
         // An old acceptance by another user, expired at 500 (before NOW) and never revoked.
         sqlx::query(
-            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username, created_at, expires_at)
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username, created_at, expires_at)
              VALUES ('old', 'm1', ?, 'old reason', 'u9', 'u9', 100, 500)",
         )
         .bind(CVE)
@@ -821,7 +812,7 @@ mod tests {
             accept,
             serde_json::json!({
                 "cve_id": CVE,
-                "mapping_id": "m1",
+                "source_id": "m1",
                 "expires_at": "1970-02-01T00:00:00Z",
             })
         );

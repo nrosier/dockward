@@ -9,21 +9,21 @@ use crate::error::AppError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedJob {
     pub id: String,
-    pub mapping_id: String,
+    pub source_id: Option<String>,
     pub attempts: i64,
     pub payload: String,
 }
 
-/// Adds a queued job for a mapping. `payload` must hold no secrets.
+/// Adds a queued job for a source. `payload` must hold no secrets.
 pub async fn enqueue(
     pool: &SqlitePool,
     id: &str,
-    mapping_id: &str,
+    source_id: Option<&str>,
     payload: &str,
     now: i64,
 ) -> Result<(), AppError> {
     let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
-    enqueue_in(&mut conn, id, mapping_id, payload, now).await
+    enqueue_in(&mut conn, id, source_id, payload, now).await
 }
 
 /// [`enqueue`] on a connection the caller holds, so the insert can join a transaction (the
@@ -31,15 +31,15 @@ pub async fn enqueue(
 pub async fn enqueue_in(
     conn: &mut SqliteConnection,
     id: &str,
-    mapping_id: &str,
+    source_id: Option<&str>,
     payload: &str,
     now: i64,
 ) -> Result<(), AppError> {
     sqlx::query!(
-        "INSERT INTO sync_jobs (id, mapping_id, status, attempts, next_attempt_at, payload, created_at, updated_at)
+        "INSERT INTO sync_jobs (id, source_id, status, attempts, next_attempt_at, payload, created_at, updated_at)
          VALUES (?, ?, 'queued', 0, ?, ?, ?, ?)",
         id,
-        mapping_id,
+        source_id,
         now,
         payload,
         now,
@@ -49,107 +49,6 @@ pub async fn enqueue_in(
     .await
     .map(|_| ())
     .map_err(|_| AppError::InternalError)
-}
-
-/// Whether a `queued` or `running` sync job exists for this mapping, digest and tag. Only
-/// those two statuses count: a `done` or `failed` job never blocks a new one, because a rescan
-/// of a synced tag must sync again (`specs/integrations.md`, resolve worker). A resolve job has
-/// no `tag` in its payload, so it can never match. Reads on the caller's connection, so the
-/// check sees the transaction's own inserts.
-pub async fn has_pending_pair(
-    conn: &mut SqliteConnection,
-    mapping_id: &str,
-    digest: &str,
-    tag: &str,
-) -> Result<bool, AppError> {
-    let row = sqlx::query!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM sync_jobs
-           WHERE mapping_id = ?
-             AND status IN ('queued', 'running')
-             AND json_valid(payload)
-             AND COALESCE(json_extract(payload, '$.kind'), 'sync') = 'sync'
-             AND json_extract(payload, '$.digest') = ?
-             AND json_extract(payload, '$.tag') = ?"#,
-        mapping_id,
-        digest,
-        tag
-    )
-    .fetch_one(conn)
-    .await
-    .map_err(|_| AppError::InternalError)?;
-    Ok(row.n > 0)
-}
-
-/// Whether a `queued` or `running` scheduled-scan job exists for this mapping (#191). The
-/// scheduler queues no second one while it does.
-pub async fn has_pending_scan_job(
-    conn: &mut SqliteConnection,
-    mapping_id: &str,
-) -> Result<bool, AppError> {
-    let row = sqlx::query!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM sync_jobs
-           WHERE mapping_id = ?
-             AND status IN ('queued', 'running')
-             AND json_valid(payload)
-             AND json_extract(payload, '$.kind') = 'scan'"#,
-        mapping_id
-    )
-    .fetch_one(conn)
-    .await
-    .map_err(|_| AppError::InternalError)?;
-    Ok(row.n > 0)
-}
-
-/// Whether a `queued` or `running` `scanner_scan` job exists for this mapping, tag and scanner
-/// (#224). `scanner_uuid` is `""` for a scan with the project's current scanner. Reads on the
-/// caller's connection, so a check and an insert can share one transaction.
-pub async fn has_pending_scanner_scan(
-    conn: &mut SqliteConnection,
-    mapping_id: &str,
-    tag: &str,
-    scanner_uuid: &str,
-) -> Result<bool, AppError> {
-    let row = sqlx::query!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM sync_jobs
-           WHERE mapping_id = ?
-             AND status IN ('queued', 'running')
-             AND json_valid(payload)
-             AND json_extract(payload, '$.kind') = 'scanner_scan'
-             AND json_extract(payload, '$.tag') = ?
-             AND COALESCE(json_extract(payload, '$.scanner_uuid'), '') = ?"#,
-        mapping_id,
-        tag,
-        scanner_uuid
-    )
-    .fetch_one(conn)
-    .await
-    .map_err(|_| AppError::InternalError)?;
-    Ok(row.n > 0)
-}
-
-/// Whether a `queued` or `running` sync job from a scheduled scan exists for this mapping and
-/// digest (#191). Such a job waits for a scan HarborGate started, so a second scan of the same
-/// digest is not started.
-pub async fn has_pending_scheduled_sync(
-    conn: &mut SqliteConnection,
-    mapping_id: &str,
-    digest: &str,
-) -> Result<bool, AppError> {
-    let row = sqlx::query!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM sync_jobs
-           WHERE mapping_id = ?
-             AND status IN ('queued', 'running')
-             AND json_valid(payload)
-             AND json_extract(payload, '$.trigger') = 'schedule'
-             AND json_extract(payload, '$.kind') IS NULL
-             AND json_extract(payload, '$.digest') = ?"#,
-        mapping_id,
-        digest
-    )
-    .fetch_one(conn)
-    .await
-    .map_err(|_| AppError::InternalError)?;
-    Ok(row.n > 0)
 }
 
 /// Marks a job `done` only while it is still `running`. Returns the rows changed: zero means
@@ -226,7 +125,7 @@ pub async fn claim_next(pool: &SqlitePool, now: i64) -> Result<Option<ClaimedJob
                ORDER BY next_attempt_at, created_at
                LIMIT 1
            )
-           RETURNING id AS "id!", mapping_id AS "mapping_id!", attempts AS "attempts!: i64", payload AS "payload!""#,
+           RETURNING id AS "id!", source_id AS "source_id?: String", attempts AS "attempts!: i64", payload AS "payload!""#,
         now,
         now
     )
@@ -235,7 +134,7 @@ pub async fn claim_next(pool: &SqlitePool, now: i64) -> Result<Option<ClaimedJob
     .map_err(|_| AppError::InternalError)?;
     Ok(row.map(|row| ClaimedJob {
         id: row.id,
-        mapping_id: row.mapping_id,
+        source_id: row.source_id,
         attempts: row.attempts,
         payload: row.payload,
     }))
@@ -323,8 +222,8 @@ pub async fn reset_failed(
     .map_err(|_| AppError::InternalError)
 }
 
-/// Counts the `failed` jobs a purge would delete: in scope, and not named by a scanner lock.
-/// `all_users` covers every mapping; otherwise only the mappings of `user_id`.
+/// Counts the `failed` jobs a purge would delete, in scope. `all_users` covers every job;
+/// otherwise only the jobs of the sources of `user_id`.
 pub async fn count_purgeable_failed(
     pool: &SqlitePool,
     user_id: &str,
@@ -334,8 +233,7 @@ pub async fn count_purgeable_failed(
     let row = sqlx::query!(
         r#"SELECT COUNT(*) AS "n: i64" FROM sync_jobs
          WHERE status = 'failed'
-           AND id NOT IN (SELECT job_id FROM project_scanner_locks)
-           AND (? = 1 OR mapping_id IN (SELECT id FROM repo_mappings WHERE user_id = ?))"#,
+           AND (? = 1 OR source_id IN (SELECT id FROM image_sources WHERE user_id = ?))"#,
         all,
         user_id
     )
@@ -345,7 +243,7 @@ pub async fn count_purgeable_failed(
     Ok(row.n)
 }
 
-/// Deletes the `failed` jobs in scope that no scanner lock names, and returns the row count.
+/// Deletes the `failed` jobs in scope and returns the row count.
 /// The state is checked in this statement, so a job retried meanwhile is kept. It takes a
 /// connection so the caller can run the delete and its audit row in one transaction.
 pub async fn delete_purgeable_failed(
@@ -357,8 +255,7 @@ pub async fn delete_purgeable_failed(
     sqlx::query!(
         "DELETE FROM sync_jobs
          WHERE status = 'failed'
-           AND id NOT IN (SELECT job_id FROM project_scanner_locks)
-           AND (? = 1 OR mapping_id IN (SELECT id FROM repo_mappings WHERE user_id = ?))",
+           AND (? = 1 OR source_id IN (SELECT id FROM image_sources WHERE user_id = ?))",
         all,
         user_id
     )
@@ -368,11 +265,12 @@ pub async fn delete_purgeable_failed(
     .map_err(|_| AppError::InternalError)
 }
 
-/// The user who owns the mapping of a job. `None` when the job does not exist.
-pub async fn owner_of_job(pool: &SqlitePool, id: &str) -> Result<Option<String>, AppError> {
+/// The user who owns the source of a job. The outer `None` means the job does not exist; the
+/// inner `None` means it has no source (a `db_update` job), which no tenant owns.
+pub async fn owner_of_job(pool: &SqlitePool, id: &str) -> Result<Option<Option<String>>, AppError> {
     let row = sqlx::query!(
-        "SELECT m.user_id AS \"user_id!\" FROM sync_jobs j
-         JOIN repo_mappings m ON m.id = j.mapping_id
+        "SELECT m.user_id AS \"user_id?: String\" FROM sync_jobs j
+         LEFT JOIN image_sources m ON m.id = j.source_id
          WHERE j.id = ?",
         id
     )
@@ -392,7 +290,7 @@ pub const MAX_TEXT_CHARS: i64 = 500;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobRow {
     pub id: String,
-    pub mapping_id: String,
+    pub source_id: Option<String>,
     pub status: String,
     pub attempts: i64,
     pub next_attempt_at: Option<i64>,
@@ -409,7 +307,7 @@ pub struct JobRow {
     pub report: Option<ReportRow>,
 }
 
-/// The `sync_reports` row linked to a job. `error_message` is not read.
+/// The `publish_reports` row linked to a job. `error_message` is not read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportRow {
     pub image_tag: String,
@@ -419,8 +317,6 @@ pub struct ReportRow {
     pub vulnerability_summary: String,
     pub sarif_status: String,
     pub synced_at: Option<i64>,
-    /// JSON array of the CVE ids new for the digest, for a scheduled scan only (#191).
-    pub new_cve_ids: Option<String>,
 }
 
 /// Filters and paging for [`list_jobs`] and [`count_jobs`]. Every filter is optional.
@@ -430,7 +326,7 @@ pub struct JobFilter<'a> {
     pub user_id: Option<&'a str>,
     pub id: Option<&'a str>,
     pub status: Option<&'a str>,
-    pub mapping_id: Option<&'a str>,
+    pub source_id: Option<&'a str>,
     pub sort: &'a str,
     pub sort_sign: i64,
     pub limit: i64,
@@ -450,7 +346,7 @@ pub async fn list_jobs_in(
     filter: &JobFilter<'_>,
 ) -> Result<Vec<JobRow>, AppError> {
     let rows = sqlx::query!(
-        r#"SELECT j.id AS "id!", j.mapping_id AS "mapping_id!", j.status AS "status!",
+        r#"SELECT j.id AS "id!", j.source_id AS "source_id?: String", j.status AS "status!",
                   j.attempts AS "attempts!: i64", j.next_attempt_at AS "next_attempt_at?: i64",
                   substr(CAST(j.last_error AS TEXT), 1, ?) AS "last_error?: String",
                   j.created_at AS "created_at?: i64", j.updated_at AS "updated_at?: i64",
@@ -469,16 +365,15 @@ pub async fn list_jobs_in(
                   substr(CAST(r.commit_sha AS TEXT), 1, ?) AS "report_commit_sha?: String",
                   r.vulnerability_summary AS "report_summary?",
                   r.sarif_status AS "report_sarif_status?",
-                  r.synced_at AS "report_synced_at?: i64",
-                  r.new_cve_ids AS "report_new_cve_ids?: String"
+                  r.synced_at AS "report_synced_at?: i64"
            FROM sync_jobs j
-           JOIN repo_mappings m ON m.id = j.mapping_id
-           LEFT JOIN sync_reports r
-             ON r.rowid = (SELECT MAX(r2.rowid) FROM sync_reports r2 WHERE r2.sync_job_id = j.id)
+           LEFT JOIN image_sources m ON m.id = j.source_id
+           LEFT JOIN publish_reports r
+             ON r.rowid = (SELECT MAX(r2.rowid) FROM publish_reports r2 WHERE r2.sync_job_id = j.id)
            WHERE (? IS NULL OR m.user_id = ?)
              AND (? IS NULL OR j.id = ?)
              AND (? IS NULL OR j.status = ?)
-             AND (? IS NULL OR j.mapping_id = ?)
+             AND (? IS NULL OR j.source_id = ?)
            ORDER BY
              CASE WHEN ? = 'created_at' AND ? = 1 THEN j.created_at END ASC,
              CASE WHEN ? = 'created_at' AND ? = -1 THEN j.created_at END DESC,
@@ -501,8 +396,8 @@ pub async fn list_jobs_in(
         filter.id,
         filter.status,
         filter.status,
-        filter.mapping_id,
-        filter.mapping_id,
+        filter.source_id,
+        filter.source_id,
         filter.sort,
         filter.sort_sign,
         filter.sort,
@@ -534,14 +429,13 @@ pub async fn list_jobs_in(
                         vulnerability_summary,
                         sarif_status: sarif,
                         synced_at: row.report_synced_at,
-                        new_cve_ids: row.report_new_cve_ids,
                     })
                 }
                 _ => None,
             };
             JobRow {
                 id: row.id,
-                mapping_id: row.mapping_id,
+                source_id: row.source_id,
                 status: row.status,
                 attempts: row.attempts,
                 next_attempt_at: row.next_attempt_at,
@@ -559,25 +453,25 @@ pub async fn list_jobs_in(
         .collect())
 }
 
-/// Counts jobs for the same `user_id`, `status` and `mapping_id` filters as [`list_jobs`].
+/// Counts jobs for the same `user_id`, `status` and `source_id` filters as [`list_jobs`].
 pub async fn count_jobs(
     pool: &SqlitePool,
     user_id: Option<&str>,
     status: Option<&str>,
-    mapping_id: Option<&str>,
+    source_id: Option<&str>,
 ) -> Result<i64, AppError> {
     let row = sqlx::query!(
         r#"SELECT COUNT(*) AS "n!: i64" FROM sync_jobs j
-           JOIN repo_mappings m ON m.id = j.mapping_id
+           LEFT JOIN image_sources m ON m.id = j.source_id
            WHERE (? IS NULL OR m.user_id = ?)
              AND (? IS NULL OR j.status = ?)
-             AND (? IS NULL OR j.mapping_id = ?)"#,
+             AND (? IS NULL OR j.source_id = ?)"#,
         user_id,
         user_id,
         status,
         status,
-        mapping_id,
-        mapping_id
+        source_id,
+        source_id
     )
     .fetch_one(pool)
     .await
@@ -585,17 +479,17 @@ pub async fn count_jobs(
     Ok(row.n)
 }
 
-/// The status and update time of a mapping's most recently updated job, if it has one.
-pub async fn latest_for_mapping(
+/// The status and update time of a source's most recently updated job, if it has one.
+pub async fn latest_for_source(
     pool: &SqlitePool,
-    mapping_id: &str,
+    source_id: &str,
 ) -> Result<Option<(String, Option<i64>)>, AppError> {
     let row = sqlx::query!(
         r#"SELECT status AS "status!", updated_at AS "updated_at?: i64"
-           FROM sync_jobs WHERE mapping_id = ?
+           FROM sync_jobs WHERE source_id = ?
            ORDER BY updated_at DESC, rowid DESC
            LIMIT 1"#,
-        mapping_id
+        source_id
     )
     .fetch_optional(pool)
     .await
@@ -610,7 +504,7 @@ pub async fn find(pool: &SqlitePool, id: &str) -> Result<Option<JobRow>, AppErro
         user_id: None,
         id: Some(id),
         status: None,
-        mapping_id: None,
+        source_id: None,
         sort: "created_at",
         sort_sign: -1,
         limit: 1,
@@ -626,7 +520,7 @@ pub async fn find_in(conn: &mut SqliteConnection, id: &str) -> Result<Option<Job
         user_id: None,
         id: Some(id),
         status: None,
-        mapping_id: None,
+        source_id: None,
         sort: "created_at",
         sort_sign: -1,
         limit: 1,

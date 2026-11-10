@@ -1,5 +1,5 @@
 //! Dashboard summary (`specs/api.md`, Dashboard; `specs/cve-lifecycle.md`, Dashboard counts).
-//! The counts are a current snapshot, distinct CVEs per mapping, summed over mappings. The
+//! The counts are a current snapshot, distinct CVEs per source, summed over sources. The
 //! SQL is in `db::dashboard`; this module sums the rows and builds the response.
 
 use serde::Serialize;
@@ -13,8 +13,8 @@ use crate::services::sync_jobs::{self, SyncJob};
 /// (`specs/cve-lifecycle.md`, Dashboard counts: last 90 days).
 pub const FAILED_SYNC_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
 
-/// Open CVEs by severity, summed over mappings: every severity and their `total`
-/// (`specs/api.md`, Dashboard and Mappings; changed on #129).
+/// Open CVEs by severity, summed over sources: every severity and their `total`
+/// (`specs/api.md`, Dashboard; changed on #129).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct OpenCves {
     pub critical: i64,
@@ -51,7 +51,7 @@ pub struct Summary {
     pub recent_syncs: Vec<SyncJob>,
 }
 
-/// Sums per-mapping open counts. A CVE in two mappings is counted in each, as the spec
+/// Sums per-source open counts. A CVE in two sources is counted in each, as the spec
 /// requires (`specs/cve-lifecycle.md`, Decided 2026-11-03).
 fn sum_open(rows: &[db::OpenCount]) -> OpenCves {
     rows.iter().fold(OpenCves::default(), |acc, row| {
@@ -65,25 +65,14 @@ fn sum_open(rows: &[db::OpenCount]) -> OpenCves {
     })
 }
 
-/// The open CVEs of one mapping, for the mapping list. A mapping with no open CVEs gives
-/// zero counts, not an absent value.
-pub async fn open_cves_for_mapping(
-    pool: &SqlitePool,
-    mapping_id: &str,
-    now: i64,
-) -> Result<OpenCves, AppError> {
-    let rows = db::open_by_mapping(pool, None, Some(mapping_id), now).await?;
-    Ok(sum_open(&rows))
-}
-
-/// The dashboard summary for one scope. `user_id` `None` is every mapping (admin
+/// The dashboard summary for one scope. `user_id` `None` is every source (admin
 /// `scope=all`). `now` is Unix seconds.
 pub async fn summary(
     pool: &SqlitePool,
     user_id: Option<&str>,
     now: i64,
 ) -> Result<Summary, AppError> {
-    let open_rows = db::open_by_mapping(pool, user_id, None, now).await?;
+    let open_rows = db::open_by_source(pool, user_id, None, now).await?;
     Ok(Summary {
         open_cves: sum_open(&open_rows),
         fixed_cves: db::fixed_cves(pool, user_id).await?,
@@ -114,9 +103,9 @@ mod tests {
         (pool, dir)
     }
 
-    /// One user with a Harbor and a GitHub credential, and the given mappings. Each
-    /// mapping is `(id, github_repo)`, with a distinct GitHub target.
-    async fn seed(pool: &SqlitePool, user: &str, mappings: &[(&str, &str)]) {
+    /// One user with a GitHub credential, and the given sources. Each source is
+    /// `(id, github_repo)`, with a distinct GitHub target.
+    async fn seed(pool: &SqlitePool, user: &str, sources: &[(&str, &str)]) {
         sqlx::query(
             "INSERT INTO users (id, username, role, token_version) VALUES (?, ?, 'user', 0)",
         )
@@ -125,62 +114,48 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        let (harbor, github) = (format!("{user}-h"), format!("{user}-g"));
+        let github = format!("{user}-g");
         sqlx::query(
-            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
-             VALUES (?, ?, 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake')",
-        )
-        .bind(&harbor)
-        .bind(user)
-        .execute(pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO user_credentials (id, user_id, service_type, label, encrypted_token)
-             VALUES (?, ?, 'github', 'g', 'v1:fake')",
+            "INSERT INTO user_credentials (id, user_id, label, encrypted_token)
+             VALUES (?, ?, 'g', 'v1:fake')",
         )
         .bind(&github)
         .bind(user)
         .execute(pool)
         .await
         .unwrap();
-        for (id, repo) in mappings {
+        for (id, repo) in sources {
             sqlx::query(
-                "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url,
-                    harbor_project, harbor_repository, github_owner, github_repo,
-                    webhook_token_hash, webhook_auth_secret_hash)
-                 VALUES (?, ?, ?, ?, 'https://harbor.example.com', 'proj', ?, 'octo', ?, ?, ?)",
+                "INSERT INTO image_sources
+                    (id, user_id, hub_id, repository, tag_value, github_cred_id, github_owner, github_repo)
+                 VALUES (?, ?, 'hub-default-ghcr', ?, '*', ?, 'octo', ?)",
             )
             .bind(id)
             .bind(user)
-            .bind(&harbor)
-            .bind(&github)
             .bind(id)
+            .bind(&github)
             .bind(repo)
-            .bind(format!("hash-token-{id}"))
-            .bind(format!("hash-secret-{id}"))
             .execute(pool)
             .await
             .unwrap();
         }
     }
 
-    /// One tag's finding for a CVE in a mapping.
+    /// One tag's finding for a CVE in a source.
     async fn finding(
         pool: &SqlitePool,
-        mapping: &str,
+        source: &str,
         tag: &str,
         cve: &str,
         severity: &str,
         status: &str,
     ) {
         sqlx::query(
-            "INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, severity, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO cve_findings (id, source_id, image_tag, cve_id, severity, status)
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(format!("{mapping}-{tag}-{cve}"))
-        .bind(mapping)
-        .bind(mapping)
+        .bind(format!("{source}-{tag}-{cve}"))
+        .bind(source)
         .bind(tag)
         .bind(cve)
         .bind(severity)
@@ -188,36 +163,64 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        // The tag has a successful report on the newest digest unless a test stored one.
-        report(pool, mapping, tag, "sha256:new", 2000).await;
+        // The tag points at the newest scanned image unless a test observed it already.
+        report(pool, source, tag, "sha256:new", 2000).await;
     }
 
-    /// A successful report for a tag, once per (mapping, tag). The newest digest of a mapping is
-    /// the one with the latest push time (#196).
-    async fn report(pool: &SqlitePool, mapping: &str, tag: &str, digest: &str, pushed: i64) {
+    /// Observes a tag on a scanned image, once per (source, tag). The newest image of a source
+    /// is the one whose observation has the latest `first_seen_at` (decision 49).
+    async fn report(pool: &SqlitePool, source: &str, tag: &str, digest: &str, seen: i64) {
+        let image = format!("img-{source}-{digest}");
         sqlx::query(
-            "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest,
-                                       vulnerability_summary, sarif_status, image_push_time)
-             SELECT ?1, ?2, ?2, ?3, ?4, '{}', 'success', ?5
-             WHERE NOT EXISTS (SELECT 1 FROM sync_reports WHERE mapping_id = ?2 AND image_tag = ?3)",
+            "INSERT OR IGNORE INTO images (id, hub_id, repository, digest, is_index)
+             VALUES (?, 'hub-default-ghcr', ?, ?, 0)",
         )
-        .bind(format!("rep-{mapping}-{tag}"))
-        .bind(mapping)
-        .bind(tag)
+        .bind(&image)
+        .bind(source)
         .bind(digest)
-        .bind(pushed)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT OR IGNORE INTO image_platforms (id, image_id, platform, platform_digest, state)
+             VALUES (?, ?, 'linux/amd64', ?, 'stored')",
+        )
+        .bind(format!("plat-{image}"))
+        .bind(&image)
+        .bind(digest)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT OR IGNORE INTO scan_runs (id, image_platform_id, scanner, trigger, status)
+             VALUES (?, ?, 'grype', 'first_pull', 'done')",
+        )
+        .bind(format!("run-{image}"))
+        .bind(format!("plat-{image}"))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tag_observations (source_id, tag, image_id, first_seen_at, last_seen_at)
+             SELECT ?1, ?2, ?3, ?4, ?4
+             WHERE NOT EXISTS (SELECT 1 FROM tag_observations WHERE source_id = ?1 AND tag = ?2)",
+        )
+        .bind(source)
+        .bind(tag)
+        .bind(&image)
+        .bind(seen)
         .execute(pool)
         .await
         .unwrap();
     }
 
-    async fn accept(pool: &SqlitePool, mapping: &str, cve: &str, expires_at: Option<i64>) {
+    async fn accept(pool: &SqlitePool, source: &str, cve: &str, expires_at: Option<i64>) {
         sqlx::query(
-            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by_username, expires_at)
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by_username, expires_at)
              VALUES (?, ?, ?, 'accepted for the test', 'u', ?)",
         )
-        .bind(format!("acc-{mapping}-{cve}"))
-        .bind(mapping)
+        .bind(format!("acc-{source}-{cve}"))
+        .bind(source)
         .bind(cve)
         .bind(expires_at)
         .execute(pool)
@@ -226,7 +229,7 @@ mod tests {
     }
 
     async fn open_totals(pool: &SqlitePool, user: Option<&str>) -> OpenCves {
-        sum_open(&db::open_by_mapping(pool, user, None, NOW).await.unwrap())
+        sum_open(&db::open_by_source(pool, user, None, NOW).await.unwrap())
     }
 
     #[tokio::test]
@@ -245,7 +248,7 @@ mod tests {
     }
 
     /// The walley case (#196): `latest` is the newest digest and is clean, `0.4` is an older
-    /// digest that still reports CVEs. The mapping has zero open CVEs. A CVE that only the
+    /// digest that still reports CVEs. The source has zero open CVEs. A CVE that only the
     /// older digest had as `fixed` adds nothing to the fixed count (decision 23).
     #[tokio::test]
     async fn walley_latest_clean_and_old_tag_open_counts_zero() {
@@ -261,7 +264,7 @@ mod tests {
             OpenCves::of(0, 0, 0, 0, 0)
         );
         assert!(
-            db::open_by_mapping(&pool, None, Some("m1"), NOW)
+            db::open_by_source(&pool, None, Some("m1"), NOW)
                 .await
                 .unwrap()
                 .is_empty()
@@ -280,8 +283,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_cve_in_two_mappings_counts_twice() {
-        let (pool, dir) = fresh_pool("two-mappings").await;
+    async fn same_cve_in_two_sources_counts_twice() {
+        let (pool, dir) = fresh_pool("two-sources").await;
         seed(&pool, "u1", &[("m1", "app"), ("m2", "other")]).await;
         finding(&pool, "m1", "v1", "CVE-2026-0001", "HIGH", "open").await;
         finding(&pool, "m2", "v1", "CVE-2026-0001", "HIGH", "open").await;
@@ -359,7 +362,11 @@ mod tests {
         );
         assert_eq!(open_totals(&pool, Some("u1")).await.total, 6);
         assert_eq!(
-            open_cves_for_mapping(&pool, "m2", NOW).await.unwrap(),
+            sum_open(
+                &db::open_by_source(&pool, None, Some("m2"), NOW)
+                    .await
+                    .unwrap()
+            ),
             OpenCves::of(0, 0, 1, 0, 0)
         );
         let summary = summary(&pool, Some("u1"), NOW).await.unwrap();
@@ -400,7 +407,7 @@ mod tests {
             ("older", NOW - 365 * 24 * 60 * 60),
         ] {
             sqlx::query(
-                "INSERT INTO sync_jobs (id, mapping_id, status, attempts, payload, created_at, updated_at)
+                "INSERT INTO sync_jobs (id, source_id, status, attempts, payload, created_at, updated_at)
                  VALUES (?, 'm1', 'failed', 8, '{}', ?, ?)",
             )
             .bind(id)
@@ -412,7 +419,7 @@ mod tests {
         }
         // A done job is never a failed sync, however recent.
         sqlx::query(
-            "INSERT INTO sync_jobs (id, mapping_id, status, attempts, payload, created_at, updated_at)
+            "INSERT INTO sync_jobs (id, source_id, status, attempts, payload, created_at, updated_at)
              VALUES ('done', 'm1', 'done', 1, '{}', ?, ?)",
         )
         .bind(NOW)
@@ -431,7 +438,7 @@ mod tests {
     }
 
     /// #247: the accepted count equals the active acceptances on CVEs open in scope. Expired
-    /// and revoked acceptances, fixed CVEs and other users' mappings add nothing, and the
+    /// and revoked acceptances, fixed CVEs and other users' sources add nothing, and the
     /// open count is unchanged by the accepted ones.
     #[tokio::test]
     async fn accepted_count_matches_active_acceptances_in_scope() {

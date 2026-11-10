@@ -300,6 +300,40 @@ CREATE TABLE IF NOT EXISTS alert_deliveries (
     UNIQUE (channel_id, dedupe_key)
 );
 
+-- The tags of a source's newest scanned image (decision 49). The newest image is the tag
+-- observation with the latest first_seen_at among images that have a done scan run. A tag that
+-- has since moved to another digest does not belong to it. Read by the CVE list and the dashboard.
+CREATE VIEW IF NOT EXISTS newest_digest_tags AS
+SELECT o.source_id AS source_id, o.tag AS image_tag
+FROM tag_observations o
+WHERE o.image_id = (
+        SELECT o2.image_id FROM tag_observations o2
+        WHERE o2.source_id = o.source_id
+          AND EXISTS (
+              SELECT 1 FROM image_platforms p
+              JOIN scan_runs r ON r.image_platform_id = p.id AND r.status = 'done'
+              WHERE p.image_id = o2.image_id)
+        ORDER BY o2.first_seen_at DESC, o2.rowid DESC
+        LIMIT 1)
+  AND NOT EXISTS (
+        SELECT 1 FROM tag_observations n
+        WHERE n.source_id = o.source_id AND n.tag = o.tag
+          AND (n.first_seen_at > o.first_seen_at
+               OR (n.first_seen_at = o.first_seen_at AND n.rowid > o.rowid)));
+
+-- When each tag of a source was last scanned: the latest finished done scan run of any image the
+-- tag was observed on. A tag with no done scan is absent (it is not tracked). Tags that share an
+-- image share its scan time, so seen_at (when discovery first saw the tag on the image) breaks the
+-- tie, newest first. Read by the CVE list.
+CREATE VIEW IF NOT EXISTS tag_scan_times AS
+SELECT o.source_id AS source_id, o.tag AS image_tag,
+       MAX(COALESCE(r.finished_at, 0)) AS scan_at, MAX(o.first_seen_at) AS seen_at,
+       MAX(r.rowid) AS last_row
+FROM tag_observations o
+JOIN image_platforms p ON p.image_id = o.image_id
+JOIN scan_runs r ON r.image_platform_id = p.id AND r.status = 'done'
+GROUP BY o.source_id, o.tag;
+
 -- Default hubs (decisions 7, 11, 13). Inserted here; the query layer refuses to delete a row
 -- whose kind is 'default'. Docker Hub is stored as docker.io and pulled from registry-1.docker.io.
 INSERT OR IGNORE INTO hubs (id, host, kind)

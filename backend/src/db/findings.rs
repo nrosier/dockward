@@ -1,5 +1,5 @@
 //! SQL for the `cve_findings` table (`specs/database.md`, `specs/cve-lifecycle.md`,
-//! "Tracking per tag"). One row per (mapping, Harbor repository, image tag, CVE).
+//! "Tracking per tag"). One row per (source, image tag, CVE).
 //! Rows hold CVE facts only, never secrets.
 //!
 //! Every function takes a connection so the caller can run them in one transaction.
@@ -13,8 +13,7 @@ use crate::error::AppError;
 pub struct Finding<'a> {
     /// Primary key used when the row is new; an existing row keeps its own.
     pub id: &'a str,
-    pub mapping_id: &'a str,
-    pub harbor_repository: &'a str,
+    pub source_id: &'a str,
     pub image_tag: &'a str,
     pub cve_id: &'a str,
     pub package: Option<&'a str>,
@@ -33,10 +32,10 @@ pub struct Finding<'a> {
 pub async fn upsert(conn: &mut SqliteConnection, finding: &Finding<'_>) -> Result<(), AppError> {
     sqlx::query!(
         "INSERT INTO cve_findings
-            (id, mapping_id, harbor_repository, image_tag, cve_id, package, severity,
+            (id, source_id, image_tag, cve_id, package, severity,
              fixed_in_version, description, first_seen_at, last_seen_at, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
-         ON CONFLICT (mapping_id, harbor_repository, image_tag, cve_id) DO UPDATE SET
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
+         ON CONFLICT (source_id, image_tag, cve_id) DO UPDATE SET
             severity = excluded.severity,
             package = excluded.package,
             fixed_in_version = excluded.fixed_in_version,
@@ -44,8 +43,7 @@ pub async fn upsert(conn: &mut SqliteConnection, finding: &Finding<'_>) -> Resul
             last_seen_at = excluded.last_seen_at,
             status = 'open'",
         finding.id,
-        finding.mapping_id,
-        finding.harbor_repository,
+        finding.source_id,
         finding.image_tag,
         finding.cve_id,
         finding.package,
@@ -61,177 +59,55 @@ pub async fn upsert(conn: &mut SqliteConnection, finding: &Finding<'_>) -> Resul
     .map_err(|_| AppError::InternalError)
 }
 
-/// True when the mapping has a row for this CVE on any tag, in any status.
-pub async fn exists_for_mapping(
-    conn: &mut SqliteConnection,
-    mapping_id: &str,
-    cve_id: &str,
-) -> Result<bool, AppError> {
-    let row = sqlx::query!(
-        r#"SELECT EXISTS (
-               SELECT 1 FROM cve_findings WHERE mapping_id = ? AND cve_id = ?
-           ) AS "found!: i64""#,
-        mapping_id,
-        cve_id
-    )
-    .fetch_one(conn)
-    .await
-    .map_err(|_| AppError::InternalError)?;
-    Ok(row.found != 0)
-}
-
-/// The CVE ids open on one tag of a mapping, sorted. The scheduled scan reads them as the last
-/// result of a digest whose report was stored before migration 0008 (#191).
-pub async fn open_ids_for_tag(
-    pool: &SqlitePool,
-    mapping_id: &str,
-    repo: &str,
-    tag: &str,
-) -> Result<Vec<String>, AppError> {
-    sqlx::query_scalar!(
-        r#"SELECT DISTINCT cve_id AS "cve_id!" FROM cve_findings
-           WHERE mapping_id = ? AND harbor_repository = ? AND image_tag = ? AND status = 'open'
-           ORDER BY cve_id"#,
-        mapping_id,
-        repo,
-        tag
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|_| AppError::InternalError)
-}
-
-/// Marks the tag's `open` rows `fixed` when their CVE is not in `seen_ids`. The ids go to
-/// SQLite as one JSON array, so the list length is not limited by the bind count. Returns
-/// the number of rows changed.
-pub async fn mark_missing_fixed(
-    conn: &mut SqliteConnection,
-    mapping_id: &str,
-    repo: &str,
-    tag: &str,
-    seen_ids: &[String],
-) -> Result<u64, AppError> {
-    let seen = serde_json::to_string(seen_ids).map_err(|_| AppError::InternalError)?;
-    sqlx::query!(
-        "UPDATE cve_findings SET status = 'fixed'
-         WHERE mapping_id = ? AND harbor_repository = ? AND image_tag = ?
-           AND status = 'open'
-           AND cve_id NOT IN (SELECT value FROM json_each(?))",
-        mapping_id,
-        repo,
-        tag,
-        seen
-    )
-    .execute(conn)
-    .await
-    .map(|result| result.rows_affected())
-    .map_err(|_| AppError::InternalError)
-}
-
-/// The mapping's tracked tags, newest first. A tag is tracked when it has a successful
-/// `sync_reports` row, so a tag with zero CVEs counts. Its scan time is the latest
-/// `synced_at` among its successful reports; ties go to the report stored last.
-pub async fn tags_by_recency(
-    conn: &mut SqliteConnection,
-    mapping_id: &str,
-) -> Result<Vec<String>, AppError> {
-    let rows = sqlx::query!(
-        r#"SELECT image_tag AS "image_tag!"
-           FROM sync_reports
-           WHERE mapping_id = ? AND sarif_status = 'success'
-           GROUP BY image_tag
-           ORDER BY MAX(synced_at) DESC, MAX(rowid) DESC"#,
-        mapping_id
-    )
-    .fetch_all(conn)
-    .await
-    .map_err(|_| AppError::InternalError)?;
-    Ok(rows.into_iter().map(|row| row.image_tag).collect())
-}
-
 /// One tag of the CVE view's tag set, as `GET /mappings/:id/tags` returns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackedTagRow {
     pub image_tag: String,
-    /// The tag's latest successful `synced_at`, Unix seconds.
+    /// The tag's latest `done` scan, Unix seconds.
     pub last_scan_at: i64,
     /// The tag's `cve_findings` rows that are `open`.
     pub open_cves: i64,
 }
 
-/// The mapping's tag set in the CVE view: the tags with a successful `sync_reports` row,
+/// The mapping's tag set in the CVE view: the tags with a `done` scan run,
 /// most recently scanned first, at most 10. This is the `tag_scans` and `tracked` rule of
 /// [`list_cves`] (`tracked_tags` is the length of this list) with the order of
 /// [`tags_by_recency`].
 pub async fn tracked_tags(
     pool: &SqlitePool,
-    mapping_id: &str,
+    source_id: &str,
 ) -> Result<Vec<TrackedTagRow>, AppError> {
     sqlx::query_as!(
         TrackedTagRow,
         r#"SELECT ts.image_tag AS "image_tag!: String", ts.scan_at AS "last_scan_at!: i64",
                   (SELECT COUNT(*) FROM cve_findings f
-                   WHERE f.mapping_id = ts.mapping_id AND f.image_tag = ts.image_tag
+                   WHERE f.source_id = ts.source_id AND f.image_tag = ts.image_tag
                      AND f.status = 'open') AS "open_cves!: i64"
            FROM (
-               SELECT mapping_id, image_tag, MAX(synced_at) AS scan_at, MAX(rowid) AS last_row
-               FROM sync_reports
-               WHERE mapping_id = ?1 AND sarif_status = 'success'
-               GROUP BY mapping_id, image_tag
+               SELECT source_id, image_tag, scan_at, seen_at, last_row
+               FROM tag_scan_times WHERE source_id = ?1
            ) ts
-           ORDER BY ts.scan_at DESC, ts.last_row DESC
+           ORDER BY ts.scan_at DESC, ts.seen_at DESC, ts.last_row DESC
            LIMIT 10"#,
-        mapping_id
+        source_id
     )
     .fetch_all(pool)
     .await
     .map_err(|_| AppError::InternalError)
 }
 
-/// Deletes a tag's `cve_findings` and `sync_reports`. It never touches `github_issues`;
-/// their `sync_report_id` and the findings' `github_issue_id` are `ON DELETE SET NULL`.
-/// Returns the number of rows deleted from both tables.
-pub async fn delete_tag(
-    conn: &mut SqliteConnection,
-    mapping_id: &str,
-    repo: &str,
-    tag: &str,
-) -> Result<u64, AppError> {
-    let findings = sqlx::query!(
-        "DELETE FROM cve_findings
-         WHERE mapping_id = ? AND harbor_repository = ? AND image_tag = ?",
-        mapping_id,
-        repo,
-        tag
-    )
-    .execute(&mut *conn)
-    .await
-    .map_err(|_| AppError::InternalError)?;
-    let reports = sqlx::query!(
-        "DELETE FROM sync_reports
-         WHERE mapping_id = ? AND harbor_repository = ? AND image_tag = ?",
-        mapping_id,
-        repo,
-        tag
-    )
-    .execute(conn)
-    .await
-    .map_err(|_| AppError::InternalError)?;
-    Ok(findings.rows_affected() + reports.rows_affected())
-}
-
-/// True when the mapping exists and `user_id` owns it. `None` skips the owner check (an
-/// admin, who may read every tenant's mappings).
-pub async fn mapping_readable(
+/// True when the source exists and `user_id` owns it. `None` skips the owner check (an
+/// admin, who may read every tenant's sources).
+pub async fn source_readable(
     pool: &SqlitePool,
-    mapping_id: &str,
+    source_id: &str,
     user_id: Option<&str>,
 ) -> Result<bool, AppError> {
     let row = sqlx::query!(
         r#"SELECT EXISTS (
-               SELECT 1 FROM repo_mappings WHERE id = ?1 AND (?2 IS NULL OR user_id = ?2)
+               SELECT 1 FROM image_sources WHERE id = ?1 AND (?2 IS NULL OR user_id = ?2)
            ) AS "found!: i64""#,
-        mapping_id,
+        source_id,
         user_id
     )
     .fetch_one(pool)
@@ -249,7 +125,7 @@ pub struct CveListFilter<'a> {
     /// `None` reads every user's mappings: admin `scope=all`, or a mapping the service has
     /// already checked.
     pub user_id: Option<&'a str>,
-    pub mapping_id: Option<&'a str>,
+    pub source_id: Option<&'a str>,
     /// Exactly one CVE (the detail route).
     pub cve_id: Option<&'a str>,
     /// Any of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `UNKNOWN`, matched against the highest
@@ -260,17 +136,17 @@ pub struct CveListFilter<'a> {
     pub statuses: &'a [&'a str],
     /// `Some(1)` keeps accepted CVEs, `Some(0)` the others.
     pub accepted: Option<i64>,
-    /// Lowercase ASCII text searched in the CVE id, the package, and the mapping's Harbor
-    /// project and repository (#257). A literal substring, so `%` and `_` are not wildcards.
+    /// Lowercase ASCII text searched in the CVE id, the package, and the source's
+    /// namespace and repository (#257). A literal substring, so `%` and `_` are not wildcards.
     pub q: Option<&'a str>,
     /// The summary's `package` equals this.
     pub package: Option<&'a str>,
     /// The CVE has a row, open or fixed, for this image tag.
     pub tag: Option<&'a str>,
-    /// The mapping's `harbor_project` equals this.
-    pub harbor_project: Option<&'a str>,
-    /// The mapping's `harbor_repository` equals this.
-    pub harbor_repository: Option<&'a str>,
+    /// The first path segment of the source's repository equals this (decision 38).
+    pub namespace: Option<&'a str>,
+    /// `<hub host>/<repository>` of the source equals this.
+    pub repository: Option<&'a str>,
     /// `Some(1)` keeps CVEs with a GitHub issue row, `Some(0)` those without (#257).
     pub has_issue: Option<i64>,
     /// Any of `available` (the summary's `fixed_in_version` is non-empty) and `none` (it is
@@ -302,7 +178,7 @@ fn json_list(values: &[&str]) -> Result<Option<String>, AppError> {
 /// One CVE of one mapping, aggregated over the mapping's tags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CveSummaryRow {
-    pub mapping_id: String,
+    pub source_id: String,
     pub cve_id: String,
     pub severity: String,
     /// The highest severity among the open rows, `None` when every row is fixed.
@@ -326,7 +202,7 @@ pub struct CveSummaryRow {
 /// `status` is `open` when any tag's row is open, else `fixed`. `severity` is the highest
 /// over the tags, `first_seen_at` the earliest and `last_seen_at` the latest. `package` and
 /// `fixed_in_version` come from the most recently scanned tag that reports the CVE: the
-/// latest successful `sync_reports.synced_at`, then the later `last_seen_at`. `open_tags`
+/// latest `done` scan run (`tag_scan_times.scan_at`), then the later `last_seen_at`. `open_tags`
 /// counts the tags whose row is open. `tracked_tags` counts the mapping's tags with a
 /// successful report, at most 10. The issue is the `github_issues` row of the mapping's
 /// GitHub target. `accepted` means an active acceptance exists. `open_severity` is the
@@ -335,7 +211,7 @@ pub struct CveSummaryRow {
 /// The filters in the outer `WHERE` and in `tag_rows` are the same text as in
 /// [`count_cves`], so `total` always matches the items. Keep the two in step.
 ///
-/// A CVE id that the `<mapping_id>:<cve_id>` route id cannot carry (over 128 bytes, or a
+/// A CVE id that the `<source_id>:<cve_id>` route id cannot carry (over 128 bytes, or a
 /// character outside letters, digits, `.`, `_`, `-` and `:`) is left out, so every listed
 /// id can be opened. These are the same ids the issue routes refuse.
 pub async fn list_cves(
@@ -347,16 +223,14 @@ pub async fn list_cves(
     let fixes = json_list(filter.fixes)?;
     let rows = sqlx::query!(
         r#"WITH tag_scans AS (
-               SELECT mapping_id, image_tag, MAX(synced_at) AS scan_at
-               FROM sync_reports WHERE sarif_status = 'success'
-               GROUP BY mapping_id, image_tag
+               SELECT source_id, image_tag, scan_at, seen_at FROM tag_scan_times
            ),
            tracked AS (
-               SELECT mapping_id, MIN(10, COUNT(*)) AS n FROM newest_digest_tags
-               GROUP BY mapping_id
+               SELECT source_id, MIN(10, COUNT(*)) AS n FROM newest_digest_tags
+               GROUP BY source_id
            ),
            tag_rows AS (
-               SELECT f.mapping_id AS mapping_id, f.cve_id AS cve_id, f.image_tag AS image_tag,
+               SELECT f.source_id AS source_id, f.cve_id AS cve_id, f.image_tag AS image_tag,
                       f.package AS package, f.fixed_in_version AS fixed_in_version,
                       f.first_seen_at AS first_seen_at, f.last_seen_at AS last_seen_at,
                       f.status AS status,
@@ -364,28 +238,28 @@ pub async fn list_cves(
                            WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 ELSE 1 END AS sev_rank,
                       (nd.image_tag IS NOT NULL) AS nd,
                       ROW_NUMBER() OVER (
-                          PARTITION BY f.mapping_id, f.cve_id
+                          PARTITION BY f.source_id, f.cve_id
                           ORDER BY (nd.image_tag IS NOT NULL) DESC, COALESCE(ts.scan_at, -1) DESC,
-                                   f.last_seen_at DESC, f.id DESC
+                                   COALESCE(ts.seen_at, -1) DESC, f.last_seen_at DESC, f.id DESC
                       ) AS rn
                FROM cve_findings f
-               JOIN repo_mappings m ON m.id = f.mapping_id
+               JOIN image_sources m ON m.id = f.source_id JOIN hubs h ON h.id = m.hub_id
                LEFT JOIN tag_scans ts
-                    ON ts.mapping_id = f.mapping_id AND ts.image_tag = f.image_tag
+                    ON ts.source_id = f.source_id AND ts.image_tag = f.image_tag
                LEFT JOIN newest_digest_tags nd
-                    ON nd.mapping_id = f.mapping_id AND nd.image_tag = f.image_tag
+                    ON nd.source_id = f.source_id AND nd.image_tag = f.image_tag
                WHERE (?1 IS NULL OR m.user_id = ?1)
                  AND (?17 = 1 OR nd.image_tag IS NOT NULL)
-                 AND (?2 IS NULL OR f.mapping_id = ?2)
+                 AND (?2 IS NULL OR f.source_id = ?2)
                  AND (?3 IS NULL OR f.cve_id = ?3)
-                 AND (?15 IS NULL OR m.harbor_project = ?15)
-                 AND (?16 IS NULL OR m.harbor_repository = ?16)
+                 AND (?15 IS NULL OR substr(m.repository, 1, instr(m.repository || '/', '/') - 1) = ?15)
+                 AND (?16 IS NULL OR h.host || '/' || m.repository = ?16)
                  AND length(CAST(f.cve_id AS BLOB)) BETWEEN 1 AND 128
                  AND f.cve_id NOT GLOB '*[^A-Za-z0-9._:-]*'
                  AND instr(CAST(f.cve_id AS BLOB), x'00') = 0
            ),
            summary AS (
-               SELECT mapping_id, cve_id,
+               SELECT source_id, cve_id,
                       COALESCE(MAX(CASE WHEN nd THEN sev_rank END), MAX(sev_rank)) AS sev_rank,
                       MAX(CASE WHEN nd AND status = 'open' THEN sev_rank END) AS open_rank,
                       MIN(first_seen_at) AS first_seen_at,
@@ -397,10 +271,10 @@ pub async fn list_cves(
                       MAX(CASE WHEN rn = 1 THEN package END) AS package,
                       MAX(CASE WHEN rn = 1 THEN fixed_in_version END) AS fixed_in_version
                FROM tag_rows
-               GROUP BY mapping_id, cve_id
+               GROUP BY source_id, cve_id
            ),
            items AS (
-               SELECT s.mapping_id AS mapping_id, s.cve_id AS cve_id, s.sev_rank AS sev_rank,
+               SELECT s.source_id AS source_id, s.cve_id AS cve_id, s.sev_rank AS sev_rank,
                       CASE s.sev_rank WHEN 5 THEN 'CRITICAL' WHEN 4 THEN 'HIGH'
                            WHEN 3 THEN 'MEDIUM' WHEN 2 THEN 'LOW' ELSE 'UNKNOWN' END AS severity,
                       CASE s.open_rank WHEN 5 THEN 'CRITICAL' WHEN 4 THEN 'HIGH'
@@ -409,28 +283,28 @@ pub async fn list_cves(
                       CASE WHEN s.any_open = 1 THEN 'open' ELSE 'fixed' END AS status,
                       s.package AS package, s.fixed_in_version AS fixed_in_version,
                       (SELECT MIN(af.first_seen_at) FROM cve_findings af
-                       WHERE af.mapping_id = s.mapping_id AND af.cve_id = s.cve_id)
+                       WHERE af.source_id = s.source_id AND af.cve_id = s.cve_id)
                           AS first_seen_at,
                       s.last_seen_at AS last_seen_at,
                       s.open_tags AS open_tags, COALESCE(t.n, 0) AS tracked_tags,
                       gi.github_issue_url AS github_issue_url,
                       gi.github_issue_number AS github_issue_number,
                       gi.status AS github_issue_status,
-                      m.harbor_project AS harbor_project,
-                      m.harbor_repository AS harbor_repository,
+                      substr(m.repository, 1, instr(m.repository || '/', '/') - 1) AS namespace,
+                      h.host || '/' || m.repository AS repository,
                       EXISTS (
                           SELECT 1 FROM cve_acceptances ca
-                          WHERE ca.mapping_id = s.mapping_id AND ca.cve_id = s.cve_id
+                          WHERE ca.source_id = s.source_id AND ca.cve_id = s.cve_id
                             AND ca.revoked_at IS NULL
                             AND (ca.expires_at IS NULL OR ca.expires_at > ?4)
                       ) AS accepted
                FROM summary s
-               JOIN repo_mappings m ON m.id = s.mapping_id
-               LEFT JOIN tracked t ON t.mapping_id = s.mapping_id
+               JOIN image_sources m ON m.id = s.source_id JOIN hubs h ON h.id = m.hub_id
+               LEFT JOIN tracked t ON t.source_id = s.source_id
                LEFT JOIN github_issues gi ON gi.github_owner = m.github_owner
                     AND gi.github_repo = m.github_repo AND gi.cve_id = s.cve_id
            )
-           SELECT mapping_id AS "mapping_id!: String", cve_id AS "cve_id!: String",
+           SELECT source_id AS "source_id!: String", cve_id AS "cve_id!: String",
                   severity AS "severity!: String", open_severity AS "open_severity?: String",
                   status AS "status!: String",
                   package AS "package?: String", fixed_in_version AS "fixed_in_version?: String",
@@ -450,8 +324,8 @@ pub async fn list_cves(
              AND (?7 IS NULL OR accepted = ?7)
              AND (?8 IS NULL OR instr(lower(cve_id), ?8) > 0
                   OR instr(lower(COALESCE(package, '')), ?8) > 0
-                  OR instr(lower(harbor_project), ?8) > 0
-                  OR instr(lower(harbor_repository), ?8) > 0)
+                  OR instr(lower(namespace), ?8) > 0
+                  OR instr(lower(repository), ?8) > 0)
              AND (?18 IS NULL OR (?18 = 1) = (github_issue_number IS NOT NULL))
              AND (?19 IS NULL OR EXISTS (
                   SELECT 1 FROM json_each(?19) fx
@@ -461,8 +335,8 @@ pub async fn list_cves(
              AND (?14 IS NULL OR EXISTS (
                   SELECT 1 FROM cve_findings tf
                   JOIN newest_digest_tags tn
-                       ON tn.mapping_id = tf.mapping_id AND tn.image_tag = tf.image_tag
-                  WHERE tf.mapping_id = items.mapping_id AND tf.cve_id = items.cve_id
+                       ON tn.source_id = tf.source_id AND tn.image_tag = tf.image_tag
+                  WHERE tf.source_id = items.source_id AND tf.cve_id = items.cve_id
                     AND tf.image_tag = ?14))
            ORDER BY
              CASE WHEN ?9 = 'severity' AND ?10 = 1 THEN sev_rank END ASC,
@@ -473,10 +347,10 @@ pub async fn list_cves(
              CASE WHEN ?9 = 'first_seen_at' AND ?10 = -1 THEN first_seen_at END DESC,
              CASE WHEN ?9 = 'last_seen_at' AND ?10 = 1 THEN last_seen_at END ASC,
              CASE WHEN ?9 = 'last_seen_at' AND ?10 = -1 THEN last_seen_at END DESC,
-             cve_id ASC, mapping_id ASC
+             cve_id ASC, source_id ASC
            LIMIT ?11 OFFSET ?12"#,
         filter.user_id,
-        filter.mapping_id,
+        filter.source_id,
         filter.cve_id,
         filter.now,
         severities,
@@ -489,8 +363,8 @@ pub async fn list_cves(
         filter.offset,
         filter.package,
         filter.tag,
-        filter.harbor_project,
-        filter.harbor_repository,
+        filter.namespace,
+        filter.repository,
         filter.include_older,
         filter.has_issue,
         fixes
@@ -501,7 +375,7 @@ pub async fn list_cves(
     Ok(rows
         .into_iter()
         .map(|row| CveSummaryRow {
-            mapping_id: row.mapping_id,
+            source_id: row.source_id,
             cve_id: row.cve_id,
             severity: row.severity,
             open_severity: row.open_severity,
@@ -529,59 +403,61 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
     let fixes = json_list(filter.fixes)?;
     let row = sqlx::query!(
         r#"WITH tag_rows AS (
-               SELECT f.mapping_id AS mapping_id, f.cve_id AS cve_id, f.image_tag AS image_tag,
+               SELECT f.source_id AS source_id, f.cve_id AS cve_id, f.image_tag AS image_tag,
                       f.package AS package, f.status AS status,
                       f.fixed_in_version AS fixed_in_version,
-                      m.harbor_project AS harbor_project,
-                      m.harbor_repository AS harbor_repository,
+                      substr(m.repository, 1, instr(m.repository || '/', '/') - 1) AS namespace,
+                      h.host || '/' || m.repository AS repository,
                       CASE f.severity WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4
                            WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 ELSE 1 END AS sev_rank,
                       ROW_NUMBER() OVER (
-                          PARTITION BY f.mapping_id, f.cve_id
+                          PARTITION BY f.source_id, f.cve_id
                           ORDER BY COALESCE((
-                              SELECT MAX(sr.synced_at) FROM sync_reports sr
-                              WHERE sr.mapping_id = f.mapping_id AND sr.image_tag = f.image_tag
-                                AND sr.sarif_status = 'success'), -1) DESC,
+                              SELECT st.scan_at FROM tag_scan_times st
+                              WHERE st.source_id = f.source_id AND st.image_tag = f.image_tag), -1) DESC,
+                              COALESCE((
+                              SELECT st.seen_at FROM tag_scan_times st
+                              WHERE st.source_id = f.source_id AND st.image_tag = f.image_tag), -1) DESC,
                               f.last_seen_at DESC, f.id DESC
                       ) AS rn
                FROM cve_findings f
-               JOIN repo_mappings m ON m.id = f.mapping_id
+               JOIN image_sources m ON m.id = f.source_id JOIN hubs h ON h.id = m.hub_id
                JOIN newest_digest_tags nd
-                    ON nd.mapping_id = f.mapping_id AND nd.image_tag = f.image_tag
+                    ON nd.source_id = f.source_id AND nd.image_tag = f.image_tag
                WHERE (?1 IS NULL OR m.user_id = ?1)
-                 AND (?2 IS NULL OR f.mapping_id = ?2)
+                 AND (?2 IS NULL OR f.source_id = ?2)
                  AND (?3 IS NULL OR f.cve_id = ?3)
-                 AND (?11 IS NULL OR m.harbor_project = ?11)
-                 AND (?12 IS NULL OR m.harbor_repository = ?12)
+                 AND (?11 IS NULL OR substr(m.repository, 1, instr(m.repository || '/', '/') - 1) = ?11)
+                 AND (?12 IS NULL OR h.host || '/' || m.repository = ?12)
                  AND length(CAST(f.cve_id AS BLOB)) BETWEEN 1 AND 128
                  AND f.cve_id NOT GLOB '*[^A-Za-z0-9._:-]*'
                  AND instr(CAST(f.cve_id AS BLOB), x'00') = 0
            ),
            items AS (
-               SELECT mapping_id, cve_id,
+               SELECT source_id, cve_id,
                       CASE MAX(sev_rank) WHEN 5 THEN 'CRITICAL' WHEN 4 THEN 'HIGH'
                            WHEN 3 THEN 'MEDIUM' WHEN 2 THEN 'LOW' ELSE 'UNKNOWN' END AS severity,
                       CASE WHEN MAX(status = 'open') = 1 THEN 'open' ELSE 'fixed' END AS status,
                       MAX(CASE WHEN rn = 1 THEN package END) AS package,
                       MAX(CASE WHEN rn = 1 THEN fixed_in_version END) AS fixed_in_version,
-                      MAX(harbor_project) AS harbor_project,
-                      MAX(harbor_repository) AS harbor_repository,
+                      MAX(namespace) AS namespace,
+                      MAX(repository) AS repository,
                       EXISTS (
                           SELECT 1 FROM github_issues gi
-                          JOIN repo_mappings gm ON gm.id = tag_rows.mapping_id
+                          JOIN image_sources gm ON gm.id = tag_rows.source_id
                           WHERE gi.github_owner = gm.github_owner
                             AND gi.github_repo = gm.github_repo
                             AND gi.cve_id = tag_rows.cve_id
                       ) AS has_issue,
                       EXISTS (
                           SELECT 1 FROM cve_acceptances ca
-                          WHERE ca.mapping_id = tag_rows.mapping_id
+                          WHERE ca.source_id = tag_rows.source_id
                             AND ca.cve_id = tag_rows.cve_id
                             AND ca.revoked_at IS NULL
                             AND (ca.expires_at IS NULL OR ca.expires_at > ?4)
                       ) AS accepted
                FROM tag_rows
-               GROUP BY mapping_id, cve_id
+               GROUP BY source_id, cve_id
            )
            SELECT COUNT(*) AS "total!: i64"
            FROM items
@@ -594,8 +470,8 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
              AND (?7 IS NULL OR accepted = ?7)
              AND (?8 IS NULL OR instr(lower(cve_id), ?8) > 0
                   OR instr(lower(COALESCE(package, '')), ?8) > 0
-                  OR instr(lower(harbor_project), ?8) > 0
-                  OR instr(lower(harbor_repository), ?8) > 0)
+                  OR instr(lower(namespace), ?8) > 0
+                  OR instr(lower(repository), ?8) > 0)
              AND (?13 IS NULL OR (?13 = 1) = (has_issue = 1))
              AND (?14 IS NULL OR EXISTS (
                   SELECT 1 FROM json_each(?14) fx
@@ -604,10 +480,10 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
              AND (?9 IS NULL OR package = ?9)
              AND (?10 IS NULL OR EXISTS (
                   SELECT 1 FROM cve_findings tf
-                  WHERE tf.mapping_id = items.mapping_id AND tf.cve_id = items.cve_id
+                  WHERE tf.source_id = items.source_id AND tf.cve_id = items.cve_id
                     AND tf.image_tag = ?10))"#,
         filter.user_id,
-        filter.mapping_id,
+        filter.source_id,
         filter.cve_id,
         filter.now,
         severities,
@@ -616,8 +492,8 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
         filter.q,
         filter.package,
         filter.tag,
-        filter.harbor_project,
-        filter.harbor_repository,
+        filter.namespace,
+        filter.repository,
         filter.has_issue,
         fixes
     )
@@ -636,7 +512,7 @@ pub struct CveTagRow {
     pub fixed_in_version: Option<String>,
     /// The Harbor vulnerability description on this tag's row.
     pub description: Option<String>,
-    /// The tag's latest successful `sync_reports.synced_at`.
+    /// The tag's latest `done` scan run (`tag_scan_times.scan_at`).
     pub last_scan_at: Option<i64>,
     /// True for a tag of the mapping's newest scanned digest (#196).
     pub newest_digest: bool,
@@ -647,7 +523,7 @@ pub struct CveTagRow {
 /// `package` and `fixed_in_version` from.
 pub async fn cve_tags(
     pool: &SqlitePool,
-    mapping_id: &str,
+    source_id: &str,
     cve_id: &str,
 ) -> Result<Vec<CveTagRow>, AppError> {
     sqlx::query_as!(
@@ -659,16 +535,15 @@ pub async fn cve_tags(
                   (nd.image_tag IS NOT NULL) AS "newest_digest!: bool"
            FROM cve_findings f
            LEFT JOIN newest_digest_tags nd
-                  ON nd.mapping_id = f.mapping_id AND nd.image_tag = f.image_tag
+                  ON nd.source_id = f.source_id AND nd.image_tag = f.image_tag
            LEFT JOIN (
-               SELECT image_tag, MAX(synced_at) AS scan_at
-               FROM sync_reports WHERE mapping_id = ?1 AND sarif_status = 'success'
-               GROUP BY image_tag
+               SELECT image_tag, scan_at, seen_at FROM tag_scan_times WHERE source_id = ?1
            ) ts ON ts.image_tag = f.image_tag
-           WHERE f.mapping_id = ?1 AND f.cve_id = ?2
-           ORDER BY COALESCE(ts.scan_at, -1) DESC, f.last_seen_at DESC, f.id DESC
+           WHERE f.source_id = ?1 AND f.cve_id = ?2
+           ORDER BY COALESCE(ts.scan_at, -1) DESC, COALESCE(ts.seen_at, -1) DESC,
+                    f.last_seen_at DESC, f.id DESC
            LIMIT 10"#,
-        mapping_id,
+        source_id,
         cve_id
     )
     .fetch_all(pool)

@@ -14,7 +14,7 @@ use crate::api::state::AppState;
 use crate::error::AppError;
 use crate::models::role::Role;
 use crate::services::audit::Actor;
-use crate::services::credential_probe::{self, HarborProbe, OutboundHarborProbe};
+use crate::services::credential_probe;
 use crate::services::credentials::{
     self, Credential, CredentialListItem, CredentialPatch, ListQuery, NewCredential,
 };
@@ -80,15 +80,8 @@ pub async fn create(
 ) -> Result<Response, AppError> {
     let input: NewCredential = parse_body(&body)?;
     let actor = actor_of(&user);
-    let created = credentials::create(
-        &state.pool,
-        &state.credentials_key,
-        &actor,
-        &user.id,
-        input,
-        state.allow_private_harbor,
-    )
-    .await?;
+    let created =
+        credentials::create(&state.pool, &state.credentials_key, &actor, &user.id, input).await?;
     Ok((StatusCode::CREATED, Json(created)).into_response())
 }
 
@@ -108,11 +101,8 @@ pub async fn update(
         &user.id,
         &id,
         patch,
-        state.allow_private_harbor,
     )
     .await?;
-    // A rotated token or a changed base URL must not serve the old picker lists.
-    state.pickers.drop_credential(&id);
     Ok(Json(updated))
 }
 
@@ -124,12 +114,10 @@ pub async fn delete(
 ) -> Result<StatusCode, AppError> {
     let actor = actor_of(&user);
     credentials::delete(&state.pool, &actor, &user.id, &id).await?;
-    state.pickers.drop_credential(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /api/v1/credentials/:id/test`. Owner only. Harbor runs the robot check.
-/// GitHub ignores any body: it lists the token's first visible repository and runs the
+/// `POST /api/v1/credentials/:id/test`. Owner only. The test ignores any body: it lists the token's first visible repository and runs the
 /// repository, code scanning, and issues probes on it (`specs/api.md`, Test button).
 pub async fn test(
     State(state): State<AppState>,
@@ -137,12 +125,6 @@ pub async fn test(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let row = credentials::load_owned(&state.pool, &user.id, &id).await?;
-    if row.service_type == credentials::SERVICE_HARBOR {
-        let probe = OutboundHarborProbe::new(state.allow_private_harbor)?;
-        let check = run_harbor_probe(&state, &probe, &row).await?;
-        let ok = check.ok;
-        return Ok(Json(serde_json::json!({ "ok": ok, "checks": [check] })));
-    }
     let probe = credential_probe::OutboundGithubProbe::new(state.github.clone())?;
     let result = run_github_test(&state, &probe, &row).await?;
     Ok(Json(serde_json::json!({
@@ -227,53 +209,12 @@ pub async fn run_github_probes<P: credential_probe::GithubProbe>(
     ])
 }
 
-/// Runs the probe for one stored Harbor credential. The decrypted secret lives only
-/// in the local buffer and is never logged or returned.
-pub async fn run_harbor_probe<P: HarborProbe>(
-    state: &AppState,
-    probe: &P,
-    row: &crate::db::credentials::CredentialRow,
-) -> Result<credential_probe::Check, AppError> {
-    let base_text = row.base_url.as_deref().ok_or(AppError::InternalError)?;
-    let base = credentials::base_for_join(base_text)?;
-    let username = row.username.as_deref().ok_or(AppError::InternalError)?;
-    let secret = credentials::decrypt_token(&state.credentials_key, row)?;
-    let status = probe.users_current(&base, username, &secret).await?;
-    Ok(credential_probe::harbor_check(status))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::credentials::CredentialRow;
 
-    /// A probe that returns a fixed status, so each Harbor response can be checked
-    /// without a socket. The status values are the recorded Harbor responses.
-    struct FixedStatus(u16);
-
-    impl HarborProbe for FixedStatus {
-        async fn users_current(
-            &self,
-            _base: &reqwest::Url,
-            _username: &str,
-            _secret: &[u8],
-        ) -> Result<u16, AppError> {
-            Ok(self.0)
-        }
-
-        async fn artifacts_status(
-            &self,
-            _base: &reqwest::Url,
-            _username: &str,
-            _secret: &[u8],
-            _project: &str,
-            _repository: &str,
-        ) -> Result<u16, AppError> {
-            Ok(self.0)
-        }
-    }
-
-    /// A stored Harbor row whose token is encrypted under `key`, as the service
+    /// A stored row whose token is encrypted under `key`, as the service
     /// writes it. The plaintext is a fixed fake value.
     fn row_with_token(key: &crate::auth::crypto::DerivedKey) -> CredentialRow {
         let encrypted = crate::auth::crypto::encrypt(
@@ -286,10 +227,10 @@ mod tests {
         .unwrap();
         CredentialRow {
             id: "cred-1".to_owned(),
-            service_type: "harbor".to_owned(),
+            service_type: "github".to_owned(),
             label: "h".to_owned(),
-            base_url: Some("https://harbor.example.com".to_owned()),
-            username: Some("robot$harborgate".to_owned()),
+            base_url: None,
+            username: None,
             encrypted_token: encrypted,
             expires_at: None,
             created_at: None,
@@ -301,20 +242,6 @@ mod tests {
         let state = test_state("debug").await;
         let row = row_with_token(&state.credentials_key);
         assert!(!format!("{row:?}").contains(&row.encrypted_token));
-    }
-
-    #[tokio::test]
-    async fn recorded_harbor_statuses_map_to_checks() {
-        // 412 is a working robot; 401 is wrong, disabled, or expired; 200 is a human.
-        let state = test_state("probe").await;
-        let row = row_with_token(&state.credentials_key);
-        for (status, ok) in [(412u16, true), (401, false), (200, false), (503, false)] {
-            let check = run_harbor_probe(&state, &FixedStatus(status), &row)
-                .await
-                .unwrap();
-            assert_eq!(check.ok, ok, "status {status}");
-            assert_eq!(check.name, "harbor_robot");
-        }
     }
 
     /// A GitHub probe that records each requested path. No socket is opened.
@@ -469,10 +396,9 @@ mod tests {
         assert!(!rendered.contains(&token));
     }
 
-    /// Creates an owner and one Harbor credential through the service, then returns
-    /// the owner id and the credential id.
-    async fn owner_with_harbor_credential(state: &AppState) -> (String, String) {
-        let owner = crate::services::users::create_local(
+    /// Creates an owner through the service and returns the owner id.
+    async fn owner(state: &AppState) -> String {
+        crate::services::users::create_local(
             &state.pool,
             &Actor::cli(),
             "owner",
@@ -481,35 +407,13 @@ mod tests {
             Role::User,
         )
         .await
-        .unwrap();
-        let actor = Actor {
-            user_id: Some(owner.clone()),
-            username: "owner".to_owned(),
-        };
-        let created = credentials::create(
-            &state.pool,
-            &state.credentials_key,
-            &actor,
-            &owner,
-            NewCredential {
-                service_type: "harbor".to_owned(),
-                label: "primary".to_owned(),
-                base_url: Some("https://harbor.example.com".to_owned()),
-                username: Some("robot$harborgate".to_owned()),
-                token: crate::services::ids::new_id().unwrap_or_default(),
-                expires_at: None,
-            },
-            false,
-        )
-        .await
-        .unwrap();
-        (owner, created.id)
+        .unwrap()
     }
 
     #[tokio::test]
     async fn list_items_have_mapping_count() {
         let state = test_state("list-count").await;
-        let (owner, harbor_id) = owner_with_harbor_credential(&state).await;
+        let owner = owner(&state).await;
         let actor = Actor {
             user_id: Some(owner.clone()),
             username: "owner".to_owned(),
@@ -522,25 +426,20 @@ mod tests {
             NewCredential {
                 service_type: "github".to_owned(),
                 label: "gh".to_owned(),
-                base_url: None,
-                username: None,
                 token: crate::services::ids::new_id().unwrap_or_default(),
                 expires_at: None,
             },
-            false,
         )
         .await
         .unwrap()
         .id;
-        // One mapping uses the Harbor credential on its Harbor side.
+        // One image source uses the GitHub credential.
         sqlx::query(
-            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url,
-                harbor_project, harbor_repository, github_owner, github_repo,
-                webhook_token_hash, webhook_auth_secret_hash)
-             VALUES ('m1', ?, ?, ?, 'https://harbor.example.com', 'p', 'r', 'o', 'g', 'h1', 'h2')",
+            "INSERT INTO image_sources
+                (id, user_id, hub_id, repository, tag_value, github_cred_id, github_owner, github_repo)
+             VALUES ('s1', ?, 'hub-default-ghcr', 'team/app', '*', ?, 'o', 'g')",
         )
         .bind(&owner)
-        .bind(&harbor_id)
         .bind(&github_id)
         .execute(&state.pool)
         .await
@@ -566,11 +465,8 @@ mod tests {
         .unwrap();
         let value = serde_json::to_value(&page).unwrap();
         let items = value["items"].as_array().unwrap();
-        let harbor_item = items.iter().find(|item| item["id"] == harbor_id).unwrap();
-        assert_eq!(harbor_item["label"], "primary");
-        assert_eq!(harbor_item["mapping_count"], 1);
-        // The same mapping uses the GitHub credential on its GitHub side.
         let github_item = items.iter().find(|item| item["id"] == github_id).unwrap();
+        assert_eq!(github_item["label"], "gh");
         assert_eq!(github_item["mapping_count"], 1);
     }
 
@@ -594,10 +490,8 @@ mod tests {
         };
         let body = axum::body::Bytes::from(
             serde_json::json!({
-                "service_type": "harbor",
+                "service_type": "github",
                 "label": "primary",
-                "base_url": "https://harbor.example.com",
-                "username": "robot$harborgate",
                 "token": crate::services::ids::new_id().unwrap_or_default(),
             })
             .to_string(),
@@ -637,26 +531,17 @@ mod tests {
                 crate::auth::crypto::credentials_key(&root).unwrap(),
             ),
             allow_private_oidc: false,
-            allow_private_harbor: false,
             allow_private_alerts: false,
             jwks: std::sync::Arc::new(crate::services::oidc_jwt::JwksCache::new()),
-            webhook_token_limiter: crate::api::webhooks::new_token_limiter(),
-            webhook_failure_limiter: crate::api::webhooks::new_failure_limiter(),
             backup_key: std::sync::Arc::new(crate::auth::crypto::backup_key(&root).unwrap()),
             data_dir: dir.clone(),
             backup_dir: dir.join("backups"),
             issues_client: std::sync::Arc::new(
                 crate::services::github_issues::GithubIssues::new(Default::default()).unwrap(),
             ),
-            harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
             app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
                 crate::services::app_log::REVERT_AFTER,
             )),
-            harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
-            pull_limiter: crate::api::mappings::new_pull_limiter(),
-            scanner_launch: Default::default(),
-            pickers: crate::services::pickers::PickerState::outbound(false, Default::default())
-                .unwrap(),
             github: Default::default(),
         }
     }

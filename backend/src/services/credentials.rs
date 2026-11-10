@@ -10,13 +10,13 @@ use crate::db::credentials::{self as db, CredentialRow, ListFilter};
 use crate::error::AppError;
 use crate::services::audit::{self, Actor};
 use crate::services::{
-    ids, outbound,
+    ids,
     pagination::{Page, Pagination},
     time,
 };
 
-/// The `service_type` values in `specs/database.md`.
-pub const SERVICE_HARBOR: &str = "harbor";
+/// The only `service_type`: `user_credentials` holds GitHub credentials only
+/// (`specs/spinoff-local-scan.md`, section 9).
 pub const SERVICE_GITHUB: &str = "github";
 
 /// Sort keys the list route accepts. The first is the default.
@@ -31,15 +31,13 @@ pub struct Credential {
     pub id: String,
     pub service_type: String,
     pub label: String,
-    pub base_url: Option<String>,
-    pub username: Option<String>,
     pub expires_at: Option<String>,
     pub created_at: Option<String>,
 }
 
 /// One item of the list route. The `Credential` fields are flattened in, and
-/// `mapping_count` is the number of mappings that use the credential as their Harbor
-/// or GitHub credential (`specs/api.md`, Credentials). Other responses do not carry it.
+/// `mapping_count` is the number of image sources that use the credential as their GitHub
+/// credential (`specs/api.md`, Credentials). Other responses do not carry it.
 #[derive(Debug, Serialize)]
 pub struct CredentialListItem {
     #[serde(flatten)]
@@ -51,12 +49,15 @@ pub struct CredentialListItem {
 /// dropped. `Debug` is hand-written so the token is never printed.
 #[derive(serde::Deserialize)]
 pub struct NewCredential {
+    #[serde(default = "default_service")]
     pub service_type: String,
     pub label: String,
-    pub base_url: Option<String>,
-    pub username: Option<String>,
     pub token: String,
     pub expires_at: Option<i64>,
+}
+
+fn default_service() -> String {
+    SERVICE_GITHUB.to_owned()
 }
 
 impl std::fmt::Debug for NewCredential {
@@ -64,8 +65,6 @@ impl std::fmt::Debug for NewCredential {
         f.debug_struct("NewCredential")
             .field("service_type", &self.service_type)
             .field("label", &self.label)
-            .field("base_url", &self.base_url)
-            .field("username", &self.username)
             .field("token", &"<redacted>")
             .field("expires_at", &self.expires_at)
             .finish()
@@ -76,8 +75,6 @@ impl std::fmt::Debug for NewCredential {
 #[derive(serde::Deserialize, Default)]
 pub struct CredentialPatch {
     pub label: Option<String>,
-    pub base_url: Option<String>,
-    pub username: Option<String>,
     pub token: Option<String>,
     pub expires_at: Option<i64>,
 }
@@ -86,8 +83,6 @@ impl std::fmt::Debug for CredentialPatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CredentialPatch")
             .field("label", &self.label)
-            .field("base_url", &self.base_url)
-            .field("username", &self.username)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
             .field("expires_at", &self.expires_at)
             .finish()
@@ -104,57 +99,6 @@ pub struct ListQuery {
     pub service_type: Option<String>,
     /// Admin only: list every user's credentials.
     pub all_users: bool,
-}
-
-/// Normalizes a Harbor base URL: lowercase scheme and host, no default port, no
-/// trailing slash. Requires `https://` and rejects a literal blocked address.
-/// Any violation is a `422`.
-pub fn normalize_base_url(text: &str, allow_private: bool) -> Result<String, AppError> {
-    let url = reqwest::Url::parse(text)
-        .map_err(|_| AppError::ValidationFailed("base_url must be an https:// URL.".to_owned()))?;
-    outbound::require_https(&url)
-        .map_err(|_| AppError::ValidationFailed("base_url must be an https:// URL.".to_owned()))?;
-    if url.query().is_some() || url.fragment().is_some() || !url.username().is_empty() {
-        return Err(AppError::ValidationFailed(
-            "base_url must not contain a query, fragment, or user info.".to_owned(),
-        ));
-    }
-    if let Some(host) = url.host_str() {
-        let literal = host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<std::net::IpAddr>();
-        if let Ok(ip) = literal
-            && !allow_private
-            && outbound::is_blocked(ip)
-        {
-            return Err(AppError::ValidationFailed(
-                "base_url resolves to a blocked address.".to_owned(),
-            ));
-        }
-    }
-    let host = url
-        .host_str()
-        .ok_or_else(|| AppError::ValidationFailed("base_url needs a host.".to_owned()))?
-        .to_ascii_lowercase();
-    let port = match url.port() {
-        Some(443) | None => String::new(),
-        Some(port) => format!(":{port}"),
-    };
-    let path = url.path().trim_end_matches('/');
-    Ok(format!("https://{host}{port}{path}"))
-}
-
-/// Parses a stored Harbor base URL for joining relative paths. The stored form has no
-/// trailing slash, and `Url::join` would replace its last segment, so a `/prefix` base
-/// would lose `prefix`. A trailing `/` is added first, so `join("api/...")` keeps the path.
-pub fn base_for_join(stored: &str) -> Result<reqwest::Url, AppError> {
-    let with_slash = if stored.ends_with('/') {
-        stored.to_owned()
-    } else {
-        format!("{stored}/")
-    };
-    reqwest::Url::parse(&with_slash).map_err(|_| AppError::InternalError)
 }
 
 fn validate_label(label: &str) -> Result<(), AppError> {
@@ -174,9 +118,9 @@ fn validate_token(token: &str) -> Result<(), AppError> {
 }
 
 fn validate_service(service: &str) -> Result<(), AppError> {
-    if service != SERVICE_HARBOR && service != SERVICE_GITHUB {
+    if service != SERVICE_GITHUB {
         return Err(AppError::ValidationFailed(
-            "service_type must be harbor or github.".to_owned(),
+            "service_type must be github.".to_owned(),
         ));
     }
     Ok(())
@@ -204,8 +148,6 @@ fn to_response(row: CredentialRow) -> Result<Credential, AppError> {
         id: row.id,
         service_type: row.service_type,
         label: row.label,
-        base_url: row.base_url,
-        username: row.username,
         expires_at: row.expires_at.map(time::rfc3339).transpose()?,
         created_at: row.created_at.map(time::rfc3339).transpose()?,
     })
@@ -219,30 +161,17 @@ pub async fn create(
     actor: &Actor,
     user_id: &str,
     input: NewCredential,
-    allow_private_harbor: bool,
 ) -> Result<Credential, AppError> {
     validate_service(&input.service_type)?;
     validate_label(&input.label)?;
     validate_token(&input.token)?;
-    let base_url = match input.service_type.as_str() {
-        SERVICE_HARBOR => Some(normalize_base_url_field(
-            input.base_url.as_deref(),
-            allow_private_harbor,
-        )?),
-        _ => None,
-    };
-    let username = if input.service_type == SERVICE_HARBOR {
-        input.username.clone()
-    } else {
-        None
-    };
     let id = ids::new_id()?;
     let row = CredentialRow {
         id: id.clone(),
-        service_type: input.service_type.clone(),
+        service_type: SERVICE_GITHUB.to_owned(),
         label: input.label.clone(),
-        base_url,
-        username,
+        base_url: None,
+        username: None,
         encrypted_token: encrypt_token(key, &id, &input.token)?,
         expires_at: input.expires_at,
         created_at: None,
@@ -268,16 +197,7 @@ pub async fn create(
     to_response(stored)
 }
 
-fn normalize_base_url_field(value: Option<&str>, allow_private: bool) -> Result<String, AppError> {
-    match value {
-        Some(text) => normalize_base_url(text, allow_private),
-        None => Err(AppError::ValidationFailed(
-            "base_url is required for a harbor credential.".to_owned(),
-        )),
-    }
-}
-
-/// Returns one page of credentials, each with its `mapping_count`. `all_users` is
+/// Returns one page of credentials, each with its `mapping_count` (image sources). `all_users` is
 /// honored only for admins; the route checks the role before calling this.
 pub async fn list(
     pool: &SqlitePool,
@@ -322,9 +242,7 @@ pub async fn list(
     })
 }
 
-/// Updates one credential owned by `user_id`. A `base_url` change while a mapping
-/// uses the credential as its Harbor side returns `409`. A token change writes
-/// `credential.rotate`.
+/// Updates one credential owned by `user_id`. A token change writes `credential.rotate`.
 pub async fn update(
     pool: &SqlitePool,
     key: &DerivedKey,
@@ -332,7 +250,6 @@ pub async fn update(
     user_id: &str,
     id: &str,
     patch: CredentialPatch,
-    allow_private_harbor: bool,
 ) -> Result<Credential, AppError> {
     let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
     let current = db::find_owned(&mut tx, user_id, id)
@@ -343,20 +260,6 @@ pub async fn update(
         validate_label(label)?;
         next.label = label.to_owned();
     }
-    let mut base_changed = false;
-    if let Some(url) = patch.base_url.as_deref() {
-        if current.service_type != SERVICE_HARBOR {
-            return Err(AppError::ValidationFailed(
-                "base_url applies to harbor credentials only.".to_owned(),
-            ));
-        }
-        let normalized = normalize_base_url(url, allow_private_harbor)?;
-        base_changed = current.base_url.as_deref() != Some(normalized.as_str());
-        next.base_url = Some(normalized);
-    }
-    if let Some(username) = patch.username {
-        next.username = Some(username);
-    }
     if let Some(expires) = patch.expires_at {
         next.expires_at = Some(expires);
     }
@@ -365,11 +268,6 @@ pub async fn update(
         validate_token(token)?;
         next.encrypted_token = encrypt_token(key, id, token)?;
         rotated = true;
-    }
-    if base_changed && db::harbor_mapping_refs(&mut tx, id).await? > 0 {
-        return Err(AppError::Conflict(
-            "base_url cannot change while a mapping uses this credential.".to_owned(),
-        ));
     }
     db::update_owned(&mut tx, user_id, &next).await?;
     if rotated {
@@ -406,14 +304,14 @@ pub async fn delete(
     }
     if db::mapping_refs(&mut tx, id).await? > 0 {
         return Err(AppError::Conflict(
-            "this credential is in use by a mapping.".to_owned(),
+            "this credential is in use by an image source.".to_owned(),
         ));
     }
     let removed = db::delete_owned(&mut tx, user_id, id)
         .await
         .map_err(|err| match err {
             sqlx::Error::Database(_) => {
-                AppError::Conflict("this credential is in use by a mapping.".to_owned())
+                AppError::Conflict("this credential is in use by an image source.".to_owned())
             }
             _ => AppError::InternalError,
         })?;
@@ -454,8 +352,7 @@ mod tests {
 
     // Test values only. The root key and the secrets are obviously fake.
     const ROOT: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-    const TOKEN: &str = "test-robot-secret-value";
-    const HARBOR: &str = "https://Harbor.Example.com:443/";
+    const TOKEN: &str = "test-github-secret-value";
 
     fn key() -> DerivedKey {
         let root = config::parse_encryption_key(ROOT).unwrap();
@@ -491,63 +388,18 @@ mod tests {
         .unwrap()
     }
 
-    fn harbor(label: &str) -> NewCredential {
+    fn github(label: &str) -> NewCredential {
         NewCredential {
-            service_type: SERVICE_HARBOR.to_owned(),
+            service_type: SERVICE_GITHUB.to_owned(),
             label: label.to_owned(),
-            base_url: Some(HARBOR.to_owned()),
-            username: Some("robot$harborgate".to_owned()),
             token: TOKEN.to_owned(),
             expires_at: None,
         }
     }
 
     #[test]
-    fn base_url_is_normalized() {
-        assert_eq!(
-            normalize_base_url(HARBOR, false).unwrap(),
-            "https://harbor.example.com"
-        );
-        assert_eq!(
-            normalize_base_url("https://harbor.example.com:8443/base/", false).unwrap(),
-            "https://harbor.example.com:8443/base"
-        );
-    }
-
-    #[test]
-    fn base_path_is_kept_when_joining() {
-        let stored = normalize_base_url("https://harbor.example.com/prefix/", false).unwrap();
-        let joined = base_for_join(&stored)
-            .unwrap()
-            .join("api/v2.0/users/current")
-            .unwrap();
-        assert_eq!(
-            joined.as_str(),
-            "https://harbor.example.com/prefix/api/v2.0/users/current"
-        );
-        // Without a base path the join stays at the host root.
-        let root = normalize_base_url(HARBOR, false).unwrap();
-        let root_joined = base_for_join(&root)
-            .unwrap()
-            .join("api/v2.0/users/current")
-            .unwrap();
-        assert_eq!(
-            root_joined.as_str(),
-            "https://harbor.example.com/api/v2.0/users/current"
-        );
-    }
-
-    #[test]
-    fn base_url_must_be_https_and_not_a_blocked_literal() {
-        assert!(normalize_base_url("http://harbor.example.com", false).is_err());
-        assert!(normalize_base_url("https://127.0.0.1", false).is_err());
-        assert!(normalize_base_url("https://169.254.169.254", false).is_err());
-        assert!(normalize_base_url("https://127.0.0.1", true).is_ok());
-    }
-
-    #[test]
     fn debug_output_hides_the_token() {
-        let input = harbor("label");
+        let input = github("label");
         assert!(!format!("{input:?}").contains(TOKEN));
         let patch = CredentialPatch {
             token: Some(TOKEN.to_owned()),
@@ -557,19 +409,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_github_credentials_are_accepted() {
+        let (pool, dir) = fresh_pool("service").await;
+        let owner = user(&pool, "owner").await;
+        let mut input = github("x");
+        input.service_type = "harbor".to_owned();
+        assert!(matches!(
+            create(&pool, &key(), &actor(&owner), &owner, input).await,
+            Err(AppError::ValidationFailed(_))
+        ));
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn create_stores_only_ciphertext_and_returns_no_token() {
         let (pool, dir) = fresh_pool("create").await;
         let owner = user(&pool, "owner").await;
-        let created = create(
-            &pool,
-            &key(),
-            &actor(&owner),
-            &owner,
-            harbor("primary"),
-            false,
-        )
-        .await
-        .unwrap();
+        let created = create(&pool, &key(), &actor(&owner), &owner, github("primary"))
+            .await
+            .unwrap();
         let json = serde_json::to_string(&created).unwrap();
         assert!(!json.contains(TOKEN));
         let row = load_owned(&pool, &owner, &created.id).await.unwrap();
@@ -586,7 +445,7 @@ mod tests {
         let (pool, dir) = fresh_pool("tenancy").await;
         let owner = user(&pool, "owner").await;
         let other = user(&pool, "other").await;
-        let created = create(&pool, &key(), &actor(&owner), &owner, harbor("mine"), false)
+        let created = create(&pool, &key(), &actor(&owner), &owner, github("mine"))
             .await
             .unwrap();
         assert!(matches!(
@@ -598,16 +457,7 @@ mod tests {
             ..CredentialPatch::default()
         };
         assert!(matches!(
-            update(
-                &pool,
-                &key(),
-                &actor(&other),
-                &other,
-                &created.id,
-                patch,
-                false
-            )
-            .await,
+            update(&pool, &key(), &actor(&other), &other, &created.id, patch).await,
             Err(AppError::NotFound)
         ));
         assert!(matches!(
@@ -624,24 +474,16 @@ mod tests {
     async fn token_change_rotates_and_writes_audit() {
         let (pool, dir) = fresh_pool("rotate").await;
         let owner = user(&pool, "owner").await;
-        let created = create(&pool, &key(), &actor(&owner), &owner, harbor("r"), false)
+        let created = create(&pool, &key(), &actor(&owner), &owner, github("r"))
             .await
             .unwrap();
         let patch = CredentialPatch {
             token: Some("test-new-secret".to_owned()),
             ..CredentialPatch::default()
         };
-        update(
-            &pool,
-            &key(),
-            &actor(&owner),
-            &owner,
-            &created.id,
-            patch,
-            false,
-        )
-        .await
-        .unwrap();
+        update(&pool, &key(), &actor(&owner), &owner, &created.id, patch)
+            .await
+            .unwrap();
         let row = load_owned(&pool, &owner, &created.id).await.unwrap();
         let plain = decrypt_token(&key(), &row).unwrap();
         assert_eq!(plain.as_slice(), b"test-new-secret");
@@ -655,117 +497,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[tokio::test]
-    async fn base_url_change_while_mapped_returns_conflict() {
-        let (pool, dir) = fresh_pool("base-conflict").await;
-        let owner = user(&pool, "owner").await;
-        let harbor_cred = create(&pool, &key(), &actor(&owner), &owner, harbor("h"), false)
-            .await
-            .unwrap();
-        let github = create(
-            &pool,
-            &key(),
-            &actor(&owner),
-            &owner,
-            NewCredential {
-                service_type: SERVICE_GITHUB.to_owned(),
-                label: "gh".to_owned(),
-                base_url: None,
-                username: None,
-                token: TOKEN.to_owned(),
-                expires_at: None,
-            },
-            false,
-        )
-        .await
-        .unwrap();
-        // A mapping row uses the Harbor credential. Mapping CRUD is issue #22, so the
-        // row is inserted directly here.
+    /// Inserts an image source that uses `github_cred`. The source table replaces the
+    /// mapping table as the credential's user (`specs/spinoff-local-scan.md`, section 9).
+    async fn insert_source(pool: &SqlitePool, id: &str, owner: &str, github_cred: &str) {
         sqlx::query(
-            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url,
-                harbor_project, harbor_repository, github_owner, github_repo,
-                webhook_token_hash, webhook_auth_secret_hash)
-             VALUES ('m1', ?, ?, ?, 'https://harbor.example.com', 'p', 'r', 'o', 'g', 'h1', 'h2')",
+            "INSERT INTO image_sources
+                (id, user_id, hub_id, repository, tag_value, github_cred_id, github_owner, github_repo)
+             VALUES (?, ?, 'hub-default-ghcr', ?, '*', ?, 'o', 'g')",
         )
-        .bind(&owner)
-        .bind(&harbor_cred.id)
-        .bind(&github.id)
-        .execute(&pool)
+        .bind(id)
+        .bind(owner)
+        .bind(format!("team/{id}"))
+        .bind(github_cred)
+        .execute(pool)
         .await
         .unwrap();
-        let patch = CredentialPatch {
-            base_url: Some("https://other.example.com".to_owned()),
-            ..CredentialPatch::default()
-        };
-        let result = update(
-            &pool,
-            &key(),
-            &actor(&owner),
-            &owner,
-            &harbor_cred.id,
-            patch,
-            false,
-        )
-        .await;
-        assert!(matches!(result, Err(AppError::Conflict(_))));
-        // A label change is still allowed while the mapping exists.
-        let label = CredentialPatch {
-            label: Some("renamed".to_owned()),
-            ..CredentialPatch::default()
-        };
-        update(
-            &pool,
-            &key(),
-            &actor(&owner),
-            &owner,
-            &harbor_cred.id,
-            label,
-            false,
-        )
-        .await
-        .unwrap();
-        pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn delete_of_a_credential_in_use_returns_conflict() {
         let (pool, dir) = fresh_pool("delete-conflict").await;
         let owner = user(&pool, "owner").await;
-        let harbor_cred = create(&pool, &key(), &actor(&owner), &owner, harbor("h"), false)
+        let cred = create(&pool, &key(), &actor(&owner), &owner, github("gh"))
             .await
             .unwrap();
-        let github = create(
-            &pool,
-            &key(),
-            &actor(&owner),
-            &owner,
-            NewCredential {
-                service_type: SERVICE_GITHUB.to_owned(),
-                label: "gh".to_owned(),
-                base_url: None,
-                username: None,
-                token: TOKEN.to_owned(),
-                expires_at: None,
-            },
-            false,
-        )
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url,
-                harbor_project, harbor_repository, github_owner, github_repo,
-                webhook_token_hash, webhook_auth_secret_hash)
-             VALUES ('m1', ?, ?, ?, 'https://harbor.example.com', 'p', 'r', 'o', 'g', 'h1', 'h2')",
-        )
-        .bind(&owner)
-        .bind(&harbor_cred.id)
-        .bind(&github.id)
-        .execute(&pool)
-        .await
-        .unwrap();
+        insert_source(&pool, "s1", &owner, &cred.id).await;
         assert!(matches!(
-            delete(&pool, &actor(&owner), &owner, &harbor_cred.id).await,
+            delete(&pool, &actor(&owner), &owner, &cred.id).await,
             Err(AppError::Conflict(_))
         ));
         pool.close().await;
@@ -777,7 +535,7 @@ mod tests {
         let (pool, dir) = fresh_pool("list").await;
         let owner = user(&pool, "owner").await;
         for label in ["b", "a", "c"] {
-            create(&pool, &key(), &actor(&owner), &owner, harbor(label), false)
+            create(&pool, &key(), &actor(&owner), &owner, github(label))
                 .await
                 .unwrap();
         }
@@ -799,117 +557,27 @@ mod tests {
             service_type: Some(SERVICE_GITHUB.to_owned()),
             ..ListQuery::default()
         };
-        assert_eq!(list(&pool, &owner, &github_only).await.unwrap().total, 0);
+        assert_eq!(list(&pool, &owner, &github_only).await.unwrap().total, 3);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Inserts a mapping row directly. Mapping CRUD is issue #22, so the test rows are
-    /// written here. Each argument that is unique in `repo_mappings` is distinct.
-    async fn insert_mapping(
-        pool: &SqlitePool,
-        id: &str,
-        owner: &str,
-        harbor_cred: &str,
-        github_cred: &str,
-        repository: &str,
-    ) {
-        sqlx::query(
-            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url,
-                harbor_project, harbor_repository, github_owner, github_repo,
-                webhook_token_hash, webhook_auth_secret_hash)
-             VALUES (?, ?, ?, ?, 'https://harbor.example.com', 'p', ?, 'o', ?, ?, 'h2')",
-        )
-        .bind(id)
-        .bind(owner)
-        .bind(harbor_cred)
-        .bind(github_cred)
-        .bind(repository)
-        .bind(repository)
-        .bind(format!("hash-{id}"))
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
     #[tokio::test]
-    async fn list_counts_mappings_on_either_side() {
-        let (pool, dir) = fresh_pool("mapping-count").await;
+    async fn list_counts_image_sources_per_credential() {
+        let (pool, dir) = fresh_pool("source-count").await;
         let owner = user(&pool, "owner").await;
-        // harbor_used: Harbor side of two mappings. github_used: GitHub side of one.
-        // github_second: GitHub side of one. unused: no mapping.
-        let harbor_used = create(&pool, &key(), &actor(&owner), &owner, harbor("h"), false)
+        let used = create(&pool, &key(), &actor(&owner), &owner, github("used"))
             .await
             .unwrap();
-        let github_used = create(
-            &pool,
-            &key(),
-            &actor(&owner),
-            &owner,
-            NewCredential {
-                service_type: SERVICE_GITHUB.to_owned(),
-                label: "gh-used".to_owned(),
-                base_url: None,
-                username: None,
-                token: TOKEN.to_owned(),
-                expires_at: None,
-            },
-            false,
-        )
-        .await
-        .unwrap();
-        let github_second = create(
-            &pool,
-            &key(),
-            &actor(&owner),
-            &owner,
-            NewCredential {
-                service_type: SERVICE_GITHUB.to_owned(),
-                label: "gh-second".to_owned(),
-                base_url: None,
-                username: None,
-                token: TOKEN.to_owned(),
-                expires_at: None,
-            },
-            false,
-        )
-        .await
-        .unwrap();
-        let unused = create(
-            &pool,
-            &key(),
-            &actor(&owner),
-            &owner,
-            NewCredential {
-                service_type: SERVICE_GITHUB.to_owned(),
-                label: "unused".to_owned(),
-                base_url: None,
-                username: None,
-                token: TOKEN.to_owned(),
-                expires_at: None,
-            },
-            false,
-        )
-        .await
-        .unwrap();
-        insert_mapping(
-            &pool,
-            "m1",
-            &owner,
-            &harbor_used.id,
-            &github_used.id,
-            "repo-one",
-        )
-        .await;
-        insert_mapping(
-            &pool,
-            "m2",
-            &owner,
-            &harbor_used.id,
-            &github_second.id,
-            "repo-two",
-        )
-        .await;
+        let second = create(&pool, &key(), &actor(&owner), &owner, github("second"))
+            .await
+            .unwrap();
+        let unused = create(&pool, &key(), &actor(&owner), &owner, github("unused"))
+            .await
+            .unwrap();
+        insert_source(&pool, "s1", &owner, &used.id).await;
+        insert_source(&pool, "s2", &owner, &used.id).await;
+        insert_source(&pool, "s3", &owner, &second.id).await;
         let page = list(&pool, &owner, &ListQuery::default()).await.unwrap();
         let count_of = |id: &str| -> i64 {
             page.items
@@ -918,9 +586,8 @@ mod tests {
                 .map(|item| item.mapping_count)
                 .unwrap()
         };
-        assert_eq!(count_of(&harbor_used.id), 2);
-        assert_eq!(count_of(&github_used.id), 1);
-        assert_eq!(count_of(&github_second.id), 1);
+        assert_eq!(count_of(&used.id), 2);
+        assert_eq!(count_of(&second.id), 1);
         assert_eq!(count_of(&unused.id), 0);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);

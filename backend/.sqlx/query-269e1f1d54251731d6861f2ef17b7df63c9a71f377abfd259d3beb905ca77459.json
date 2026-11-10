@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM sync_jobs\n         WHERE status = 'failed'\n           AND (? = 1 OR source_id IN (SELECT id FROM image_sources WHERE user_id = ?))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "269e1f1d54251731d6861f2ef17b7df63c9a71f377abfd259d3beb905ca77459"
+}

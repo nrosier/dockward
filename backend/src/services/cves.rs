@@ -9,7 +9,7 @@
 //! runs before any other parameter is validated, and every parameter is validated before the
 //! list query runs.
 //!
-//! The CVE id, package, fixed-in version and description come from Harbor and are untrusted.
+//! The CVE id, package, fixed-in version and description come from the scanners and are untrusted.
 //! They are returned as JSON string values only; nothing here builds markup or logs them.
 
 use serde::Serialize;
@@ -32,7 +32,7 @@ const MAX_ID_BYTES: usize = 128;
 /// The longest `q` search text, in characters.
 pub const MAX_Q_CHARS: usize = 100;
 
-/// The longest `package`, `tag`, `harbor_project` or `harbor_repository` filter, in
+/// The longest `package`, `tag`, `namespace` or `repository` filter, in
 /// characters (`specs/api.md`, CVEs, list filters).
 pub const MAX_FILTER_CHARS: usize = 256;
 
@@ -63,7 +63,7 @@ impl Reader<'_> {
 }
 
 /// Raw query values of both list routes, as strings, so nothing is rejected before the
-/// mapping check. Every one is validated in [`list`]. `mapping_id` and `scope` are read by
+/// mapping check. Every one is validated in [`list`]. `source_id` and `scope` are read by
 /// `GET /cves` only.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct ListParams {
@@ -77,28 +77,24 @@ pub struct ListParams {
     pub q: Option<String>,
     pub package: Option<String>,
     pub tag: Option<String>,
-    pub harbor_project: Option<String>,
-    pub harbor_repository: Option<String>,
-    pub mapping_id: Option<String>,
+    /// The first path segment of the source's repository (decision 38).
+    pub namespace: Option<String>,
+    /// `<hub host>/<repository>`.
+    pub repository: Option<String>,
+    pub source_id: Option<String>,
     pub scope: Option<String>,
     /// #257: `true` or `false`.
     pub has_issue: Option<String>,
     /// #265: a comma list of `available` and `none`.
     pub fix: Option<String>,
-    /// #257: the new name of `harbor_project`; wins when both are sent.
-    pub project: Option<String>,
-    /// #257: the new name of `harbor_repository`; wins when both are sent.
-    pub repository: Option<String>,
-    /// #257: the new name of `mapping_id`; wins when both are sent.
-    pub mapping: Option<String>,
 }
 
 /// One CVE of one mapping (`specs/api.md`, CVEs, `CveSummary`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CveSummary {
-    /// `<mapping_id>:<cve_id>`, the id of `GET /cves/:id` and the POST routes.
+    /// `<source_id>:<cve_id>`, the id of `GET /cves/:id` and the POST routes.
     pub id: String,
-    pub mapping_id: String,
+    pub source_id: String,
     pub cve_id: String,
     /// The highest severity across the tags.
     pub severity: String,
@@ -124,8 +120,8 @@ pub struct CveSummary {
 impl CveSummary {
     fn from_row(row: CveSummaryRow) -> Result<Self, AppError> {
         Ok(Self {
-            id: format!("{}:{}", row.mapping_id, row.cve_id),
-            mapping_id: row.mapping_id,
+            id: format!("{}:{}", row.source_id, row.cve_id),
+            source_id: row.source_id,
             cve_id: row.cve_id,
             severity: row.severity,
             open_severity: row.open_severity,
@@ -164,7 +160,7 @@ pub struct CveDetail {
     /// At most 10, most recently scanned first.
     pub tags: Vec<CveTag>,
     pub acceptance: Option<Acceptance>,
-    /// The Harbor description from the most recently scanned tag's row, or `null`.
+    /// The scanner description from the most recently scanned tag's row, or `null`.
     pub description: Option<String>,
     /// True when no newest-digest row of the CVE is `open` and a row on an older tag is
     /// (#196). The UI shows the inline older-tags notice.
@@ -181,7 +177,7 @@ fn valid_cve_id(id: &str) -> bool {
 
 /// True for an id the mapping routes can hold: 1 to 128 bytes of ASCII letters, digits,
 /// `.`, `_` and `-`.
-fn valid_mapping_id(id: &str) -> bool {
+fn valid_source_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_ID_BYTES
         && id
@@ -189,13 +185,13 @@ fn valid_mapping_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// Splits the route id `<mapping_id>:<cve_id>` with the rules of the issue and accept routes.
+/// Splits the route id `<source_id>:<cve_id>` with the rules of the issue and accept routes.
 /// Any other shape, an empty part, a part over 128 bytes, or a character outside the allowed
 /// set is `404`, before any database call.
 fn split_id(id: &str) -> Result<(&str, &str), AppError> {
     match id.split_once(':') {
-        Some((mapping_id, cve_id)) if valid_mapping_id(mapping_id) && valid_cve_id(cve_id) => {
-            Ok((mapping_id, cve_id))
+        Some((source_id, cve_id)) if valid_source_id(source_id) && valid_cve_id(cve_id) => {
+            Ok((source_id, cve_id))
         }
         _ => Err(AppError::NotFound),
     }
@@ -203,15 +199,15 @@ fn split_id(id: &str) -> Result<(&str, &str), AppError> {
 
 /// `404` unless the mapping exists and the reader may read it. A malformed id is `404` too,
 /// with no database call.
-async fn check_mapping(
+async fn check_source(
     pool: &SqlitePool,
     reader: &Reader<'_>,
-    mapping_id: &str,
+    source_id: &str,
 ) -> Result<(), AppError> {
-    if !valid_mapping_id(mapping_id) {
+    if !valid_source_id(source_id) {
         return Err(AppError::NotFound);
     }
-    if db::mapping_readable(pool, mapping_id, reader.owner_scope()).await? {
+    if db::source_readable(pool, source_id, reader.owner_scope()).await? {
         Ok(())
     } else {
         Err(AppError::NotFound)
@@ -226,18 +222,10 @@ struct Filters {
     q: Option<String>,
     package: Option<String>,
     tag: Option<String>,
-    harbor_project: Option<String>,
-    harbor_repository: Option<String>,
+    namespace: Option<String>,
+    repository: Option<String>,
     has_issue: Option<i64>,
     fixes: Vec<&'static str>,
-}
-
-/// The value of a renamed parameter: the new name when it is non-empty, else the old one.
-fn renamed<'a>(new: Option<&'a str>, old: Option<&'a str>) -> Option<&'a str> {
-    match new {
-        Some(value) if !value.is_empty() => Some(value),
-        _ => old,
-    }
 }
 
 /// A comma-separated list of known values, each kept once in the order of `known`. An
@@ -341,17 +329,8 @@ fn parse_filters(params: &ListParams) -> Result<Filters, AppError> {
         q,
         package: parse_text(params.package.as_deref(), "package")?,
         tag: parse_text(params.tag.as_deref(), "tag")?,
-        harbor_project: parse_text(
-            renamed(params.project.as_deref(), params.harbor_project.as_deref()),
-            "project",
-        )?,
-        harbor_repository: parse_text(
-            renamed(
-                params.repository.as_deref(),
-                params.harbor_repository.as_deref(),
-            ),
-            "repository",
-        )?,
+        namespace: parse_text(params.namespace.as_deref(), "namespace")?,
+        repository: parse_text(params.repository.as_deref(), "repository")?,
         has_issue,
         fixes,
     })
@@ -370,35 +349,35 @@ fn parse_number(value: Option<&str>, message: &str) -> Result<Option<i64>, AppEr
 
 /// One page of CVE summaries.
 ///
-/// `path_mapping` is the `:id` of `GET /mappings/:id/cves`, and `None` for `GET /cves`.
+/// `path_source` is the `:id` of `GET /image-sources/:id/cves`, and `None` for `GET /cves`.
 /// `params` is the parsed query string, or the error for one that could not be parsed.
 ///
-/// Order: the mapping check runs first (the path mapping, then the `mapping_id` filter), so
+/// Order: the mapping check runs first (the path mapping, then the `source_id` filter), so
 /// another tenant's mapping is `404` whatever else the request says. Then `scope=all` from a
 /// non-admin is `403`. Then every parameter is validated: `400` for a bad one, including
 /// `page_size` over 200 and an unknown `sort`. Only then does the list query run.
 pub async fn list(
     pool: &SqlitePool,
     reader: &Reader<'_>,
-    path_mapping: Option<&str>,
+    path_source: Option<&str>,
     params: Result<ListParams, AppError>,
     now: i64,
 ) -> Result<Page<CveSummary>, AppError> {
-    if let Some(mapping_id) = path_mapping {
-        check_mapping(pool, reader, mapping_id).await?;
+    if let Some(source_id) = path_source {
+        check_source(pool, reader, source_id).await?;
     }
     let params = params?;
-    let mapping_id = match path_mapping {
-        Some(mapping_id) => Some(mapping_id),
-        None => match renamed(params.mapping.as_deref(), params.mapping_id.as_deref()) {
-            Some(mapping_id) => {
-                check_mapping(pool, reader, mapping_id).await?;
-                Some(mapping_id)
+    let source_id = match path_source {
+        Some(source_id) => Some(source_id),
+        None => match params.source_id.as_deref().filter(|id| !id.is_empty()) {
+            Some(source_id) => {
+                check_source(pool, reader, source_id).await?;
+                Some(source_id)
             }
             None => None,
         },
     };
-    let all_users = match (path_mapping, params.scope.as_deref()) {
+    let all_users = match (path_source, params.scope.as_deref()) {
         (Some(_), _) | (None, None) => false,
         (None, Some("all")) if reader.is_admin => true,
         (None, Some("all")) => return Err(AppError::Forbidden),
@@ -416,14 +395,14 @@ pub async fn list(
     )?;
     let filters = parse_filters(&params)?;
     // A checked mapping needs no owner filter: an admin may read it, and a user owns it.
-    let user_id = if mapping_id.is_some() || all_users {
+    let user_id = if source_id.is_some() || all_users {
         None
     } else {
         Some(reader.user_id)
     };
     let filter = CveListFilter {
         user_id,
-        mapping_id,
+        source_id,
         cve_id: None,
         severities: &filters.severities,
         statuses: &filters.statuses,
@@ -431,8 +410,8 @@ pub async fn list(
         q: filters.q.as_deref(),
         package: filters.package.as_deref(),
         tag: filters.tag.as_deref(),
-        harbor_project: filters.harbor_project.as_deref(),
-        harbor_repository: filters.harbor_repository.as_deref(),
+        namespace: filters.namespace.as_deref(),
+        repository: filters.repository.as_deref(),
         has_issue: filters.has_issue,
         fixes: &filters.fixes,
         sort: &paging.sort,
@@ -466,27 +445,27 @@ fn to_tag(row: &CveTagRow) -> Result<CveTag, AppError> {
     })
 }
 
-/// One tag of `GET /mappings/:id/tags`. Names and counts only.
+/// One tag of `GET /image-sources/:id/tags`. Names and counts only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MappingTag {
+pub struct SourceTag {
     pub image_tag: String,
     pub last_scan_at: String,
     pub open_cves: i64,
 }
 
-/// `GET /mappings/:id/tags`: the CVE view's tag set of the mapping, most recently scanned
+/// `GET /image-sources/:id/tags`: the CVE view's tag set of the mapping, most recently scanned
 /// first, at most 10. Another tenant's mapping and an unknown one are both `404`.
-pub async fn mapping_tags(
+pub async fn source_tags(
     pool: &SqlitePool,
     reader: &Reader<'_>,
-    mapping_id: &str,
-) -> Result<Vec<MappingTag>, AppError> {
-    check_mapping(pool, reader, mapping_id).await?;
-    db::tracked_tags(pool, mapping_id)
+    source_id: &str,
+) -> Result<Vec<SourceTag>, AppError> {
+    check_source(pool, reader, source_id).await?;
+    db::tracked_tags(pool, source_id)
         .await?
         .into_iter()
         .map(|row| {
-            Ok(MappingTag {
+            Ok(SourceTag {
                 image_tag: row.image_tag,
                 last_scan_at: time::rfc3339(row.last_scan_at)?,
                 open_cves: row.open_cves,
@@ -495,7 +474,7 @@ pub async fn mapping_tags(
         .collect()
 }
 
-/// `GET /cves/:id`. `id` is `<mapping_id>:<cve_id>`. A malformed id, another tenant's
+/// `GET /cves/:id`. `id` is `<source_id>:<cve_id>`. A malformed id, another tenant's
 /// mapping, and a CVE the mapping has no row for are all `404`.
 pub async fn detail(
     pool: &SqlitePool,
@@ -503,11 +482,11 @@ pub async fn detail(
     id: &str,
     now: i64,
 ) -> Result<CveDetail, AppError> {
-    let (mapping_id, cve_id) = split_id(id)?;
-    check_mapping(pool, reader, mapping_id).await?;
+    let (source_id, cve_id) = split_id(id)?;
+    check_source(pool, reader, source_id).await?;
     let filter = CveListFilter {
         user_id: None,
-        mapping_id: Some(mapping_id),
+        source_id: Some(source_id),
         cve_id: Some(cve_id),
         severities: &[],
         statuses: &[],
@@ -515,8 +494,8 @@ pub async fn detail(
         q: None,
         package: None,
         tag: None,
-        harbor_project: None,
-        harbor_repository: None,
+        namespace: None,
+        repository: None,
         has_issue: None,
         fixes: &[],
         sort: "cve_id",
@@ -533,7 +512,7 @@ pub async fn detail(
         .next()
         .ok_or(AppError::NotFound)?;
     let summary = CveSummary::from_row(row)?;
-    let tag_rows = db::cve_tags(pool, mapping_id, cve_id).await?;
+    let tag_rows = db::cve_tags(pool, source_id, cve_id).await?;
     let older_tags_only = !tag_rows
         .iter()
         .any(|row| row.newest_digest && row.status == "open")
@@ -544,13 +523,13 @@ pub async fn detail(
     let tags = tag_rows.iter().map(to_tag).collect::<Result<Vec<_>, _>>()?;
     let acceptance = {
         let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
-        acceptance_db::active(&mut conn, mapping_id, cve_id, now).await?
+        acceptance_db::active(&mut conn, source_id, cve_id, now).await?
     };
     let acceptance = match acceptance {
         None => None,
         Some(row) => Some(Acceptance {
             id: row.id,
-            mapping_id: row.mapping_id,
+            source_id: row.source_id,
             cve_id: row.cve_id,
             reason: row.reason,
             created_by: row.created_by_username,
@@ -645,11 +624,11 @@ mod tests {
                 ..ListParams::default()
             },
             ListParams {
-                harbor_project: Some(long.clone()),
+                namespace: Some(long.clone()),
                 ..ListParams::default()
             },
             ListParams {
-                harbor_repository: Some("a\u{7}".to_owned()),
+                repository: Some("a\u{7}".to_owned()),
                 ..ListParams::default()
             },
         ];
@@ -666,8 +645,8 @@ mod tests {
             q: Some("OpenSSL".to_owned()),
             package: Some("OpenSSL".to_owned()),
             tag: Some("v1.2".to_owned()),
-            harbor_project: Some("proj".to_owned()),
-            harbor_repository: Some("team/app".to_owned()),
+            namespace: Some("proj".to_owned()),
+            repository: Some("ghcr.io/team/app".to_owned()),
             ..ListParams::default()
         })
         .unwrap();
@@ -697,8 +676,8 @@ mod tests {
             "exact, not folded"
         );
         assert_eq!(good.tag.as_deref(), Some("v1.2"));
-        assert_eq!(good.harbor_project.as_deref(), Some("proj"));
-        assert_eq!(good.harbor_repository.as_deref(), Some("team/app"));
+        assert_eq!(good.namespace.as_deref(), Some("proj"));
+        assert_eq!(good.repository.as_deref(), Some("ghcr.io/team/app"));
     }
 
     #[test]
