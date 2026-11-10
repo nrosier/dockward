@@ -12,7 +12,7 @@ use tokio::net::TcpListener;
 
 use super::*;
 use crate::db;
-use crate::services::discovery::handler::{MSG_PULL_UNAVAILABLE, SpinoffJobs};
+use crate::services::discovery::handler::SpinoffJobs;
 use crate::services::registry::manifest::{OCI_INDEX, OCI_MANIFEST};
 use crate::worker::{JobHandler, JobOutcome};
 
@@ -63,7 +63,7 @@ impl Script {
         routes.get(target).or_else(|| routes.get(path)).cloned()
     }
 
-    fn hits(&self) -> Vec<String> {
+    pub(crate) fn hits(&self) -> Vec<String> {
         self.hits
             .lock()
             .map(|hits| hits.clone())
@@ -738,7 +738,7 @@ async fn the_discover_handler_records_a_job_run_and_maps_failures_to_fixed_text(
 }
 
 #[tokio::test]
-async fn the_job_handler_fails_pull_with_the_fixed_text_and_other_kinds_permanently() {
+async fn the_job_handler_maps_pull_errors_to_fixed_text_and_other_kinds_permanently() {
     let env = env("dispatch").await;
     let key = Arc::new(
         crate::auth::crypto::credentials_key(
@@ -748,22 +748,35 @@ async fn the_job_handler_fails_pull_with_the_fixed_text_and_other_kinds_permanen
         .unwrap(),
     );
     let notifier = crate::services::alerts::Notifier::new(env.pool.clone(), key, false);
-    let handler = SpinoffJobs::new(env.discovery.clone(), notifier);
+    let handler = SpinoffJobs::new(
+        env.discovery.clone(),
+        notifier,
+        env.pool.clone(),
+        crate::services::storage::StoreRoot::at(env.dir.join("images")),
+    );
     let job = |payload: &str| crate::db::sync_jobs::ClaimedJob {
         id: "j".to_owned(),
         source_id: None,
         attempts: 0,
         payload: payload.to_owned(),
     };
+    // A pull for a platform row that does not exist fails with the fixed not-found text.
     assert_eq!(
         handler
             .run(job(
-                r#"{"kind":"pull","platform_id":"p","digest":"d","trigger":"first_pull"}"#
+                r#"{"kind":"pull","platform_id":"00000000000000000000000000000009","digest":"d","trigger":"first_pull"}"#
             ))
             .await,
-        JobOutcome::Failed(MSG_PULL_UNAVAILABLE.to_owned())
+        JobOutcome::Failed("image not found in registry".to_owned())
     );
-    assert_eq!(MSG_PULL_UNAVAILABLE, "pull is not available yet");
+    assert_eq!(
+        handler
+            .run(job(
+                r#"{"kind":"pull","platform_id":"../x","digest":"d","trigger":"t"}"#
+            ))
+            .await,
+        JobOutcome::Permanent("job payload is not valid".to_owned())
+    );
     assert_eq!(
         handler.run(job(r#"{"kind":"scan"}"#)).await,
         JobOutcome::Permanent(crate::worker::MSG_UNHANDLED.to_owned())

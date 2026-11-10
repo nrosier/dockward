@@ -68,7 +68,7 @@ const MAX_PLATFORM_BYTES: usize = 64;
 /// The fixed text for an anonymous Docker Hub pull refused for the rate limit (decision 40).
 pub const MSG_DOCKER_HUB_RATE_LIMIT: &str = "docker hub rate limit reached";
 /// The fixed text for a job payload that cannot be read.
-const MSG_BAD_PAYLOAD: &str = "job payload is not valid";
+pub(crate) const MSG_BAD_PAYLOAD: &str = "job payload is not valid";
 const MSG_INTERNAL: &str = "internal error";
 
 /// The payload of a `discover` job: ids only. `source_id` limits a manual scan to one source.
@@ -98,7 +98,7 @@ impl DiscoverPayload {
     }
 }
 
-/// The payload of a `pull` job: the platform row and its digest. The pull itself is the next PR.
+/// The payload of a `pull` job: the platform row and its digest. The pull job reads the rest from the platform row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullPayload {
     pub kind: String,
@@ -117,13 +117,14 @@ pub fn fixed_text(error: &AppError) -> String {
         AppError::UpstreamStatus(code) => format!("registry returned status {code}"),
         AppError::UpstreamContentInvalid => "image content did not match its digest".to_owned(),
         AppError::ImageTooLarge => "image is larger than the allowed size".to_owned(),
+        AppError::InsufficientDisk => "not enough disk space".to_owned(),
         _ => MSG_INTERNAL.to_owned(),
     }
 }
 
 /// The job outcome for a failed run. A `429` defers, except an anonymous Docker Hub pull, which
 /// is a failure on the backoff (decision 40). A name outside the grammar cannot heal by retrying.
-fn failure(error: &AppError, docker_anonymous: bool, now: i64) -> JobOutcome {
+pub(crate) fn failure(error: &AppError, docker_anonymous: bool, now: i64) -> JobOutcome {
     match error {
         AppError::RateLimited if docker_anonymous => {
             JobOutcome::Failed(MSG_DOCKER_HUB_RATE_LIMIT.to_owned())
@@ -247,7 +248,15 @@ impl Discovery {
 
     /// The decrypted credential of a source, or `None`. The token lives in the returned value
     /// only and is zeroized when the session drops it.
-    async fn credential_for(&self, source_id: &str) -> Result<Option<Credential>, AppError> {
+    /// The registry client, shared with the pull job.
+    pub(crate) fn client(&self) -> &RegistryClient {
+        &self.client
+    }
+
+    pub(crate) async fn credential_for(
+        &self,
+        source_id: &str,
+    ) -> Result<Option<Credential>, AppError> {
         let mut conn = self
             .pool
             .acquire()

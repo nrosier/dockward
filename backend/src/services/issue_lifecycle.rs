@@ -970,7 +970,9 @@ async fn scanner_state(
 /// The scanner keys the operator enabled: `scanners.enabled` of `system_config`, a comma
 /// separated list of `grype` and `trivy`. An unset or unusable value enables both. Unknown
 /// words are ignored.
-async fn enabled_scanner_keys(conn: &mut sqlx::SqliteConnection) -> Result<Vec<String>, AppError> {
+pub(crate) async fn enabled_scanner_keys(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<String>, AppError> {
     let value = runs_db::enabled_scanners_setting_in(conn).await?;
     let listed: Vec<String> = value
         .as_deref()
