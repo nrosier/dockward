@@ -309,7 +309,7 @@ mod tests {
             &actor(&admin, "test-admin"),
             "test-new",
             None,
-            &format!("{}", "short"),
+            "short",
             Role::User,
         )
         .await;
