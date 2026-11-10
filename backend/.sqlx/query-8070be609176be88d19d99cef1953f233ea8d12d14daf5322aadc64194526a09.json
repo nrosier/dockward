@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cve_id AS \"cve_id!\" FROM cve_acceptances\n           WHERE source_id = ? AND revoked_at IS NULL\n             AND (expires_at IS NULL OR expires_at > ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "cve_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_acceptances",
+            "name": "cve_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8070be609176be88d19d99cef1953f233ea8d12d14daf5322aadc64194526a09"
+}

@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", label AS \"label!\", encrypted_token AS \"encrypted_token!\",\n                  expires_at, created_at\n           FROM user_credentials\n           WHERE (? IS NULL OR user_id = ?) AND (? IS NULL OR 'github' = ?)\n           ORDER BY\n             CASE WHEN ? = 'label' AND ? = 1 THEN label END ASC,\n             CASE WHEN ? = 'label' AND ? = -1 THEN label END DESC,\n             CASE WHEN ? = 'created_at' AND ? = 1 THEN created_at END ASC,\n             CASE WHEN ? = 'created_at' AND ? = -1 THEN created_at END DESC,\n             CASE WHEN ? = 'expires_at' AND ? = 1 THEN expires_at END ASC,\n             CASE WHEN ? = 'expires_at' AND ? = -1 THEN expires_at END DESC,\n             id ASC\n           LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "label!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "label"
+          }
+        }
+      },
+      {
+        "name": "encrypted_token!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "encrypted_token"
+          }
+        }
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "user_credentials",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 18
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "25ce77215dfe90953961e10fd5c9f7ceba64d0bc493b5c02830cf4c3e70a7db1"
+}

@@ -24,6 +24,7 @@ use sqlx::SqlitePool;
 use crate::api::hardening::RateLimiter;
 use crate::auth::crypto::DerivedKey;
 use crate::db::mappings::MappingRow;
+// TODO(spinoff part 2): bridge. db::scanner_reports was deleted or ported to scan_runs in Step 1a; this Harbor-pipeline caller is removed or rewritten in part 3.
 use crate::db::scanner_reports::{self as scanner_db, HarborScannerUpsert};
 use crate::db::sync_jobs;
 use crate::error::{AppError, ErrorDetail};

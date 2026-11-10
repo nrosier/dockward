@@ -22,6 +22,7 @@ use zeroize::Zeroizing;
 use crate::auth::crypto::DerivedKey;
 use crate::db::credentials::{self as credential_db, CredentialRow};
 use crate::db::mappings::{self as mapping_db, MappingRow};
+// TODO(spinoff part 2): bridge. db::scanner_reports was deleted or ported to scan_runs in Step 1a; this Harbor-pipeline caller is removed or rewritten in part 3.
 use crate::db::scanner_reports as scanner_db;
 use crate::db::sync_jobs::ClaimedJob;
 use crate::db::sync_reports::{self as report_db, NewReport};
@@ -787,6 +788,7 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
     /// fails the job for backoff, like a report Harbor does not have yet.
     async fn merged_report(&self, context: &Context) -> Flow<Value> {
         let mapping = &context.mapping;
+        // TODO(spinoff part 2): bridge. merged_view::load (now takes an image id) was deleted or ported to scan_runs in Step 1a; this Harbor-pipeline caller is removed or rewritten in part 3.
         let merged = merged_view::load(
             &self.pool,
             &mapping.id,

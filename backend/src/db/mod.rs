@@ -5,7 +5,6 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePo
 pub mod acceptances;
 pub mod alert_channels;
 pub mod alert_deliveries;
-pub mod artifact_removal;
 #[allow(dead_code)] // Used by the audit writer and the admin audit list.
 pub mod audit;
 pub mod backup;
@@ -19,10 +18,10 @@ pub mod job_runs;
 pub mod key_rotation;
 pub mod mappings;
 pub mod retention;
-#[allow(dead_code)] // Used by the scanner services added in later parts of #224.
-pub mod scanner_reports;
+pub mod scan_runs;
 #[allow(dead_code)] // Used by the setup and login services.
 pub mod setup;
+pub mod sources;
 #[allow(dead_code)] // Used by the pull and eviction jobs (Steps 4 and 5).
 pub mod storage;
 #[allow(dead_code)] // Used by the job worker and the retry route.

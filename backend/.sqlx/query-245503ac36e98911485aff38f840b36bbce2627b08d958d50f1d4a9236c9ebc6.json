@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE publish_reports SET github_sarif_id = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "245503ac36e98911485aff38f840b36bbce2627b08d958d50f1d4a9236c9ebc6"
+}

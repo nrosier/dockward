@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO image_sources (\n                id, user_id, hub_id, repository, tag_value, github_cred_id, github_owner, github_repo)\n             VALUES ('src-1', 'user-1', 'hub-default-ghcr', 'nrosier/walley', 'latest',\n                'cred-gh', 'owner', 'repo')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "577631c220c01b07124846a569d09231fe87e2f3e0d2bb07506faed510be529e"
+}

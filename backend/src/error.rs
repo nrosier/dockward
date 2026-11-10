@@ -229,7 +229,8 @@ impl AppError {
             AppError::InsufficientDisk => "An internal error occurred.".to_owned(),
             AppError::Scanner(fault) => fault.text().to_owned(),
             AppError::LegacyDatabase => {
-                "this database was created by HarborGate and cannot be used by this version".to_owned()
+                "this database was created by HarborGate and cannot be used by this version"
+                    .to_owned()
             }
         }
     }

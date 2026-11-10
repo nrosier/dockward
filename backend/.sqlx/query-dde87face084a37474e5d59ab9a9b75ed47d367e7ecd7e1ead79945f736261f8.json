@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO publish_reports\n            (id, source_id, sync_job_id, image_tag, image_digest,\n             commit_sha, vulnerability_summary, sarif_status)\n         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "dde87face084a37474e5d59ab9a9b75ed47d367e7ecd7e1ead79945f736261f8"
+}

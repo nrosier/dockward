@@ -159,10 +159,7 @@ pub async fn mapping_refs(conn: &mut SqliteConnection, id: &str) -> Result<i64, 
 }
 
 /// Harbor credentials no longer exist. Always zero (`specs/spinoff-local-scan.md`, section 9).
-pub async fn harbor_mapping_refs(
-    _conn: &mut SqliteConnection,
-    _id: &str,
-) -> Result<i64, AppError> {
+pub async fn harbor_mapping_refs(_conn: &mut SqliteConnection, _id: &str) -> Result<i64, AppError> {
     Ok(0)
 }
 

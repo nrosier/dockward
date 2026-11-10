@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM publish_reports WHERE synced_at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "3a8ecc16c0bdab5e12804f060e81390cf4d199d22b0fefdc9202d719c09cce4e"
+}

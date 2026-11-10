@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT value AS \"value!\" FROM system_config WHERE key = 'scanners.enabled'",
+  "describe": {
+    "columns": [
+      {
+        "name": "value!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "system_config",
+            "name": "value"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "24eb2fa996b4ea175828e6ac93fee5389b87a88cd96cb1a28d25aa8e67502e3d"
+}

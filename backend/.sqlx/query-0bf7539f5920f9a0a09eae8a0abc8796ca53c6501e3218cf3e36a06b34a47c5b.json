@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", source_id AS \"mapping_id!\", cve_id AS \"cve_id!\",\n                  reason AS \"reason!\", created_by_username AS \"created_by_username!\",\n                  created_at, expires_at\n           FROM cve_acceptances\n           WHERE source_id = ? AND cve_id = ? AND revoked_at IS NULL\n             AND (expires_at IS NULL OR expires_at > ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_acceptances",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "mapping_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_acceptances",
+            "name": "source_id"
+          }
+        }
+      },
+      {
+        "name": "cve_id!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_acceptances",
+            "name": "cve_id"
+          }
+        }
+      },
+      {
+        "name": "reason!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_acceptances",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "created_by_username!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_acceptances",
+            "name": "created_by_username"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "cve_acceptances",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "cve_acceptances",
+            "name": "expires_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "0bf7539f5920f9a0a09eae8a0abc8796ca53c6501e3218cf3e36a06b34a47c5b"
+}

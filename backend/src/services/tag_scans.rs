@@ -14,8 +14,10 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 
 use crate::db::mappings::MappingRow;
+// TODO(spinoff part 2): bridge. db::scanner_reports was deleted or ported to scan_runs in Step 1a; this Harbor-pipeline caller is removed or rewritten in part 3.
 use crate::db::scanner_reports::{self as scanner_db, TagScanJob, UNKNOWN_SCANNER_UUID};
 use crate::error::AppError;
+// TODO(spinoff part 2): bridge. merged_view::unlinked_name and UNKNOWN_SCANNER_NAME was deleted or ported to scan_runs in Step 1a; this Harbor-pipeline caller is removed or rewritten in part 3.
 use crate::services::merged_view::{UNKNOWN_SCANNER_NAME, unlinked_name};
 use crate::services::resolve::NOTE_ARTIFACT_GONE;
 use crate::services::scanner_launch::valid_tag;

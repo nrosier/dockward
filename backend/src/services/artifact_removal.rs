@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use serde_json::json;
 use sqlx::SqlitePool;
 
+// TODO(spinoff part 2): bridge. db::artifact_removal was deleted or ported to scan_runs in Step 1a; this Harbor-pipeline caller is removed or rewritten in part 3.
 use crate::db::artifact_removal as removal_db;
 use crate::db::mappings::{self as mapping_db, MappingRow};
 use crate::db::sync_jobs::ClaimedJob;

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\" FROM image_sources\n           WHERE github_owner = ? AND github_repo = ? AND id <> ?\n           ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "77985f3e0392b3c8fff47f165658efe81a4286f04370ea74d47ba6ba406fad66"
+}

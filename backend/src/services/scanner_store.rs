@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::db::mappings::{self as mapping_db, MappingRow};
+// TODO(spinoff part 2): bridge. db::scanner_reports was deleted or ported to scan_runs in Step 1a; this Harbor-pipeline caller is removed or rewritten in part 3.
 use crate::db::scanner_reports::{
     self as scanner_db, HarborScannerUpsert, NewScannerFinding, NewScannerReport,
     UNKNOWN_SCANNER_UUID,
@@ -300,6 +301,7 @@ async fn recompute_digest(
     let Some(mapping) = mapping_db::find_by_id(conn, mapping_id).await? else {
         return Ok(());
     };
+    // TODO(spinoff part 2): bridge. merged_view::load_in (now takes an image id) was deleted or ported to scan_runs in Step 1a; this Harbor-pipeline caller is removed or rewritten in part 3.
     let merged = merged_view::load_in(conn, mapping_id, harbor_base_url, digest).await?;
     let report = merged_view::first_per_cve(&merged_view::to_report(&merged.findings));
     for tag in scanner_db::synced_tags_for_digest(conn, mapping_id, digest).await? {
