@@ -11,12 +11,15 @@
 //! tested against a temporary SQLite database.
 
 pub mod eviction;
+pub mod job;
 pub mod layout;
 pub mod limits;
 pub mod pull;
 pub mod repository;
 pub mod startup;
 
+#[cfg(test)]
+mod job_tests;
 #[cfg(test)]
 mod tests;
 

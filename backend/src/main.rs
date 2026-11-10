@@ -600,6 +600,26 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         tracing::info!(requeued, "re-queued sync jobs left running at startup");
     }
 
+    // Store repair (section 4): a pull cut off by the last process is marked failed so its retry
+    // can start, `.tmp` and orphan layouts are removed, and a half-done eviction is completed.
+    // Counts only are logged. A failure is logged with fixed text and does not stop the start.
+    let store = services::storage::StoreRoot::under(&state.data_dir);
+    match services::storage::startup::repair(
+        &services::storage::repository::SqlStoreRepository::new(state.pool.clone()),
+        &store,
+        worker::now_secs(),
+    )
+    .await
+    {
+        Ok(report) => tracing::info!(
+            evictions_completed = report.evictions_completed,
+            pulls_failed = report.pulls_failed,
+            directories_removed = report.directories_removed,
+            "image store repaired"
+        ),
+        Err(_) => tracing::warn!("image store repair did not finish"),
+    }
+
     // The stop flag flips to true on the first signal. The server stops accepting
     // connections and drains in-flight requests. The instant of the signal is sent first,
     // so one 8-second budget (`drain`) covers the server and the background tasks.
@@ -614,7 +634,7 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
     // The worker stops taking jobs on the same signal. A job it already took finishes.
     let worker_pool = state.pool.clone();
     let worker_stop = stop_rx.clone();
-    // `discover` has a handler. `pull` fails with a fixed message until the pull step lands,
+    // `discover` has a handler. `pull` pulls into `<data dir>/images`,
     // and the scan and publish kinds fail permanently as before.
     let notifier = services::alerts::Notifier::new(
         state.pool.clone(),
@@ -624,6 +644,8 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
     let handler = Arc::new(services::discovery::handler::SpinoffJobs::new(
         state.discovery.clone(),
         notifier,
+        state.pool.clone(),
+        services::storage::StoreRoot::under(&state.data_dir),
     ));
     let worker_task = tokio::spawn(async move {
         worker::run(worker_pool, handler, worker_stop).await;

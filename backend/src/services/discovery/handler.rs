@@ -1,9 +1,7 @@
 //! The worker's job handler for the spinoff job kinds (`specs/spinoff-local-scan.md`, section 5
 //! and section 6).
 //!
-//! `discover` runs the discovery service. `pull` is queued by discovery and is not implemented
-//! yet: it fails with a fixed message and retries on the backoff, so a job queued now can
-//! succeed once the pull step lands. Every other kind has no handler yet and fails once,
+//! `discover` runs the discovery service. `pull` runs the pull job (`services::storage::job`). Every other kind has no handler yet and fails once,
 //! permanently, as before.
 
 use std::sync::Arc;
@@ -13,10 +11,10 @@ use serde::Deserialize;
 use crate::db::sync_jobs::ClaimedJob;
 use crate::services::alerts::Notifier;
 use crate::services::discovery::Discovery;
+use crate::services::storage::StoreRoot;
+use crate::services::storage::job::run_pull;
 use crate::worker::{JobHandler, JobOutcome, MSG_UNHANDLED};
-
-/// The fixed text of a `pull` job until the pull step exists.
-pub const MSG_PULL_UNAVAILABLE: &str = "pull is not available yet";
+use sqlx::SqlitePool;
 
 #[derive(Deserialize)]
 struct KindOnly {
@@ -27,13 +25,22 @@ struct KindOnly {
 pub struct SpinoffJobs {
     discovery: Arc<Discovery>,
     notifier: Notifier,
+    pool: SqlitePool,
+    store: StoreRoot,
 }
 
 impl SpinoffJobs {
-    pub fn new(discovery: Arc<Discovery>, notifier: Notifier) -> Self {
+    pub fn new(
+        discovery: Arc<Discovery>,
+        notifier: Notifier,
+        pool: SqlitePool,
+        store: StoreRoot,
+    ) -> Self {
         Self {
             discovery,
             notifier,
+            pool,
+            store,
         }
     }
 }
@@ -49,7 +56,16 @@ impl JobHandler for SpinoffJobs {
                     .run_discover(&job.payload, crate::worker::now_secs())
                     .await
             }
-            Some("pull") => JobOutcome::Failed(MSG_PULL_UNAVAILABLE.to_owned()),
+            Some("pull") => {
+                run_pull(
+                    &self.pool,
+                    &self.discovery,
+                    &self.store,
+                    &job,
+                    crate::worker::now_secs(),
+                )
+                .await
+            }
             _ => JobOutcome::Permanent(MSG_UNHANDLED.to_owned()),
         }
     }

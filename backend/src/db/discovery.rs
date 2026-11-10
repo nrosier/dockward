@@ -270,6 +270,37 @@ pub struct ImageRow {
     pub digest: String,
 }
 
+/// A platform row with the hub fields needed to reach its registry, for the `pull` job.
+#[derive(Debug, Clone)]
+pub struct PlatformTarget {
+    pub state: String,
+    pub platform_digest: String,
+    pub hub_host: String,
+    pub pull_endpoint: Option<String>,
+    pub repository: String,
+}
+
+/// One platform row by id, with its image's hub and repository.
+pub async fn find_platform_target(
+    conn: &mut SqliteConnection,
+    platform_id: &str,
+) -> Result<Option<PlatformTarget>, AppError> {
+    sqlx::query_as!(
+        PlatformTarget,
+        r#"SELECT p.state AS "state!", p.platform_digest AS "platform_digest!",
+                  h.host AS "hub_host!", h.pull_endpoint AS "pull_endpoint?",
+                  i.repository AS "repository!"
+           FROM image_platforms p
+           JOIN images i ON i.id = p.image_id
+           JOIN hubs h ON h.id = i.hub_id
+           WHERE p.id = ?"#,
+        platform_id
+    )
+    .fetch_optional(conn)
+    .await
+    .map_err(db_err)
+}
+
 /// One image by id.
 pub async fn find_image(
     conn: &mut SqliteConnection,
