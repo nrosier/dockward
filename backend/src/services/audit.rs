@@ -40,6 +40,7 @@ pub const ACTIONS: &[&str] = &[
     "sync_job.purge",
     "log.level_change",
     "artifact.remove",
+    "image.evict",
 ];
 
 /// Key names (lowercased) that mark a value as a secret. Any key that contains

@@ -245,6 +245,14 @@ impl PullSession<'_> {
 
     /// Fetches the manifest or index for `reference` (an exact tag or a `sha256:` digest).
     pub async fn manifest(&mut self, reference: &str) -> Result<Parsed, AppError> {
+        let raw = self.manifest_raw(reference).await?;
+        manifest::parse(&raw.media_type, &raw.bytes)
+    }
+
+    /// Fetches the manifest or index bytes for `reference` as the registry sent them, with the
+    /// media type. The storage writer keeps these bytes unchanged in the OCI layout, because
+    /// their digest is the one the layout names.
+    pub async fn manifest_raw(&mut self, reference: &str) -> Result<RawManifest, AppError> {
         let target = match parse_reference(reference)? {
             Reference::Tag(tag) => tag,
             Reference::Digest(digest) => digest,
@@ -253,7 +261,10 @@ impl PullSession<'_> {
         let body = self
             .get_body(&path, MANIFEST_ACCEPT, MANIFEST_MAX_BYTES)
             .await?;
-        manifest::parse(&body.content_type, &body.bytes)
+        Ok(RawManifest {
+            bytes: body.bytes,
+            media_type: body.content_type,
+        })
     }
 
     /// Lists the tags of the repository, following `Link: rel="next"` pages. A next link that
@@ -484,6 +495,14 @@ struct Body {
     next_link: NextLink,
 }
 
+/// A manifest or index as the registry sent it: the exact bytes and the media type without its
+/// parameters. Nothing is parsed here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawManifest {
+    pub bytes: Vec<u8>,
+    pub media_type: String,
+}
+
 /// A destination for streamed blob bytes. A pull writes into its temporary directory.
 pub trait BlobSink {
     fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), AppError>;
@@ -509,7 +528,7 @@ pub fn disk_guard(free_bytes: u64, min_free_bytes: u64) -> Result<(), AppError> 
 }
 
 /// The `sha256:` digest text of a 32-byte hash, as lowercase hex.
-fn sha256_digest_text(bytes: &[u8]) -> String {
+pub fn sha256_digest_text(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(7 + bytes.len() * 2);
     text.push_str("sha256:");
     for byte in bytes {
