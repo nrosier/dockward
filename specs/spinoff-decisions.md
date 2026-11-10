@@ -85,3 +85,6 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 47. GitHub issues are keyed by GitHub repository and CVE, as today. Sources that target the same GitHub repository share one issue per CVE. The issue closes only when no source for that GitHub repository reports the CVE. This supersedes the per-source-issue reading of decision 37 for issues; decision 37 still gives each source its own alerts and findings.
 
 48. Step 1 part 1 ports the kept code to the new tables in the same part: issue_lifecycle and merged_view read scan_runs and scanner_findings, and the kept tests are ported, not ignored or deleted. Harbor-only tests are removed with their code in part 3. The build stays green at each merge.
+
+49. The newest image of a source is the tag observation with the latest first_seen_at for that tag (tag_observations.first_seen_at). A tag that moves to a new digest becomes newest on the next discovery. Used by findings, mappings, sync_jobs, github_issues and dashboard.
+50. The kept callers merged_view and issue_lifecycle are ported to scan_runs and scanner_findings (per decision 48). scanner_reports and artifact_removal are Harbor-only and are deleted once their kept callers no longer reference them.
