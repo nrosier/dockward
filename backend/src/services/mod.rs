@@ -41,7 +41,6 @@ pub mod retention;
 pub mod sarif;
 pub mod scan;
 pub mod scan_settings;
-#[allow(dead_code)] // The spinoff refresh job calls the scanner runner (the next step).
 pub mod scanner;
 #[allow(dead_code)] // Used by the session extractor and logout routes.
 pub mod sessions;

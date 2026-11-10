@@ -12,6 +12,7 @@ pub mod backup;
 pub mod config;
 pub mod credentials;
 pub mod dashboard;
+pub mod db_refresh;
 pub mod discovery;
 pub mod findings;
 pub mod github_issues;

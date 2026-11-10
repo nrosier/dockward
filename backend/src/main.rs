@@ -711,13 +711,19 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         stop_rx.clone(),
     ));
 
+    // The scanner databases refresh every 24 hours (decision 4).
+    let db_update_task = tokio::spawn(services::scanner::db_update::run(
+        state.pool.clone(),
+        stop_rx.clone(),
+    ));
+
     let mut graceful = stop_rx.clone();
     let router = app(settings.trusted_proxies.clone(), state)
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
     let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
         let _ = graceful.wait_for(|stopped| *stopped).await;
     });
-    let tasks = vec![worker_task, retention_task, discovery_task];
+    let tasks = vec![worker_task, retention_task, discovery_task, db_update_task];
 
     let mut serve = Box::pin(std::future::IntoFuture::into_future(serve));
     let first = tokio::select! {

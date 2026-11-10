@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT platform_digest AS \"platform_digest!\" FROM image_platforms\n           WHERE state = 'stored' ORDER BY platform_digest",
+  "describe": {
+    "columns": [
+      {
+        "name": "platform_digest!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "platform_digest"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0a7f00eb8182c66bab1d34de87f15b38b00f4c8d5536c93bcca2dd4fc7800376"
+}
