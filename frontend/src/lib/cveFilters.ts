@@ -19,7 +19,8 @@ export interface CveFilterState {
   hasIssue: HasIssue;
   // Empty or both means no fix filter (#265).
   fixes: FixValue[];
-  project: string;
+  // The first path segment of the repository (decision 38).
+  namespace: string;
   repository: string;
   tag: string;
   mapping: string;
@@ -71,8 +72,8 @@ export function parseFilters(params: URLSearchParams): CveFilterState {
     statuses: parseStatuses(params),
     hasIssue: hasIssue === "true" || hasIssue === "false" ? hasIssue : "",
     fixes: pick(params.get("fix"), FIXES),
-    project: renamed(params, "project", "harbor_project"),
-    repository: renamed(params, "repository", "harbor_repository"),
+    namespace: params.get("namespace") ?? "",
+    repository: params.get("repository") ?? "",
     tag: params.get("tag") ?? "",
     mapping: renamed(params, "mapping", "mapping_id"),
   };
@@ -96,7 +97,7 @@ export function toUrlParams(state: CveFilterState): Record<string, string> {
   if (state.fixes.length > 0) {
     out.fix = state.fixes.join(",");
   }
-  for (const name of ["project", "repository", "tag", "mapping"] as const) {
+  for (const name of ["namespace", "repository", "tag", "mapping"] as const) {
     if (state[name] !== "") {
       out[name] = state[name];
     }
@@ -117,12 +118,16 @@ export const FILTER_KEYS = [
   "status",
   "has_issue",
   "fix",
-  "project",
+  "namespace",
   "repository",
   "tag",
   "mapping",
   "accepted",
-  "harbor_project",
-  "harbor_repository",
   "mapping_id",
 ] as const;
+
+// The namespace of a repository path: its first segment (decision 33).
+export function namespaceOf(repository: string): string {
+  const slash = repository.indexOf("/");
+  return slash < 0 ? repository : repository.slice(0, slash);
+}

@@ -88,19 +88,6 @@ describe("SyncJobsPage", () => {
     expect(within(table).getAllByText(t("syncJobs.noNewVulns"))).toHaveLength(1);
   });
 
-  it("a refused scheduled scan shows the fixed catalog message (#191)", async () => {
-    stub([
-      {
-        ...failed,
-        trigger: "schedule",
-        last_error: "Harbor refused to start the scan; grant the robot account the Scan permission",
-        image: { repo_full_name: "platform/billing-worker", tag: null, digest: null },
-      },
-    ]);
-    renderAt(<SyncJobsPage />);
-    expect(await screen.findByText(t("sync.note.scanForbidden"))).toBeInTheDocument();
-  });
-
   it("a failed job still shows its error", async () => {
     stub([failed]);
     renderAt(<SyncJobsPage />);

@@ -102,7 +102,7 @@ export default function CvesPage() {
     setParams(
       (current) => {
         const updated = new URLSearchParams(current);
-        for (const legacy of ["accepted", "harbor_project", "harbor_repository", "mapping_id"]) {
+        for (const legacy of ["accepted", "mapping_id"]) {
           updated.delete(legacy);
         }
         for (const [name, value] of Object.entries(toUrlParams(filters))) {

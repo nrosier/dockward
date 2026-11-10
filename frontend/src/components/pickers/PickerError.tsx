@@ -4,8 +4,6 @@ import { ApiError } from "../../lib/api";
 import { Button } from "../ui/Button";
 
 const DETAIL = {
-  harbor_identity: "mapping.errors.detail.harborIdentity",
-  robot_scope: "mapping.errors.detail.robotScope",
   github_token: "mapping.errors.detail.githubToken",
   wrong_credential_type: "mapping.errors.detail.wrongCredentialType",
 } as const;
@@ -74,16 +72,5 @@ export function PickerError({ error, onRetry, stamp }: { error: unknown; onRetry
     <div role="alert" className="flex flex-col gap-1.5 rounded-lg border border-crit/45 bg-crit/12 px-3 py-2 text-[13px] text-crit-ink">
       {bodyOf(error, onRetry, stamp)}
     </div>
-  );
-}
-
-// The failure of a hide action. A 422 here is the 1,000-item cap (the name came
-// from the list, so it passed the name checks); anything else is generic.
-export function HideError({ error }: { error: unknown }) {
-  const capped = error instanceof ApiError && error.status === 422;
-  return (
-    <p role="alert" className="rounded-lg border border-crit/45 bg-crit/12 px-3 py-2 text-[13px] text-crit-ink">
-      {capped ? t("mapping.hide.cap") : t("errors.generic")}
-    </p>
   );
 }

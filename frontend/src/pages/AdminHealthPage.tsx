@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Badge, CardHeading, daysLeft, formatDate, ROW, TD, TH } from "../components/admin/parts";
+import { Badge, CardHeading, ROW, TD, TH } from "../components/admin/parts";
 import { HEALTH_INTERVAL_MS } from "../components/shell/Topbar";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
@@ -7,8 +7,6 @@ import { ErrorMessage, LoadingMessage } from "../components/ui/StatusMessage";
 import { t } from "../i18n";
 import { api } from "../lib/api";
 import type { HealthCheck, HealthReport } from "../types/api";
-
-const WARNING_DAYS = 14;
 
 function CheckPill({ check }: { check: HealthCheck }) {
   if (!check.reachable) {
@@ -81,49 +79,9 @@ export default function AdminHealthPage() {
           {health.isFetching ? t("admin.health.checking") : t("admin.health.checkNow")}
         </Button>
       </div>
-      <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
-        <ChecksCard id="health-harbor" title={t("admin.health.harbor")} checks={report.harbor} />
+      <div className="grid grid-cols-1 gap-5">
         <ChecksCard id="health-github" title={t("admin.health.github")} checks={report.github} />
       </div>
-
-      <Card className="flex flex-col gap-3 py-5" aria-labelledby="health-robot">
-        <div className="px-5">
-          <CardHeading id="health-robot" title={t("admin.health.robot")} help={t("admin.health.robotHelp")} />
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse">
-            <thead>
-              <tr>
-                <th className={TH}>{t("admin.health.col.credential")}</th>
-                <th className={TH}>{t("admin.health.col.expires")}</th>
-                <th className={TH}>{t("admin.health.col.daysLeft")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {report.robot_accounts.map((robot) => {
-                const left = robot.days_left ?? daysLeft(robot.expires_at);
-                return (
-                  <tr key={robot.credential_id} className={ROW}>
-                    <td className={TD}>{robot.label}</td>
-                    <td className={`${TD} text-muted`}>
-                      {robot.expires_at === null ? t("admin.health.noExpiry") : formatDate(robot.expires_at)}
-                    </td>
-                    <td className={TD}>
-                      {left === null ? (
-                        <span className="text-muted">{t("admin.health.dash")}</span>
-                      ) : left <= WARNING_DAYS ? (
-                        <Badge tone="warn">{t("account.credentials.days", { n: Math.max(left, 0) })}</Badge>
-                      ) : (
-                        <span className="text-muted">{t("account.credentials.days", { n: left })}</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </Card>
 
       <Card className="flex flex-col gap-3 py-5" aria-labelledby="health-scan">
         <div className="px-5">

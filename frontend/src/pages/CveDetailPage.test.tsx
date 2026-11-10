@@ -9,9 +9,7 @@ import CveDetailPage from "./CveDetailPage";
 const mapping: Mapping = {
   id: "m1",
   user_id: "u1",
-  harbor_cred_id: "c1",
   github_cred_id: "c2",
-  harbor_base_url: "https://harbor.example.org",
   harbor_project: "platform",
   harbor_repository: "api-gateway",
   github_owner: "example-org",
@@ -20,9 +18,6 @@ const mapping: Mapping = {
   auto_create_issues: true,
   min_issue_severity: "HIGH",
   created_at: null,
-  scan_schedule: "off",
-  scan_time: "00:00",
-  scan_weekday: 1,
 };
 
 function cve(over: Partial<CveDetail>): CveDetail {

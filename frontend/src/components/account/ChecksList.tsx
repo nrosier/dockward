@@ -2,7 +2,6 @@ import { t, type MessageKey } from "../../i18n";
 import type { CheckResult } from "../../types/api";
 
 const NAMES: Record<string, MessageKey> = {
-  harbor_robot: "credentials.check.harbor_robot",
   github_repo: "credentials.check.github_repo",
   github_code_scanning: "credentials.check.github_code_scanning",
   github_issues: "credentials.check.github_issues",

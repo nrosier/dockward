@@ -1,5 +1,4 @@
 import { useQuery } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
 import { Link } from "react-router";
 import { PageHeader } from "../components/mappings/PageHeader";
 import { LINK, TABLE, TD, TH } from "../components/mappings/styles";
@@ -10,7 +9,6 @@ import { JobStatusPill } from "../components/syncjobs/jobPill";
 import { triggerLabel } from "../components/syncjobs/labels";
 import { RetryButton } from "../components/syncjobs/RetryButton";
 import { Time } from "../components/syncjobs/Time";
-import { buttonClass } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Panel } from "../components/mappings/Panel";
 import { Pill, type PillKind } from "../components/ui/Pill";
@@ -64,10 +62,6 @@ export default function DashboardPage() {
   const header = (
     <PageHeader title={t("page.dashboard")} subtitle={t("dashboard.subtitle")}>
       <ScopeToggle />
-      <Link to="/mappings/new" className={buttonClass("primary")}>
-        <Plus aria-hidden="true" size={16} />
-        {t("dashboard.newMapping")}
-      </Link>
     </PageHeader>
   );
 

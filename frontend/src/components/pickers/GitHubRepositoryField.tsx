@@ -1,15 +1,13 @@
 import { useState } from "react";
 import { t } from "../../i18n";
 import type { GitHubRepository } from "../../types/api";
-import { Button } from "../ui/Button";
 import { Field } from "../ui/Field";
 import { Pill } from "../ui/Pill";
 import { Tooltip } from "../ui/Tooltip";
 import { Combobox, type ComboOption } from "./Combobox";
 import { Note, Pager } from "./PickerControls";
-import { HideError, PickerError } from "./PickerError";
+import { PickerError } from "./PickerError";
 import { useDebounced } from "./useDebounced";
-import { useHide } from "./useHide";
 import { usePickerList } from "./usePickerList";
 
 interface Props {
@@ -31,7 +29,6 @@ export function GitHubRepositoryField({ credentialId, value, error, onText, onPi
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
-  const hide = useHide();
   // A new credential starts the list clean. The input stays mounted so typing
   // is not interrupted when the default credential is filled in.
   const [seenCredential, setSeenCredential] = useState(credentialId);
@@ -62,12 +59,6 @@ export function GitHubRepositoryField({ credentialId, value, error, onText, onPi
       setPage(1);
       onPick(item.owner, item.repo);
     },
-    action: (
-      <Button variant="small" disabled={hide.pending} onClick={() => hide.hide({ source: "github", full_name: item.full_name })}>
-        {t("mapping.hide.action")}
-        <span className="sr-only">{item.full_name}</span>
-      </Button>
-    ),
   }));
 
   return (
@@ -93,7 +84,6 @@ export function GitHubRepositoryField({ credentialId, value, error, onText, onPi
         }}
       >
         {list.isError ? <PickerError error={list.error} stamp={list.errorUpdatedAt} onRetry={() => void list.refetch()} /> : null}
-        {hide.failed ? <HideError error={hide.error} /> : null}
         {list.data === undefined ? null : (
           <>
             {list.data.items.length === 0 ? <p className="text-[12.5px] text-muted">{t("mapping.picker.empty")}</p> : null}
