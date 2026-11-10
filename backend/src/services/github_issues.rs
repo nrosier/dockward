@@ -82,18 +82,18 @@ pub fn issue_body(
     severity: &str,
     package: &str,
     fixed_in: Option<&str>,
-    harbor_repo: &str,
+    image: &str,
     description: Option<&str>,
 ) -> String {
     let fixed = fixed_in.unwrap_or("none yet");
     let mut body = format!(
-        "{}\n\n| Field | Value |\n| --- | --- |\n| CVE | {} |\n| Severity | {} |\n| Package | {} |\n| Fixed in | {} |\n| Harbor repository | {} |\n",
+        "{}\n\n| Field | Value |\n| --- | --- |\n| CVE | {} |\n| Severity | {} |\n| Package | {} |\n| Fixed in | {} |\n| Image | {} |\n",
         marker(cve_id),
         cell(cve_id),
         cell(severity),
         cell(package),
         cell(fixed),
-        cell(harbor_repo),
+        cell(image),
     );
     if let Some(text) = description.map(str::trim).filter(|text| !text.is_empty()) {
         body.push_str("\nDescription:\n\n");
@@ -983,7 +983,7 @@ mod tests {
         assert_eq!(body.lines().next(), Some("<!-- harborgate:CVE-2026-1 -->"));
         assert!(body.contains("| Severity | CRITICAL |"));
         assert!(body.contains("| Fixed in | 1.2.4 |"));
-        assert!(body.contains("| Harbor repository | library/app |"));
+        assert!(body.contains("| Image | library/app |"));
 
         // The body it produces is found again by the marker lookup.
         let issues = vec![ref_of(1, &body)];
@@ -1035,10 +1035,7 @@ mod tests {
         );
         let one = with_found_by(&body, "Found by 1 scanner: `Trivy`").unwrap();
         let lines: Vec<&str> = one.split('\n').collect();
-        let table_end = lines
-            .iter()
-            .position(|l| l.starts_with("| Harbor repository"))
-            .unwrap();
+        let table_end = lines.iter().position(|l| l.starts_with("| Image")).unwrap();
         assert_eq!(lines[table_end + 1], "");
         assert_eq!(lines[table_end + 2], "Found by 1 scanner: `Trivy`");
         assert_eq!(lines[0], marker("CVE-2026-1"), "the marker stays first");

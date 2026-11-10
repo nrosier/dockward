@@ -1,6 +1,6 @@
 //! Sync job routes (`specs/api.md`, Sync jobs). Every handler takes `AuthUser`, so a missing
 //! or invalid session is `401`. Tenancy is enforced in the service: another tenant's job or
-//! mapping is `404` (or an empty page for a foreign `mapping_id` filter).
+//! source is `404` (or an empty page for a foreign `source_id` filter).
 
 use axum::{
     Json,
@@ -26,7 +26,7 @@ pub struct SyncJobListParams {
     pub order: Option<String>,
     pub scope: Option<String>,
     pub status: Option<String>,
-    pub mapping_id: Option<String>,
+    pub source_id: Option<String>,
 }
 
 /// `GET /api/v1/sync-jobs`. `scope=all` is honored for admins only; another role gets `403`.
@@ -47,13 +47,13 @@ pub async fn list(
         sort: params.sort,
         order: params.order,
         status: params.status,
-        mapping_id: params.mapping_id,
+        source_id: params.source_id,
         all_users,
     };
     Ok(Json(sync_jobs::list(&state.pool, &user.id, &query).await?))
 }
 
-/// Reads the purge `scope` query: none is the caller's own mappings, `all` is admin only.
+/// Reads the purge `scope` query: none is the caller's own sources, `all` is admin only.
 fn purge_scope(user: &AuthUser, scope: Option<&str>) -> Result<bool, AppError> {
     match scope {
         None => Ok(false),
@@ -107,7 +107,7 @@ pub async fn get(
     ))
 }
 
-/// `POST /api/v1/sync-jobs/:id/retry`. The mapping owner or an admin. Returns `200`
+/// `POST /api/v1/sync-jobs/:id/retry`. The source owner or an admin. Returns `200`
 /// with the `SyncJob`. Only a `failed` job can be retried (`409` otherwise).
 pub async fn retry(
     State(state): State<AppState>,
@@ -139,7 +139,7 @@ mod tests {
         (pool, dir)
     }
 
-    /// One user `owner` with mapping `m1`, which has a job `job-1` with `payload`.
+    /// One user `owner` with source `m1`, which has a job `job-1` with `payload`.
     async fn seed_job(pool: &sqlx::SqlitePool, payload: &str) {
         sqlx::query(
             "INSERT INTO users (id, username, role, token_version) VALUES ('owner', 'owner', 'user', 0)",
@@ -148,22 +148,21 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
-             VALUES ('c1', 'owner', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
-                    ('c2', 'owner', 'github', 'g', NULL, NULL, 'v1:fake')",
+            "INSERT INTO user_credentials (id, user_id, label, encrypted_token)
+             VALUES ('c2', 'owner', 'g', 'v1:fake')",
         )
         .execute(pool)
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
-             VALUES ('m1', 'owner', 'c1', 'c2', 'https://harbor.example.com', 'p', 'r', 'o', 'g', 'h1', 'h2')",
+            "INSERT INTO image_sources (id, user_id, hub_id, repository, tag_value, github_cred_id, github_owner, github_repo)
+             VALUES ('m1', 'owner', 'hub-default-ghcr', 'p/r', '*', 'c2', 'o', 'g')",
         )
         .execute(pool)
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO sync_jobs (id, mapping_id, status, attempts, payload, created_at, updated_at)
+            "INSERT INTO sync_jobs (id, source_id, status, attempts, payload, created_at, updated_at)
              VALUES ('job-1', 'm1', 'done', 1, ?, 1000, 2000)",
         )
         .bind(payload)
@@ -181,8 +180,8 @@ mod tests {
         )
         .await;
         sqlx::query(
-            "INSERT INTO sync_reports (id, mapping_id, sync_job_id, harbor_repository, image_tag, image_digest, commit_sha, vulnerability_summary, sarif_status, synced_at)
-             VALUES ('rep-1', 'm1', 'job-1', 'r', 'v1', 'sha256:aa', 'abc123', '{\"critical\": 0, \"high\": 2}', 'success', 3000)",
+            "INSERT INTO publish_reports (id, source_id, sync_job_id, image_tag, image_digest, commit_sha, vulnerability_summary, sarif_status, synced_at)
+             VALUES ('rep-1', 'm1', 'job-1', 'v1', 'sha256:aa', 'abc123', '{\"critical\": 0, \"high\": 2}', 'success', 3000)",
         )
         .execute(&pool)
         .await
@@ -208,14 +207,14 @@ mod tests {
         let (pool, dir) = fresh_pool("image").await;
         seed_job(
             &pool,
-            r#"{"trigger":"poll","repo_full_name":"p/r","digest":"sha256:aa","tag":"v1"}"#,
+            r#"{"trigger":"discovery","repo_full_name":"p/r","digest":"sha256:aa","tag":"v1"}"#,
         )
         .await;
 
         let job = sync_jobs::get(&pool, "owner", false, "job-1")
             .await
             .unwrap();
-        assert_eq!(job.trigger, "poll");
+        assert_eq!(job.trigger.as_deref(), Some("discovery"));
         assert_eq!(job.image.repo_full_name.as_deref(), Some("p/r"));
         assert_eq!(job.image.tag.as_deref(), Some("v1"));
         assert_eq!(job.image.digest.as_deref(), Some("sha256:aa"));
@@ -225,24 +224,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_resolve_job_has_kind_resolve_no_tag_and_no_report() {
-        let (pool, dir) = fresh_pool("resolve-kind").await;
-        seed_job(
-            &pool,
-            r#"{"kind":"resolve","repo_full_name":"p/r","digest":"sha256:aa"}"#,
-        )
-        .await;
+    async fn a_pull_job_has_kind_pull_no_tag_and_no_report() {
+        let (pool, dir) = fresh_pool("pull-kind").await;
+        seed_job(&pool, r#"{"kind":"pull","digest":"sha256:aa"}"#).await;
 
         let job = sync_jobs::get(&pool, "owner", false, "job-1")
             .await
             .unwrap();
-        assert_eq!(job.kind, "resolve");
+        assert_eq!(job.kind.as_deref(), Some("pull"));
         assert_eq!(job.image.tag, None);
         assert_eq!(job.image.digest.as_deref(), Some("sha256:aa"));
-        assert_eq!(job.image.repo_full_name.as_deref(), Some("p/r"));
         assert!(job.report.is_none());
         let json = serde_json::to_value(&job).unwrap();
-        assert_eq!(json["kind"], "resolve");
+        assert_eq!(json["kind"], "pull");
         assert!(json["image"]["tag"].is_null());
         assert!(json["report"].is_null());
         pool.close().await;
@@ -250,20 +244,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_legacy_payload_with_no_kind_is_a_sync_job() {
-        let (pool, dir) = fresh_pool("legacy-kind").await;
-        seed_job(
-            &pool,
-            r#"{"repo_full_name":"p/r","digest":"sha256:aa","tag":"v1"}"#,
-        )
-        .await;
+    async fn a_payload_with_an_unknown_or_no_kind_has_a_null_kind() {
+        let (pool, dir) = fresh_pool("unknown-kind").await;
+        seed_job(&pool, r#"{"digest":"sha256:aa","tag":"v1"}"#).await;
 
         let job = sync_jobs::get(&pool, "owner", false, "job-1")
             .await
             .unwrap();
-        assert_eq!(job.kind, "sync");
+        assert_eq!(job.kind, None);
         assert_eq!(job.image.tag.as_deref(), Some("v1"));
-        // A kind that is not known is shown as sync: the field has two values (`specs/api.md`).
         sqlx::query(r#"UPDATE sync_jobs SET payload = '{"kind":"other","tag":"v1"}'"#)
             .execute(&pool)
             .await
@@ -271,13 +260,37 @@ mod tests {
         let odd = sync_jobs::get(&pool, "owner", false, "job-1")
             .await
             .unwrap();
-        assert_eq!(odd.kind, "sync");
+        assert_eq!(odd.kind, None);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
-    async fn payload_without_trigger_is_webhook() {
+    async fn a_database_refresh_job_has_no_source_and_no_owner() {
+        let (pool, dir) = fresh_pool("db-update").await;
+        seed_job(&pool, "{}").await;
+        sqlx::query(
+            "INSERT INTO sync_jobs (id, source_id, status, attempts, payload, created_at, updated_at)
+             VALUES ('job-db', NULL, 'done', 1, '{\"kind\":\"db_update\"}', 1000, 2000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let admin = sync_jobs::get(&pool, "admin", true, "job-db")
+            .await
+            .unwrap();
+        assert_eq!(admin.source_id, None);
+        assert_eq!(admin.kind.as_deref(), Some("db_update"));
+        assert!(matches!(
+            sync_jobs::get(&pool, "owner", false, "job-db").await,
+            Err(crate::error::AppError::NotFound)
+        ));
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn payload_without_trigger_has_a_null_trigger() {
         let (pool, dir) = fresh_pool("trigger").await;
         seed_job(
             &pool,
@@ -288,7 +301,7 @@ mod tests {
         let job = sync_jobs::get(&pool, "owner", false, "job-1")
             .await
             .unwrap();
-        assert_eq!(job.trigger, "webhook");
+        assert_eq!(job.trigger, None);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -318,8 +331,8 @@ mod tests {
         seed_job(&pool, "{}").await;
         let long = "y".repeat(5_000);
         sqlx::query(
-            "INSERT INTO sync_reports (id, mapping_id, sync_job_id, harbor_repository, image_tag, image_digest, commit_sha, vulnerability_summary, sarif_status)
-             VALUES ('rep-cap', 'm1', 'job-1', 'r', ?, ?, ?, '{}', 'success')",
+            "INSERT INTO publish_reports (id, source_id, sync_job_id, image_tag, image_digest, commit_sha, vulnerability_summary, sarif_status)
+             VALUES ('rep-cap', 'm1', 'job-1', ?, ?, ?, '{}', 'success')",
         )
         .bind(&long)
         .bind(&long)

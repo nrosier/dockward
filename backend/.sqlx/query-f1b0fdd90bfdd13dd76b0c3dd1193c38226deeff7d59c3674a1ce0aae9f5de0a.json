@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE cve_findings SET github_issue_id = ?\n         WHERE source_id = ? AND cve_id = ?\n           AND (github_issue_id IS NULL OR github_issue_id <> ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "f1b0fdd90bfdd13dd76b0c3dd1193c38226deeff7d59c3674a1ce0aae9f5de0a"
+}

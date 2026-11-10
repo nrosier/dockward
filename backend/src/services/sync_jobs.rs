@@ -82,13 +82,16 @@ use crate::services::audit::{self, Actor};
 use crate::services::pagination::{Page, Pagination};
 use crate::services::time;
 
+/// The job kinds of `specs/spinoff-local-scan.md`, section 9.
+const JOB_KINDS: &[&str] = &["discover", "pull", "scan", "publish", "db_update"];
+
 /// Sort keys `GET /sync-jobs` accepts. The first is the default (`specs/api.md`, Sync jobs).
 const SORTS: &[&str] = &["created_at", "updated_at"];
 
 /// Most jobs in the dashboard's `recent_syncs` (`specs/api.md`, Dashboard).
 pub const RECENT_SYNCS: i64 = 10;
 
-/// The `report` of a `SyncJob`: the linked `sync_reports` row (`specs/api.md`, Sync jobs).
+/// The `report` of a `SyncJob`: the linked `publish_reports` row (`specs/api.md`, Sync jobs).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SyncReport {
     pub image_tag: String,
@@ -98,9 +101,6 @@ pub struct SyncReport {
     pub vulnerability_summary: serde_json::Value,
     pub sarif_status: String,
     pub synced_at: Option<String>,
-    /// The CVE ids a scheduled scan found that were not in the last stored result for the
-    /// same digest (#191). `null` for any other trigger. An empty list means nothing new.
-    pub new_cve_ids: Option<Vec<String>>,
 }
 
 /// The image a job is for, from its payload, so queued jobs show it before a report exists.
@@ -116,17 +116,19 @@ pub struct JobImage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SyncJob {
     pub id: String,
-    pub mapping_id: String,
+    /// The image source of the job, or `null` for a database refresh job.
+    pub source_id: Option<String>,
     pub status: String,
     pub attempts: i64,
     pub next_attempt_at: Option<String>,
     pub last_error: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
-    /// `webhook` or `poll`. A payload with no `trigger` is `webhook`.
-    pub trigger: String,
-    /// `sync`, `resolve` (#132) or `scan` (#191). A payload with no `kind` is `sync`.
-    pub kind: String,
+    /// The payload `trigger`, or `null` when the payload has none.
+    pub trigger: Option<String>,
+    /// `discover`, `pull`, `scan`, `publish` or `db_update`. A payload with no known `kind`
+    /// is `null`.
+    pub kind: Option<String>,
     pub image: JobImage,
     pub report: Option<SyncReport>,
 }
@@ -144,28 +146,19 @@ fn to_sync_job(row: db::JobRow) -> Result<SyncJob, AppError> {
                 .unwrap_or(serde_json::Value::Null),
             sarif_status: report.sarif_status,
             synced_at: report.synced_at.map(time::rfc3339).transpose()?,
-            new_cve_ids: report
-                .new_cve_ids
-                .as_deref()
-                .and_then(|text| serde_json::from_str(text).ok()),
         }),
     };
     Ok(SyncJob {
         id: row.id,
-        mapping_id: row.mapping_id,
+        source_id: row.source_id,
         status: row.status,
         attempts: row.attempts,
         next_attempt_at: row.next_attempt_at.map(time::rfc3339).transpose()?,
         last_error: row.last_error,
         created_at: row.created_at.map(time::rfc3339).transpose()?,
         updated_at: row.updated_at.map(time::rfc3339).transpose()?,
-        trigger: row.trigger.unwrap_or_else(|| "webhook".to_owned()),
-        kind: match row.kind.as_deref() {
-            Some("resolve") => "resolve",
-            Some("scan") => "scan",
-            _ => "sync",
-        }
-        .to_owned(),
+        trigger: row.trigger,
+        kind: row.kind.filter(|kind| JOB_KINDS.contains(&kind.as_str())),
         image: JobImage {
             repo_full_name: row.repo_full_name,
             tag: row.tag,
@@ -183,7 +176,7 @@ pub struct ListQuery {
     pub sort: Option<String>,
     pub order: Option<String>,
     pub status: Option<String>,
-    pub mapping_id: Option<String>,
+    pub source_id: Option<String>,
     /// `true` lists every user's jobs (admin `scope=all`).
     pub all_users: bool,
 }
@@ -191,7 +184,7 @@ pub struct ListQuery {
 /// The statuses a `status` filter may name (`sync_jobs.status`).
 const STATUSES: &[&str] = &["queued", "running", "done", "failed"];
 
-/// `GET /sync-jobs`. One user sees only their own mappings' jobs. A `mapping_id` that is
+/// `GET /sync-jobs`. One user sees only their own sources' jobs. A `source_id` that is
 /// not theirs gives an empty page, not `404` (`specs/api.md`; decided on #55).
 pub async fn list(
     pool: &SqlitePool,
@@ -221,7 +214,7 @@ pub async fn list(
         user_id: scope,
         id: None,
         status: query.status.as_deref(),
-        mapping_id: query.mapping_id.as_deref(),
+        source_id: query.source_id.as_deref(),
         sort: &paging.sort,
         sort_sign: if paging.ascending { 1 } else { -1 },
         limit: paging.page_size,
@@ -232,7 +225,7 @@ pub async fn list(
         pool,
         scope,
         query.status.as_deref(),
-        query.mapping_id.as_deref(),
+        query.source_id.as_deref(),
     )
     .await?;
     let items = rows
@@ -262,9 +255,12 @@ pub async fn get(
     to_sync_job(row)
 }
 
-/// True when `user_id` owns the mapping of the job. Used before a tenant read.
+/// True when `user_id` owns the source of the job. Used before a tenant read.
 async fn owns_job(pool: &SqlitePool, user_id: &str, job_id: &str) -> Result<bool, AppError> {
-    Ok(db::owner_of_job(pool, job_id).await?.as_deref() == Some(user_id))
+    Ok(matches!(
+        db::owner_of_job(pool, job_id).await?,
+        Some(Some(owner)) if owner == user_id
+    ))
 }
 
 /// The dashboard's `recent_syncs`: the 10 jobs with the newest `updated_at`, for the same
@@ -274,7 +270,7 @@ pub async fn recent(pool: &SqlitePool, user_id: Option<&str>) -> Result<Vec<Sync
         user_id,
         id: None,
         status: None,
-        mapping_id: None,
+        source_id: None,
         sort: "updated_at",
         sort_sign: -1,
         limit: RECENT_SYNCS,
@@ -287,26 +283,7 @@ pub async fn recent(pool: &SqlitePool, user_id: Option<&str>) -> Result<Vec<Sync
         .collect()
 }
 
-/// The `last_sync` of a mapping list item: the status and `updated_at` of the mapping's most
-/// recently updated job (`specs/api.md`, Mappings).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LastSync {
-    pub status: String,
-    pub updated_at: Option<String>,
-}
-
-/// The mapping's most recently updated job as `last_sync`, or `None` when it has no job.
-pub async fn last_sync(pool: &SqlitePool, mapping_id: &str) -> Result<Option<LastSync>, AppError> {
-    match db::latest_for_mapping(pool, mapping_id).await? {
-        None => Ok(None),
-        Some((status, updated_at)) => Ok(Some(LastSync {
-            status,
-            updated_at: updated_at.map(time::rfc3339).transpose()?,
-        })),
-    }
-}
-
-/// Manual retry (`POST /api/v1/sync-jobs/:id/retry`, `specs/api.md`). The mapping owner
+/// Manual retry (`POST /api/v1/sync-jobs/:id/retry`, `specs/api.md`). The source owner
 /// or an admin may retry. Only a `failed` job can be retried; any other status is `409`.
 /// The reset and the `sync_job.retry` audit row commit in one transaction.
 pub async fn retry(
@@ -320,7 +297,7 @@ pub async fn retry(
     let owner = db::owner_of_job(pool, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    if !caller_is_admin && owner != caller_id {
+    if !caller_is_admin && owner.as_deref() != Some(caller_id) {
         // Another tenant's job is not revealed: it looks the same as a missing one.
         return Err(AppError::NotFound);
     }
@@ -335,14 +312,14 @@ pub async fn retry(
     // The response is read in the same transaction, before the commit, so a read that
     // fails rolls the retry back instead of leaving a 500 after a retry that happened.
     let row = db::find_in(&mut tx, id).await?.ok_or(AppError::NotFound)?;
-    let mapping_id = row.mapping_id.clone();
+    let source_id = row.source_id.clone();
     let job = to_sync_job(row)?;
     audit::record(
         &mut tx,
         actor,
         "sync_job.retry",
         &format!("sync_job:{id}"),
-        Some(&serde_json::json!({ "job_id": id, "mapping_id": mapping_id })),
+        Some(&serde_json::json!({ "job_id": id, "source_id": source_id })),
     )
     .await?;
     tx.commit().await.map_err(|_| AppError::InternalError)?;
@@ -359,7 +336,7 @@ pub async fn failed_count(
 }
 
 /// Deletes the caller's failed jobs (every tenant's with `all_users`, admin only, checked by
-/// the caller). Keeps a job that holds a scanner lock. Writes one `sync_job.purge` audit
+/// the caller). Writes one `sync_job.purge` audit
 /// entry in the same transaction when at least one row is deleted. Returns the row count.
 pub async fn purge_failed(
     pool: &SqlitePool,
@@ -404,7 +381,7 @@ mod purge_tests {
         sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
     }
 
-    /// Users `owner`, `stranger` (role user) and `boss` (admin). `owner` has mapping `m1`;
+    /// Users `owner`, `stranger` (role user) and `boss` (admin). `owner` has source `m1`;
     /// `stranger` has `m2`. Jobs: two failed, queued, running, retrying (queued with
     /// attempts) and done on `m1`, plus a failed job on `m2`.
     async fn seed(name: &str) -> (SqlitePool, std::path::PathBuf) {
@@ -425,23 +402,21 @@ mod purge_tests {
         .await;
         exec(
             &pool,
-            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token) VALUES
-             ('c1', 'owner', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
-             ('c2', 'owner', 'github', 'g', NULL, NULL, 'v1:fake'),
-             ('c3', 'stranger', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
-             ('c4', 'stranger', 'github', 'g', NULL, NULL, 'v1:fake')",
+            "INSERT INTO user_credentials (id, user_id, label, encrypted_token) VALUES
+             ('c2', 'owner', 'g', 'v1:fake'),
+             ('c4', 'stranger', 'g', 'v1:fake')",
         )
         .await;
         exec(
             &pool,
-            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash) VALUES
-             ('m1', 'owner', 'c1', 'c2', 'https://harbor.example.com', 'p', 'r', 'o', 'g', 'h1', 'h2'),
-             ('m2', 'stranger', 'c3', 'c4', 'https://harbor.example.com', 'p2', 'r2', 'o', 'g2', 'h3', 'h4')",
+            "INSERT INTO image_sources (id, user_id, hub_id, repository, tag_value, github_cred_id, github_owner, github_repo) VALUES
+             ('m1', 'owner', 'hub-default-ghcr', 'p/r', '*', 'c2', 'o', 'g'),
+             ('m2', 'stranger', 'hub-default-ghcr', 'p2/r2', '*', 'c4', 'o', 'g2')",
         )
         .await;
         exec(
             &pool,
-            "INSERT INTO sync_jobs (id, mapping_id, status, attempts, payload, created_at, updated_at) VALUES
+            "INSERT INTO sync_jobs (id, source_id, status, attempts, payload, created_at, updated_at) VALUES
              ('j-failed', 'm1', 'failed', 8, '{}', 1, 1),
              ('j-failed2', 'm1', 'failed', 8, '{}', 1, 1),
              ('j-queued', 'm1', 'queued', 0, '{}', 1, 1),
@@ -488,12 +463,12 @@ mod purge_tests {
         assert_eq!(
             count(
                 &pool,
-                "SELECT COUNT(*) FROM sync_jobs WHERE mapping_id = 'm1'"
+                "SELECT COUNT(*) FROM sync_jobs WHERE source_id = 'm1'"
             )
             .await,
             6
         );
-        // An admin without scope=all also stays on their own mappings.
+        // An admin without scope=all also stays on their own sources.
         let none = purge_failed(&pool, &actor_of("boss"), false).await.unwrap();
         assert_eq!(none, 0);
         assert_eq!(
@@ -534,25 +509,28 @@ mod purge_tests {
         let (pool, dir) = seed("findings").await;
         exec(
             &pool,
-            "INSERT INTO sync_reports (id, mapping_id, sync_job_id, harbor_repository, image_tag, image_digest, vulnerability_summary, sarif_status, synced_at)
-             VALUES ('rep-1', 'm1', 'j-failed', 'r', 'v1', 'sha256:aa', '{}', 'failed', 3000)",
+            "INSERT INTO publish_reports (id, source_id, sync_job_id, image_tag, image_digest, vulnerability_summary, sarif_status, synced_at)
+             VALUES ('rep-1', 'm1', 'j-failed', 'v1', 'sha256:aa', '{}', 'failed', 3000)",
         )
         .await;
         exec(
             &pool,
-            "INSERT INTO cve_findings (id, mapping_id, harbor_repository, image_tag, cve_id, severity)
-             VALUES ('f1', 'm1', 'r', 'v1', 'CVE-1', 'HIGH')",
+            "INSERT INTO cve_findings (id, source_id, image_tag, cve_id, severity)
+             VALUES ('f1', 'm1', 'v1', 'CVE-1', 'HIGH')",
         )
         .await;
         purge_failed(&pool, &actor_of("owner"), false)
             .await
             .unwrap();
         assert_eq!(count(&pool, "SELECT COUNT(*) FROM cve_findings").await, 1);
-        assert_eq!(count(&pool, "SELECT COUNT(*) FROM sync_reports").await, 1);
+        assert_eq!(
+            count(&pool, "SELECT COUNT(*) FROM publish_reports").await,
+            1
+        );
         assert_eq!(
             count(
                 &pool,
-                "SELECT COUNT(*) FROM sync_reports WHERE sync_job_id IS NULL"
+                "SELECT COUNT(*) FROM publish_reports WHERE sync_job_id IS NULL"
             )
             .await,
             1,
@@ -579,36 +557,6 @@ mod purge_tests {
         assert_eq!(rows[0].2, "sync_jobs");
         let details: serde_json::Value = serde_json::from_str(&rows[0].3).unwrap();
         assert_eq!(details, serde_json::json!({ "scope": "own", "deleted": 2 }));
-        pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn a_job_holding_a_scanner_lock_is_kept() {
-        let (pool, dir) = seed("lock").await;
-        exec(
-            &pool,
-            "INSERT INTO project_scanner_locks (harbor_base_url, harbor_project, job_id, mapping_id, chosen_scanner_uuid, previous_scanner_uuid, state, acquired_at)
-             VALUES ('https://harbor.example.com', 'p', 'j-failed', 'm1', 'u1', 'u0', 'restore_pending', 1)",
-        )
-        .await;
-        assert_eq!(failed_count(&pool, "owner", false).await.unwrap(), 1);
-        let deleted = purge_failed(&pool, &actor_of("owner"), false)
-            .await
-            .unwrap();
-        assert_eq!(deleted, 1);
-        assert_eq!(
-            count(
-                &pool,
-                "SELECT COUNT(*) FROM sync_jobs WHERE id = 'j-failed'"
-            )
-            .await,
-            1
-        );
-        assert_eq!(
-            count(&pool, "SELECT COUNT(*) FROM project_scanner_locks").await,
-            1
-        );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -662,7 +610,7 @@ mod retry_tests {
         (pool, dir)
     }
 
-    /// One user owning one mapping with one job in the given status.
+    /// One user owning one source with one job in the given status.
     async fn job_with_status(pool: &SqlitePool, status: &str) {
         sqlx::query(
             "INSERT INTO users (id, username, password_hash, role, token_version)
@@ -672,21 +620,20 @@ mod retry_tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
-             VALUES ('c1', 'owner', 'harbor', 'h', 'https://harbor.example.com', 'robot$hg', 'v1:fake'),
-                    ('c2', 'owner', 'github', 'g', NULL, NULL, 'v1:fake')",
+            "INSERT INTO user_credentials (id, user_id, label, encrypted_token)
+             VALUES ('c2', 'owner', 'g', 'v1:fake')",
         )
         .execute(pool)
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash, auto_create_issues, min_issue_severity, default_branch)
-             VALUES ('m1', 'owner', 'c1', 'c2', 'https://harbor.example.com', 'p', 'r', 'o', 'g', 'h1', 'h2', 0, 'CRITICAL', 'main')",
+            "INSERT INTO image_sources (id, user_id, hub_id, repository, tag_value, github_cred_id, github_owner, github_repo)
+             VALUES ('m1', 'owner', 'hub-default-ghcr', 'p/r', '*', 'c2', 'o', 'g')",
         )
         .execute(pool)
         .await
         .unwrap();
-        db::sync_jobs::enqueue(pool, "job-1", "m1", "{}", 1_000)
+        db::sync_jobs::enqueue(pool, "job-1", Some("m1"), "{}", 1_000)
             .await
             .unwrap();
         sqlx::query(
@@ -777,7 +724,7 @@ mod retry_tests {
         let details: serde_json::Value = serde_json::from_str(details.as_deref().unwrap()).unwrap();
         assert_eq!(
             details,
-            serde_json::json!({ "job_id": "job-1", "mapping_id": "m1" })
+            serde_json::json!({ "job_id": "job-1", "source_id": "m1" })
         );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);

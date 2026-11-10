@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS n FROM user_credentials\n          WHERE (? IS NULL OR user_id = ?) AND (? IS NULL OR 'github' = ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "n",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "06a9877d4e864fea28e4141d03b4ebda0824752d2e9fc6ef3caef89ae51b4e6b"
+}

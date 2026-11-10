@@ -21,7 +21,7 @@ use sqlx::SqlitePool;
 use crate::auth::crypto::{self, DerivedKey};
 use crate::db::alert_channels::ChannelRow;
 use crate::db::alert_deliveries as deliveries;
-use crate::db::mappings::{self, MappingRow};
+use crate::db::sources::{self, SourceRow};
 use crate::error::AppError;
 use crate::services::alert_channels::{SmtpConfig, WebhookConfig};
 use crate::services::alert_send::{self, Alert, AlertEvent, SendError};
@@ -190,10 +190,10 @@ impl Notifier {
         deliveries::release(&mut conn, channel_id, dedupe_key, now).await
     }
 
-    /// Alerts for CVEs that are new CRITICAL findings in `mapping`, on a background task.
+    /// Alerts for CVEs that are new CRITICAL findings in `source`, on a background task.
     /// The dedupe key is the CVE id alone, so the same CVE alerts once per 24 hours
     /// whatever the mapping. The payload has mapping names, the tag and the CVE id only.
-    pub fn spawn_new_critical(&self, mapping: &MappingRow, tag: &str, cve_ids: &[String]) {
+    pub fn spawn_new_critical(&self, source: &SourceRow, tag: &str, cve_ids: &[String]) {
         if cve_ids.is_empty() {
             return;
         }
@@ -204,9 +204,9 @@ impl Notifier {
                 let alert = Alert {
                     event: AlertEvent::CriticalCve,
                     occurred_at: 0,
-                    mapping_id: mapping.id.clone(),
-                    harbor: format!("{}/{}", mapping.harbor_project, mapping.harbor_repository),
-                    github: format!("{}/{}", mapping.github_owner, mapping.github_repo),
+                    mapping_id: source.id.clone(),
+                    harbor: format!("{}/{}", source.hub_host, source.repository),
+                    github: format!("{}/{}", source.github_owner, source.github_repo),
                     cve_id: Some(cve_id.clone()),
                     severity: Some("CRITICAL".to_owned()),
                     image_tag: Some(tag.to_owned()),
@@ -239,16 +239,16 @@ impl Notifier {
 
     async fn sync_failed_alert(&self, mapping_id: &str, now: i64) -> Alert {
         let found = match self.pool.acquire().await {
-            Ok(mut conn) => mappings::find_by_id(&mut conn, mapping_id)
+            Ok(mut conn) => sources::find_by_id(&mut conn, mapping_id)
                 .await
                 .ok()
                 .flatten(),
             Err(_) => None,
         };
         let (harbor, github) = match found {
-            Some(mapping) => (
-                format!("{}/{}", mapping.harbor_project, mapping.harbor_repository),
-                format!("{}/{}", mapping.github_owner, mapping.github_repo),
+            Some(source) => (
+                format!("{}/{}", source.hub_host, source.repository),
+                format!("{}/{}", source.github_owner, source.github_repo),
             ),
             None => (UNKNOWN.to_owned(), UNKNOWN.to_owned()),
         };
@@ -547,28 +547,20 @@ mod tests {
             log.lock().unwrap().push(alert);
             Box::pin(async { Ok(()) })
         });
-        let mapping = MappingRow {
+        let source = SourceRow {
             id: "map-1".to_owned(),
             user_id: "admin-1".to_owned(),
-            harbor_cred_id: "c1".to_owned(),
+            hub_host: "ghcr.io".to_owned(),
+            repository: "proj/app".to_owned(),
+            tag_value: "*".to_owned(),
             github_cred_id: "c2".to_owned(),
-            harbor_base_url: "https://harbor.example.com".to_owned(),
-            harbor_project: "proj".to_owned(),
-            harbor_repository: "app".to_owned(),
             github_owner: "acme".to_owned(),
             github_repo: "app".to_owned(),
-            webhook_token_hash: "FAKE_TOKEN_HASH".to_owned(),
-            webhook_auth_secret_hash: "FAKE_SECRET_HASH".to_owned(),
-            auto_create_issues: None,
-            min_issue_severity: None,
             default_branch: "main".to_owned(),
-            created_at: None,
-            scan_schedule: "off".to_owned(),
-            scan_minute: 0,
-            scan_weekday: 1,
-            scan_last_slot: None,
+            auto_create_issues: false,
+            min_issue_severity: "CRITICAL".to_owned(),
         };
-        notifier.spawn_new_critical(&mapping, "v1", &["CVE-2026-0001".to_owned()]);
+        notifier.spawn_new_critical(&source, "v1", &["CVE-2026-0001".to_owned()]);
         for _ in 0..200 {
             if !seen.lock().unwrap().is_empty() {
                 break;
@@ -580,7 +572,7 @@ mod tests {
         assert_eq!(alerts[0].event, AlertEvent::CriticalCve);
         assert_eq!(alerts[0].cve_id.as_deref(), Some("CVE-2026-0001"));
         assert_eq!(alerts[0].image_tag.as_deref(), Some("v1"));
-        assert_eq!(alerts[0].harbor, "proj/app");
+        assert_eq!(alerts[0].harbor, "ghcr.io/proj/app");
         let dedupe: String = sqlx::query_scalar("SELECT dedupe_key FROM alert_deliveries")
             .fetch_one(&pool)
             .await

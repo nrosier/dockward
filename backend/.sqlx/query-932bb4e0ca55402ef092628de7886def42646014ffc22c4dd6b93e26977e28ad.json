@@ -1,0 +1,110 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cve_id AS \"cve_id!\", image_tag AS \"image_tag!\", package,\n                  severity AS \"severity!\", fixed_in_version, status AS \"status!\", last_seen_at,\n                  description\n           FROM cve_findings WHERE source_id = ? AND cve_id = ?\n           ORDER BY image_tag",
+  "describe": {
+    "columns": [
+      {
+        "name": "cve_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "cve_id"
+          }
+        }
+      },
+      {
+        "name": "image_tag!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "image_tag"
+          }
+        }
+      },
+      {
+        "name": "package",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "package"
+          }
+        }
+      },
+      {
+        "name": "severity!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "severity"
+          }
+        }
+      },
+      {
+        "name": "fixed_in_version",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "fixed_in_version"
+          }
+        }
+      },
+      {
+        "name": "status!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "last_seen_at",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "last_seen_at"
+          }
+        }
+      },
+      {
+        "name": "description",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "description"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "932bb4e0ca55402ef092628de7886def42646014ffc22c4dd6b93e26977e28ad"
+}

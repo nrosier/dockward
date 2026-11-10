@@ -11,7 +11,7 @@ use crate::db::users;
 use crate::error::AppError;
 use crate::models::role::Role;
 use crate::services::audit::{self, Actor};
-use crate::services::{auth as local_auth, ids, project_webhooks};
+use crate::services::{auth as local_auth, ids};
 
 /// Creates a local user. Local accounts only: OIDC accounts are created by login.
 /// `POST /api/v1/admin/users` returns `409` when the username is taken.
@@ -56,14 +56,11 @@ pub async fn create_local(
 }
 
 /// Deletes a user in the order from `specs/database.md`: mappings, then credentials,
-/// then the user row, all in one transaction. Before that, each project webhook the user
-/// owns is transferred or left to the user cascade (`specs/integrations.md`, #132). The
-/// rules are checked first:
+/// then the user row, all in one transaction. The rules are checked first:
 /// - an admin cannot delete themselves (`409`);
 /// - the last local admin cannot be deleted (`409`).
 ///
-/// Returns the ids of the credentials that were deleted, so the caller can drop the
-/// in-memory picker cache and rate-limit block of each (`PickerState::drop_credential`).
+/// Returns the ids of the credentials that were deleted.
 pub async fn delete_user(
     pool: &SqlitePool,
     actor: &Actor,
@@ -83,9 +80,6 @@ pub async fn delete_user(
             "The last local admin cannot be deleted.".to_owned(),
         ));
     }
-    // Project webhooks the user owns move to another user on the same Harbor project first.
-    // Any without a candidate stay, and the user row's cascade deletes them (#132).
-    project_webhooks::transfer_on_user_delete(&mut tx, actor, user_id).await?;
     users::delete_mappings(&mut tx, user_id).await?;
     let credential_ids = users::credential_ids(&mut tx, user_id).await?;
     users::delete_credentials(&mut tx, user_id).await?;
@@ -338,36 +332,27 @@ mod tests {
         )
         .await
         .unwrap();
-        // The victim owns a credential pair, a mapping, and an acceptance on that mapping.
+        // The victim owns a GitHub credential, a source that uses it, and an acceptance on that source.
         sqlx::query!(
-            "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, encrypted_token)
-             VALUES ('test-cred-h', ?, 'harbor', 'h', 'https://harbor.example.com', 'v1:test')",
+            "INSERT INTO user_credentials (id, user_id, label, encrypted_token)
+             VALUES ('test-cred-g', ?, 'g', 'v1:test')",
             victim
         )
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query!(
-            "INSERT INTO user_credentials (id, user_id, service_type, label, encrypted_token)
-             VALUES ('test-cred-g', ?, 'github', 'g', 'v1:test')",
+            "INSERT INTO image_sources (id, user_id, hub_id, repository, tag_value, github_cred_id,
+                github_owner, github_repo)
+             VALUES ('test-src', ?, 'hub-default-ghcr', 'o/walley', 'latest', 'test-cred-g', 'o', 'repo')",
             victim
         )
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query!(
-            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url,
-                harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash)
-             VALUES ('test-map', ?, 'test-cred-h', 'test-cred-g', 'https://harbor.example.com',
-                'p', 'r', 'o', 'repo', 'hash-token-test', 'hash-secret-test')",
-            victim
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query!(
-            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username)
-             VALUES ('test-acc', 'test-map', 'CVE-2099-0001', 'test reason', ?, 'test-victim')",
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username)
+             VALUES ('test-acc', 'test-src', 'CVE-2099-0001', 'test reason', ?, 'test-victim')",
             victim
         )
         .execute(&pool)
@@ -375,7 +360,7 @@ mod tests {
         .unwrap();
 
         let result = delete_user(&pool, &actor(&admin, "test-admin"), &victim).await;
-        let mappings = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "n: i64" FROM repo_mappings"#)
+        let sources = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "n: i64" FROM image_sources"#)
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -383,7 +368,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        // The acceptance is on the victim's mapping, so the mapping cascade removes it.
+        // The acceptance is on the victim's source, so the source cascade removes it.
         let acceptances =
             sqlx::query_scalar!(r#"SELECT COUNT(*) AS "n: i64" FROM cve_acceptances"#)
                 .fetch_one(&pool)
@@ -403,8 +388,8 @@ mod tests {
         // The ids come back so the handler can drop each credential's picker cache.
         let mut deleted = result.unwrap_or_default();
         deleted.sort();
-        assert_eq!(deleted, ["test-cred-g", "test-cred-h"]);
-        assert_eq!(mappings, 0);
+        assert_eq!(deleted, ["test-cred-g"]);
+        assert_eq!(sources, 0);
         assert_eq!(creds, 0);
         assert_eq!(acceptances, 0);
         assert_eq!(delete_row.actor_username, "test-admin");

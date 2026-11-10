@@ -1,0 +1,146 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.id AS \"id!\", s.user_id AS \"user_id!\", h.host AS \"hub_host!\",\n                  s.repository AS \"repository!\", s.tag_value AS \"tag_value!\",\n                  s.github_cred_id AS \"github_cred_id!\", s.github_owner AS \"github_owner!\",\n                  s.github_repo AS \"github_repo!\", s.default_branch AS \"default_branch!\",\n                  s.auto_create_issues AS \"auto_create_issues!: bool\",\n                  s.min_issue_severity AS \"min_issue_severity!\"\n           FROM image_sources s JOIN hubs h ON h.id = s.hub_id\n           WHERE s.id = ? AND s.user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "user_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "hub_host!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "host"
+          }
+        }
+      },
+      {
+        "name": "repository!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "repository"
+          }
+        }
+      },
+      {
+        "name": "tag_value!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "tag_value"
+          }
+        }
+      },
+      {
+        "name": "github_cred_id!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "github_cred_id"
+          }
+        }
+      },
+      {
+        "name": "github_owner!",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "github_owner"
+          }
+        }
+      },
+      {
+        "name": "github_repo!",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "github_repo"
+          }
+        }
+      },
+      {
+        "name": "default_branch!",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "default_branch"
+          }
+        }
+      },
+      {
+        "name": "auto_create_issues!: bool",
+        "ordinal": 9,
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "auto_create_issues"
+          }
+        }
+      },
+      {
+        "name": "min_issue_severity!",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "min_issue_severity"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bd0b9bbfbcb410dfbdecabe5dc9bc5ca3844829b44e05d31582f8eae69b8a49a"
+}

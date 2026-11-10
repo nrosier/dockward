@@ -9,12 +9,12 @@ use sqlx::SqliteConnection;
 
 use crate::error::AppError;
 
-/// Deletes `sync_reports` rows synced before `cutoff`.
+/// Deletes `publish_reports` rows synced before `cutoff`. (Replaces `sync_reports`, section 9.)
 pub async fn delete_sync_reports(
     conn: &mut SqliteConnection,
     cutoff: i64,
 ) -> Result<u64, AppError> {
-    sqlx::query!("DELETE FROM sync_reports WHERE synced_at < ?", cutoff)
+    sqlx::query!("DELETE FROM publish_reports WHERE synced_at < ?", cutoff)
         .execute(conn)
         .await
         .map(|done| done.rows_affected())

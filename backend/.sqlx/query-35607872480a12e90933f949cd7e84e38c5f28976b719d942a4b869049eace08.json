@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO sync_jobs (id, source_id, status, attempts, next_attempt_at, payload, created_at, updated_at)\n         VALUES (?, ?, 'queued', 0, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "35607872480a12e90933f949cd7e84e38c5f28976b719d942a4b869049eace08"
+}

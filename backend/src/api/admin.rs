@@ -13,13 +13,12 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::api::auth::AdminUser;
-use crate::api::credentials::run_harbor_probe;
 use crate::api::hardening::{ClientIp, ClientIpSource};
 use crate::api::state::AppState;
 use crate::auth::session;
 use crate::db::credentials as credential_rows;
 use crate::db::credentials::CredentialRow;
-use crate::db::mappings as mapping_rows;
+use crate::db::sources as source_rows;
 use crate::error::AppError;
 use crate::models::role::Role;
 use crate::models::user::User;
@@ -27,9 +26,7 @@ use crate::services::alert_channels::{self, Channel, ListQuery};
 use crate::services::app_log;
 use crate::services::audit::{self, AuditEntry, AuditQuery};
 use crate::services::backup as backup_service;
-use crate::services::credential_probe::{
-    self, GithubProbe, HarborProbe, OutboundGithubProbe, OutboundHarborProbe,
-};
+use crate::services::credential_probe::{self, GithubProbe, OutboundGithubProbe};
 use crate::services::credentials;
 use crate::services::health::{self, GithubAnswers, HealthReport};
 use crate::services::job_runs::{self as job_runs, JobRunItem, ListQuery as JobRunsListQuery};
@@ -315,11 +312,7 @@ pub async fn delete_user(
         user_id: Some(admin.id),
         username: admin.username,
     };
-    let credential_ids = user_service::delete_user(&state.pool, &actor, &id).await?;
-    // The deleted credentials must not linger in the picker cache or block list.
-    for credential_id in &credential_ids {
-        state.pickers.drop_credential(credential_id);
-    }
+    user_service::delete_user(&state.pool, &actor, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -418,24 +411,20 @@ pub async fn health(
     Extension(ClientIp(client_ip)): Extension<ClientIp>,
     Extension(source): Extension<ClientIpSource>,
 ) -> Result<Json<HealthBody>, AppError> {
-    let harbor = OutboundHarborProbe::new(state.allow_private_harbor)?;
     let github = OutboundGithubProbe::new(state.github.clone())?;
-    Ok(Json(
-        health_body(&state, &harbor, &github, client_ip, source).await?,
-    ))
+    Ok(Json(health_body(&state, &github, client_ip, source).await?))
 }
 
 /// Builds the health body from the given probes. Generic over the probes, so tests pass
 /// fakes and make no network call.
-pub async fn health_body<H: HarborProbe, G: GithubProbe>(
+pub async fn health_body<G: GithubProbe>(
     state: &AppState,
-    harbor: &H,
     github: &G,
     client_ip: IpAddr,
     source: ClientIpSource,
 ) -> Result<HealthBody, AppError> {
     let now = session::now_unix()?;
-    let report = report(state, harbor, github, now).await?;
+    let report = report(state, github, now).await?;
     Ok(HealthBody {
         report,
         request: RequestInfo {
@@ -445,30 +434,14 @@ pub async fn health_body<H: HarborProbe, G: GithubProbe>(
     })
 }
 
-/// Runs the Harbor and GitHub checks and the robot account list. Harbor gets one check
-/// per Harbor credential. GitHub gets one check per mapping target, probed with that
-/// mapping's GitHub credential. Probes run one after another.
-pub async fn report<H: HarborProbe, G: GithubProbe>(
+/// Runs the GitHub checks. GitHub gets one check per source target, probed with that
+/// source's GitHub credential. Probes run one after another.
+pub async fn report<G: GithubProbe>(
     state: &AppState,
-    harbor: &H,
     github: &G,
-    now: i64,
+    _now: i64,
 ) -> Result<HealthReport, AppError> {
-    let harbor_rows = credential_rows::all_harbor(&state.pool).await?;
-    let mut harbor_checks = Vec::with_capacity(harbor_rows.len());
-    let mut robot_accounts = Vec::with_capacity(harbor_rows.len());
-    for row in &harbor_rows {
-        let outcome = run_harbor_probe(state, harbor, row).await;
-        harbor_checks.push(health::harbor_health(&row.id, &row.label, outcome)?);
-        robot_accounts.push(health::robot_account(
-            &row.id,
-            &row.label,
-            row.expires_at,
-            now,
-        )?);
-    }
-
-    let targets = mapping_rows::all_targets(&state.pool).await?;
+    let targets = source_rows::all_targets(&state.pool).await?;
     let mut github_checks = Vec::with_capacity(targets.len());
     for target in &targets {
         let cred = load_github_credential(state, target).await?;
@@ -499,17 +472,15 @@ pub async fn report<H: HarborProbe, G: GithubProbe>(
     }
 
     Ok(HealthReport {
-        harbor: harbor_checks,
         github: github_checks,
-        robot_accounts,
     })
 }
 
-/// Loads the GitHub credential a mapping target uses. The credential always belongs to
-/// the mapping's owner, so the owner-scoped lookup is the right one.
+/// Loads the GitHub credential a source target uses. The credential always belongs to
+/// the source's owner, so the owner-scoped lookup is the right one.
 async fn load_github_credential(
     state: &AppState,
-    target: &mapping_rows::TargetRow,
+    target: &source_rows::TargetRow,
 ) -> Result<CredentialRow, AppError> {
     let mut conn = state
         .pool
@@ -536,40 +507,11 @@ pub(crate) mod test_support {
     use crate::auth::crypto::{self, DerivedKey};
     use crate::config;
     use crate::db::credentials::{self as credential_rows, CredentialRow};
-    use crate::db::mappings::{self as mapping_rows, MappingRow};
     use crate::error::AppError;
-    use crate::services::credential_probe::{GithubProbe, GithubResponse, HarborProbe};
+    use crate::services::credential_probe::{GithubProbe, GithubResponse};
 
-    /// A fake robot secret. It is written into the test database encrypted, and the
-    /// health body must never contain it.
-    pub const FAKE_ROBOT_TOKEN: &str = "test-robot-secret-value";
-    /// A fake GitHub token, for the same check on the GitHub side.
+    /// A fake GitHub token, for the check that the health body never holds a token.
     pub const FAKE_GITHUB_TOKEN: &str = "test-github-token-value";
-
-    /// Harbor fake that answers one status for every credential.
-    pub struct FixedHarbor(pub u16);
-
-    impl HarborProbe for FixedHarbor {
-        async fn users_current(
-            &self,
-            _base: &reqwest::Url,
-            _username: &str,
-            _secret: &[u8],
-        ) -> Result<u16, AppError> {
-            Ok(self.0)
-        }
-
-        async fn artifacts_status(
-            &self,
-            _base: &reqwest::Url,
-            _username: &str,
-            _secret: &[u8],
-            _project: &str,
-            _repository: &str,
-        ) -> Result<u16, AppError> {
-            Ok(self.0)
-        }
-    }
 
     /// GitHub fake with the recorded answers: repository `200`, code scanning `404`
     /// "no analysis found", issues `403`. It records every path it was asked for.
@@ -634,26 +576,17 @@ pub(crate) mod test_support {
             login_limiter: RateLimiter::new(10, std::time::Duration::from_secs(60)),
             credentials_key: Arc::new(crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
-            allow_private_harbor: false,
             allow_private_alerts: false,
             jwks: Arc::new(crate::services::oidc_jwt::JwksCache::new()),
-            webhook_token_limiter: crate::api::webhooks::new_token_limiter(),
-            webhook_failure_limiter: crate::api::webhooks::new_failure_limiter(),
             backup_key: Arc::new(crypto::backup_key(&root).unwrap()),
             data_dir: dir.clone(),
             backup_dir: dir.join("backups"),
             issues_client: std::sync::Arc::new(
                 crate::services::github_issues::GithubIssues::new(Default::default()).unwrap(),
             ),
-            harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
             app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
                 crate::services::app_log::REVERT_AFTER,
             )),
-            harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
-            pull_limiter: crate::api::mappings::new_pull_limiter(),
-            scanner_launch: Default::default(),
-            pickers: crate::services::pickers::PickerState::outbound(false, Default::default())
-                .unwrap(),
             github: Default::default(),
         };
         (state, dir)
@@ -663,31 +596,6 @@ pub(crate) mod test_support {
     pub async fn seed_user(pool: &SqlitePool, id: &str, role: &str) {
         let mut conn = pool.acquire().await.unwrap();
         crate::db::users::insert_local(&mut conn, id, id, None, "not-a-real-hash", role)
-            .await
-            .unwrap();
-    }
-
-    /// Inserts a Harbor credential whose token is encrypted under the credentials key.
-    pub async fn seed_harbor(
-        pool: &SqlitePool,
-        user_id: &str,
-        id: &str,
-        label: &str,
-        expires_at: Option<i64>,
-    ) {
-        let encrypted = encrypt(id, FAKE_ROBOT_TOKEN);
-        let row = CredentialRow {
-            id: id.to_owned(),
-            service_type: "harbor".to_owned(),
-            label: label.to_owned(),
-            base_url: Some("https://harbor.example.com".to_owned()),
-            username: Some("robot$harborgate".to_owned()),
-            encrypted_token: encrypted,
-            expires_at,
-            created_at: None,
-        };
-        let mut conn = pool.acquire().await.unwrap();
-        credential_rows::insert(&mut conn, &row, user_id)
             .await
             .unwrap();
     }
@@ -710,40 +618,26 @@ pub(crate) mod test_support {
             .unwrap();
     }
 
-    /// Inserts a mapping from `harbor_cred` to `github_cred` for one GitHub target.
-    /// The Harbor repository is named after the mapping, so each mapping is unique.
-    pub async fn seed_mapping(
+    /// Inserts a source that targets one GitHub repository with `github_cred`.
+    pub async fn seed_source(
         pool: &SqlitePool,
         user_id: &str,
-        mapping_id: &str,
-        harbor_cred: &str,
+        source_id: &str,
         github_cred: &str,
         github_owner: &str,
         github_repo: &str,
     ) {
-        let row = MappingRow {
-            id: mapping_id.to_owned(),
-            user_id: user_id.to_owned(),
-            harbor_cred_id: harbor_cred.to_owned(),
-            github_cred_id: github_cred.to_owned(),
-            harbor_base_url: "https://harbor.example.com".to_owned(),
-            harbor_project: "proj".to_owned(),
-            harbor_repository: mapping_id.to_owned(),
-            github_owner: github_owner.to_owned(),
-            github_repo: github_repo.to_owned(),
-            webhook_token_hash: format!("hash-token-{mapping_id}"),
-            webhook_auth_secret_hash: format!("hash-secret-{mapping_id}"),
-            auto_create_issues: None,
-            min_issue_severity: None,
-            default_branch: "main".to_owned(),
-            created_at: None,
-            scan_schedule: "off".to_owned(),
-            scan_minute: 0,
-            scan_weekday: 1,
-            scan_last_slot: None,
-        };
         let mut conn = pool.acquire().await.unwrap();
-        mapping_rows::insert(&mut conn, &row).await.unwrap();
+        crate::db::sources::insert_for_test(
+            &mut conn,
+            user_id,
+            source_id,
+            github_cred,
+            github_owner,
+            github_repo,
+        )
+        .await
+        .unwrap();
     }
 
     fn encrypt(id: &str, token: &str) -> String {
@@ -829,7 +723,7 @@ mod tests {
         assert!(body.contains("\"source\""), "{body}");
     }
 
-    /// The health body never contains a stored token. Harbor and GitHub credentials are
+    /// The health body never contains a stored token. GitHub credentials are
     /// seeded with known fake tokens, and the serialized body is checked for both.
     #[tokio::test]
     async fn health_body_contains_no_token() {
@@ -838,13 +732,11 @@ mod tests {
 
         let (state, dir) = fake::test_state("health-no-token").await;
         fake::seed_user(&state.pool, "u-a", "user").await;
-        fake::seed_harbor(&state.pool, "u-a", "h-a", "harbor", Some(4_000_000_000)).await;
         fake::seed_github(&state.pool, "u-a", "g-a", "github").await;
-        fake::seed_mapping(&state.pool, "u-a", "m-a", "h-a", "g-a", "octo", "app").await;
+        fake::seed_source(&state.pool, "u-a", "m-a", "g-a", "octo", "app").await;
 
         let body = health_body(
             &state,
-            &fake::FixedHarbor(412),
             &fake::FixedGithub::default(),
             "203.0.113.9".parse::<IpAddr>().unwrap(),
             ClientIpSource::Peer,
@@ -855,7 +747,6 @@ mod tests {
         state.pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(!json.contains(fake::FAKE_ROBOT_TOKEN), "{json}");
         assert!(!json.contains(fake::FAKE_GITHUB_TOKEN), "{json}");
         assert!(json.contains("\"client_ip\":\"203.0.113.9\""), "{json}");
         assert!(json.contains("\"source\":\"peer\""), "{json}");
@@ -902,26 +793,17 @@ mod tests {
             login_limiter: RateLimiter::new(10, std::time::Duration::from_secs(60)),
             credentials_key: Arc::new(crypto::credentials_key(&root).unwrap()),
             allow_private_oidc: false,
-            allow_private_harbor: false,
             allow_private_alerts: false,
             jwks: Arc::new(JwksCache::new()),
-            webhook_token_limiter: crate::api::webhooks::new_token_limiter(),
-            webhook_failure_limiter: crate::api::webhooks::new_failure_limiter(),
             backup_key: Arc::new(crypto::backup_key(&root).unwrap()),
             data_dir: dir.clone(),
             backup_dir: dir.join("backups"),
             issues_client: std::sync::Arc::new(
                 crate::services::github_issues::GithubIssues::new(Default::default()).unwrap(),
             ),
-            harbor_probe: crate::api::state::HarborProbeHandle::outbound(false).unwrap(),
             app_log: std::sync::Arc::new(crate::services::app_log::AppLog::detached(
                 crate::services::app_log::REVERT_AFTER,
             )),
-            harbor_fetch: crate::api::state::HarborFetchHandle::outbound(false).unwrap(),
-            pull_limiter: crate::api::mappings::new_pull_limiter(),
-            scanner_launch: Default::default(),
-            pickers: crate::services::pickers::PickerState::outbound(false, Default::default())
-                .unwrap(),
             github: Default::default(),
         };
         (crate::app(Vec::new(), state), pool, dir)

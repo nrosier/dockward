@@ -12,7 +12,6 @@ use crate::auth::crypto::{self, DerivedKey};
 use crate::db::key_rotation::{self as rows, SealedValue};
 use crate::error::AppError;
 use crate::services::audit::{self, Actor};
-use crate::services::harbor_webhook::constant_time_eq;
 
 /// One encrypted column. The AAD of each value is `<table>:<column>:<row id>`.
 pub struct EncryptedColumn {
@@ -110,6 +109,17 @@ fn expect_one(changed: u64) -> Result<(), AppError> {
     }
 }
 
+/// Compares two equal-length byte strings without an early exit on the first difference.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -187,8 +197,8 @@ mod tests {
                 crypto::encrypt(&key, &crypto::aad(table, column, id), plain.as_bytes()).unwrap();
             let query = match table {
                 "user_credentials" => sqlx::query(
-                    "INSERT INTO user_credentials (id, user_id, service_type, label, encrypted_token)
-                     VALUES (?, 'user-1', 'github', 'fake label', ?)",
+                    "INSERT INTO user_credentials (id, user_id, label, encrypted_token)
+                     VALUES (?, 'user-1', 'fake label', ?)",
                 ),
                 "system_config" => sqlx::query(
                     "INSERT INTO system_config (key, value, is_encrypted) VALUES (?, ?, 1)",

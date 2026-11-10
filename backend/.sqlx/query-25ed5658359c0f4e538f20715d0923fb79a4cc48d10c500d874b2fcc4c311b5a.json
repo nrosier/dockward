@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM sync_jobs j\n           LEFT JOIN image_sources m ON m.id = j.source_id\n           WHERE j.status = 'failed' AND j.updated_at >= ?2\n             AND (?1 IS NULL OR m.user_id = ?1)",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "25ed5658359c0f4e538f20715d0923fb79a4cc48d10c500d874b2fcc4c311b5a"
+}

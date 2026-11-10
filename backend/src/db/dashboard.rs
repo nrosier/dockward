@@ -6,11 +6,11 @@ use sqlx::SqlitePool;
 
 use crate::error::AppError;
 
-/// Open CVEs of one mapping by severity, every severity (`specs/cve-lifecycle.md`, changed
-/// on #129). A mapping with none is absent from the result.
+/// Open CVEs of one source by severity, every severity (`specs/cve-lifecycle.md`, changed
+/// on #129). A source with none is absent from the result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenCount {
-    pub mapping_id: String,
+    pub source_id: String,
     pub critical: i64,
     pub high: i64,
     pub medium: i64,
@@ -18,7 +18,7 @@ pub struct OpenCount {
     pub unknown: i64,
 }
 
-/// Open CVEs by severity, per mapping. `mapping_id` `Some` limits the result to that mapping.
+/// Open CVEs by severity, per mapping. `source_id` `Some` limits the result to that mapping.
 ///
 /// Only the rows of the newest-digest tags count (#196, decision 21; the `newest_digest_tags`
 /// view, migration 0010). A CVE open only on an older tag is not counted.
@@ -32,26 +32,26 @@ pub struct OpenCount {
 ///
 /// An acceptance is active when `revoked_at IS NULL` and (`expires_at IS NULL` or
 /// `expires_at > now`), as in `db::acceptances::active`.
-pub async fn open_by_mapping(
+pub async fn open_by_source(
     pool: &SqlitePool,
     user_id: Option<&str>,
-    mapping_id: Option<&str>,
+    source_id: Option<&str>,
     now: i64,
 ) -> Result<Vec<OpenCount>, AppError> {
     let rows = sqlx::query!(
         r#"WITH open_best AS (
-               SELECT f.mapping_id AS mapping_id, f.cve_id AS cve_id,
+               SELECT f.source_id AS source_id, f.cve_id AS cve_id,
                       MAX(CASE f.severity WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4
                            WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 ELSE 1 END) AS sev_rank
                FROM cve_findings f
-               JOIN repo_mappings m ON m.id = f.mapping_id
+               JOIN image_sources m ON m.id = f.source_id
                JOIN newest_digest_tags nd
-                    ON nd.mapping_id = f.mapping_id AND nd.image_tag = f.image_tag
+                    ON nd.source_id = f.source_id AND nd.image_tag = f.image_tag
                WHERE f.status = 'open' AND (?1 IS NULL OR m.user_id = ?1)
-                 AND (?3 IS NULL OR f.mapping_id = ?3)
-               GROUP BY f.mapping_id, f.cve_id
+                 AND (?3 IS NULL OR f.source_id = ?3)
+               GROUP BY f.source_id, f.cve_id
            )
-           SELECT ob.mapping_id AS "mapping_id!",
+           SELECT ob.source_id AS "source_id!",
                   COALESCE(SUM(CASE WHEN ob.sev_rank = 5 THEN 1 ELSE 0 END), 0) AS "critical!: i64",
                   COALESCE(SUM(CASE WHEN ob.sev_rank = 4 THEN 1 ELSE 0 END), 0) AS "high!: i64",
                   COALESCE(SUM(CASE WHEN ob.sev_rank = 3 THEN 1 ELSE 0 END), 0) AS "medium!: i64",
@@ -60,14 +60,14 @@ pub async fn open_by_mapping(
            FROM open_best ob
            WHERE NOT EXISTS (
                SELECT 1 FROM cve_acceptances ca
-               WHERE ca.mapping_id = ob.mapping_id AND ca.cve_id = ob.cve_id
+               WHERE ca.source_id = ob.source_id AND ca.cve_id = ob.cve_id
                  AND ca.revoked_at IS NULL
                  AND (ca.expires_at IS NULL OR ca.expires_at > ?2)
            )
-           GROUP BY ob.mapping_id"#,
+           GROUP BY ob.source_id"#,
         user_id,
         now,
-        mapping_id
+        source_id
     )
     .fetch_all(pool)
     .await
@@ -75,7 +75,7 @@ pub async fn open_by_mapping(
     Ok(rows
         .into_iter()
         .map(|row| OpenCount {
-            mapping_id: row.mapping_id,
+            source_id: row.source_id,
             critical: row.critical,
             high: row.high,
             medium: row.medium,
@@ -95,13 +95,13 @@ pub async fn open_by_mapping(
 pub async fn fixed_cves(pool: &SqlitePool, user_id: Option<&str>) -> Result<i64, AppError> {
     let row = sqlx::query!(
         r#"SELECT COUNT(*) AS "n!: i64" FROM (
-               SELECT f.mapping_id, f.cve_id
+               SELECT f.source_id, f.cve_id
                FROM cve_findings f
-               JOIN repo_mappings m ON m.id = f.mapping_id
+               JOIN image_sources m ON m.id = f.source_id
                JOIN newest_digest_tags nd
-                    ON nd.mapping_id = f.mapping_id AND nd.image_tag = f.image_tag
+                    ON nd.source_id = f.source_id AND nd.image_tag = f.image_tag
                WHERE (?1 IS NULL OR m.user_id = ?1)
-               GROUP BY f.mapping_id, f.cve_id
+               GROUP BY f.source_id, f.cve_id
                HAVING SUM(CASE WHEN f.status = 'open' THEN 1 ELSE 0 END) = 0
            )"#,
         user_id
@@ -113,7 +113,7 @@ pub async fn fixed_cves(pool: &SqlitePool, user_id: Option<&str>) -> Result<i64,
 }
 
 /// Accepted CVEs (#247): distinct `cve_id` per mapping with at least one newest-digest-tag row
-/// at `status = 'open'` and an active acceptance. These are exactly the CVEs `open_by_mapping`
+/// at `status = 'open'` and an active acceptance. These are exactly the CVEs `open_by_source`
 /// leaves out, so an accepted CVE is never in both counts. An acceptance is active when
 /// `revoked_at IS NULL` and (`expires_at IS NULL` or `expires_at > now`).
 pub async fn accepted_cves(
@@ -123,19 +123,19 @@ pub async fn accepted_cves(
 ) -> Result<i64, AppError> {
     let row = sqlx::query!(
         r#"SELECT COUNT(*) AS "n!: i64" FROM (
-               SELECT f.mapping_id, f.cve_id
+               SELECT f.source_id, f.cve_id
                FROM cve_findings f
-               JOIN repo_mappings m ON m.id = f.mapping_id
+               JOIN image_sources m ON m.id = f.source_id
                JOIN newest_digest_tags nd
-                    ON nd.mapping_id = f.mapping_id AND nd.image_tag = f.image_tag
+                    ON nd.source_id = f.source_id AND nd.image_tag = f.image_tag
                WHERE f.status = 'open' AND (?1 IS NULL OR m.user_id = ?1)
                  AND EXISTS (
                      SELECT 1 FROM cve_acceptances ca
-                     WHERE ca.mapping_id = f.mapping_id AND ca.cve_id = f.cve_id
+                     WHERE ca.source_id = f.source_id AND ca.cve_id = f.cve_id
                        AND ca.revoked_at IS NULL
                        AND (ca.expires_at IS NULL OR ca.expires_at > ?2)
                  )
-               GROUP BY f.mapping_id, f.cve_id
+               GROUP BY f.source_id, f.cve_id
            )"#,
         user_id,
         now
@@ -147,14 +147,15 @@ pub async fn accepted_cves(
 }
 
 /// Open GitHub issues: `github_issues` rows with `status = 'open'` for the GitHub target of
-/// the user's mappings (`specs/cve-lifecycle.md`, Dashboard counts). One mapping exists per
-/// GitHub repository, so each issue row is counted once.
+/// the user's sources (`specs/cve-lifecycle.md`, Dashboard counts). Sources may share a
+/// GitHub repository (decision 47); an issue row is counted once.
 pub async fn open_issues(pool: &SqlitePool, user_id: Option<&str>) -> Result<i64, AppError> {
     let row = sqlx::query!(
         r#"SELECT COUNT(*) AS "n!: i64" FROM github_issues gi
-           JOIN repo_mappings m
-             ON m.github_owner = gi.github_owner AND m.github_repo = gi.github_repo
-           WHERE gi.status = 'open' AND (?1 IS NULL OR m.user_id = ?1)"#,
+           WHERE gi.status = 'open' AND EXISTS (
+               SELECT 1 FROM image_sources m
+               WHERE m.github_owner = gi.github_owner AND m.github_repo = gi.github_repo
+                 AND (?1 IS NULL OR m.user_id = ?1))"#,
         user_id
     )
     .fetch_one(pool)
@@ -176,7 +177,7 @@ pub async fn failed_syncs_since(
 ) -> Result<i64, AppError> {
     let row = sqlx::query!(
         r#"SELECT COUNT(*) AS "n!: i64" FROM sync_jobs j
-           JOIN repo_mappings m ON m.id = j.mapping_id
+           LEFT JOIN image_sources m ON m.id = j.source_id
            WHERE j.status = 'failed' AND j.updated_at >= ?2
              AND (?1 IS NULL OR m.user_id = ?1)"#,
         user_id,

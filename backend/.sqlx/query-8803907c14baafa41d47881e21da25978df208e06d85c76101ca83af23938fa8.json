@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE sync_jobs SET status = 'running', updated_at = ?\n           WHERE id = (\n               SELECT id FROM sync_jobs\n               WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)\n               ORDER BY next_attempt_at, created_at\n               LIMIT 1\n           )\n           RETURNING id AS \"id!\", source_id AS \"source_id?: String\", attempts AS \"attempts!: i64\", payload AS \"payload!\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_jobs",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "source_id?: String",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_jobs",
+            "name": "source_id"
+          }
+        }
+      },
+      {
+        "name": "attempts!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sync_jobs",
+            "name": "attempts"
+          }
+        }
+      },
+      {
+        "name": "payload!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sync_jobs",
+            "name": "payload"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "8803907c14baafa41d47881e21da25978df208e06d85c76101ca83af23938fa8"
+}

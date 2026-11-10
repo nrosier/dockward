@@ -1,7 +1,7 @@
 //! The GitHub issue lifecycle (`specs/cve-lifecycle.md`, "GitHub issue rules"; defaults in
 //! `specs/integrations.md`, "GitHub issues").
 //!
-//! After each applied scan, [`reconcile`] makes the GitHub issues of one mapping follow its
+//! After each applied scan, [`reconcile`] makes the GitHub issues of one source follow its
 //! `cve_findings`: create or adopt an issue for an eligible CVE, reuse it while it is open,
 //! close it with a comment when the newest scanned digest no longer reports the CVE
 //! (#196), and reopen it when a later scan of the newest digest reports the CVE again. Each
@@ -18,8 +18,8 @@ use sqlx::SqlitePool;
 use crate::auth::crypto::DerivedKey;
 use crate::db::credentials as credential_db;
 use crate::db::github_issues::{self as issue_db, FindingRow, IssueRow, NewIssue};
-use crate::db::mappings::{self as mapping_db, MappingRow};
-use crate::db::scanner_reports as scanner_db;
+use crate::db::scan_runs as runs_db;
+use crate::db::sources::{self as source_db, SourceRow};
 use crate::error::AppError;
 use crate::services::credentials::decrypt_token;
 use crate::services::github_issues::{self, GithubIssues, IssueRef};
@@ -32,13 +32,16 @@ use crate::services::merged_view::{self, ScannerRef};
 /// (https://docs.github.com/rest/issues/issues#create-an-issue) does not state the limit.
 const MAX_TITLE_CHARS: usize = 256;
 
+/// The scanner keys of `scan_runs.scanner`.
+const ALL_SCANNERS: [&str; 2] = ["grype", "trivy"];
+
 /// The package text when a row has none, in the title and in the table.
 const UNKNOWN_PACKAGE: &str = "unknown package";
 
 /// The comment when the manual route reopens a closed issue.
 const MANUAL_REOPEN_COMMENT: &str = "CVE reopened manually from HarborGate.";
 
-/// The longest CVE id or mapping id the manual route and the lifecycle accept, in bytes.
+/// The longest CVE id or source id the manual route and the lifecycle accept, in bytes.
 const MAX_ID_BYTES: usize = 128;
 
 /// Serialises "look for a row, look for a marked issue, create an issue, store the row".
@@ -322,7 +325,7 @@ fn rank(severity: &str) -> u8 {
     }
 }
 
-/// True when `severity` reaches the mapping's `min_issue_severity`. Used by the automatic
+/// True when `severity` reaches the source's `min_issue_severity`. Used by the automatic
 /// path only; MEDIUM, LOW and UNKNOWN never pass.
 fn meets_minimum(severity: &str, min_issue_severity: Option<&str>) -> bool {
     let needed = if min_issue_severity == Some("HIGH") {
@@ -395,7 +398,7 @@ fn summarize(cve_id: &str, rows: &[FindingRow]) -> Option<CveView> {
 }
 
 /// The view of a CVE as the newest scanned digest reports it: only the rows of `newest_tags`
-/// count, or every row when the mapping has no successful report (`None`).
+/// count, or every row when the source has no successful report (`None`).
 fn reported_in(
     cve_id: &str,
     rows: &[FindingRow],
@@ -432,14 +435,14 @@ fn issue_title(view: &CveView) -> String {
 }
 
 /// The marker line, the table from [`github_issues::issue_body`], and the affected tags.
-fn issue_text(view: &CveView, mapping: &MappingRow) -> String {
-    let harbor = format!("{}/{}", mapping.harbor_project, mapping.harbor_repository);
+fn issue_text(view: &CveView, source: &SourceRow) -> String {
+    let image = format!("{}/{}", source.hub_host, source.repository);
     let mut body = github_issues::issue_body(
         &view.cve_id,
         view.severity,
         &code_span(view.package.as_deref().unwrap_or(UNKNOWN_PACKAGE)),
         view.fixed_in.as_deref(),
-        &harbor,
+        &image,
         view.description.as_deref(),
     );
     let tags: Vec<String> = view
@@ -467,7 +470,7 @@ fn valid_cve_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':'))
 }
 
-fn valid_mapping_id(id: &str) -> bool {
+fn valid_source_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_ID_BYTES
         && id
@@ -493,23 +496,23 @@ enum Made {
     Existing(IssueRow),
 }
 
-/// What every GitHub step needs: the database, the client, the token, the mapping and the
+/// What every GitHub step needs: the database, the client, the token, the source and the
 /// time. The token is only passed on to the client.
 struct Ctx<'a, G> {
     pool: &'a SqlitePool,
     gh: &'a G,
     token: &'a [u8],
-    mapping: &'a MappingRow,
+    source: &'a SourceRow,
     now: i64,
 }
 
 impl<G: IssueApi> Ctx<'_, G> {
     fn owner(&self) -> &str {
-        &self.mapping.github_owner
+        &self.source.github_owner
     }
 
     fn repo(&self) -> &str {
-        &self.mapping.github_repo
+        &self.source.github_repo
     }
 
     /// Finds or makes the issue for a CVE and stores the row. Under [`CREATE_LOCK`] it first
@@ -553,7 +556,7 @@ impl<G: IssueApi> Ctx<'_, G> {
                         self.owner(),
                         self.repo(),
                         &issue_title(view),
-                        &issue_text(view, self.mapping),
+                        &issue_text(view, self.source),
                         &labels,
                         self.now,
                     )
@@ -587,7 +590,7 @@ impl<G: IssueApi> Ctx<'_, G> {
                 .ok_or(AppError::InternalError)?;
             return Ok(Made::Existing(row));
         }
-        issue_db::link_findings(&mut conn, &self.mapping.id, &view.cve_id, &id).await?;
+        issue_db::link_findings(&mut conn, &self.source.id, &view.cve_id, &id).await?;
         Ok(Made::Created(IssueRow {
             id,
             github_owner: self.owner().to_owned(),
@@ -646,7 +649,7 @@ impl<G: IssueApi> Ctx<'_, G> {
 
     /// Sets the `Found by` line of an open issue to the scanners that report the CVE now, with a
     /// PATCH on the body, only when the line differs (`specs/integrations.md`, "GitHub issues").
-    /// Nothing is read or sent when no scanner is known, so a mapping that has no stored scanner
+    /// Nothing is read or sent when no scanner is known, so a source that has no stored scanner
     /// report makes the same GitHub calls as before.
     async fn refresh_found_by(
         &self,
@@ -685,9 +688,9 @@ impl<G: IssueApi> Ctx<'_, G> {
         issue_db::find(&mut conn, self.owner(), self.repo(), cve_id).await
     }
 
-    /// True when another mapping that targets the same GitHub repository reports `cve_id`:
+    /// True when another source that targets the same GitHub repository reports `cve_id`:
     /// a tag of its newest scanned digest has the CVE `open` (every tracked tag when it has
-    /// no successful report). The issue is shared (#185), so it closes only when no mapping
+    /// no successful report). The issue is shared (#185), so it closes only when no source
     /// of the repository reports the CVE (`specs/cve-lifecycle.md`).
     async fn reported_elsewhere(&self, cve_id: &str) -> Result<bool, AppError> {
         let mut conn = self
@@ -696,15 +699,14 @@ impl<G: IssueApi> Ctx<'_, G> {
             .await
             .map_err(|_| AppError::InternalError)?;
         let siblings =
-            issue_db::sibling_mappings(&mut conn, &self.mapping.id, self.owner(), self.repo())
+            issue_db::sibling_sources(&mut conn, &self.source.id, self.owner(), self.repo())
                 .await?;
         for sibling in siblings {
-            let (id, harbor_repository) = (sibling.id, sibling.harbor_repository);
-            let rows = issue_db::findings_for_cve(&mut conn, &id, cve_id).await?;
+            let rows = issue_db::findings_for_cve(&mut conn, &sibling.id, cve_id).await?;
             if rows.is_empty() {
                 continue;
             }
-            let newest = issue_db::newest_digest_tags(&mut conn, &id, &harbor_repository).await?;
+            let newest = issue_db::newest_image_tags(&mut conn, &sibling.id).await?;
             if reported_in(cve_id, &rows, newest.as_deref()).is_some() {
                 return Ok(true);
             }
@@ -797,7 +799,7 @@ impl<G: IssueApi> Ctx<'_, G> {
         Ok(())
     }
 
-    /// Applies the issue rules to one CVE of the mapping, given its rows. The CVE counts as
+    /// Applies the issue rules to one CVE of the source, given its rows. The CVE counts as
     /// reported only when a tag of the newest scanned digest has it `open`
     /// (`rules.newest_tags`); older tags never keep an issue open.
     async fn step(
@@ -816,7 +818,7 @@ impl<G: IssueApi> Ctx<'_, G> {
                 .map_err(|_| AppError::InternalError)?;
             let row = issue_db::find(&mut conn, self.owner(), self.repo(), cve_id).await?;
             if let Some(row) = &row {
-                issue_db::link_findings(&mut conn, &self.mapping.id, cve_id, &row.id).await?;
+                issue_db::link_findings(&mut conn, &self.source.id, cve_id, &row.id).await?;
             }
             row
         };
@@ -871,7 +873,7 @@ impl<G: IssueApi> Ctx<'_, G> {
                 }
             }
             // (c) The row is open: read the GitHub state first. The row is shared by every
-            // mapping of the GitHub repository (#185), so the CVE counts as reported when
+            // source of the GitHub repository (#185), so the CVE counts as reported when
             // another of them reports it.
             (Some(row), _) if row.status == "open" => {
                 let reported = reported || self.reported_elsewhere(cve_id).await?;
@@ -910,106 +912,123 @@ impl<G: IssueApi> Ctx<'_, G> {
     }
 }
 
-/// The mapping's rule inputs for one reconcile run.
+/// The source's rule inputs for one reconcile run.
 struct Rules<'a> {
     auto_create: bool,
     min_issue_severity: Option<&'a str>,
     scan_label: &'a str,
     /// CVE ids with an active acceptance.
     accepted: Vec<String>,
-    /// Image tags of the newest scanned digest, or `None` when the mapping has no successful
+    /// Image tags of the newest scanned digest, or `None` when the source has no successful
     /// report (then every tracked tag counts).
     newest_tags: Option<Vec<String>>,
     /// The scanners that report each CVE on the newest digest (#224).
     scanners: HashMap<String, Vec<ScannerRef>>,
-    /// True while an enabled scanner has no report for the newest digest of this mapping or of a
-    /// mapping that shares the GitHub repository. No issue closes then (#224 d14).
+    /// True while an enabled scanner has no report for the newest digest of this source or of a
+    /// source that shares the GitHub repository. No issue closes then (#224 d14).
     close_blocked: bool,
 }
 
-/// What the stored scanner reports say for one mapping (#224): the scanners per CVE on the newest
+/// What the stored scanner reports say for one source (#224): the scanners per CVE on the newest
 /// digest, and whether a close must wait. A digest with no stored scanner report (one that was
 /// synced the old way) has no scanners, so nothing changes for it.
 async fn scanner_state(
     pool: &SqlitePool,
-    mapping: &MappingRow,
+    source: &SourceRow,
 ) -> Result<(HashMap<String, Vec<ScannerRef>>, bool), AppError> {
     let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
-    let newest =
-        issue_db::newest_digest(&mut conn, &mapping.id, &mapping.harbor_repository).await?;
+    let enabled = enabled_scanner_keys(&mut conn).await?;
+    let newest = issue_db::newest_image(&mut conn, &source.id).await?;
     let mut blocked = false;
-    if let Some(digest) = &newest {
-        blocked = scanner_db::enabled_scanners_without_report(
-            &mut conn,
-            &mapping.harbor_base_url,
-            &mapping.id,
-            digest,
-        )
-        .await?
-            > 0;
+    if let Some(image_id) = &newest {
+        blocked = image_awaits_scanner(&mut conn, image_id, &enabled).await?;
     }
-    let siblings = issue_db::sibling_mappings(
+    let siblings = issue_db::sibling_sources(
         &mut conn,
-        &mapping.id,
-        &mapping.github_owner,
-        &mapping.github_repo,
+        &source.id,
+        &source.github_owner,
+        &source.github_repo,
     )
     .await?;
     for sibling in siblings {
         if blocked {
             break;
         }
-        if let Some(digest) =
-            issue_db::newest_digest(&mut conn, &sibling.id, &sibling.harbor_repository).await?
-        {
-            blocked = scanner_db::enabled_scanners_without_report(
-                &mut conn,
-                &sibling.harbor_base_url,
-                &sibling.id,
-                &digest,
-            )
-            .await?
-                > 0;
+        if let Some(image_id) = issue_db::newest_image(&mut conn, &sibling.id).await? {
+            blocked = image_awaits_scanner(&mut conn, &image_id, &enabled).await?;
         }
     }
     drop(conn);
     let mut by_cve = HashMap::new();
-    if let Some(digest) = newest {
-        let merged =
-            merged_view::load(pool, &mapping.id, &mapping.harbor_base_url, &digest).await?;
+    if let Some(image_id) = newest {
+        let merged = merged_view::load(pool, &image_id).await?;
         by_cve = merged_view::scanners_by_cve(&merged);
     }
     Ok((by_cve, blocked))
 }
 
-/// Makes the GitHub issues of `mapping` follow its findings. `scan_label` names the scan in
+/// The scanner keys the operator enabled: `scanners.enabled` of `system_config`, a comma
+/// separated list of `grype` and `trivy`. An unset or unusable value enables both. Unknown
+/// words are ignored.
+async fn enabled_scanner_keys(conn: &mut sqlx::SqliteConnection) -> Result<Vec<String>, AppError> {
+    let value = runs_db::enabled_scanners_setting_in(conn).await?;
+    let listed: Vec<String> = value
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(|word| word.trim().to_ascii_lowercase())
+        .filter(|word| ALL_SCANNERS.contains(&word.as_str()))
+        .collect();
+    if listed.is_empty() {
+        return Ok(ALL_SCANNERS.iter().map(|key| (*key).to_owned()).collect());
+    }
+    Ok(listed)
+}
+
+/// True while an enabled scanner has no `done` run for some platform of the image. An evicted
+/// platform counts through its last `done` run. A queued, running or failed run is not a result,
+/// so it holds issue closing open (#224 d14; `specs/spinoff-local-scan.md`, section 9).
+async fn image_awaits_scanner(
+    conn: &mut sqlx::SqliteConnection,
+    image_id: &str,
+    enabled: &[String],
+) -> Result<bool, AppError> {
+    let platforms = runs_db::platform_ids_in(conn, image_id).await?;
+    let done = runs_db::done_pairs_in(conn, image_id).await?;
+    Ok(platforms.iter().any(|platform| {
+        enabled
+            .iter()
+            .any(|scanner| !done.iter().any(|(p, s)| p == platform && s == scanner))
+    }))
+}
+
+/// Makes the GitHub issues of `source` follow its findings. `scan_label` names the scan in
 /// the comments. A rate limit stops the run and is returned in [`Outcome`]. Any other GitHub
 /// error is logged as fixed text and the next CVE continues. A database error is returned.
 pub async fn reconcile<G: IssueApi>(
     pool: &SqlitePool,
     gh: &G,
     token: &[u8],
-    mapping: &MappingRow,
+    source: &SourceRow,
     scan_label: &str,
     now: i64,
 ) -> Result<Outcome, AppError> {
     let (rows, accepted, newest_tags) = {
         let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
         (
-            issue_db::findings_for_mapping(&mut conn, &mapping.id).await?,
-            issue_db::accepted_cves(&mut conn, &mapping.id, now).await?,
-            issue_db::newest_digest_tags(&mut conn, &mapping.id, &mapping.harbor_repository)
-                .await?,
+            issue_db::findings_for_source(&mut conn, &source.id).await?,
+            issue_db::accepted_cves(&mut conn, &source.id, now).await?,
+            issue_db::newest_image_tags(&mut conn, &source.id).await?,
         )
     };
-    let (scanners, close_blocked) = scanner_state(pool, mapping).await?;
+    let (scanners, close_blocked) = scanner_state(pool, source).await?;
     let mut by_cve: BTreeMap<String, Vec<FindingRow>> = BTreeMap::new();
     for row in rows {
         by_cve.entry(row.cve_id.clone()).or_default().push(row);
     }
     let rules = Rules {
-        auto_create: mapping.auto_create_issues.unwrap_or(false),
-        min_issue_severity: mapping.min_issue_severity.as_deref(),
+        auto_create: source.auto_create_issues,
+        min_issue_severity: Some(source.min_issue_severity.as_str()),
         scan_label,
         accepted,
         newest_tags,
@@ -1020,7 +1039,7 @@ pub async fn reconcile<G: IssueApi>(
         pool,
         gh,
         token,
-        mapping,
+        source,
         now,
     };
     let mut listed: Option<Vec<IssueRef>> = None;
@@ -1065,13 +1084,13 @@ fn manual_error(failure: Failure) -> AppError {
 }
 
 /// The manual issue route's work (`specs/api.md`, `POST /api/v1/cves/:id/issue`) for a
-/// mapping the caller owns.
+/// source the caller owns.
 ///
-/// - `404` when the mapping has no finding for the CVE.
+/// - `404` when the source has no finding for the CVE.
 /// - `409` (with the URL) when its issue is open, and `409` while an active acceptance exists.
 /// - `422` when no tracked tag reports the CVE as open. Any open severity is allowed, LOW
 ///   and UNKNOWN included (#129); the confirmation for those is a frontend step. The
-///   mapping's `min_issue_severity` and `auto_create_issues` do not apply: the manual action
+///   source's `min_issue_severity` and `auto_create_issues` do not apply: the manual action
 ///   overrides them.
 /// - A closed issue is reopened, never duplicated. Otherwise an open labelled issue with the
 ///   marker is adopted, or a new one is created.
@@ -1080,22 +1099,16 @@ pub async fn create_manual<G: IssueApi>(
     pool: &SqlitePool,
     gh: &G,
     token: &[u8],
-    mapping: &MappingRow,
+    source: &SourceRow,
     cve_id: &str,
     now: i64,
 ) -> Result<ManualIssue, AppError> {
     let (rows, existing, accepted) = {
         let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
         (
-            issue_db::findings_for_cve(&mut conn, &mapping.id, cve_id).await?,
-            issue_db::find(
-                &mut conn,
-                &mapping.github_owner,
-                &mapping.github_repo,
-                cve_id,
-            )
-            .await?,
-            issue_db::accepted_cves(&mut conn, &mapping.id, now).await?,
+            issue_db::findings_for_cve(&mut conn, &source.id, cve_id).await?,
+            issue_db::find(&mut conn, &source.github_owner, &source.github_repo, cve_id).await?,
+            issue_db::accepted_cves(&mut conn, &source.id, now).await?,
         )
     };
     if rows.is_empty() {
@@ -1123,7 +1136,7 @@ pub async fn create_manual<G: IssueApi>(
         pool,
         gh,
         token,
-        mapping,
+        source,
         now,
     };
     let row = match existing {
@@ -1163,20 +1176,20 @@ pub async fn create_manual<G: IssueApi>(
     })
 }
 
-/// Splits the route id `<mapping_id>:<cve_id>`. An id in any other shape, an empty part, a
+/// Splits the route id `<source_id>:<cve_id>`. An id in any other shape, an empty part, a
 /// part over 128 bytes, or a character outside the allowed set is `404`, before any database
 /// call.
 fn split_id(id: &str) -> Result<(&str, &str), AppError> {
     match id.split_once(':') {
-        Some((mapping_id, cve_id)) if valid_mapping_id(mapping_id) && valid_cve_id(cve_id) => {
-            Ok((mapping_id, cve_id))
+        Some((source_id, cve_id)) if valid_source_id(source_id) && valid_cve_id(cve_id) => {
+            Ok((source_id, cve_id))
         }
         _ => Err(AppError::NotFound),
     }
 }
 
-/// `POST /api/v1/cves/:id/issue` for `user_id`: finds the mapping the caller owns (another
-/// tenant's mapping is `404`), decrypts the GitHub token of its credential, and calls
+/// `POST /api/v1/cves/:id/issue` for `user_id`: finds the source the caller owns (another
+/// tenant's source is `404`), decrypts the GitHub token of its credential, and calls
 /// [`create_manual`].
 pub async fn create_manual_for_user<G: IssueApi>(
     pool: &SqlitePool,
@@ -1186,19 +1199,19 @@ pub async fn create_manual_for_user<G: IssueApi>(
     id: &str,
     now: i64,
 ) -> Result<ManualIssue, AppError> {
-    let (mapping_id, cve_id) = split_id(id)?;
-    let (mapping, credential) = {
+    let (source_id, cve_id) = split_id(id)?;
+    let (source, credential) = {
         let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
-        let mapping = mapping_db::find_owned(&mut conn, user_id, mapping_id)
+        let source = source_db::find_owned(&mut conn, user_id, source_id)
             .await?
             .ok_or(AppError::NotFound)?;
-        let credential = credential_db::find_owned(&mut conn, user_id, &mapping.github_cred_id)
+        let credential = credential_db::find_owned(&mut conn, user_id, &source.github_cred_id)
             .await?
             .ok_or(AppError::NotFound)?;
-        (mapping, credential)
+        (source, credential)
     };
     let token = decrypt_token(credentials_key, &credential)?;
-    create_manual(pool, gh, &token, &mapping, cve_id, now).await
+    create_manual(pool, gh, &token, &source, cve_id, now).await
 }
 
 #[cfg(test)]
@@ -1588,11 +1601,11 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
 
     use super::test_support::{FakeGithub, FakeIssues};
     use super::*;
     use crate::db;
-    use crate::db::mappings as mapping_db;
 
     const TOKEN: &[u8] = b"fake-token-value";
 
@@ -1601,6 +1614,8 @@ mod tests {
         dir: std::path::PathBuf,
         github: Arc<FakeGithub>,
         gh: FakeIssues,
+        /// The `finished_at` of the next scan run; each run is later than the one before.
+        clock: AtomicI64,
     }
 
     impl Fixture {
@@ -1619,41 +1634,35 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-            for (id, service, base_url) in [
-                ("c1", "harbor", Some("https://harbor.example.com")),
-                ("c2", "github", None),
-            ] {
-                sqlx::query(
-                    "INSERT INTO user_credentials (id, user_id, service_type, label, base_url, username, encrypted_token)
-                     VALUES (?, 'u1', ?, ?, ?, NULL, 'v1:test')",
-                )
-                .bind(id)
-                .bind(service)
-                .bind(id)
-                .bind(base_url)
-                .execute(&pool)
-                .await
-                .unwrap();
-            }
+            sqlx::query(
+                "INSERT INTO user_credentials (id, user_id, label, encrypted_token)
+                 VALUES ('c2', 'u1', 'c2', 'v1:test')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
             let github = Arc::new(FakeGithub::default());
             let fixture = Self {
                 pool,
                 dir,
                 github: github.clone(),
                 gh: FakeIssues(github),
+                clock: AtomicI64::new(1_000),
             };
-            fixture.mapping_row("m1", min, auto).await;
+            fixture.source_row("m1", min, auto).await;
             fixture
         }
 
-        async fn mapping_row(&self, id: &str, min: &str, auto: bool) {
+        /// A source on `ghcr.io`. `m1` is `o/app`; any other id is `o/web`. Both target the
+        /// GitHub repository `octo/app`.
+        async fn source_row(&self, id: &str, min: &str, auto: bool) {
+            let repository = if id == "m1" { "o/app" } else { "o/web" };
             sqlx::query(
-                "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash, auto_create_issues, min_issue_severity)
-                 VALUES (?, 'u1', 'c1', 'c2', 'https://harbor.example.com', 'proj', 'app', 'octo', 'app', ?, ?, ?, ?)",
+                "INSERT INTO image_sources (id, user_id, hub_id, repository, tag_value, github_cred_id, github_owner, github_repo, auto_create_issues, min_issue_severity)
+                 VALUES (?, 'u1', 'hub-default-ghcr', ?, '*', 'c2', 'octo', 'app', ?, ?)",
             )
             .bind(id)
-            .bind(format!("hash-token-{id}"))
-            .bind(format!("hash-secret-{id}"))
+            .bind(repository)
             .bind(auto)
             .bind(min)
             .execute(&self.pool)
@@ -1661,37 +1670,34 @@ mod tests {
             .unwrap();
         }
 
-        async fn mapping(&self, id: &str) -> MappingRow {
+        async fn source(&self, id: &str) -> SourceRow {
             let mut conn = self.pool.acquire().await.unwrap();
-            mapping_db::find_by_id(&mut conn, id)
-                .await
-                .unwrap()
-                .unwrap()
+            source_db::find_by_id(&mut conn, id).await.unwrap().unwrap()
         }
 
         /// Stores a finding for `tag` as an `open` row seen at `at`.
-        async fn finding(&self, mapping_id: &str, tag: &str, cve: &str, severity: &str, at: i64) {
-            self.finding_pkg(mapping_id, tag, cve, severity, "openssl", at)
+        async fn finding(&self, source_id: &str, tag: &str, cve: &str, severity: &str, at: i64) {
+            self.finding_pkg(source_id, tag, cve, severity, "openssl", at)
                 .await;
         }
 
         async fn finding_pkg(
             &self,
-            mapping_id: &str,
+            source_id: &str,
             tag: &str,
             cve: &str,
             severity: &str,
             package: &str,
             at: i64,
         ) {
-            self.finding_full(mapping_id, tag, cve, severity, package, None, at)
+            self.finding_full(source_id, tag, cve, severity, package, None, at)
                 .await;
         }
 
         #[allow(clippy::too_many_arguments)]
         async fn finding_full(
             &self,
-            mapping_id: &str,
+            source_id: &str,
             tag: &str,
             cve: &str,
             severity: &str,
@@ -1699,22 +1705,26 @@ mod tests {
             description: Option<&str>,
             at: i64,
         ) {
-            let mut conn = self.pool.acquire().await.unwrap();
-            db::findings::upsert(
-                &mut conn,
-                &db::findings::Finding {
-                    id: &ids::new_id().unwrap_or_default(),
-                    mapping_id,
-                    harbor_repository: "app",
-                    image_tag: tag,
-                    cve_id: cve,
-                    package: Some(package),
-                    severity,
-                    fixed_in_version: None,
-                    description,
-                    now: at,
-                },
+            sqlx::query(
+                "INSERT INTO cve_findings
+                    (id, source_id, image_tag, cve_id, package, severity, description,
+                     first_seen_at, last_seen_at, status)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
+                 ON CONFLICT (source_id, image_tag, cve_id) DO UPDATE SET
+                    severity = excluded.severity, package = excluded.package,
+                    description = excluded.description, last_seen_at = excluded.last_seen_at,
+                    status = 'open'",
             )
+            .bind(ids::new_id().unwrap_or_default())
+            .bind(source_id)
+            .bind(tag)
+            .bind(cve)
+            .bind(package)
+            .bind(severity)
+            .bind(description)
+            .bind(at)
+            .bind(at)
+            .execute(&self.pool)
             .await
             .unwrap();
         }
@@ -1730,24 +1740,83 @@ mod tests {
             .unwrap();
         }
 
-        /// Stores a successful report of `tag` on `digest`, pushed at `push_ms`.
-        async fn report(&self, tag: &str, digest: &str, push_ms: i64) {
+        /// Source `m1` observes `tag` on `digest` from `first_seen` on (decision 49). The image
+        /// has one platform. No scan run is stored.
+        async fn observe(&self, tag: &str, digest: &str, first_seen: i64) {
+            let image = format!("img-{digest}");
             sqlx::query(
-                "INSERT INTO sync_reports (id, mapping_id, harbor_repository, image_tag, image_digest, vulnerability_summary, sarif_status, image_push_time, synced_at)
-                 VALUES (?, 'm1', 'app', ?, ?, '{}', 'success', ?, 1)",
+                "INSERT OR IGNORE INTO images (id, hub_id, repository, digest, is_index)
+                 VALUES (?, 'hub-default-ghcr', 'o/app', ?, 0)",
             )
-            .bind(format!("r-{tag}-{digest}"))
-            .bind(tag)
+            .bind(&image)
             .bind(digest)
-            .bind(push_ms)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT OR IGNORE INTO image_platforms (id, image_id, platform, platform_digest, state)
+                 VALUES (?, ?, 'linux/amd64', ?, 'stored')",
+            )
+            .bind(format!("plat-{digest}"))
+            .bind(&image)
+            .bind(digest)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO tag_observations (source_id, tag, image_id, first_seen_at, last_seen_at)
+                 VALUES ('m1', ?, ?, ?, ?)",
+            )
+            .bind(tag)
+            .bind(&image)
+            .bind(first_seen)
+            .bind(first_seen)
             .execute(&self.pool)
             .await
             .unwrap();
         }
 
+        /// A finished scan of `digest` by `scanner` (`grype` or `trivy`) that found `cves`
+        /// (CVE id, package). It is later than every run stored before it.
+        async fn scan_run(&self, digest: &str, scanner: &str, cves: &[(&str, &str)]) {
+            let run_id = ids::new_id().unwrap();
+            let finished = self.clock.fetch_add(1, Ordering::SeqCst);
+            sqlx::query(
+                "INSERT INTO scan_runs (id, image_platform_id, scanner, trigger, status, finished_at)
+                 VALUES (?, ?, ?, 'first_pull', 'done', ?)",
+            )
+            .bind(&run_id)
+            .bind(format!("plat-{digest}"))
+            .bind(scanner)
+            .bind(finished)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+            for (cve, package) in cves {
+                sqlx::query(
+                    "INSERT INTO scanner_findings (run_id, cve_id, package, version, severity)
+                     VALUES (?, ?, ?, '1.0', 'CRITICAL')",
+                )
+                .bind(&run_id)
+                .bind(cve)
+                .bind(package)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            }
+        }
+
+        /// Source `m1` observes `tag` on `digest` from `first_seen` on, and both scanners have a
+        /// finished, clean scan of it.
+        async fn report(&self, tag: &str, digest: &str, first_seen: i64) {
+            self.observe(tag, digest, first_seen).await;
+            self.scan_run(digest, "grype", &[]).await;
+            self.scan_run(digest, "trivy", &[]).await;
+        }
+
         async fn reconcile(&self, label: &str) -> Outcome {
-            let mapping = self.mapping("m1").await;
-            reconcile(&self.pool, &self.gh, TOKEN, &mapping, label, 1_000)
+            let source = self.source("m1").await;
+            reconcile(&self.pool, &self.gh, TOKEN, &source, label, 1_000)
                 .await
                 .unwrap()
         }
@@ -1780,7 +1849,7 @@ mod tests {
             .await;
         fx.finding("m1", "v1", "CVE-2026-0002", "MEDIUM", 10).await;
 
-        assert_eq!(fx.reconcile("proj/app:v1").await, Outcome::Complete);
+        assert_eq!(fx.reconcile("ghcr.io/o/app:v1").await, Outcome::Complete);
 
         let creates = fx.github.creates();
         assert_eq!(creates.len(), 1);
@@ -1810,14 +1879,14 @@ mod tests {
     async fn high_creates_only_when_min_severity_is_high() {
         let fx = Fixture::new("high", "CRITICAL", true).await;
         fx.finding("m1", "v1", "CVE-2026-0003", "HIGH", 10).await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         assert!(fx.github.creates().is_empty());
 
-        sqlx::query("UPDATE repo_mappings SET min_issue_severity = 'HIGH' WHERE id = 'm1'")
+        sqlx::query("UPDATE image_sources SET min_issue_severity = 'HIGH' WHERE id = 'm1'")
             .execute(&fx.pool)
             .await
             .unwrap();
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         assert_eq!(fx.github.creates().len(), 1);
     }
 
@@ -1826,13 +1895,13 @@ mod tests {
         let fx = Fixture::new("reuse", "CRITICAL", true).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         let listed_after_first = fx.github.requests();
 
         // A later scan of another tag reports the same CVE.
         fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 20)
             .await;
-        fx.reconcile("proj/app:v2").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
 
         assert_eq!(fx.github.creates().len(), 1);
         assert_eq!(fx.issues().await.len(), 1);
@@ -1846,27 +1915,21 @@ mod tests {
         );
     }
 
-    /// #185: one issue is shared by two mappings on the same GitHub repository. It stays
-    /// open while either reports the CVE, survives the delete of one mapping, and closes only
-    /// when no remaining mapping reports it.
+    /// #185: one issue is shared by two sources on the same GitHub repository. It stays
+    /// open while either reports the CVE, survives the delete of one source, and closes only
+    /// when no remaining source reports it.
     #[tokio::test]
-    async fn shared_issue_stays_open_while_another_mapping_reports_the_cve() {
+    async fn shared_issue_stays_open_while_another_source_reports_the_cve() {
         let fx = Fixture::new("shared", "CRITICAL", true).await;
-        // A second mapping, another Harbor repository, the same GitHub repository octo/app.
-        sqlx::query(
-            "INSERT INTO repo_mappings (id, user_id, harbor_cred_id, github_cred_id, harbor_base_url, harbor_project, harbor_repository, github_owner, github_repo, webhook_token_hash, webhook_auth_secret_hash, auto_create_issues, min_issue_severity)
-             VALUES ('m2', 'u1', 'c1', 'c2', 'https://harbor.example.com', 'proj', 'web', 'octo', 'app', 'hash-token-m2', 'hash-secret-m2', 1, 'CRITICAL')",
-        )
-        .execute(&fx.pool)
-        .await
-        .unwrap();
+        // A second source, another repository, the same GitHub repository octo/app.
+        fx.source_row("m2", "CRITICAL", true).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
         fx.finding("m2", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        fx.reconcile("proj/app:v1").await;
-        let m2 = fx.mapping("m2").await;
-        reconcile(&fx.pool, &fx.gh, TOKEN, &m2, "proj/web:v1", 1_000)
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        let m2 = fx.source("m2").await;
+        reconcile(&fx.pool, &fx.gh, TOKEN, &m2, "ghcr.io/o/web:v1", 1_000)
             .await
             .unwrap();
         assert_eq!(fx.github.creates().len(), 1, "one shared issue");
@@ -1874,23 +1937,23 @@ mod tests {
 
         // m1 no longer reports the CVE; m2 still does, so the shared issue stays open.
         fx.fix("v1", "CVE-2026-0001").await;
-        sqlx::query("UPDATE cve_findings SET status = 'open' WHERE mapping_id = 'm2'")
+        sqlx::query("UPDATE cve_findings SET status = 'open' WHERE source_id = 'm2'")
             .execute(&fx.pool)
             .await
             .unwrap();
-        fx.reconcile("proj/app:v2").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
         assert_eq!(
             fx.issues().await,
             vec![("CVE-2026-0001".to_owned(), number, "open".to_owned())]
         );
 
-        // m1 is deleted through the mapping delete rule: the shared row survives, still open.
+        // m1 is deleted through the source delete rule: the shared row survives, still open.
         let mut conn = fx.pool.acquire().await.unwrap();
-        mapping_db::delete_github_issues(&mut conn, "m1", "octo", "app")
+        issue_db::delete_unreported_elsewhere(&mut conn, "m1", "octo", "app")
             .await
             .unwrap();
         drop(conn);
-        sqlx::query("DELETE FROM repo_mappings WHERE id = 'm1'")
+        sqlx::query("DELETE FROM image_sources WHERE id = 'm1'")
             .execute(&fx.pool)
             .await
             .unwrap();
@@ -1898,48 +1961,48 @@ mod tests {
             fx.issues().await,
             vec![("CVE-2026-0001".to_owned(), number, "open".to_owned())]
         );
-        reconcile(&fx.pool, &fx.gh, TOKEN, &m2, "proj/web:v2", 1_000)
+        reconcile(&fx.pool, &fx.gh, TOKEN, &m2, "ghcr.io/o/web:v2", 1_000)
             .await
             .unwrap();
         assert_eq!(fx.issues().await[0].2, "open");
 
-        // The last mapping stops reporting it: now the issue closes.
-        sqlx::query("UPDATE cve_findings SET status = 'fixed' WHERE mapping_id = 'm2'")
+        // The last source stops reporting it: now the issue closes.
+        sqlx::query("UPDATE cve_findings SET status = 'fixed' WHERE source_id = 'm2'")
             .execute(&fx.pool)
             .await
             .unwrap();
-        reconcile(&fx.pool, &fx.gh, TOKEN, &m2, "proj/web:v3", 1_000)
+        reconcile(&fx.pool, &fx.gh, TOKEN, &m2, "ghcr.io/o/web:v3", 1_000)
             .await
             .unwrap();
         assert_eq!(fx.issues().await[0].2, "closed");
     }
 
     #[tokio::test]
-    async fn readopts_after_mapping_delete_and_recreate() {
+    async fn readopts_after_source_delete_and_recreate() {
         let fx = Fixture::new("readopt", "CRITICAL", true).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         assert_eq!(fx.github.creates().len(), 1);
 
-        // The mapping is deleted: its issue rows go with it, and GitHub is not changed.
+        // The source is deleted: its issue rows go with it, and GitHub is not changed.
         let mut conn = fx.pool.acquire().await.unwrap();
-        mapping_db::delete_github_issues(&mut conn, "m1", "octo", "app")
+        issue_db::delete_unreported_elsewhere(&mut conn, "m1", "octo", "app")
             .await
             .unwrap();
         drop(conn);
-        sqlx::query("DELETE FROM repo_mappings WHERE id = 'm1'")
+        sqlx::query("DELETE FROM image_sources WHERE id = 'm1'")
             .execute(&fx.pool)
             .await
             .unwrap();
         assert!(fx.issues().await.is_empty());
 
-        // A new mapping for the same repository, and the CVE is reported again.
-        fx.mapping_row("m2", "CRITICAL", true).await;
+        // A new source for the same repository, and the CVE is reported again.
+        fx.source_row("m2", "CRITICAL", true).await;
         fx.finding("m2", "v1", "CVE-2026-0001", "CRITICAL", 30)
             .await;
-        let mapping = fx.mapping("m2").await;
-        reconcile(&fx.pool, &fx.gh, TOKEN, &mapping, "proj/app:v1", 2_000)
+        let source = fx.source("m2").await;
+        reconcile(&fx.pool, &fx.gh, TOKEN, &source, "ghcr.io/o/app:v1", 2_000)
             .await
             .unwrap();
 
@@ -1955,7 +2018,7 @@ mod tests {
         let fx = Fixture::new("labels-high", "HIGH", true).await;
         fx.finding_pkg("m1", "v1", "CVE-2024-1", "HIGH", "openssl", 10)
             .await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
 
         let creates = fx.github.creates();
         assert_eq!(creates.len(), 1);
@@ -1970,8 +2033,8 @@ mod tests {
     async fn unknown_cve_gets_no_severity_label() {
         let fx = Fixture::new("labels-unknown", "HIGH", true).await;
         fx.finding("m1", "v1", "CVE-2024-2", "UNKNOWN", 10).await;
-        let mapping = fx.mapping("m1").await;
-        create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2024-2", 1_000)
+        let source = fx.source("m1").await;
+        create_manual(&fx.pool, &fx.gh, TOKEN, &source, "CVE-2024-2", 1_000)
             .await
             .unwrap();
 
@@ -1988,7 +2051,7 @@ mod tests {
             state.repo_labels = vec!["harborgate".to_owned(), "high".to_owned()];
         });
         fx.finding("m1", "v1", "CVE-2024-3", "HIGH", 10).await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
 
         let writes = fx.github.with(|state| state.log.clone());
         let label_posts: Vec<&str> = writes
@@ -2021,12 +2084,12 @@ mod tests {
                 number: 1,
                 body: marker.to_owned(),
                 open: true,
-                title: "CVE-2024-4: openssl (CRITICAL) in proj/app".to_owned(),
+                title: "CVE-2024-4: openssl (CRITICAL) in ghcr.io/o/app".to_owned(),
                 labels: vec!["harborgate".to_owned()],
             });
         });
         fx.finding("m1", "v1", "CVE-2024-4", "CRITICAL", 10).await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
 
         assert!(fx.github.creates().is_empty());
         let writes = fx.github.writes();
@@ -2062,7 +2125,7 @@ mod tests {
             });
         });
         fx2.finding("m1", "v1", "CVE-2024-5", "CRITICAL", 10).await;
-        fx2.reconcile("proj/app:v1").await;
+        fx2.reconcile("ghcr.io/o/app:v1").await;
         assert!(fx2.github.writes().is_empty());
     }
 
@@ -2081,7 +2144,7 @@ mod tests {
         .await;
         fx.finding_full("m1", "v1", "CVE-2024-7", "HIGH", "zlib", None, 10)
             .await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
 
         let creates = fx.github.creates();
         assert_eq!(creates.len(), 2);
@@ -2099,12 +2162,12 @@ mod tests {
         fx.report("v1", "sha256:old", 100).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         assert_eq!(fx.issues().await[0].2, "open");
 
         // A newer digest is scanned and has no row for the CVE. v1 still reports it.
         fx.report("v2", "sha256:new", 200).await;
-        fx.reconcile("proj/app:v2").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
 
         assert_eq!(fx.issues().await[0].2, "closed");
         let writes = fx.github.writes();
@@ -2130,7 +2193,7 @@ mod tests {
             .await;
         fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 20)
             .await;
-        fx.reconcile("proj/app:v2").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
 
         let creates = fx.github.creates();
         assert_eq!(creates.len(), 1);
@@ -2148,10 +2211,10 @@ mod tests {
             .await;
         fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 20)
             .await;
-        fx.reconcile("proj/app:v2").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
         // The older tag is scanned clean; the newest digest still reports the CVE.
         fx.fix("v1", "CVE-2026-0001").await;
-        fx.reconcile("proj/app:v2").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
 
         assert_eq!(fx.issues().await[0].2, "open");
         assert_eq!(fx.github.writes().len(), 1, "only the create");
@@ -2164,22 +2227,22 @@ mod tests {
         fx.report("v1", "sha256:old", 100).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         fx.report("v2", "sha256:new", 200).await;
-        fx.reconcile("proj/app:v2").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
         assert_eq!(fx.issues().await[0].2, "closed");
 
         // A later scan of the newest digest reports the CVE again.
         fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 40)
             .await;
-        fx.reconcile("proj/app:v2").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
 
         assert_eq!(fx.github.creates().len(), 1, "no new issue");
         let writes = fx.github.writes();
         // create, comment, close, reopen, comment.
         assert_eq!(writes.len(), 5);
         assert_eq!(writes[3].2["state"], "open");
-        assert_eq!(writes[4].2["body"], "CVE is back in scan proj/app:v2");
+        assert_eq!(writes[4].2["body"], "CVE is back in scan ghcr.io/o/app:v2");
         assert_eq!(
             fx.issues().await,
             vec![("CVE-2026-0001".to_owned(), 1, "open".to_owned())]
@@ -2194,13 +2257,13 @@ mod tests {
         fx.report("v1", "sha256:aaa", 100).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         assert_eq!(fx.github.writes().len(), 1);
 
         // Someone closes the issue on GitHub.
         fx.github.with(|state| state.issues[0].open = false);
-        fx.reconcile("proj/app:v1").await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
 
         assert_eq!(fx.issues().await[0].2, "closed");
         assert_eq!(
@@ -2215,7 +2278,7 @@ mod tests {
 
         // The CVE then leaves the newest digest: still no close comment on a closed issue.
         fx.fix("v1", "CVE-2026-0001").await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         assert_eq!(fx.github.writes().len(), 1);
     }
 
@@ -2227,12 +2290,12 @@ mod tests {
         fx.report("v1", "sha256:old", 100).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         fx.report("v2", "sha256:new", 200).await;
-        fx.reconcile("proj/app:v2").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
         assert_eq!(fx.issues().await[0].2, "closed");
         sqlx::query(
-            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username, expires_at)
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username, expires_at)
              VALUES ('a1', 'm1', 'CVE-2026-0001', 'accepted for the test', 'u1', 'u1', NULL)",
         )
         .execute(&fx.pool)
@@ -2241,70 +2304,10 @@ mod tests {
 
         fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 40)
             .await;
-        fx.reconcile("proj/app:v2").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
 
         assert_eq!(fx.github.creates().len(), 1, "accepting never creates one");
         assert_eq!(fx.issues().await[0].2, "open");
-    }
-
-    /// Registers a Harbor scanner for the fixture's Harbor base URL.
-    async fn scanner(fx: &Fixture, uuid: &str, name: &str, disabled: bool) {
-        scanner_db::upsert_scanner(
-            &fx.pool,
-            &scanner_db::HarborScannerUpsert {
-                harbor_base_url: "https://harbor.example.com",
-                uuid,
-                name,
-                vendor: None,
-                version: None,
-                disabled,
-                seen_at: 1,
-            },
-        )
-        .await
-        .unwrap();
-    }
-
-    /// Stores one scanner report of digest `digest` with the given (CVE, package) findings.
-    async fn scanner_report(
-        fx: &Fixture,
-        digest: &str,
-        uuid: &str,
-        name: &str,
-        cves: &[(&str, &str)],
-    ) {
-        let id = ids::new_id().unwrap();
-        let findings: Vec<scanner_db::NewScannerFinding<'_>> = cves
-            .iter()
-            .map(|(cve, package)| scanner_db::NewScannerFinding {
-                cve_id: cve,
-                package,
-                version: Some("1.0"),
-                fixed_in_version: None,
-                severity: "CRITICAL",
-                cvss_v3: None,
-                description: None,
-            })
-            .collect();
-        let mut tx = fx.pool.begin().await.unwrap();
-        scanner_db::replace_report(
-            &mut tx,
-            &scanner_db::NewScannerReport {
-                id: &id,
-                mapping_id: "m1",
-                image_digest: digest,
-                scanner_uuid: uuid,
-                scanner_name: Some(name),
-                scanner_vendor: None,
-                scanner_version: None,
-                image_push_time: None,
-                stored_at: 1,
-            },
-            &findings,
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
     }
 
     /// The merged CVE found by two scanners gets one issue whose body says so, and the line is
@@ -2312,29 +2315,15 @@ mod tests {
     #[tokio::test]
     async fn the_issue_body_names_the_scanner_count_and_names() {
         let fx = Fixture::new("found-by", "CRITICAL", true).await;
-        scanner(&fx, "u-1", "Grype", false).await;
-        scanner(&fx, "u-2", "Trivy", false).await;
-        fx.report("v1", "sha256:new", 100).await;
+        fx.observe("v1", "sha256:new", 100).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        scanner_report(
-            &fx,
-            "sha256:new",
-            "u-1",
-            "Grype",
-            &[("CVE-2026-0001", "openssl")],
-        )
-        .await;
-        scanner_report(
-            &fx,
-            "sha256:new",
-            "u-2",
-            "Trivy",
-            &[("CVE-2026-0001", "openssl")],
-        )
-        .await;
+        fx.scan_run("sha256:new", "grype", &[("CVE-2026-0001", "openssl")])
+            .await;
+        fx.scan_run("sha256:new", "trivy", &[("CVE-2026-0001", "openssl")])
+            .await;
 
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
 
         let created = fx.github.creates();
         assert_eq!(created.len(), 1);
@@ -2344,60 +2333,46 @@ mod tests {
             "{body}"
         );
         assert!(body.starts_with("<!-- harborgate:CVE-2026-0001 -->"));
+        assert!(body.contains("| Image | ghcr.io/o/app |"), "{body}");
 
-        // One scanner stops reporting: the line is refreshed on the next scan.
-        scanner_report(&fx, "sha256:new", "u-1", "Grype", &[]).await;
-        fx.reconcile("proj/app:v1").await;
+        // One scanner stops reporting: its newer run is clean, and the line is refreshed on the
+        // next scan.
+        fx.scan_run("sha256:new", "grype", &[]).await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         let patched = fx.github.with(|state| state.issues[0].body.clone());
         assert!(patched.contains("Found by 1 scanner: `Trivy`"), "{patched}");
         assert_eq!(patched.matches("Found by ").count(), 1);
     }
 
-    /// d14: the issue stays open while one scanner still reports the CVE, stays open while an
-    /// enabled scanner has no report for the newest digest, and closes only when every enabled
-    /// scanner has reported and none reports the CVE.
+    /// d14: the issue stays open while an enabled scanner has no finished run for the newest
+    /// image, and closes only when every enabled scanner has finished and none reports the CVE.
     #[tokio::test]
-    async fn closes_only_when_every_enabled_scanner_reports_clean() {
+    async fn closes_only_when_every_enabled_scanner_runs_clean() {
         let fx = Fixture::new("d14", "CRITICAL", true).await;
-        scanner(&fx, "u-1", "Grype", false).await;
-        scanner(&fx, "u-2", "Trivy", false).await;
-        scanner(&fx, "u-3", "Disabled", true).await;
-        fx.report("v1", "sha256:old", 100).await;
+        fx.observe("v1", "sha256:old", 100).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        scanner_report(
-            &fx,
-            "sha256:old",
-            "u-1",
-            "Grype",
-            &[("CVE-2026-0001", "openssl")],
-        )
-        .await;
-        scanner_report(
-            &fx,
-            "sha256:old",
-            "u-2",
-            "Trivy",
-            &[("CVE-2026-0001", "openssl")],
-        )
-        .await;
-        fx.reconcile("proj/app:v1").await;
+        fx.scan_run("sha256:old", "grype", &[("CVE-2026-0001", "openssl")])
+            .await;
+        fx.scan_run("sha256:old", "trivy", &[("CVE-2026-0001", "openssl")])
+            .await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         assert_eq!(fx.issues().await[0].2, "open");
 
-        // A newer digest. The CVE is gone from the findings, but only Trivy has reported on it.
-        fx.report("v2", "sha256:new", 200).await;
+        // A newer image. The CVE is gone from the findings, but only Trivy has finished on it.
+        fx.observe("v2", "sha256:new", 200).await;
         fx.fix("v1", "CVE-2026-0001").await;
-        scanner_report(&fx, "sha256:new", "u-2", "Trivy", &[]).await;
-        fx.reconcile("proj/app:v2").await;
+        fx.scan_run("sha256:new", "trivy", &[]).await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
         assert_eq!(
             fx.issues().await[0].2,
             "open",
-            "Grype has not reported on the newest digest: a partial result never closes"
+            "Grype has not finished on the newest image: a partial result never closes"
         );
 
-        // Grype reports clean too (the disabled scanner is not waited for): the issue closes.
-        scanner_report(&fx, "sha256:new", "u-1", "Grype", &[]).await;
-        fx.reconcile("proj/app:v2").await;
+        // Grype is clean too: the issue closes.
+        fx.scan_run("sha256:new", "grype", &[]).await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
         assert_eq!(fx.issues().await[0].2, "closed");
         let writes = fx.github.writes();
         let comment = writes
@@ -2406,40 +2381,99 @@ mod tests {
             .unwrap();
         assert_eq!(
             comment.2["body"],
-            "No scanner reports this CVE since scan proj/app:v2."
+            "No scanner reports this CVE since scan ghcr.io/o/app:v2."
         );
+    }
+
+    /// A scanner that is not enabled is not waited for (`scanners.enabled` of `system_config`).
+    #[tokio::test]
+    async fn a_disabled_scanner_is_not_waited_for() {
+        let fx = Fixture::new("disabled", "CRITICAL", true).await;
+        sqlx::query("INSERT INTO system_config (key, value) VALUES ('scanners.enabled', 'trivy')")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        fx.observe("v1", "sha256:old", 100).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.scan_run("sha256:old", "trivy", &[("CVE-2026-0001", "openssl")])
+            .await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        fx.observe("v2", "sha256:new", 200).await;
+        fx.fix("v1", "CVE-2026-0001").await;
+        fx.scan_run("sha256:new", "trivy", &[]).await;
+
+        fx.reconcile("ghcr.io/o/app:v2").await;
+
+        assert_eq!(fx.issues().await[0].2, "closed", "Grype is not enabled");
+    }
+
+    /// A platform with no finished run holds a close, and an evicted platform counts through its
+    /// last `done` run (section 9).
+    #[tokio::test]
+    async fn every_platform_must_have_finished_before_a_close() {
+        let fx = Fixture::new("platforms", "CRITICAL", true).await;
+        fx.observe("v1", "sha256:old", 100).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.scan_run("sha256:old", "grype", &[("CVE-2026-0001", "openssl")])
+            .await;
+        fx.scan_run("sha256:old", "trivy", &[("CVE-2026-0001", "openssl")])
+            .await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        fx.observe("v2", "sha256:new", 200).await;
+        fx.fix("v1", "CVE-2026-0001").await;
+        fx.scan_run("sha256:new", "grype", &[]).await;
+        fx.scan_run("sha256:new", "trivy", &[]).await;
+        // A second platform of the newest image that no scanner has finished.
+        sqlx::query(
+            "INSERT INTO image_platforms (id, image_id, platform, platform_digest, state)
+             VALUES ('plat-arm', 'img-sha256:new', 'linux/arm64', 'sha256:arm', 'queued')",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        fx.reconcile("ghcr.io/o/app:v2").await;
+        assert_eq!(fx.issues().await[0].2, "open");
+
+        // The platform is stored and both scanners finish on it, then it is evicted: it still
+        // counts through its last done run.
+        for scanner in ["grype", "trivy"] {
+            let run_id = ids::new_id().unwrap();
+            sqlx::query(
+                "INSERT INTO scan_runs (id, image_platform_id, scanner, trigger, status, finished_at)
+                 VALUES (?, 'plat-arm', ?, 'first_pull', 'done', 5000)",
+            )
+            .bind(run_id)
+            .bind(scanner)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("UPDATE image_platforms SET state = 'evicted' WHERE id = 'plat-arm'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        fx.reconcile("ghcr.io/o/app:v2").await;
+        assert_eq!(fx.issues().await[0].2, "closed");
     }
 
     /// A scanner that still reports the CVE keeps the issue open even though another is clean.
     #[tokio::test]
     async fn stays_open_while_one_scanner_still_reports() {
         let fx = Fixture::new("d3", "CRITICAL", true).await;
-        scanner(&fx, "u-1", "Grype", false).await;
-        scanner(&fx, "u-2", "Trivy", false).await;
-        fx.report("v1", "sha256:new", 100).await;
+        fx.observe("v1", "sha256:new", 100).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        scanner_report(
-            &fx,
-            "sha256:new",
-            "u-1",
-            "Grype",
-            &[("CVE-2026-0001", "openssl")],
-        )
-        .await;
-        scanner_report(
-            &fx,
-            "sha256:new",
-            "u-2",
-            "Trivy",
-            &[("CVE-2026-0001", "openssl")],
-        )
-        .await;
-        fx.reconcile("proj/app:v1").await;
+        fx.scan_run("sha256:new", "grype", &[("CVE-2026-0001", "openssl")])
+            .await;
+        fx.scan_run("sha256:new", "trivy", &[("CVE-2026-0001", "openssl")])
+            .await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
 
-        scanner_report(&fx, "sha256:new", "u-2", "Trivy", &[]).await;
+        fx.scan_run("sha256:new", "trivy", &[]).await;
         // Findings still list the CVE because Grype reports it.
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         assert_eq!(fx.issues().await[0].2, "open");
         assert!(
             !fx.github
@@ -2450,15 +2484,44 @@ mod tests {
         );
     }
 
+    /// Decision 49: the newest image is the observation with the latest `first_seen_at` for the
+    /// tag, not the highest digest or the latest insert. A tag that moves back to an older
+    /// digest makes that digest newest again.
+    #[tokio::test]
+    async fn the_newest_image_is_the_latest_first_seen_observation() {
+        let fx = Fixture::new("newest", "CRITICAL", true).await;
+        fx.report("latest", "sha256:zzz", 100).await;
+        fx.report("latest", "sha256:aaa", 200).await;
+        let mut conn = fx.pool.acquire().await.unwrap();
+        let newest = issue_db::newest_image(&mut conn, "m1").await.unwrap();
+        assert_eq!(newest.as_deref(), Some("img-sha256:aaa"));
+        // The tag points back at the first digest, seen again later.
+        sqlx::query(
+            "UPDATE tag_observations SET first_seen_at = 300 WHERE image_id = 'img-sha256:zzz'",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        let newest = issue_db::newest_image(&mut conn, "m1").await.unwrap();
+        assert_eq!(newest.as_deref(), Some("img-sha256:zzz"));
+        let tags = issue_db::newest_image_tags(&mut conn, "m1").await.unwrap();
+        assert_eq!(tags, Some(vec!["latest".to_owned()]));
+        // The old digest no longer owns the tag.
+        let old = issue_db::current_tags_of_image(&mut conn, "m1", "img-sha256:aaa")
+            .await
+            .unwrap();
+        assert!(old.is_empty());
+    }
+
     #[tokio::test]
     async fn closes_when_no_tag_reports() {
         let fx = Fixture::new("closes", "CRITICAL", true).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
 
         fx.fix("v1", "CVE-2026-0001").await;
-        fx.reconcile("proj/app:v2").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
 
         let writes = fx.github.writes();
         // create, comment, close.
@@ -2467,13 +2530,13 @@ mod tests {
         assert_eq!(writes[1].1, "repos/octo/app/issues/1/comments");
         assert_eq!(
             writes[1].2["body"],
-            "No scanner reports this CVE since scan proj/app:v2."
+            "No scanner reports this CVE since scan ghcr.io/o/app:v2."
         );
         assert_eq!(writes[2].0, "PATCH");
         assert_eq!(writes[2].2["state"], "closed");
         assert_eq!(fx.issues().await[0].2, "closed");
         // Running again does nothing more.
-        fx.reconcile("proj/app:v2").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
         assert_eq!(fx.github.writes().len(), 3);
     }
 
@@ -2482,15 +2545,15 @@ mod tests {
         let fx = Fixture::new("reopens", "CRITICAL", true).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         fx.fix("v1", "CVE-2026-0001").await;
-        fx.reconcile("proj/app:v2").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
         assert_eq!(fx.issues().await[0].2, "closed");
 
         // The CVE returns on a later scan of v3.
         fx.finding("m1", "v3", "CVE-2026-0001", "CRITICAL", 40)
             .await;
-        fx.reconcile("proj/app:v3").await;
+        fx.reconcile("ghcr.io/o/app:v3").await;
 
         assert_eq!(fx.github.creates().len(), 1, "the same issue is reused");
         let writes = fx.github.writes();
@@ -2498,7 +2561,7 @@ mod tests {
         assert_eq!(writes.len(), 5);
         assert_eq!(writes[3].0, "PATCH");
         assert_eq!(writes[3].2["state"], "open");
-        assert_eq!(writes[4].2["body"], "CVE is back in scan proj/app:v3");
+        assert_eq!(writes[4].2["body"], "CVE is back in scan ghcr.io/o/app:v3");
         assert_eq!(
             fx.issues().await,
             vec![("CVE-2026-0001".to_owned(), 1, "open".to_owned())]
@@ -2511,13 +2574,13 @@ mod tests {
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
         sqlx::query(
-            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username, expires_at)
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username, expires_at)
              VALUES ('a1', 'm1', 'CVE-2026-0001', 'accepted for the test', 'u1', 'u1', NULL)",
         )
         .execute(&fx.pool)
         .await
         .unwrap();
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         assert!(fx.github.creates().is_empty());
         assert!(fx.issues().await.is_empty());
 
@@ -2526,7 +2589,7 @@ mod tests {
             .execute(&fx.pool)
             .await
             .unwrap();
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         assert_eq!(fx.github.creates().len(), 1);
     }
 
@@ -2535,7 +2598,7 @@ mod tests {
         let fx = Fixture::new("autooff", "CRITICAL", false).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         assert!(fx.github.creates().is_empty());
 
         // An issue made by hand exists; it still follows the close rule.
@@ -2556,7 +2619,7 @@ mod tests {
             })
         });
         fx.fix("v1", "CVE-2026-0001").await;
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
         assert_eq!(fx.issues().await[0].2, "closed");
     }
 
@@ -2569,7 +2632,7 @@ mod tests {
             .await;
         fx.github.with(|state| state.rate_limited = true);
 
-        let outcome = fx.reconcile("proj/app:v1").await;
+        let outcome = fx.reconcile("ghcr.io/o/app:v1").await;
 
         assert_eq!(outcome, Outcome::RateLimited { until: 5_000 });
         // The run stopped at the first call.
@@ -2583,11 +2646,11 @@ mod tests {
         fx.github.with(|state| state.rendezvous = true);
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        let mapping = fx.mapping("m1").await;
+        let source = fx.source("m1").await;
 
         let (a, b) = tokio::join!(
-            reconcile(&fx.pool, &fx.gh, TOKEN, &mapping, "proj/app:v1", 1_000),
-            reconcile(&fx.pool, &fx.gh, TOKEN, &mapping, "proj/app:v1", 1_000),
+            reconcile(&fx.pool, &fx.gh, TOKEN, &source, "ghcr.io/o/app:v1", 1_000),
+            reconcile(&fx.pool, &fx.gh, TOKEN, &source, "ghcr.io/o/app:v1", 1_000),
         );
 
         assert_eq!(a.unwrap(), Outcome::Complete);
@@ -2602,11 +2665,11 @@ mod tests {
         fx.github.with(|state| state.rendezvous = true);
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        let mapping = fx.mapping("m1").await;
+        let source = fx.source("m1").await;
 
         let (a, b) = tokio::join!(
-            create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0001", 1_000),
-            create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0001", 1_000),
+            create_manual(&fx.pool, &fx.gh, TOKEN, &source, "CVE-2026-0001", 1_000),
+            create_manual(&fx.pool, &fx.gh, TOKEN, &source, "CVE-2026-0001", 1_000),
         );
 
         // One call creates the issue; the other sees it and gets the `409`.
@@ -2627,11 +2690,11 @@ mod tests {
         fx.github.with(|state| state.rendezvous = true);
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        let mapping = fx.mapping("m1").await;
+        let source = fx.source("m1").await;
 
         let (synced, manual) = tokio::join!(
-            reconcile(&fx.pool, &fx.gh, TOKEN, &mapping, "proj/app:v1", 1_000),
-            create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0001", 1_000),
+            reconcile(&fx.pool, &fx.gh, TOKEN, &source, "ghcr.io/o/app:v1", 1_000),
+            create_manual(&fx.pool, &fx.gh, TOKEN, &source, "CVE-2026-0001", 1_000),
         );
 
         assert_eq!(synced.unwrap(), Outcome::Complete);
@@ -2793,20 +2856,20 @@ mod tests {
         let fx = Fixture::new("unique", "CRITICAL", true).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        let mapping = fx.mapping("m1").await;
+        let source = fx.source("m1").await;
         let gh = Racing {
             inner: FakeIssues(fx.github.clone()),
             pool: fx.pool.clone(),
         };
 
-        let outcome = reconcile(&fx.pool, &gh, TOKEN, &mapping, "proj/app:v1", 1_000).await;
+        let outcome = reconcile(&fx.pool, &gh, TOKEN, &source, "ghcr.io/o/app:v1", 1_000).await;
 
         assert_eq!(outcome.unwrap(), Outcome::Complete);
         assert_eq!(
             fx.issues().await,
             vec![("CVE-2026-0001".to_owned(), 99, "open".to_owned())]
         );
-        let manual = create_manual(&fx.pool, &gh, TOKEN, &mapping, "CVE-2026-0001", 1_000).await;
+        let manual = create_manual(&fx.pool, &gh, TOKEN, &source, "CVE-2026-0001", 1_000).await;
         assert_eq!(
             manual.unwrap_err().status(),
             axum::http::StatusCode::CONFLICT
@@ -2818,13 +2881,13 @@ mod tests {
         let fx = Fixture::new("unique-manual", "CRITICAL", true).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
-        let mapping = fx.mapping("m1").await;
+        let source = fx.source("m1").await;
         let gh = Racing {
             inner: FakeIssues(fx.github.clone()),
             pool: fx.pool.clone(),
         };
 
-        let manual = create_manual(&fx.pool, &gh, TOKEN, &mapping, "CVE-2026-0001", 1_000).await;
+        let manual = create_manual(&fx.pool, &gh, TOKEN, &source, "CVE-2026-0001", 1_000).await;
 
         assert_eq!(
             manual.unwrap_err().status(),
@@ -2841,7 +2904,7 @@ mod tests {
         }
         fx.github.with(|state| state.unauthorized = true);
 
-        let outcome = fx.reconcile("proj/app:v1").await;
+        let outcome = fx.reconcile("ghcr.io/o/app:v1").await;
 
         assert_eq!(outcome, Outcome::Refused);
         assert_eq!(fx.github.requests(), 1, "one call, not one per CVE");
@@ -2861,7 +2924,7 @@ mod tests {
             fx.finding("m1", "v1", id, "CRITICAL", 10).await;
         }
 
-        assert_eq!(fx.reconcile("proj/app:v1").await, Outcome::Complete);
+        assert_eq!(fx.reconcile("ghcr.io/o/app:v1").await, Outcome::Complete);
 
         assert_eq!(fx.github.requests(), 0);
         assert!(!valid_cve_id("CVE-1\n-->"));
@@ -2875,7 +2938,7 @@ mod tests {
         fx.finding_pkg("m1", "v1", "CVE-2026-0001", "CRITICAL", "@scope/pkg", 10)
             .await;
 
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
 
         let creates = fx.github.creates();
         let body = creates[0]["body"].as_str().unwrap();
@@ -2894,7 +2957,7 @@ mod tests {
             fx.finding("m1", "v1", "CVE-2026-0004", "LOW", 10).await;
             fx.finding("m1", "v1", "CVE-2026-0005", "UNKNOWN", 10).await;
 
-            assert_eq!(fx.reconcile("proj/app:v1").await, Outcome::Complete);
+            assert_eq!(fx.reconcile("ghcr.io/o/app:v1").await, Outcome::Complete);
 
             let created: Vec<String> = fx.issues().await.into_iter().map(|(id, _, _)| id).collect();
             let expected: &[&str] = if min == "HIGH" {
@@ -2927,14 +2990,14 @@ mod tests {
         let fx = Fixture::new("manual-low-sync", "HIGH", true).await;
         fx.finding("m1", "v1", "CVE-2026-0004", "LOW", 10).await;
         fx.finding("m1", "v1", "CVE-2026-0005", "LOW", 10).await;
-        let mapping = fx.mapping("m1").await;
+        let source = fx.source("m1").await;
 
-        let made = create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0004", 1_000)
+        let made = create_manual(&fx.pool, &fx.gh, TOKEN, &source, "CVE-2026-0004", 1_000)
             .await
             .unwrap();
         assert_eq!(made.number, 1);
         assert_eq!(fx.github.creates()[0]["title"], "CVE-2026-0004 openssl");
-        fx.reconcile("proj/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
 
         assert_eq!(
             fx.github.creates().len(),
@@ -2953,16 +3016,16 @@ mod tests {
     async fn manual_unknown_follows_the_acceptance_reopen_and_open_rules() {
         let fx = Fixture::new("manual-unknown", "CRITICAL", true).await;
         fx.finding("m1", "v1", "CVE-2026-0005", "UNKNOWN", 10).await;
-        let mapping = fx.mapping("m1").await;
+        let source = fx.source("m1").await;
         sqlx::query(
-            "INSERT INTO cve_acceptances (id, mapping_id, cve_id, reason, created_by, created_by_username)
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username)
              VALUES ('a1', 'm1', 'CVE-2026-0005', 'accepted for the test', 'u1', 'u1')",
         )
         .execute(&fx.pool)
         .await
         .unwrap();
 
-        let refused = create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0005", 1_000)
+        let refused = create_manual(&fx.pool, &fx.gh, TOKEN, &source, "CVE-2026-0005", 1_000)
             .await
             .unwrap_err();
         assert_eq!(refused.status(), axum::http::StatusCode::CONFLICT);
@@ -2972,7 +3035,7 @@ mod tests {
             .execute(&fx.pool)
             .await
             .unwrap();
-        let first = create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0005", 1_000)
+        let first = create_manual(&fx.pool, &fx.gh, TOKEN, &source, "CVE-2026-0005", 1_000)
             .await
             .unwrap();
 
@@ -2982,7 +3045,7 @@ mod tests {
             .await
             .unwrap();
         fx.github.with(|state| state.issues[0].open = false);
-        let reopened = create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0005", 1_000)
+        let reopened = create_manual(&fx.pool, &fx.gh, TOKEN, &source, "CVE-2026-0005", 1_000)
             .await
             .unwrap();
         assert_eq!(reopened, first);
@@ -2990,7 +3053,7 @@ mod tests {
         let writes = fx.github.writes();
         assert_eq!(writes.last().unwrap().2["body"], MANUAL_REOPEN_COMMENT);
 
-        let open = create_manual(&fx.pool, &fx.gh, TOKEN, &mapping, "CVE-2026-0005", 1_000)
+        let open = create_manual(&fx.pool, &fx.gh, TOKEN, &source, "CVE-2026-0005", 1_000)
             .await
             .unwrap_err();
         assert_eq!(open.status(), axum::http::StatusCode::CONFLICT);
@@ -3042,7 +3105,7 @@ mod tests {
     #[test]
     fn route_ids_with_empty_parts_or_odd_characters_are_not_found() {
         let long = "a".repeat(129);
-        let long_mapping = format!("{long}:CVE-2026-0001");
+        let long_source = format!("{long}:CVE-2026-0001");
         let long_cve = format!("m1:{long}");
         for id in [
             "",
@@ -3053,7 +3116,7 @@ mod tests {
             "m1:CVE 2026",
             "m 1:CVE-2026-0001",
             "m1:CVE-1\n-->",
-            long_mapping.as_str(),
+            long_source.as_str(),
             long_cve.as_str(),
         ] {
             assert_eq!(split_id(id).unwrap_err(), AppError::NotFound, "id {id:?}");

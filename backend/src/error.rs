@@ -53,6 +53,9 @@ pub enum AppError {
     /// A scanner run failed. Not an HTTP response: the job stores the fixed text of the fault
     /// as its `last_error` (`specs/spinoff-local-scan.md`, section 6).
     Scanner(ScannerFault),
+    /// The database file holds the table of an older HarborGate schema and cannot be used
+    /// (specs/spinoff-local-scan.md, section 9). Refused at pool open. Fixed text only.
+    LegacyDatabase,
 }
 
 /// A scanner run failure. Each variant has one fixed text from `specs/spinoff-local-scan.md`,
@@ -157,6 +160,7 @@ impl AppError {
             AppError::ImageTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::InsufficientDisk => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Scanner(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::LegacyDatabase => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -183,6 +187,7 @@ impl AppError {
             AppError::ImageTooLarge => "payload_too_large",
             AppError::InsufficientDisk => "internal_error",
             AppError::Scanner(_) => "internal_error",
+            AppError::LegacyDatabase => "internal_error",
         }
     }
 
@@ -223,6 +228,10 @@ impl AppError {
             AppError::ImageTooLarge => "The image is larger than the allowed size.".to_owned(),
             AppError::InsufficientDisk => "An internal error occurred.".to_owned(),
             AppError::Scanner(fault) => fault.text().to_owned(),
+            AppError::LegacyDatabase => {
+                "this database was created by HarborGate and cannot be used by this version"
+                    .to_owned()
+            }
         }
     }
 

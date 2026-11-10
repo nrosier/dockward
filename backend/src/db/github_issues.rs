@@ -109,78 +109,83 @@ pub async fn mark_closed_manually(conn: &mut SqliteConnection, id: &str) -> Resu
     .map_err(|_| AppError::InternalError)
 }
 
-/// The newest scanned digest of the mapping's repository, or `None` when the mapping has no
-/// successful report. The same choice as [`newest_digest_tags`].
-pub async fn newest_digest(
+/// The newest scanned image of the source, or `None` when none of the source's observed images
+/// has a `done` scan run. Decision 49: the newest image is the tag observation with the latest
+/// `first_seen_at` (the later insert on a tie), so a tag that moves to a new digest becomes
+/// newest on the next discovery. An image that no scanner has finished is not yet "scanned".
+pub async fn newest_image(
     conn: &mut SqliteConnection,
-    mapping_id: &str,
-    repo: &str,
+    source_id: &str,
 ) -> Result<Option<String>, AppError> {
     sqlx::query_scalar!(
-        r#"SELECT image_digest AS "image_digest!" FROM sync_reports
-           WHERE mapping_id = ? AND harbor_repository = ? AND sarif_status = 'success'
-           ORDER BY image_push_time IS NULL, image_push_time DESC, synced_at DESC, rowid DESC
+        r#"SELECT o.image_id AS "image_id!" FROM tag_observations o
+           WHERE o.source_id = ?
+             AND EXISTS (
+                 SELECT 1 FROM image_platforms p
+                 JOIN scan_runs r ON r.image_platform_id = p.id AND r.status = 'done'
+                 WHERE p.image_id = o.image_id)
+           ORDER BY o.first_seen_at DESC, o.rowid DESC
            LIMIT 1"#,
-        mapping_id,
-        repo
+        source_id
     )
     .fetch_optional(conn)
     .await
     .map_err(|_| AppError::InternalError)
 }
 
-/// The image tags of the newest scanned digest of the mapping's repository, or `None` when
-/// the mapping has no successful report. The newest digest is the one with the latest
-/// `image_push_time` among successful reports (a report without a push time ranks below any
-/// report with one, then by `synced_at`, then by insert order). Its tags are the tags of
-/// every successful report for that digest.
-pub async fn newest_digest_tags(
+/// The tags whose current image is `image_id`: for each tag of the source, the observation with
+/// the latest `first_seen_at` is the current one, and a tag that has since moved to another
+/// digest no longer belongs to this image.
+pub async fn current_tags_of_image(
     conn: &mut SqliteConnection,
-    mapping_id: &str,
-    repo: &str,
-) -> Result<Option<Vec<String>>, AppError> {
-    let newest = sqlx::query_scalar!(
-        r#"SELECT image_digest AS "image_digest!" FROM sync_reports
-           WHERE mapping_id = ? AND harbor_repository = ? AND sarif_status = 'success'
-           ORDER BY image_push_time IS NULL, image_push_time DESC, synced_at DESC, rowid DESC
-           LIMIT 1"#,
-        mapping_id,
-        repo
-    )
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(|_| AppError::InternalError)?;
-    let Some(digest) = newest else {
-        return Ok(None);
-    };
-    let tags = sqlx::query_scalar!(
-        r#"SELECT DISTINCT image_tag AS "image_tag!" FROM sync_reports
-           WHERE mapping_id = ? AND harbor_repository = ? AND sarif_status = 'success'
-             AND image_digest = ?"#,
-        mapping_id,
-        repo,
-        digest
+    source_id: &str,
+    image_id: &str,
+) -> Result<Vec<String>, AppError> {
+    sqlx::query_scalar!(
+        r#"SELECT o.tag AS "tag!" FROM tag_observations o
+           WHERE o.source_id = ? AND o.image_id = ?
+             AND NOT EXISTS (
+                 SELECT 1 FROM tag_observations n
+                 WHERE n.source_id = o.source_id AND n.tag = o.tag
+                   AND (n.first_seen_at > o.first_seen_at
+                        OR (n.first_seen_at = o.first_seen_at AND n.rowid > o.rowid)))
+           ORDER BY o.tag"#,
+        source_id,
+        image_id
     )
     .fetch_all(conn)
     .await
-    .map_err(|_| AppError::InternalError)?;
-    Ok(Some(tags))
+    .map_err(|_| AppError::InternalError)
 }
 
-/// Points every `cve_findings` row of this CVE in the mapping at the issue row. Returns
+/// The image tags of the newest scanned image of the source, or `None` when the source has no
+/// scanned image (then every tracked tag counts).
+pub async fn newest_image_tags(
+    conn: &mut SqliteConnection,
+    source_id: &str,
+) -> Result<Option<Vec<String>>, AppError> {
+    let Some(image_id) = newest_image(&mut *conn, source_id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        current_tags_of_image(conn, source_id, &image_id).await?,
+    ))
+}
+
+/// Points every `cve_findings` row of this CVE in the source at the issue row. Returns
 /// the number of rows changed; rows that already point there are not counted.
 pub async fn link_findings(
     conn: &mut SqliteConnection,
-    mapping_id: &str,
+    source_id: &str,
     cve_id: &str,
     issue_id: &str,
 ) -> Result<u64, AppError> {
     sqlx::query!(
         "UPDATE cve_findings SET github_issue_id = ?
-         WHERE mapping_id = ? AND cve_id = ?
+         WHERE source_id = ? AND cve_id = ?
            AND (github_issue_id IS NULL OR github_issue_id <> ?)",
         issue_id,
-        mapping_id,
+        source_id,
         cve_id,
         issue_id
     )
@@ -204,29 +209,29 @@ pub struct FindingRow {
     pub description: Option<String>,
 }
 
-/// Every finding of the mapping, one row per tag and CVE.
-pub async fn findings_for_mapping(
+/// Every finding of the source, one row per tag and CVE.
+pub async fn findings_for_source(
     conn: &mut SqliteConnection,
-    mapping_id: &str,
+    source_id: &str,
 ) -> Result<Vec<FindingRow>, AppError> {
     sqlx::query_as!(
         FindingRow,
         r#"SELECT cve_id AS "cve_id!", image_tag AS "image_tag!", package,
                   severity AS "severity!", fixed_in_version, status AS "status!", last_seen_at,
                   description
-           FROM cve_findings WHERE mapping_id = ?
+           FROM cve_findings WHERE source_id = ?
            ORDER BY cve_id, image_tag"#,
-        mapping_id
+        source_id
     )
     .fetch_all(conn)
     .await
     .map_err(|_| AppError::InternalError)
 }
 
-/// The findings of one CVE in the mapping, one row per tag.
+/// The findings of one CVE in the source, one row per tag.
 pub async fn findings_for_cve(
     conn: &mut SqliteConnection,
-    mapping_id: &str,
+    source_id: &str,
     cve_id: &str,
 ) -> Result<Vec<FindingRow>, AppError> {
     sqlx::query_as!(
@@ -234,9 +239,9 @@ pub async fn findings_for_cve(
         r#"SELECT cve_id AS "cve_id!", image_tag AS "image_tag!", package,
                   severity AS "severity!", fixed_in_version, status AS "status!", last_seen_at,
                   description
-           FROM cve_findings WHERE mapping_id = ? AND cve_id = ?
+           FROM cve_findings WHERE source_id = ? AND cve_id = ?
            ORDER BY image_tag"#,
-        mapping_id,
+        source_id,
         cve_id
     )
     .fetch_all(conn)
@@ -244,60 +249,83 @@ pub async fn findings_for_cve(
     .map_err(|_| AppError::InternalError)
 }
 
-/// A mapping that targets the same GitHub repository as another one (#185).
+/// A source that targets the same GitHub repository as another one (decision 47).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SiblingMapping {
+pub struct SiblingSource {
     pub id: String,
-    pub harbor_base_url: String,
-    pub harbor_repository: String,
 }
 
-/// The other mappings that target the same GitHub repository as `mapping_id`. They share its
-/// `github_issues` rows (#185).
-pub async fn sibling_mappings(
+/// The other sources that target the same GitHub repository as `source_id`. They share its
+/// `github_issues` rows (decision 47).
+pub async fn sibling_sources(
     conn: &mut SqliteConnection,
-    mapping_id: &str,
+    source_id: &str,
     owner: &str,
     repo: &str,
-) -> Result<Vec<SiblingMapping>, AppError> {
+) -> Result<Vec<SiblingSource>, AppError> {
     let rows = sqlx::query!(
-        r#"SELECT id AS "id!", harbor_base_url AS "harbor_base_url!",
-                  harbor_repository AS "harbor_repository!" FROM repo_mappings
+        r#"SELECT id AS "id!" FROM image_sources
            WHERE github_owner = ? AND github_repo = ? AND id <> ?
            ORDER BY id"#,
         owner,
         repo,
-        mapping_id
+        source_id
     )
     .fetch_all(conn)
     .await
     .map_err(|_| AppError::InternalError)?;
     Ok(rows
         .into_iter()
-        .map(|row| SiblingMapping {
-            id: row.id,
-            harbor_base_url: row.harbor_base_url,
-            harbor_repository: row.harbor_repository,
-        })
+        .map(|row| SiblingSource { id: row.id })
         .collect())
 }
 
-/// CVE ids of the mapping with an active acceptance: not revoked, and with no expiry or an
+/// CVE ids of the source with an active acceptance: not revoked, and with no expiry or an
 /// expiry after `now`.
 pub async fn accepted_cves(
     conn: &mut SqliteConnection,
-    mapping_id: &str,
+    source_id: &str,
     now: i64,
 ) -> Result<Vec<String>, AppError> {
     sqlx::query_scalar!(
         r#"SELECT cve_id AS "cve_id!" FROM cve_acceptances
-           WHERE mapping_id = ? AND revoked_at IS NULL
+           WHERE source_id = ? AND revoked_at IS NULL
              AND (expires_at IS NULL OR expires_at > ?)"#,
-        mapping_id,
+        source_id,
         now
     )
     .fetch_all(conn)
     .await
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Deletes the `github_issues` rows of a GitHub repository that no other source of that
+/// repository reports with an `open` finding. Rows are shared by every source that targets the
+/// repository (decision 47), so a row still reported elsewhere stays. Nothing is changed on
+/// GitHub. Run it before the source row is deleted.
+#[allow(dead_code)] // Used by the source delete route (Step 1 part 2); the lifecycle tests use it.
+pub async fn delete_unreported_elsewhere(
+    conn: &mut SqliteConnection,
+    source_id: &str,
+    github_owner: &str,
+    github_repo: &str,
+) -> Result<u64, AppError> {
+    sqlx::query!(
+        "DELETE FROM github_issues
+         WHERE github_owner = ? AND github_repo = ?
+           AND NOT EXISTS (
+               SELECT 1 FROM cve_findings f
+               JOIN image_sources s ON s.id = f.source_id
+               WHERE s.id <> ? AND s.github_owner = github_issues.github_owner
+                 AND s.github_repo = github_issues.github_repo
+                 AND f.cve_id = github_issues.cve_id AND f.status = 'open')",
+        github_owner,
+        github_repo,
+        source_id
+    )
+    .execute(conn)
+    .await
+    .map(|done| done.rows_affected())
     .map_err(|_| AppError::InternalError)
 }
 
