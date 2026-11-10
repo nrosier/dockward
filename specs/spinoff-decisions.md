@@ -98,3 +98,5 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 55. The harborgate images on GHCR are deleted, including 0.1.0 and 0.1.1. dockward 0.2 is the first image in the renamed package. The deletion is permanent and is performed after dockward 0.2 is published and verified.
 
 56. Rename migration for stored data. Each encryption label (`harborgate/*`, now `dockward/*`) and each cookie name changes under decision 54. The new build decrypts with the new label and falls back to the old one. On startup it re-encrypts each stored credential under the new label, one transaction per row, and records a count. The old labels are removed only after every row is re-encrypted and the count check passes. Sessions and CSRF tokens are reissued, not migrated. Decided by the user, 2026-11-10, dialogue.
+
+57. Supersedes 25 for release 0.2 only. The environment variables are renamed to `DOCKWARD_*`. The build reads `DOCKWARD_*` first and falls back to `HARBORGATE_*`, logging a deprecation warning for each fallback read. `DOCKWARD_*` wins when both are set. The fallback is removed in the release after 0.2. Decided by the user, 2026-11-11, dialogue.
