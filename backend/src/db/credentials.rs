@@ -36,7 +36,35 @@ impl fmt::Debug for CredentialRow {
     }
 }
 
-/// Inserts a credential row on `conn`.
+/// The columns `user_credentials` holds (GitHub only). Converted to [`CredentialRow`] after
+/// the query, which sets the removed Harbor-only fields to `None` and the service type to
+/// `github`.
+struct StoredCredential {
+    id: String,
+    label: String,
+    encrypted_token: String,
+    expires_at: Option<i64>,
+    created_at: Option<i64>,
+}
+
+impl From<StoredCredential> for CredentialRow {
+    fn from(row: StoredCredential) -> Self {
+        CredentialRow {
+            id: row.id,
+            service_type: "github".to_owned(),
+            label: row.label,
+            base_url: None,
+            username: None,
+            encrypted_token: row.encrypted_token,
+            expires_at: row.expires_at,
+            created_at: row.created_at,
+        }
+    }
+}
+
+/// Inserts a GitHub credential row on `conn`. `user_credentials` holds GitHub credentials only
+/// (`specs/spinoff-local-scan.md`, section 9): `service_type`, `base_url` and `username` are
+/// not stored, so they are not written.
 pub async fn insert(
     conn: &mut SqliteConnection,
     row: &CredentialRow,
@@ -44,14 +72,11 @@ pub async fn insert(
 ) -> Result<(), AppError> {
     sqlx::query!(
         "INSERT INTO user_credentials
-            (id, user_id, service_type, label, base_url, username, encrypted_token, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (id, user_id, label, encrypted_token, expires_at)
+         VALUES (?, ?, ?, ?, ?)",
         row.id,
         user_id,
-        row.service_type,
         row.label,
-        row.base_url,
-        row.username,
         row.encrypted_token,
         row.expires_at
     )
@@ -67,10 +92,9 @@ pub async fn find_owned(
     user_id: &str,
     id: &str,
 ) -> Result<Option<CredentialRow>, AppError> {
-    sqlx::query_as!(
-        CredentialRow,
-        r#"SELECT id AS "id!", service_type AS "service_type!", label AS "label!",
-                  base_url, username, encrypted_token AS "encrypted_token!",
+    let row = sqlx::query_as!(
+        StoredCredential,
+        r#"SELECT id AS "id!", label AS "label!", encrypted_token AS "encrypted_token!",
                   expires_at, created_at
            FROM user_credentials WHERE id = ? AND user_id = ?"#,
         id,
@@ -78,7 +102,8 @@ pub async fn find_owned(
     )
     .fetch_optional(conn)
     .await
-    .map_err(|_| AppError::InternalError)
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.map(CredentialRow::from))
 }
 
 /// Replaces the mutable columns of one owned credential.
@@ -89,11 +114,9 @@ pub async fn update_owned(
 ) -> Result<(), AppError> {
     sqlx::query!(
         "UPDATE user_credentials
-            SET label = ?, base_url = ?, username = ?, encrypted_token = ?, expires_at = ?
+            SET label = ?, encrypted_token = ?, expires_at = ?
           WHERE id = ? AND user_id = ?",
         row.label,
-        row.base_url,
-        row.username,
         row.encrypted_token,
         row.expires_at,
         row.id,
@@ -122,11 +145,11 @@ pub async fn delete_owned(
     .map(|done| done.rows_affected())
 }
 
-/// Counts the mappings that reference a credential on either side.
+/// Counts the image sources that use a credential (`source_credentials` is one per source; the
+/// GitHub side is `image_sources.github_cred_id`, which is `RESTRICT`).
 pub async fn mapping_refs(conn: &mut SqliteConnection, id: &str) -> Result<i64, AppError> {
     let row = sqlx::query!(
-        "SELECT COUNT(*) AS n FROM repo_mappings WHERE harbor_cred_id = ? OR github_cred_id = ?",
-        id,
+        "SELECT COUNT(*) AS n FROM image_sources WHERE github_cred_id = ?",
         id
     )
     .fetch_one(conn)
@@ -135,16 +158,12 @@ pub async fn mapping_refs(conn: &mut SqliteConnection, id: &str) -> Result<i64, 
     Ok(row.n)
 }
 
-/// Counts the mappings that use a credential as their Harbor side.
-pub async fn harbor_mapping_refs(conn: &mut SqliteConnection, id: &str) -> Result<i64, AppError> {
-    let row = sqlx::query!(
-        "SELECT COUNT(*) AS n FROM repo_mappings WHERE harbor_cred_id = ?",
-        id
-    )
-    .fetch_one(conn)
-    .await
-    .map_err(|_| AppError::InternalError)?;
-    Ok(row.n)
+/// Harbor credentials no longer exist. Always zero (`specs/spinoff-local-scan.md`, section 9).
+pub async fn harbor_mapping_refs(
+    _conn: &mut SqliteConnection,
+    _id: &str,
+) -> Result<i64, AppError> {
+    Ok(0)
 }
 
 /// The columns a list query fills. `sort` is one of `label`, `created_at`, or
@@ -165,13 +184,12 @@ pub async fn list_owned(
     pool: &SqlitePool,
     filter: &ListFilter<'_>,
 ) -> Result<Vec<CredentialRow>, AppError> {
-    sqlx::query_as!(
-        CredentialRow,
-        r#"SELECT id AS "id!", service_type AS "service_type!", label AS "label!",
-                  base_url, username, encrypted_token AS "encrypted_token!",
+    let rows = sqlx::query_as!(
+        StoredCredential,
+        r#"SELECT id AS "id!", label AS "label!", encrypted_token AS "encrypted_token!",
                   expires_at, created_at
            FROM user_credentials
-           WHERE (? IS NULL OR user_id = ?) AND (? IS NULL OR service_type = ?)
+           WHERE (? IS NULL OR user_id = ?) AND (? IS NULL OR 'github' = ?)
            ORDER BY
              CASE WHEN ? = 'label' AND ? = 1 THEN label END ASC,
              CASE WHEN ? = 'label' AND ? = -1 THEN label END DESC,
@@ -202,24 +220,14 @@ pub async fn list_owned(
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| AppError::InternalError)
+    .map_err(|_| AppError::InternalError)?;
+    Ok(rows.into_iter().map(CredentialRow::from).collect())
 }
 
-/// Every Harbor credential of every user, soonest expiry first, with no expiry last.
-/// Only the admin health route reads it (`specs/api.md`, Health).
-pub async fn all_harbor(pool: &SqlitePool) -> Result<Vec<CredentialRow>, AppError> {
-    sqlx::query_as!(
-        CredentialRow,
-        r#"SELECT id AS "id!", service_type AS "service_type!", label AS "label!",
-                  base_url, username, encrypted_token AS "encrypted_token!",
-                  expires_at, created_at
-           FROM user_credentials
-           WHERE service_type = 'harbor'
-           ORDER BY expires_at IS NULL, expires_at, label"#
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|_| AppError::InternalError)
+/// Harbor credentials no longer exist, so there are none to list (`specs/spinoff-local-scan.md`,
+/// section 9). Kept as an empty list until the admin health route is ported.
+pub async fn all_harbor(_pool: &SqlitePool) -> Result<Vec<CredentialRow>, AppError> {
+    Ok(Vec::new())
 }
 
 /// Counts credentials for the same filter as [`list_owned`].
@@ -230,7 +238,7 @@ pub async fn count_owned(
 ) -> Result<i64, AppError> {
     let row = sqlx::query!(
         "SELECT COUNT(*) AS n FROM user_credentials
-          WHERE (? IS NULL OR user_id = ?) AND (? IS NULL OR service_type = ?)",
+          WHERE (? IS NULL OR user_id = ?) AND (? IS NULL OR 'github' = ?)",
         user_id,
         user_id,
         service_type,
