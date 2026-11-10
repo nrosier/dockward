@@ -91,3 +91,5 @@ Recorded 2026-11-09 from dialogue with the user. Binding for the spinoff spec.
 
 51. Minimal Sources and Images screens are built now, reusing the existing filter and table patterns with no new visual system. The user reviews them in the browser and approves them before release.
 52. A releasable version requires: the full pipeline (discover, pull, scan, publish), the db_update job, the minimal Sources and Images screens, and a passing gate set on the spinoff branch. The live checks against a real registry, GitHub and Code Scanning are the release's verification and are recorded with the release.
+
+53. The first spinoff release is a pre-release, 0.1.0. It is tagged only after CI is green on the spinoff head. The live checks (registry, GitHub, Code Scanning) and the browser approval of the Sources and Images screens are recorded against the release, not used as a gate for the tag.
