@@ -158,7 +158,7 @@ mod tests {
 
     // Test values only. Passwords are obviously fake.
     fn password() -> String {
-        format!("test-{}", "password-fifteen")
+        format!("pw-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()))
     }
 
     async fn fresh_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {

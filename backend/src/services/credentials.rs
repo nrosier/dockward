@@ -345,7 +345,7 @@ pub async fn load_owned(
 #[cfg(test)]
 mod tests {
     fn runtime_password() -> String {
-        format!("test-{}", "password-fifteen")
+        format!("pw-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()))
     }
 
     use super::*;
