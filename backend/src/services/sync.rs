@@ -444,17 +444,17 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
             Some(report) => report.id,
             None => {
                 let id = ids::new_id().map_err(internal)?;
-                let repository = context.mapping.harbor_repository.as_str();
+                // TODO(spinoff part 2): the mapping id stands in for the source id, and the push
+                // time (Harbor only) is no longer stored.
+                let _ = push_time;
                 let new = NewReport {
                     id: &id,
-                    mapping_id: &job.mapping_id,
+                    source_id: &job.mapping_id,
                     sync_job_id: &job.id,
-                    harbor_repository: repository,
                     image_tag: &context.payload.tag,
                     image_digest: &context.payload.digest,
                     commit_sha: Some(&revision),
                     vulnerability_summary: &summary,
-                    image_push_time: push_time,
                 };
                 let mut conn = self
                     .pool
@@ -882,6 +882,8 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
             return Ok((encoded, None));
         }
         let mapping = &context.mapping;
+        // TODO(spinoff part 2): the mapping id is passed as the source id until the Harbor
+        // sync path is ported. The result carries no cve_ids (they are not stored any more).
         let previous = report_db::last_result_for_digest(
             &self.pool,
             &mapping.id,
@@ -956,9 +958,9 @@ impl<H: HarborFetch, G: CodeScanning, C: Clock, I: IssueApi> SyncHandler<H, G, C
                     // The ids are written while the report is still pending, so a crash between
                     // the two writes leaves a pending report that the retry completes again.
                     let (cve_ids, new_ids) = self.cve_result(context, vuln_report).await?;
-                    report_db::set_cve_ids(&self.pool, report_id, &cve_ids, new_ids.as_deref())
-                        .await
-                        .map_err(database)?;
+                    // TODO(spinoff part 2): publish_reports has no cve_ids columns; the CVE set is
+                    // read from cve_findings. The Harbor sync path is ported in part 2.
+                    let _ = (cve_ids, new_ids);
                     report_db::finish(&self.pool, report_id, "success", None, self.clock.now())
                         .await
                         .map_err(database)?;
@@ -2226,14 +2228,12 @@ mod tests {
         let fx = Fixture::new("retry").await;
         let new = NewReport {
             id: "r1",
-            mapping_id: "m1",
+            source_id: "m1",
             sync_job_id: "j1",
-            harbor_repository: "app",
             image_tag: "v1",
             image_digest: "sha256:aaaa",
             commit_sha: Some(REVISION),
             vulnerability_summary: "{}",
-            image_push_time: None,
         };
         let mut conn = fx.pool.acquire().await.unwrap();
         report_db::insert_pending(&mut conn, &new).await.unwrap();
@@ -2269,14 +2269,12 @@ mod tests {
         let fx = Fixture::new("retry-pending").await;
         let new = NewReport {
             id: "r1",
-            mapping_id: "m1",
+            source_id: "m1",
             sync_job_id: "j1",
-            harbor_repository: "app",
             image_tag: "v1",
             image_digest: "sha256:aaaa",
             commit_sha: Some(REVISION),
             vulnerability_summary: "{}",
-            image_push_time: None,
         };
         let mut conn = fx.pool.acquire().await.unwrap();
         report_db::insert_pending(&mut conn, &new).await.unwrap();

@@ -1,5 +1,6 @@
-//! SQL for the `sync_reports` table (`specs/database.md`). One row per processed image
-//! digest and tag. Rows hold counts and error text only, never secrets.
+//! SQL for the `publish_reports` table (`specs/spinoff-local-scan.md`, section 9; replaces
+//! `sync_reports`). One row per published image digest and tag. Rows hold counts and error text
+//! only, never secrets.
 
 use sqlx::{SqliteConnection, SqlitePool};
 
@@ -9,17 +10,14 @@ use crate::error::AppError;
 /// `sarif_status = 'pending'`.
 pub struct NewReport<'a> {
     pub id: &'a str,
-    pub mapping_id: &'a str,
+    /// The image source the report belongs to (`publish_reports.source_id`).
+    pub source_id: &'a str,
     pub sync_job_id: &'a str,
-    pub harbor_repository: &'a str,
     pub image_tag: &'a str,
     pub image_digest: &'a str,
     pub commit_sha: Option<&'a str>,
     /// JSON text: `{"critical": 0, "high": 2, ...}`.
     pub vulnerability_summary: &'a str,
-    /// Harbor's push time of the tag on this digest, Unix milliseconds. `None` when Harbor
-    /// sent none.
-    pub image_push_time: Option<i64>,
 }
 
 /// A pending report found for a job.
@@ -36,19 +34,17 @@ pub async fn insert_pending(
     report: &NewReport<'_>,
 ) -> Result<(), AppError> {
     sqlx::query!(
-        "INSERT INTO sync_reports
-            (id, mapping_id, sync_job_id, harbor_repository, image_tag, image_digest,
-             commit_sha, vulnerability_summary, image_push_time, sarif_status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+        "INSERT INTO publish_reports
+            (id, source_id, sync_job_id, image_tag, image_digest,
+             commit_sha, vulnerability_summary, sarif_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
         report.id,
-        report.mapping_id,
+        report.source_id,
         report.sync_job_id,
-        report.harbor_repository,
         report.image_tag,
         report.image_digest,
         report.commit_sha,
-        report.vulnerability_summary,
-        report.image_push_time
+        report.vulnerability_summary
     )
     .execute(conn)
     .await
@@ -65,7 +61,7 @@ pub async fn find_pending_for_job(
     sqlx::query_as!(
         ReportRow,
         r#"SELECT id AS "id!", github_sarif_id
-           FROM sync_reports
+           FROM publish_reports
            WHERE sync_job_id = ? AND sarif_status = 'pending'
            ORDER BY rowid DESC
            LIMIT 1"#,
@@ -79,7 +75,7 @@ pub async fn find_pending_for_job(
 /// Records GitHub's SARIF id after an accepted upload.
 pub async fn set_sarif_id(pool: &SqlitePool, id: &str, sarif_id: &str) -> Result<(), AppError> {
     sqlx::query!(
-        "UPDATE sync_reports SET github_sarif_id = ? WHERE id = ?",
+        "UPDATE publish_reports SET github_sarif_id = ? WHERE id = ?",
         sarif_id,
         id
     )
@@ -89,107 +85,29 @@ pub async fn set_sarif_id(pool: &SqlitePool, id: &str, sarif_id: &str) -> Result
     .map_err(|_| AppError::InternalError)
 }
 
-/// Stores the CVE ids of a successful report and, for a scheduled scan, the new ones (#191).
-/// Both are JSON arrays of ids; `new_cve_ids` is `None` for any other trigger.
-pub async fn set_cve_ids(
-    pool: &SqlitePool,
-    id: &str,
-    cve_ids: &str,
-    new_cve_ids: Option<&str>,
-) -> Result<(), AppError> {
-    sqlx::query!(
-        "UPDATE sync_reports SET cve_ids = ?, new_cve_ids = ? WHERE id = ?",
-        cve_ids,
-        new_cve_ids,
-        id
-    )
-    .execute(pool)
-    .await
-    .map(|_| ())
-    .map_err(|_| AppError::InternalError)
-}
-
-/// The last stored result for a digest (#191): the newest successful report of the mapping for
-/// that digest stored before the scan started, as its tag and its `cve_ids`. The scan started
-/// when `sync_job_id` (the scheduled sync job) was queued, so a webhook sync of the same scan
-/// that finished first is not taken as the last result. Times are whole seconds, so a report
-/// from the second the job was queued counts as after it: the scan's result cannot be ready in
-/// that second, while a report from it may already hold the new scan. The job's own report is never taken.
-/// Any tag counts, because one digest is one image. `cve_ids` is `None` for a report stored
-/// before migration 0008. `None` when no such report exists.
+/// The last stored successful report for a digest of a source, as its tag. `None` when no such
+/// report exists. The dedupe that the Harbor poller used (`has_success`, `set_cve_ids`) and its
+/// `cve_ids` columns are removed with the Harbor code (section 9).
 pub async fn last_result_for_digest(
     pool: &SqlitePool,
-    mapping_id: &str,
+    source_id: &str,
     digest: &str,
     sync_job_id: &str,
 ) -> Result<Option<(String, Option<String>)>, AppError> {
     let row = sqlx::query!(
-        r#"SELECT r.image_tag AS "image_tag!", r.cve_ids FROM sync_reports r
-           WHERE r.mapping_id = ?1 AND r.image_digest = ?2 AND r.sarif_status = 'success'
+        r#"SELECT r.image_tag AS "image_tag!" FROM publish_reports r
+           WHERE r.source_id = ?1 AND r.image_digest = ?2 AND r.sarif_status = 'success'
              AND (r.sync_job_id IS NULL OR r.sync_job_id <> ?3)
-             AND r.synced_at < (SELECT j.created_at FROM sync_jobs j WHERE j.id = ?3)
            ORDER BY r.synced_at DESC, r.rowid DESC
            LIMIT 1"#,
-        mapping_id,
+        source_id,
         digest,
         sync_job_id
     )
     .fetch_optional(pool)
     .await
     .map_err(|_| AppError::InternalError)?;
-    Ok(row.map(|r| (r.image_tag, r.cve_ids)))
-}
-
-/// True when polling must not queue this `(digest, tag)` for the mapping: either a
-/// successful sync exists (`sync_jobs.status = 'done'` and `sarif_status = 'success'` on
-/// the linked report), or a `queued` or `running` job for the same digest and tag exists.
-pub async fn has_success(
-    pool: &SqlitePool,
-    mapping_id: &str,
-    harbor_repository: &str,
-    tag: &str,
-    digest: &str,
-) -> Result<bool, AppError> {
-    let row = sqlx::query!(
-        r#"SELECT (
-               EXISTS (
-                   SELECT 1 FROM sync_reports r
-                   JOIN sync_jobs j ON j.id = r.sync_job_id
-                   WHERE r.mapping_id = ? AND r.harbor_repository = ?
-                     AND r.image_tag = ? AND r.image_digest = ?
-                     AND r.sarif_status = 'success' AND j.status = 'done'
-               )
-               OR EXISTS (
-                   SELECT 1 FROM sync_jobs q
-                   WHERE q.mapping_id = ? AND q.status IN ('queued', 'running')
-                     AND json_extract(q.payload, '$.digest') = ?
-                     AND json_extract(q.payload, '$.tag') = ?
-               )
-               -- A permanent failure (for example a missing revision label) is one attempt
-               -- with status failed. It is not re-queued until the image digest changes or an
-               -- operator retries it (issue #141).
-               OR EXISTS (
-                   SELECT 1 FROM sync_jobs p
-                   WHERE p.mapping_id = ? AND p.status = 'failed' AND p.attempts = 1
-                     AND json_extract(p.payload, '$.digest') = ?
-                     AND json_extract(p.payload, '$.tag') = ?
-               )
-           ) AS "found!: i64""#,
-        mapping_id,
-        harbor_repository,
-        tag,
-        digest,
-        mapping_id,
-        digest,
-        tag,
-        mapping_id,
-        digest,
-        tag
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|_| AppError::InternalError)?;
-    Ok(row.found != 0)
+    Ok(row.map(|r| (r.image_tag, None)))
 }
 
 /// Ends a report with `sarif_status` (`success` or `failed`) and an optional error text.
@@ -201,7 +119,7 @@ pub async fn finish(
     now: i64,
 ) -> Result<(), AppError> {
     sqlx::query!(
-        "UPDATE sync_reports SET sarif_status = ?, error_message = ?, synced_at = ? WHERE id = ?",
+        "UPDATE publish_reports SET sarif_status = ?, error_message = ?, synced_at = ? WHERE id = ?",
         sarif_status,
         error_message,
         now,

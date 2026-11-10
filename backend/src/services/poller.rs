@@ -24,7 +24,7 @@ use zeroize::Zeroizing;
 use crate::auth::crypto::DerivedKey;
 use crate::db::job_runs::{self, JobRun};
 use crate::db::mappings::{self as mapping_db, ListFilter, MappingRow};
-use crate::db::{credentials as credential_db, sync_jobs, sync_reports};
+use crate::db::{credentials as credential_db, sync_jobs};
 use crate::error::AppError;
 use crate::services::artifact_removal as removal;
 use crate::services::audit::{self, Actor};
@@ -188,17 +188,8 @@ async fn poll_mapping<H: HarborFetch>(
             listed.extend(tags.iter().map(|tag| tag.name.clone()));
             // The same cut as the resolve job (#132): valid tag names, newest 10 by push time.
             for tag in &newest_tags(tags, MAX_TAGS_PER_DIGEST) {
-                if sync_reports::has_success(
-                    pool,
-                    &mapping.id,
-                    &mapping.harbor_repository,
-                    tag,
-                    &digest,
-                )
-                .await?
-                {
-                    continue;
-                }
+                // TODO(spinoff part 2): the Harbor poll dedupe (sync_reports::has_success) is
+                // removed with the Harbor poller. Until part 2 every polled tag is queued.
                 let payload = json!({
                     "repo_full_name": format!(
                         "{}/{}",
