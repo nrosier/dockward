@@ -126,6 +126,26 @@ describe("CvesPage", () => {
     await vi.waitFor(() => expect(lastQuery(fetchMock).get("fix")).toBe("none"));
   });
 
+  it("combines the fix filter with status and a repository in the request and the URL", async () => {
+    const fetchMock = stub();
+    const { router } = renderAt(<CvesPage />);
+    await screen.findByText("CVE-2026-0002");
+    await userEvent.click(group("cves.filter.fix").getByRole("button", { name: t("cves.filter.fixAvailable") }));
+    await userEvent.click(group("cves.filter.status").getByRole("button", { name: t("cves.status.accepted") }));
+    await userEvent.click(screen.getByRole("combobox", { name: t("cves.filter.repository") }));
+    await userEvent.click(await screen.findByRole("option", { name: "platform/api" }));
+    await vi.waitFor(() => {
+      const query = lastQuery(fetchMock);
+      expect(query.get("fix")).toBe("available");
+      expect(query.get("status")).toBe("open,accepted");
+      expect(query.get("repository")).toBe("platform/api");
+    });
+    const url = new URLSearchParams(router.state.location.search);
+    expect(url.get("fix")).toBe("available");
+    expect(url.get("status")).toBe("open,accepted");
+    expect(url.get("repository")).toBe("platform/api");
+  });
+
   it("keeps the last Status pill on", async () => {
     stub();
     renderAt(<CvesPage />);
