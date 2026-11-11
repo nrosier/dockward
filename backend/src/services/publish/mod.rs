@@ -51,6 +51,7 @@ use crate::services::github_scanning::{
 use crate::services::github_url::GithubTarget;
 use crate::services::ids;
 use crate::services::issue_lifecycle::{self, IssueApi};
+use crate::services::issue_rekey;
 use crate::services::merged_view::{self, MergedFinding};
 use crate::services::sarif;
 use crate::services::storage::messages::NO_LONGER_STORED;
@@ -618,6 +619,41 @@ impl<G: CodeScanning, I: IssueApi, C: Clock> Publisher<G, I, C> {
     async fn reconcile_issues(&self, context: &Context) {
         let source = &context.source;
         let scan_label = format!("{}/{}:{}", source.hub_host, source.repository, context.tag);
+        let rekey = issue_rekey::run(
+            &self.pool,
+            &self.issues,
+            &self.clock,
+            &context.token,
+            &source.github_owner,
+            &source.github_repo,
+        )
+        .await;
+        match rekey {
+            Ok(issue_rekey::RekeyOutcome::RateLimited { .. }) => {
+                tracing::warn!(
+                    "GitHub rate limit reached while re-keying issues; the next publish retries"
+                );
+                return;
+            }
+            Ok(issue_rekey::RekeyOutcome::Refused) => {
+                tracing::warn!(
+                    "GitHub refused the issue re-key; check the token's Issues permission"
+                );
+                return;
+            }
+            Ok(issue_rekey::RekeyOutcome::Incomplete { .. }) => {
+                tracing::warn!("some issues could not be re-keyed; the next publish retries");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "the database failed while re-keying issues; the next publish retries"
+                );
+            }
+            Ok(
+                issue_rekey::RekeyOutcome::AlreadyDone
+                | issue_rekey::RekeyOutcome::Completed { .. },
+            ) => {}
+        }
         let result = issue_lifecycle::reconcile(
             &self.pool,
             &self.issues,

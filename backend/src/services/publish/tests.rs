@@ -613,7 +613,7 @@ async fn the_sarif_is_merged_valid_and_uploaded_under_the_hub_category() {
     // The CRITICAL CVE got its issue with the marker.
     assert_eq!(fx.open_issues(), 1);
     let body = fx.github.with(|state| state.issues[0].body.clone());
-    assert!(body.starts_with("<!-- harborgate:CVE-2026-0001 -->"));
+    assert!(body.starts_with("<!-- dockward:CVE-2026-0001 -->"));
 }
 
 /// Two tags of one repository get two categories, and sources that target one GitHub repository

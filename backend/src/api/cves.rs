@@ -350,9 +350,9 @@ mod tests {
             ]
         );
         let expected = [
-            serde_json::json!(["harborgate", "areai:security", "low"]),
-            serde_json::json!(["harborgate", "areai:security"]),
-            serde_json::json!(["harborgate", "areai:security", "low"]),
+            serde_json::json!(["dockward", "areai:security", "low"]),
+            serde_json::json!(["dockward", "areai:security"]),
+            serde_json::json!(["dockward", "areai:security", "low"]),
         ];
         for (body, labels) in creates.iter().zip(expected) {
             assert_eq!(body["labels"], labels);
@@ -360,7 +360,7 @@ mod tests {
                 body["body"]
                     .as_str()
                     .unwrap()
-                    .starts_with("<!-- harborgate:CVE-2026-00")
+                    .starts_with("<!-- dockward:CVE-2026-00")
             );
         }
         // The second click is 409 with the URL, never a second issue.

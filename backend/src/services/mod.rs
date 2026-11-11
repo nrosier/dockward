@@ -29,6 +29,7 @@ pub mod hubs;
 pub mod ids;
 pub mod images;
 pub mod issue_lifecycle;
+pub mod issue_rekey;
 pub mod job_runs;
 #[allow(dead_code)] // Used by the job worker and the retry route.
 pub mod jobs;

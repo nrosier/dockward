@@ -16,8 +16,27 @@ use crate::services::github_scanning::{
 use crate::services::github_url::{GithubTarget, GithubUrls};
 use crate::services::outbound::{self, OutboundClient};
 
-/// The label on every issue HarborGate creates.
-pub const LABEL: &str = "harborgate";
+/// The label on every issue Dockward creates.
+pub const LABEL: &str = "dockward";
+
+/// The label of issues created before the rename to Dockward. Read only, for the re-key and
+/// for adoption until the re-key has completed (#311).
+pub const LEGACY_LABEL: &str = "harborgate";
+
+/// The longest CVE id or source id the manual route and the lifecycle accept, in bytes.
+pub(crate) const MAX_ID_BYTES: usize = 128;
+
+/// True for an id that is safe in the marker line and the route: 1 to 128 bytes of ASCII
+/// letters, digits, `.`, `_`, `-` and `:` (a CVE id may be `RHSA-2023:1234`). A Harbor-supplied
+/// id with a line break or `-->` fails, so it cannot break the first-line marker. Findings
+/// with such an id never get an issue.
+pub(crate) fn valid_cve_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ID_BYTES
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':'))
+}
 
 /// The label that marks an issue as a security finding (`specs/integrations.md`, "GitHub
 /// issues").
@@ -60,18 +79,70 @@ pub struct IssueRef {
     pub labels: Vec<String>,
 }
 
-/// The hidden marker that must be the first line of every issue body HarborGate creates.
+/// The hidden marker that must be the first line of every issue body Dockward creates.
 pub fn marker(cve_id: &str) -> String {
+    format!("<!-- dockward:{cve_id} -->")
+}
+
+/// The marker that issues created before the rename carry on their first line.
+pub fn legacy_marker(cve_id: &str) -> String {
     format!("<!-- harborgate:{cve_id} -->")
 }
 
 /// The issue whose body's first line is exactly the marker for `cve_id`. A marker anywhere
-/// else in the body does not count.
+/// else in the body does not count. An issue with the new marker wins over one with the
+/// legacy marker, so a re-keyed issue is preferred when both exist.
 pub fn find_marked<'a>(issues: &'a [IssueRef], cve_id: &str) -> Option<&'a IssueRef> {
-    let wanted = marker(cve_id);
-    issues
-        .iter()
-        .find(|issue| issue.body.lines().next() == Some(wanted.as_str()))
+    let first_line_is = |wanted: String| {
+        issues
+            .iter()
+            .find(|issue| issue.body.lines().next() == Some(wanted.as_str()))
+    };
+    first_line_is(marker(cve_id)).or_else(|| first_line_is(legacy_marker(cve_id)))
+}
+
+/// The body with its first line changed from the legacy marker to the new one, for an issue
+/// created before the rename. Only the first line changes: its line ending (a `\r` before the
+/// `\n`) and every other byte are kept. Returns `None` unless the first line is exactly the
+/// legacy marker for a valid CVE id: a body that already has the new marker, an empty body,
+/// or any other first line.
+pub fn rekeyed_body(body: &str) -> Option<String> {
+    let (line, tail) = match body.split_once('\n') {
+        Some((line, _)) => (line, &body[line.len()..]),
+        None => (body, ""),
+    };
+    let (text, line_end) = match line.strip_suffix('\r') {
+        Some(text) => (text, "\r"),
+        None => (line, ""),
+    };
+    let cve_id = text
+        .strip_prefix("<!-- harborgate:")?
+        .strip_suffix(" -->")?;
+    if !valid_cve_id(cve_id) {
+        return None;
+    }
+    Some(format!("{}{line_end}{tail}", marker(cve_id)))
+}
+
+/// `first` followed by every issue of `second` whose number is not already in `first`.
+pub fn merge_by_number(mut first: Vec<IssueRef>, second: Vec<IssueRef>) -> Vec<IssueRef> {
+    for issue in second {
+        if !first.iter().any(|known| known.number == issue.number) {
+            first.push(issue);
+        }
+    }
+    first
+}
+
+/// What a label rename did (`PATCH repos/{owner}/{repo}/labels/{from}`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabelRename {
+    /// The label was renamed.
+    Renamed,
+    /// The old label does not exist (`404`).
+    Absent,
+    /// The new label already exists (`422`, `already_exists`), so nothing was renamed.
+    TargetExists,
 }
 
 /// The body of a new issue: the marker on the first line, then a short Markdown table.
@@ -189,17 +260,18 @@ fn next_path(urls: &GithubUrls, link: &str) -> Result<String, ScanError> {
         .ok_or_else(|| ScanError::Upstream("GitHub sent a next link to another host".to_owned()))
 }
 
-/// Lists every open issue with the `harborgate` label, following `link: rel="next"`.
-/// Pull requests are skipped.
+/// Lists every open issue with `label` (`LABEL` or `LEGACY_LABEL`), following
+/// `link: rel="next"`. Pull requests are skipped.
 pub async fn list_open_labelled_with<H: ScanHttp>(
     http: &H,
     token: &[u8],
     owner: &str,
     repo: &str,
+    label: &str,
     now: i64,
 ) -> Result<Vec<IssueRef>, ScanError> {
     check_names(owner, repo)?;
-    let mut path = format!("repos/{owner}/{repo}/issues?state=open&labels={LABEL}&per_page=100");
+    let mut path = format!("repos/{owner}/{repo}/issues?state=open&labels={label}&per_page=100");
     let mut found = Vec::new();
     for _ in 0..MAX_PAGES {
         let response = http.get(&path, token).await?;
@@ -244,6 +316,30 @@ pub async fn create_with<H: ScanHttp>(
         return Err(classify(&response, now));
     }
     parse_issue(&response.body)
+}
+
+/// Renames a label (`PATCH repos/{owner}/{repo}/labels/{from}` with `new_name`). `200` is
+/// [`LabelRename::Renamed`], `404` is [`LabelRename::Absent`], and a `422` whose answer says
+/// `already_exists` is [`LabelRename::TargetExists`]. Any other answer goes through
+/// [`classify`].
+pub async fn rename_label_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    from: &str,
+    to: &str,
+    now: i64,
+) -> Result<LabelRename, ScanError> {
+    check_names(owner, repo)?;
+    let path = format!("repos/{owner}/{repo}/labels/{from}");
+    let response = http.patch(&path, token, &json!({"new_name": to})).await?;
+    match response.status {
+        200 => Ok(LabelRename::Renamed),
+        404 => Ok(LabelRename::Absent),
+        422 if already_exists(&response.body) => Ok(LabelRename::TargetExists),
+        _ => Err(classify(&response, now)),
+    }
 }
 
 /// Creates each label in the repository. A label that already exists (`422` with
@@ -481,15 +577,29 @@ impl GithubIssues {
         }
     }
 
-    /// Lists open issues with the `harborgate` label, all pages. See [`list_open_labelled_with`].
+    /// Lists open issues with `label`, all pages. See [`list_open_labelled_with`].
     pub async fn list_open_labelled(
         &self,
         token: &[u8],
         owner: &str,
         repo: &str,
+        label: &str,
         now: i64,
     ) -> Result<Vec<IssueRef>, ScanError> {
-        list_open_labelled_with(&self.http(), token, owner, repo, now).await
+        list_open_labelled_with(&self.http(), token, owner, repo, label, now).await
+    }
+
+    /// Renames a label. See [`rename_label_with`].
+    pub async fn rename_label(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        from: &str,
+        to: &str,
+        now: i64,
+    ) -> Result<LabelRename, ScanError> {
+        rename_label_with(&self.http(), token, owner, repo, from, to, now).await
     }
 
     /// Creates a labelled issue. See [`create_with`].
@@ -733,7 +843,7 @@ mod tests {
         let page_two = reply(200, json!([issue(3, "<!-- harborgate:CVE-2026-3 -->")]));
         let fake = Scripted::new(vec![page_one, page_two]);
 
-        let found = list_open_labelled_with(&fake, b"token", "octo", "app", 1000)
+        let found = list_open_labelled_with(&fake, b"token", "octo", "app", LABEL, 1000)
             .await
             .unwrap();
 
@@ -748,7 +858,7 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                "repos/octo/app/issues?state=open&labels=harborgate&per_page=100".to_owned(),
+                "repos/octo/app/issues?state=open&labels=dockward&per_page=100".to_owned(),
                 "repositories/42/issues?state=open&labels=harborgate&per_page=100&page=2"
                     .to_owned(),
             ]
@@ -762,7 +872,7 @@ mod tests {
             ..reply(200, json!([]))
         };
         let fake = Scripted::new(vec![page, reply(200, json!([]))]);
-        let outcome = list_open_labelled_with(&fake, b"token", "octo", "app", 1000).await;
+        let outcome = list_open_labelled_with(&fake, b"token", "octo", "app", LABEL, 1000).await;
         assert!(matches!(outcome, Err(ScanError::Upstream(_))));
         assert_eq!(fake.sent().len(), 1, "the foreign link must not be fetched");
     }
@@ -791,7 +901,8 @@ mod tests {
                 ..reply(200, json!([]))
             };
             let fake = Scripted::new(vec![page, reply(200, json!([]))]);
-            let outcome = list_open_labelled_with(&fake, b"token", "octo", "app", 1000).await;
+            let outcome =
+                list_open_labelled_with(&fake, b"token", "octo", "app", LABEL, 1000).await;
             assert!(
                 matches!(outcome, Err(ScanError::Upstream(_))),
                 "{link} should be refused"
@@ -845,40 +956,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_sends_the_harborgate_label() {
-        let fake = Scripted::new(vec![reply(201, issue(7, "<!-- harborgate:CVE-2026-1 -->"))]);
+    async fn create_sends_the_dockward_label() {
+        let fake = Scripted::new(vec![reply(201, issue(7, "<!-- dockward:CVE-2026-1 -->"))]);
         let created = create_with(
             &fake,
             b"token",
             "octo",
             "app",
             "CVE-2026-1 libfoo",
-            "<!-- harborgate:CVE-2026-1 -->",
+            "<!-- dockward:CVE-2026-1 -->",
             &issue_labels("HIGH"),
             1000,
         )
         .await
         .unwrap();
 
-        assert_eq!(created, ref_of(7, "<!-- harborgate:CVE-2026-1 -->"));
+        assert_eq!(created, ref_of(7, "<!-- dockward:CVE-2026-1 -->"));
         let sent = fake.sent();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, "POST");
         assert_eq!(sent[0].1, "repos/octo/app/issues");
         assert_eq!(
             sent[0].2["labels"],
-            json!(["harborgate", "areai:security", "high"])
+            json!(["dockward", "areai:security", "high"])
         );
         assert_eq!(sent[0].2["title"], "CVE-2026-1 libfoo");
-        assert_eq!(sent[0].2["body"], "<!-- harborgate:CVE-2026-1 -->");
+        assert_eq!(sent[0].2["body"], "<!-- dockward:CVE-2026-1 -->");
     }
 
     #[test]
     fn unknown_severity_has_no_severity_label() {
-        assert_eq!(
-            issue_labels("UNKNOWN"),
-            vec!["harborgate", "areai:security"]
-        );
+        assert_eq!(issue_labels("UNKNOWN"), vec!["dockward", "areai:security"]);
         assert_eq!(severity_label("LOW"), Some("low"));
     }
 
@@ -947,7 +1055,7 @@ mod tests {
         };
         let fake = Scripted::new(vec![limited]);
         assert_eq!(
-            list_open_labelled_with(&fake, b"token", "octo", "app", 1000).await,
+            list_open_labelled_with(&fake, b"token", "octo", "app", LABEL, 1000).await,
             Err(ScanError::RateLimited { until: 1900 })
         );
 
@@ -965,7 +1073,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_names_are_refused_before_any_request() {
         let fake = Scripted::new(vec![]);
-        let outcome = list_open_labelled_with(&fake, b"token", "../octo", "app", 1000).await;
+        let outcome = list_open_labelled_with(&fake, b"token", "../octo", "app", LABEL, 1000).await;
         assert!(matches!(outcome, Err(ScanError::Rejected(_))));
         assert!(fake.sent().is_empty());
     }
@@ -980,7 +1088,7 @@ mod tests {
             "library/app",
             None,
         );
-        assert_eq!(body.lines().next(), Some("<!-- harborgate:CVE-2026-1 -->"));
+        assert_eq!(body.lines().next(), Some("<!-- dockward:CVE-2026-1 -->"));
         assert!(body.contains("| Severity | CRITICAL |"));
         assert!(body.contains("| Fixed in | 1.2.4 |"));
         assert!(body.contains("| Image | library/app |"));
@@ -1048,5 +1156,181 @@ mod tests {
         assert!(two.contains("Found by 2 scanners: `Grype`, `Trivy`"));
         // A body without Dockward's table is left alone.
         assert_eq!(with_found_by("just text", "Found by 1 scanner: `a`"), None);
+    }
+
+    #[test]
+    fn markers_use_the_new_and_legacy_names() {
+        assert_eq!(marker("CVE-2026-1"), "<!-- dockward:CVE-2026-1 -->");
+        assert_eq!(
+            legacy_marker("CVE-2026-1"),
+            "<!-- harborgate:CVE-2026-1 -->"
+        );
+        assert_eq!(LABEL, "dockward");
+        assert_eq!(LEGACY_LABEL, "harborgate");
+    }
+
+    #[test]
+    fn find_marked_prefers_the_new_marker_over_the_legacy_one() {
+        let legacy = ref_of(1, "<!-- harborgate:CVE-2026-1 -->\n\nold");
+        let new = ref_of(2, "<!-- dockward:CVE-2026-1 -->\n\nnew");
+        let issues = vec![legacy.clone(), new.clone()];
+        assert_eq!(find_marked(&issues, "CVE-2026-1"), Some(&new));
+        // Without the new marker, the legacy one is adopted.
+        assert_eq!(
+            find_marked(std::slice::from_ref(&legacy), "CVE-2026-1"),
+            Some(&legacy)
+        );
+    }
+
+    #[test]
+    fn find_marked_rejects_a_marker_on_line_two_or_a_prefix_for_both_names() {
+        let second = ref_of(1, "intro\n<!-- dockward:CVE-2026-3 -->");
+        let legacy_second = ref_of(2, "intro\n<!-- harborgate:CVE-2026-3 -->");
+        let legacy_prefix = ref_of(3, "<!-- harborgate:CVE-2026-44 -->");
+        let issues = vec![second, legacy_second, legacy_prefix];
+        assert_eq!(find_marked(&issues, "CVE-2026-3"), None);
+        assert_eq!(find_marked(&issues, "CVE-2026-4"), None);
+    }
+
+    #[test]
+    fn rekeyed_body_rewrites_only_the_first_line_with_lf() {
+        let body = "<!-- harborgate:CVE-2026-1 -->\n\n| Field | Value |\nbody with <!-- harborgate:X --> inside\n";
+        assert_eq!(
+            rekeyed_body(body).as_deref(),
+            Some(
+                "<!-- dockward:CVE-2026-1 -->\n\n| Field | Value |\nbody with <!-- harborgate:X --> inside\n"
+            )
+        );
+    }
+
+    #[test]
+    fn rekeyed_body_keeps_a_crlf_line_ending_and_every_other_byte() {
+        let body = "<!-- harborgate:CVE-2026-2 -->\r\nline\r\n\r\ntail";
+        assert_eq!(
+            rekeyed_body(body).as_deref(),
+            Some("<!-- dockward:CVE-2026-2 -->\r\nline\r\n\r\ntail")
+        );
+    }
+
+    #[test]
+    fn rekeyed_body_is_none_for_every_other_first_line() {
+        assert_eq!(rekeyed_body("<!-- dockward:CVE-2026-1 -->\n\nbody"), None);
+        assert_eq!(rekeyed_body(""), None);
+        assert_eq!(rekeyed_body("intro\n<!-- harborgate:CVE-2026-1 -->"), None);
+        assert_eq!(
+            rekeyed_body("<!-- harborgate:CVE-2026-1 --> trailing"),
+            None
+        );
+        assert_eq!(rekeyed_body("<!-- harborgate:CVE-2026-44"), None);
+        // An id with `-->` or a line break cannot pass the id rule.
+        assert_eq!(
+            rekeyed_body("<!-- harborgate:CVE-1 --> --> -->\nbody"),
+            None
+        );
+        assert_eq!(rekeyed_body("<!-- harborgate:CVE-1\n-->"), None);
+        assert_eq!(rekeyed_body("<!-- harborgate: -->"), None);
+    }
+
+    #[tokio::test]
+    async fn rename_label_sends_the_exact_path_and_body_and_classifies_each_answer() {
+        let renamed = Scripted::new(vec![reply(200, json!({}))]);
+        assert_eq!(
+            rename_label_with(
+                &renamed,
+                b"token",
+                "octo",
+                "app",
+                "harborgate",
+                "dockward",
+                1000
+            )
+            .await,
+            Ok(LabelRename::Renamed)
+        );
+        let sent = renamed.sent();
+        assert_eq!(sent[0].0, "PATCH");
+        assert_eq!(sent[0].1, "repos/octo/app/labels/harborgate");
+        assert_eq!(sent[0].2, json!({"new_name": "dockward"}));
+
+        let absent = Scripted::new(vec![reply(404, json!({"message": "Not Found"}))]);
+        assert_eq!(
+            rename_label_with(
+                &absent,
+                b"token",
+                "octo",
+                "app",
+                "harborgate",
+                "dockward",
+                1000
+            )
+            .await,
+            Ok(LabelRename::Absent)
+        );
+
+        let exists = Scripted::new(vec![reply(
+            422,
+            json!({"errors": [{"resource": "Label", "code": "already_exists", "field": "new_name"}]}),
+        )]);
+        assert_eq!(
+            rename_label_with(
+                &exists,
+                b"token",
+                "octo",
+                "app",
+                "harborgate",
+                "dockward",
+                1000
+            )
+            .await,
+            Ok(LabelRename::TargetExists)
+        );
+
+        let refused = Scripted::new(vec![reply(401, json!({}))]);
+        assert_eq!(
+            rename_label_with(
+                &refused,
+                b"token",
+                "octo",
+                "app",
+                "harborgate",
+                "dockward",
+                1000
+            )
+            .await,
+            Err(ScanError::Unauthorized)
+        );
+
+        let limited = Scripted::new(vec![ScanResponse {
+            retry_after: Some(30),
+            ..reply(403, json!({"message": "secondary rate limit"}))
+        }]);
+        assert_eq!(
+            rename_label_with(
+                &limited,
+                b"token",
+                "octo",
+                "app",
+                "harborgate",
+                "dockward",
+                1000
+            )
+            .await,
+            Err(ScanError::RateLimited { until: 1030 })
+        );
+
+        let other_422 = Scripted::new(vec![reply(422, json!({"errors": [{"code": "invalid"}]}))]);
+        assert!(matches!(
+            rename_label_with(
+                &other_422,
+                b"token",
+                "octo",
+                "app",
+                "harborgate",
+                "dockward",
+                1000
+            )
+            .await,
+            Err(ScanError::Upstream(_))
+        ));
     }
 }
