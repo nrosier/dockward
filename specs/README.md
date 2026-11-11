@@ -1,4 +1,4 @@
-# HarborGate Specs
+# Dockward Specs
 
 Index of the detailed build specifications. CLAUDE.md is the general guide; this folder holds the detail. Each decision lives in exactly one spec file. When a decision changes, update the owning file and keep CLAUDE.md general.
 
@@ -15,7 +15,7 @@ Index of the detailed build specifications. CLAUDE.md is the general guide; this
 - [frontend.md](frontend.md) - App shell, page map, screens, visual direction, status pills, i18n, house style, design-before-build.
 - [deployment.md](deployment.md) - Dockerfile, compose, Traefik, Cloudflare tunnel, volumes, health endpoint, .gitignore, releases.
 - [testing-and-ci.md](testing-and-ci.md) - Test strategy, CI workflows (including the Syft, Grype and Trivy security scanning workflow, #227), Renovate, repo hygiene files.
-- [spinoff-local-scan.md](spinoff-local-scan.md) - PROVISIONAL. Spinoff on the branch `spinoff-local-scan` (never merged to `main`), working name `localscan` (provisional, name decided later): a local image scanner with no Harbor. Hubs and per-hub encrypted credentials, own registry client into OCI layouts on disk (no Docker daemon), per-platform scans with out-of-process pinned Trivy and Grype, daily database refresh and rescan by digest, hourly tag discovery, count-based retention, fresh schema, API, security rules and open items. Binding decisions: [spinoff-decisions.md](spinoff-decisions.md) (1 to 22).
+- [spinoff-local-scan.md](spinoff-local-scan.md) - The dockward 0.2.0 design spec. The spinoff is merged to `main` under the name dockward. It is a local image scanner with no Harbor: hubs and per-source encrypted credentials, own registry client into OCI layouts on disk (no Docker daemon), per-platform scans with out-of-process pinned Trivy and Grype, daily database refresh and rescan by digest, hourly tag discovery, count-based retention, fresh schema, API, security rules and open items. Binding decisions: [spinoff-decisions.md](spinoff-decisions.md) (1 to 59; the log records the name change in decisions 24, 54 and 57).
 
 ## Rules
 

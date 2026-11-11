@@ -1,8 +1,8 @@
-# HarborGate Development Guide
+# Dockward Development Guide
 
-HarborGate is a local-first, multi-tenant security relay. It receives container vulnerability reports from Harbor (webhooks, with polling as backup), converts Trivy reports to SARIF 2.1.0, and pushes them to GitHub Code Scanning and Issues. The backend is Rust (Axum, SQLx on SQLite); the frontend is React and TypeScript (Vite). It ships as a single Docker container.
+Dockward is a local-first, multi-tenant security relay. It discovers images in container registries, pulls them into local OCI layouts (no Docker daemon), scans them with pinned Trivy and Grype binaries, converts results to SARIF 2.1.0, and pushes them to GitHub Code Scanning and Issues. The backend is Rust (Axum, SQLx on SQLite); the frontend is React and TypeScript (Vite). It ships as a single Docker container.
 
-Status: in development. Built on `main`: first-run setup, local and OIDC login with sessions and CSRF, encrypted credentials with the Harbor and GitHub tests, mapping CRUD with hashed webhook secrets, the Harbor webhook receiver, the Harbor client and polling, the Trivy-to-SARIF 2.1.0 converter, the durable job queue, the sync pipeline with the GitHub SARIF upload, GitHub issues (create, close, reopen, manual-close honouring) and the CVE lifecycle, SMTP and webhook alerts, backup and restore, and the web UI (routed pages in `frontend/src/routes.tsx`). The specs describe the v1 behaviour.
+Status: dockward 0.2.0. Harbor support is removed. The routed pages are in `frontend/src/routes.tsx`. The specs describe the v1 behaviour.
 
 ## Specs
 
@@ -13,7 +13,7 @@ This file is the general guide. Detailed build specifications live in [`specs/`]
 - [specs/database.md](specs/database.md): schema reference and table decisions.
 - [specs/backend.md](specs/backend.md): modules, durable job queue, error handling, dev rules.
 - [specs/security.md](specs/security.md): encryption, key rotation, backup and restore, auth, sessions, hardening, tenancy.
-- [specs/integrations.md](specs/integrations.md): Harbor webhook, Harbor API, polling, OCI labels, GitHub SARIF and issues.
+- [specs/integrations.md](specs/integrations.md): registries and hubs, scanners, OCI labels, GitHub SARIF and issues.
 - [specs/cve-lifecycle.md](specs/cve-lifecycle.md): per-tag CVE tracking, issue open/close/reopen, acceptance, retention.
 - [specs/alerts.md](specs/alerts.md): SMTP and webhook alert rules.
 - [specs/frontend.md](specs/frontend.md): app shell, pages, visual direction, status pills, i18n, house style.
@@ -42,8 +42,8 @@ npm run dev               # Vite dev server with backend API proxy
 npm run build             # production build
 
 # Container (from repo root)
-docker build -t harborgate:latest .
-docker run --init --env-file .env -p 8080:8080 -v harborgate_data:/data harborgate:latest
+docker build -t dockward:latest .
+docker run --init --env-file .env -p 8080:8080 -v dockward_data:/data dockward:latest
 ```
 
 ## Command output (rtk)
@@ -56,9 +56,9 @@ Commands run through rtk (Rust Token Killer), a Claude Code Bash hook that rewri
 
 ## Repository layout
 
-- `backend/`: Rust crate. `src/api/` (handlers), `src/services/` (Harbor, GitHub, SARIF), `src/db/` (SQL), `src/auth/`, `src/models/`, `src/worker/`, `migrations/`.
+- `backend/`: Rust crate. `src/api/` (handlers), `src/services/` (Trivy, Grype, GitHub, SARIF), `src/db/` (SQL), `src/auth/`, `src/models/`, `src/worker/`, `migrations/`.
 - `frontend/`: React app. `src/components/`, `src/pages/`, `src/hooks/`, `src/lib/`, `src/types/`.
-- `docs/SETUP.md`: operator setup guide (Harbor, GitHub, connection, restore).
+- `docs/SETUP.md`: operator setup guide (registries and hubs, GitHub, connecting Dockward, OCI labels, backup and restore, key rotation).
 - `.github/`: CI workflows, issue templates, CODEOWNERS.
 - `Dockerfile`, `docker-compose.yml`, `renovate.json`, `CHANGELOG.md`, `SECURITY.md`.
 

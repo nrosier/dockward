@@ -1,6 +1,6 @@
 # Frontend
 
-Purpose: app shell, page map, screen designs, visual direction, status pills, i18n, and the house style rules.
+Purpose: app shell, page map, screen designs, visual direction, status pills, i18n, and the house style rules for dockward 0.2.0.
 
 ## Process rules
 
@@ -11,7 +11,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 
 ## Screen designs (approved 2026-11-03)
 
-- Approved (2026-11-03, user, #35): every v1 screen below. The approved artboards are in [designs/](designs/) as static HTML. The live canvas is the private artifact "HarborGate v1 screens" (https://claude.ai/artifact/2obq8cfJ1X4GmDEuLPV2o6).
+- Approved (2026-11-03, user, #35): every v1 screen below. The approved artboards are in [designs/](designs/) as static HTML. The live canvas is the private artifact "dockward v1 screens" (https://claude.ai/artifact/2obq8cfJ1X4GmDEuLPV2o6).
 - The artboards set layout, copy, states, and which controls exist. Their sample data is illustrative. Their inline `style` attributes are drawing aids only: the build uses Tailwind classes and the theme tokens, because the CSP forbids inline styles in markup (see "Process rules").
 - Approved screens, with their artboard and route:
 
@@ -20,176 +20,122 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 | Login | `Login.dc.html` | `/login` |
 | First-run setup | `Setup.dc.html` | `/setup` |
 | Dashboard | `Main.dc.html` | `/` |
-| Mappings list | `Mappings.dc.html` | `/mappings` |
-| New mapping (duplicate-target error state) | `MappingNew.dc.html` | `/mappings/new` |
-| Mapping created (shown-once values) | `MappingCreated.dc.html` | shown in place after create; not a URL |
+| Sources list (was Mappings) | `Mappings.dc.html` | `/sources` (design approved for Harbor mappings; reused, see 'Sources and Images') |
+| New source (was New mapping) | `MappingNew.dc.html` | `/sources/new` |
 | CVE list | `Cves.dc.html` | `/cves` |
 | Per-CVE view | `CveDetail.dc.html` | `/cves/:id` |
 | Accept risk dialog | `CveAccept.dc.html` | modal on `/cves/:id` |
-| Sync jobs | `SyncJobs.dc.html` | `/sync-jobs` |
+| Jobs (was Sync jobs) | `SyncJobs.dc.html` | `/jobs` |
 | Account | `Account.dc.html` | `/account` |
 | Add credential | `CredentialNew.dc.html` | `/account/credentials/new` |
 | Admin: Jobs | `AdminJobs.dc.html` | `/admin/jobs` |
-| Admin: Failed syncs | `AdminFailed.dc.html` | `/admin/failed` |
+| Admin: Failed jobs (was Failed syncs) | `AdminFailed.dc.html` | `/admin/failed` |
 | Admin: Audit log | `AdminAudit.dc.html` | `/admin/audit` |
 | Admin: Health | `AdminHealth.dc.html` | `/admin/health` |
 | Admin: Settings > OIDC | `AdminOidc.dc.html` | `/admin/settings/oidc` |
 | Admin: Settings > Users | `AdminUsers.dc.html` | `/admin/settings/users` |
 | Admin: Settings > Alerts | `AdminAlerts.dc.html` | `/admin/settings/alerts` |
 | Admin: Settings > Backup and restore | `AdminBackup.dc.html` | `/admin/settings/backup` |
+| Admin: Settings > GitHub | (no artboard; minimal) | `/admin/settings/github` |
 | Shell parts: rail, sticky header, Admin tabs | `Rail.dc.html`, `Topbar.dc.html`, `AdminTabs.dc.html` | every page |
 
 - Decisions approved with the designs (2026-11-03, user):
   - Cards and forms span the full content width (64rem). No card has its own narrower limit.
-  - Mapping form: the GitHub target section also holds a GitHub credential select, because `POST /mappings` needs `github_cred_id`. The Harbor source section holds the Harbor credential select.
-  - Mappings has a list page with the columns Harbor source, GitHub target, Issues, Open CVEs, and Last sync. Changed (2026-11-09, user, issue #263, decisions 1 and 2): the row opens the mapping (`/mappings/:id`) on click or Enter, there is no Edit button, and the mapping name in the first column is a link to the same page. Inner controls (links, buttons) keep their own action; only clicks on the rest of the row open the mapping. Rows have a pointer cursor, a hover state, and a visible focus style. Only the owner's rows are clickable and linked, as the edit page was before. Changed (2026-11-05, user, #129): Open CVEs shows every severity with a breakdown (CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN), not only CRITICAL and HIGH. The changed column needs design approval before it is built.
-  - Admins see a "My mappings / All mappings" toggle on Dashboard, Mappings, and Sync jobs. "All mappings" sends `scope=all`. Regular users do not see it. Changed (2026-11-08, user, #257, decision 2): the CVE page has no toggle; its Mapping combobox is the scope control (see "CVE list control bar").
+  - Removed (dockward 0.2.0, decision 1): the Harbor-era approval note for this screen no longer applies. The reused parts are listed under "Sources and Images".
+  - Removed (dockward 0.2.0, decision 1): the Harbor-era approval note for this screen no longer applies. The reused parts are listed under "Sources and Images".
+  - Removed (dockward 0.2.0, decision 1): the Harbor-era approval note for this screen no longer applies. The reused parts are listed under "Sources and Images".
   - Admin Settings shows its four sections as a row of pill links under the tabs. Each section has its own URL.
   - Alert channels: saved config is never returned, so editing a channel means entering its whole config again. The edit form says so.
-  - Per-CVE view: "Create issue" shows for a CVE of any severity that is open on at least one tag (Changed 2026-11-05, user, #129; until then CRITICAL and HIGH only), and is disabled while an open issue exists or an active acceptance exists. When `open_severity` is LOW or UNKNOWN, the button first asks for confirmation in a dialog; CRITICAL and HIGH stay one click (MEDIUM too, see [integrations.md](integrations.md)). A GitHub rate limit shows one clear message and is not retried in a loop. The changed button needs design approval before it is built.
+  - Removed (dockward 0.2.0, decision 1): the Harbor-era approval note for this screen no longer applies. The reused parts are listed under "Sources and Images".
   - CVE list (Decided 2026-11-05, user, #129): the default view shows every severity. CVE status uses an OPEN pill (neutral) and an ACCEPTED pill (accent). Decided (2026-11-07, user, #196, decisions 21 and 22): the list shows the CVEs of the newest scanned digest of each mapping only. A CVE that is open only on an older tag is not listed. The `tag` filter offers the newest-digest tags only. Rules: [cve-lifecycle.md](cve-lifecycle.md), "Tracking per tag". The filter header is replaced by the control bar in "CVE list control bar" below (2026-11-08, user, #257).
   - Accept risk is a modal dialog (Radix Dialog).
-  - Add credential: the primary button is "Save and test". It saves the credential, then calls `POST /credentials/:id/test` and shows the check results on the same page, with "Test again" and "Done". The API has no route that tests an unsaved credential.
-  - Sync job Trigger shows `webhook` or `poll` ([api.md](api.md), Sync jobs). A retry keeps the job's trigger. Decided (2026-11-07, #191): `schedule` shows "Schedule". A finished scheduled sync shows, under its image, "New vulnerabilities: <ids>" or "No new vulnerabilities" (catalog keys `syncJobs.newVulns`, `syncJobs.noNewVulns`), from `report.new_cve_ids`. The fixed scan notes and the Scan refusal show as catalog text (`sync.note.noTaggedImage`, `sync.note.scanAlreadyRunning`, `sync.note.scanForbidden`).
+  - Removed (dockward 0.2.0, decision 1): the Harbor-era approval note for this screen no longer applies. The reused parts are listed under "Sources and Images".
+  - Removed (dockward 0.2.0, decision 1): the Harbor-era approval note for this screen no longer applies. The reused parts are listed under "Sources and Images".
   - Light theme uses the same layouts with the light tokens. It is not drawn separately.
   - On narrow screens the rail becomes a drawer behind a menu button in the sticky header. It is not drawn separately.
 - Decided (2026-11-03, delegated): details the designs leave open.
-  - Sticky header: the environment badges (Harbor reachable, GitHub reachable, robot account expiry within 14 days) are shown to admins only. They come from `GET /api/v1/admin/health`, fetched at most once every 10 minutes, because that route makes outbound calls. Regular users see no badges. The header also shows the app version (from `frontend/package.json`, injected at build time) and Sign out.
-  - Edit mapping (`/mappings/:id`) reuses the approved New mapping form, filled in. Below the form, a "Webhook" card has "Rotate webhook URL" and "Rotate auth secret". Each rotation asks for confirmation in a dialog and then shows the new value in the approved shown-once panel. A "Delete mapping" button opens a confirmation dialog that says open GitHub issues stay open. Edit credential reuses the Add credential form with the token field empty ("Leave empty to keep it"). These screens are built from approved parts and were not drawn separately.
+  - Sticky header: the environment badges (registry reachable, GitHub reachable) are shown to admins only. They come from `GET /api/v1/admin/health`, fetched at most once every 10 minutes, because that route makes outbound calls. Regular users see no badges. The header also shows the app version (from `frontend/package.json`, injected at build time) and Sign out.
+  - Edit source (`/sources/:id`) reuses the source form, filled in. A "Delete source" button opens a confirmation dialog that says open GitHub issues stay open. Edit credential reuses the Add credential form with the token field empty ("Leave empty to keep it").
   - Shown-once values live only in component state. They are never written to `localStorage`, the URL, the TanStack Query cache, or logs. Leaving the screen discards them.
   - Routing uses `react-router` (declarative `createBrowserRouter`). Signed-out visitors go to `/login`, or to `/setup` while `setup_required` is true.
 
 ## House style and precedence
 
 - House style is shared with the Astraya project. It is not a copy of Astraya. Astraya is inspiration and a starting point.
-- Improve on Astraya where that serves HarborGate users better, and document each intentional difference and its reason in this file.
-- Adapt, do not transfer. Astraya's domain-specific UI decisions (astrology charts, persons, element and aspect colours, tone names, chart pages) are not carried over. Keep the underlying principle and re-decide the concrete choice for HarborGate: CVE findings, Harbor repositories, GitHub targets, sync jobs, admin and audit views.
-- Astraya concrete values (colours, shell items, page names) may be reused only where they fit HarborGate's domain, and each reuse is justified here.
+- Improve on Astraya where that serves dockward users better, and document each intentional difference and its reason in this file.
+- Adapt, do not transfer. Astraya's domain-specific UI decisions (astrology charts, persons, element and aspect colours, tone names, chart pages) are not carried over. Keep the underlying principle and re-decide the concrete choice for dockward: CVE findings, Harbor repositories, GitHub targets, sync jobs, admin and audit views.
+- Astraya concrete values (colours, shell items, page names) may be reused only where they fit dockward's domain, and each reuse is justified here.
 - Precedence: where Astraya's UI style conflicts with this spec, this spec wins. If a conflict cannot be resolved that way, ask the user which takes precedence before building that part.
 
 ## App shell (decided)
 
 - Collapsible left rail. Adapted from Astraya's documented target shell.
-- Top rail items, in order: Dashboard, Mappings, CVEs, Sync jobs.
+- Top rail items, in order (`frontend/src/components/shell/Rail.tsx`): Dashboard, Sources, Images, CVEs, Jobs. Images is in the rail design of the spinoff (spinoff section 11) but has no page in the router yet; see the Images note below.
 - Bottom rail items: Admin (admins only), Account.
 - Content header holds the page title and the primary action.
 - Sticky header with environment status badges.
 - Content width capped at 64rem.
 - On narrow screens the rail becomes a drawer.
-- Reason for the adaptation: HarborGate's core objects are mappings, CVE findings, and sync jobs, and Admin is role-gated.
+- Reason for the adaptation: dockward's core objects are image sources, CVE findings, and jobs, and Admin is role-gated.
 
 ## Page map (decided)
 
-- Dashboard: summary and recent syncs.
-- Mappings: create and edit. Decided (2026-11-03): the webhook URL and the auth secret are shown once, after create or rotation, with a copy button. They cannot be shown again; the user rotates to get a new one.
-- CVEs: list, and a per-CVE view.
-- Sync jobs: sync history and failures. Replaces a separate Logs page.
-- Admin (admins only): five tabs, see below.
-- Account: profile, credentials, theme, language. Replaces a separate Settings page.
-- Decided (2026-11-03): theme and language preferences are stored in the browser (`localStorage`), not on the server. No server route or `users` column holds them.
-- Login: outside the shell, shown before authentication.
-- Scope: all pages above are in the first release.
+The routes are in `frontend/src/routes.tsx`. This is the built map:
+
+- `/` Dashboard: summary and recent jobs.
+- `/sources` and `/sources/new`, `/sources/:id`: list, create, and edit an image source (hub, repository, tag value, GitHub target, registry credential, issue settings). See "Sources and Images".
+- `/cves` and `/cves/:id`: the CVE list and the per-CVE view.
+- `/jobs`: job history and failures, with retry and purge.
+- `/account` (profile, appearance, credentials) and `/account/credentials/new`, `/account/credentials/:id`.
+- `/admin`: five tabs, see "Admin".
+- `/login` and `/setup`: outside the shell, shown before authentication.
+- Not built: `/images` (the Images page in the spinoff design) and the Hubs and Scan-settings screens of spinoff section 11. Each needs design approval before it is built (decision 51).
+- Theme and language preferences are stored in the browser (`localStorage`), not on the server. No server route or `users` column holds them (Decided 2026-11-03).
+- Scope: all pages above are in the first release. Pages not listed here are not built.
 
 ## Dashboard (decided)
 
-- Summary counts: open CVEs by severity (CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN; every severity since 2026-11-05, user, #129), fixed CVEs, open GitHub issues, failed syncs.
+- Summary counts: open CVEs by severity (CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN; every severity since 2026-11-05, user, #129), fixed CVEs, accepted CVEs, open GitHub issues, failed jobs.
 - Decided (2026-11-07, user, #196, decisions 21 and 22): the CVE counts (open by severity, fixed) follow the newest scanned digest of each mapping, the same view as the CVE list. A CVE open only on an older tag adds nothing to them. Decided (2026-11-07, user, #196, decision 23): the fixed count follows the newest digest only too, so a CVE that only an older digest reported as fixed adds nothing to it. The same holds for the Open CVEs column of the mapping list. Rules: [cve-lifecycle.md](cve-lifecycle.md), "Dashboard counts". No layout changes, so no new design is needed.
 - Decided (2026-11-08, user, #247): the summary shows an accepted-CVE card between the Fixed card and the Issues card. It shows the number of CVEs with an active acceptance in the same scope as the other counts (newest-digest view; the admin `scope=all` toggle applies). Accepted is its own count and is not mixed into open; the open count is unchanged. The card is display only and changes no acceptance. Its text is catalog keys. The two astraya Medium acceptances stay as they are.
-- Below the counts: recent syncs with status and time. Failed rows have a retry action.
+- Below the counts: recent jobs with status and time. Failed rows have a retry action.
 
-## Mapping form (decided)
+## Sources and Images (spinoff, decided by decision 51)
 
-- One page. Stacked, grouped sections in this order:
-  - Harbor source: Harbor project, Harbor repository, credential.
-  - GitHub target: GitHub owner, GitHub repository, default branch.
-  - Issues: auto-create issues on or off, minimum severity.
-  - Scheduled scan (#191): a card below Issues, built from the existing parts (Card, Segmented, Field, select, time input), no new visual. Schedule is a segmented control Off, Daily, Weekly, Off by default. Daily shows "Time (UTC)"; Weekly shows "Day" (Monday to Sunday) and "Time (UTC)". Off shows neither. The help text says the robot needs the Scan permission. Catalog keys `mappings.form.scan*` and `mappings.form.weekday1` to `weekday7`. Decided (2026-11-07, delegated, #191): a new mapping's time defaults to 02:00 UTC in the form (the API default is 00:00) so a first daily run does not fall at midnight; reason: a quiet hour, and the user can change it.
-- Actions: Cancel and Save mapping.
-- Duplicate Harbor repository: shows an inline error on the Harbor repository field when the same Harbor repository is already mapped. Save is blocked until it changes. A GitHub repository already used by another mapping is not an error (Decided 2026-11-06, user, #185), and the form shows no warning for it. When the save itself returns `409 conflict` with detail `harbor_repository_mapped` (for example, a mapping owned by another user, which the form cannot see), the form shows the catalog text `mappings.form.harborRepositoryMapped` ("This Harbor repository is already mapped on this instance. Choose another repository."), which names no other user, mapping, or id (Decided 2026-11-06, user, #180). Every other save error keeps the fixed generic text.
-- The app never moves a target from one mapping to another.
-- Project webhook proposal (Decided 2026-11-06, user, #179): after Save mapping succeeds, the form proposes creating the project webhook only when the response has `project_webhook_exists: false`. Catalog keys: `mapping.projectWebhook.propose` ("Harbor project {project} has no project webhook yet. One webhook covers every repository in this project.") and `mapping.projectWebhook.create` ("Create project webhook"). It names the Harbor project and no repository. When `project_webhook_exists` is `true`, no proposal is shown. Decided (2026-11-06, user, #179): the proposal is an inline banner on the saved-mapping result, with the "Create project webhook" button. It is not a modal and does not block the user; the user can dismiss it. Placement (2026-11-07, delegated, #179): after a create, the banner is at the top of the mapping-created screen, above the shown-once values; after an edit save, it is below the form actions, and the edit page stays open instead of returning to the list. With `project_webhook_exists: true`, an edit save returns to the list as before.
+- The Sources list and form reuse the approved mapping list and form parts. Stacked sections in this order: Image source (hub select, repository, tag value with a live exact-or-pattern hint and a preview), GitHub target (owner, repository, default branch), Issues (auto-create on or off, minimum severity), Registry credential (optional on `docker.io`; a note when none is set; on `ghcr.io` a hint that only a classic token with `read:packages` works).
+- Actions: Cancel and Save source. Duplicate (hub, repository, tag value): an inline error; a `409` from the save shows the catalog text for that case.
+- Source detail: an images table (tag, platform, state, pulled time, per-scanner scan state, database date) and a Scan now button.
+- Images page (spinoff section 11): stored images, size, and which is evicted next. Not built; needs design approval.
+- Hubs and Scan settings (Admin > Settings): hubs are listed by host alone. Not built; needs design approval.
+- Status: the Sources list and form are built (`frontend/src/pages/SourcesPage.tsx`, `SourceFormPage.tsx`). The design is the Harbor mapping design, reused with no new visual, as decision 51 allows. The user reviews and approves it in the browser before release.
+- Removed (spinoff, decision 1): the Harbor project and repository pickers, the project webhook proposal, the scheduled scan card, the Scans card and its scanner switch states, and the Harbor source columns.
 
-## Sync jobs page: purge failed jobs (#243)
+## Jobs page: purge failed jobs (#243)
 
-Decided (2026-11-08, user, #243, decisions 1 to 4): the Sync jobs page has a "Purge failed jobs" button that deletes every failed job in one action, after a confirmation that shows the count. Rules: [api.md](api.md), "Purge failed jobs". The button and dialog need design approval before they are built.
+Decided (2026-11-08, user, #243, decisions 1 to 4; spinoff decision 58 renamed the page): the Jobs page has a "Purge failed jobs" button that deletes every failed job in one action, after a confirmation that shows the count. Rules: [api.md](api.md), "Purge failed jobs" (the route is `/api/v1/jobs/purge-failed`).
 
-- Placement (Decided (2026-11-08, spec author, #243)): in the page header, on the right, next to the "My mappings / All mappings" toggle. It is a secondary button with the destructive text colour, built from the existing Button and Radix Dialog parts. It is visible to every signed-in user, because every user can purge their own mappings' jobs. Reason: the Accept risk dialog and the Delete mapping dialog use the same parts.
-- Count: the page reads `GET /api/v1/sync-jobs/failed-count` with the same `scope` as the list (`scope=all` when an admin's toggle is on). The count is refetched after a retry, a purge, and when the toggle changes. On the Admin Failed syncs tab it is always `scope=all`.
-- Disabled state: with a count of zero, the button is disabled and cannot open the dialog. While the count loads, or if it failed to load, the button is also disabled. A failed count load shows `syncJobs.purge.countFailed` next to the button.
-- Confirmation dialog (Radix Dialog, modal, the destructive-action pattern of Delete mapping): the title names the action, the body shows the count and states the consequence, and there are two buttons, Cancel (focused by default) and a destructive confirm button that repeats the action and the count. Escape and Cancel close it without any request. The count is read when the dialog opens. While the purge request runs, both buttons are disabled.
-- No undo: the delete is permanent (decision 2), so the dialog is the only safeguard. The body says it is permanent and says what is not changed (decision 3).
-- Success: the dialog closes, the list and the count are refetched, and a status line above the table (`role="status"`) shows `syncJobs.purge.success` with the `deleted` value from the response, not the count shown in the dialog. A job kept because it holds the scanner lock stays in the list as a failed row.
-- Failure: the dialog stays open and shows `syncJobs.purge.failed` inline. Nothing is deleted. Cancel and a second attempt both work. No server text is shown, only the catalog text.
-- Catalog keys (all in `frontend/src/i18n/en.json`, parity kept; English text Decided (2026-11-08, spec author, #243)):
+- Placement: in the page header, on the right, next to the "My sources / All sources" toggle. It is a secondary button with the destructive text colour. It is visible to every signed-in user.
+- Count: the page reads `GET /api/v1/jobs/failed-count` with the same `scope` as the list.
+- Disabled state: with a count of zero, the button is disabled. While the count loads, or if it failed to load, the button is also disabled. A failed count load shows `syncJobs.purge.countFailed` next to the button.
+- Confirmation dialog (Radix Dialog, modal): the title names the action, the body shows the count and states that the delete is permanent, and there are two buttons, Cancel (focused by default) and a destructive confirm button. Escape and Cancel close it without any request.
+- Success: the dialog closes, the list and the count are refetched, and a status line (`role="status"`) shows `syncJobs.purge.success` with the `deleted` value from the response. A job kept because it holds the scanner lock stays in the list as a failed row.
+- Failure: the dialog stays open and shows `syncJobs.purge.failed` inline. Nothing is deleted.
+- Catalog keys (all in `frontend/src/i18n/en.json`): `syncJobs.purge.button`, `syncJobs.purge.title`, `syncJobs.purge.body`, `syncJobs.purge.confirm`, `syncJobs.purge.cancel`, `syncJobs.purge.success`, `syncJobs.purge.failed`, `syncJobs.purge.countFailed`. The keys keep their names; the spinoff does not rename catalog keys. The `syncJobs.purge.body` text says "CVE findings, reports, GitHub issues, and alerts are not changed."
+- Status: built in `frontend/src/pages/JobsPage.tsx`; the design needs user approval before the next change.
 
-  | Key | English text |
-  | --- | --- |
-  | `syncJobs.purge.button` | Purge failed jobs |
-  | `syncJobs.purge.title` | Purge failed jobs? |
-  | `syncJobs.purge.body` | {count, plural, one {This permanently deletes 1 failed sync job.} other {This permanently deletes # failed sync jobs.}} CVE findings, reports, GitHub issues, and alerts are not changed. |
-  | `syncJobs.purge.confirm` | {count, plural, one {Delete 1 failed job} other {Delete # failed jobs}} |
-  | `syncJobs.purge.cancel` | Cancel |
-  | `syncJobs.purge.success` | {count, plural, one {Deleted 1 failed job.} other {Deleted # failed jobs.}} |
-  | `syncJobs.purge.failed` | Purge failed. Try again. |
-  | `syncJobs.purge.countFailed` | Could not load the number of failed jobs. |
+## Tag scans (removed, decision 1)
 
-## Tag scans on the mapping page (#224)
-
-Decided (2026-11-07, user, #224 d1, d8, d12): each tag has a Scan button on the mapping page, and a scanner picker appears there only when Harbor has more than one enabled scanner. The picker lists scanners by name. Nothing is stored as a default scanner.
-
-- Placement (Decided 2026-11-07, delegated, #224): a "Scans" card on the mapping edit page (`/mappings/:id`), below Scheduled scan, with one row per tracked tag (the tag set of the CVE view, up to 10). Reason: the user said "the mapping page, per tag", and the edit page is the mapping's page today. Decided (2026-11-07, user, #224, dialogue): the design is approved as specified here and is built as written; no further approval is needed. The parts are existing ones (Card, table row, select, button), no new visual.
-- Row: tag, last scan date, and one line per scanner that has a report for the tag's digest: scanner name (followed by `mapping.scan.notLinked` when `unlinked` is true; Decided 2026-11-09, user, #277), state pill (queued, running, waiting for report, ok, failed) and the reason when failed. A tag whose digest has no report shows "Not scanned".
-- Scan button: with `scanner_choice` `available`, the button opens the scanner picker (a select, no preselected value, the button stays disabled until one is chosen, which is the "user must choose" rule). With `single`, one click starts the scan with no prompt. With `unavailable`, one click starts a scan with the project's current scanner, and the card shows `mapping.scan.noScannerAccess`.
-- Switch notice (Decided 2026-11-07, delegated, #224): while `switch` is not null, a banner on the card shows `mapping.scan.switchActive`, and `mapping.scan.restorePending` while the restore is waiting. A failed restore shows `mapping.scan.restoreFailed` with a link to the Sync jobs page. Reason: other Harbor users of the project are affected, so the state must be visible.
-- Errors from the start route use catalog text chosen by `code`: `409` shows `mapping.scan.alreadyRunning` or `mapping.scan.restoreWaiting`; `429` shows `mapping.scan.cooldown`. Any other error shows the fixed generic text.
-- CVE list and per-CVE view: a column "Found by" shows the scanner count and names (`cves.scanners.count`: "{count, plural, one {1 scanner} other {# scanners}}", and the names joined by ", "), with a filter by scanner. A finding from one scanner shows "1 scanner" and its name. The per-CVE tag table adds the scanner names per tag.
-- Sync jobs page: the `scanner_scan` and `scanner_restore` kinds show their scanner name and the fixed notes ([integrations.md](integrations.md)).
-- Catalog keys (all in `frontend/src/i18n/en.json`, parity kept; Decided 2026-11-07, user, #224, English text delegated):
-
-  | Key | English text |
-  | --- | --- |
-  | `mapping.scan.title` | Scans |
-  | `mapping.scan.button` | Scan |
-  | `mapping.scan.chooseScanner` | Choose a scanner |
-  | `mapping.scan.start` | Start scan |
-  | `mapping.scan.notScanned` | Not scanned |
-  | `mapping.scan.noScannerAccess` | HarborGate cannot list the Harbor scanners. Grant the robot account Scanner Read and Scanner Create to choose one. The scan uses the project's current scanner. |
-  | `mapping.scan.queued` | Scan queued |
-  | `mapping.scan.state.queued` | Queued |
-  | `mapping.scan.state.running` | Running |
-  | `mapping.scan.state.waiting` | Waiting for the report |
-  | `mapping.scan.state.ok` | Done |
-  | `mapping.scan.state.failed` | Failed |
-  | `mapping.scan.switchActive` | The Harbor project scanner is set to {scanner} for a scan. It is restored when the scan ends. |
-  | `mapping.scan.restorePending` | Waiting to restore the Harbor project scanner. |
-  | `mapping.scan.restoreFailed` | The Harbor project scanner could not be restored. Check the Sync jobs page. |
-  | `mapping.scan.alreadyRunning` | A scan with this scanner is already in progress. |
-  | `mapping.scan.restoreWaiting` | The Harbor project scanner is waiting to be restored. Try again when it has been. |
-  | `mapping.scan.cooldown` | A scan was started a moment ago. Try again in a few minutes. |
-  | `cves.scanners.count` | {count, plural, one {1 scanner} other {# scanners}} |
-  | `cves.scanners.foundBy` | Found by |
-  | `cves.scanner.unknown` | Unknown scanner |
-  | `mapping.scan.notLinked` | (not linked to a Harbor registration) |
-  | `cves.scanner.filter` | Scanner |
-  | `sync.note.scannerForbidden` | Harbor refused to switch the project scanner. Grant the robot account Scanner Read and Scanner Create. |
-  | `sync.note.scannerGone` | The scanner is no longer in Harbor. |
-  | `sync.note.scannerFailed` | The scanner failed the scan. |
-  | `sync.note.restoreFailed` | The Harbor project scanner could not be restored. |
-  | `sync.note.previousScannerGone` | The previous scanner is no longer in Harbor. |
-  | `sync.note.scannerChangedElsewhere` | The project scanner was changed by someone else, so it was left as it is. |
-  | `sync.note.scannerUnmatched` | The scanner is not recognised. |
-
-  `sync.note.scanForbidden` is existing ([integrations.md](integrations.md)). The Sync jobs page and the mapping card show the same text for the same note.
+Removed with Harbor. The per-tag Scan button, the scanner picker, the scanner switch and restore states, and the Scans card on the mapping page belonged to Harbor's scanner switch. dockward 0.2.0 has no Harbor scanner. Its scans are run by the app itself on every stored platform image (spinoff section 6). The catalog keys `mapping.scan.*` and the Harbor `sync.note.*` keys are removed with the feature. `sync.note.scanForbidden` and the other keys that name Harbor are removed as well.
 
 ## Settings rows (decided)
 
 - Stacked layout: label, then optional help text, then the control, in one column.
-- Do not use the Astraya 60/40 two-column grid for HarborGate forms.
-- Multi-field forms (mappings, credentials) use the same stacked pattern.
+- Do not use the Astraya 60/40 two-column grid for dockward forms.
+- Multi-field forms (sources, credentials) use the same stacked pattern.
 
 ## CVE list control bar (decided)
 
-Decided 2026-11-08. Source: user, issue #257, decisions 1 to 13 and the design approval (Lavish mockup, approved 2026-11-08). It supersedes #256 and replaces the earlier multi-row filter header (separate exact-match inputs for package, project, repository and tag, and the filter chips).
+Decided 2026-11-08 (user, #257, decisions 1 to 13), with the Fix available group (user, #265, decisions 1 to 4). Spinoff section 11 changes the filter row (decision 38): the Harbor Project filter is replaced by a Namespace filter. The layout below is the approved design. The spinoff changes are listed under it.
 
 - Layout, top to bottom, in one card under the page title:
   1. One search field, full width, with an inline Clear button that empties it. It matches the CVE id, the package, the Harbor project and the Harbor repository as a case-insensitive substring (a `LIKE %q%` match). `%` and `_` in the text are literal characters, never wildcards. The URL and the request update 300 ms after the last keystroke.
@@ -205,35 +151,29 @@ Decided 2026-11-08. Source: user, issue #257, decisions 1 to 13 and the design a
 
 ## Per-CVE view (decided)
 
-- A detail page for one CVE, linkable by URL.
+- A detail page for one CVE, linkable by URL. `{id}` is `<source_id>:<cve_id>`, URL-encoded.
 - Header: CVE id, severity pill, status pill, package, first seen date, link to the GitHub issue, and an "Accept risk" action.
-- Decided (2026-11-03): the manual-issue button sits in this header, next to the GitHub issue link. It calls `POST /api/v1/cves/{id}/issue`.
+- The manual-issue button sits in this header, next to the GitHub issue link. It calls `POST /api/v1/cves/{id}/issue`.
 - Below the header: a table with one row per tracked tag that reports this CVE (up to 10). Columns: tag, status, last scan date, fixed-in version when known.
-- Decided (2026-11-07, user, #196, decisions 21 and 22): this table is where the rows of older tags stay visible. A row for a tag of the newest scanned digest has no marker. A row for any other tag shows the plain text `cves.detail.olderTag`, not a badge. The header status is the status in the newest-digest view, so a CVE that only older tags report shows `fixed`. In that case the CVE row in the header carries the inline text `cves.detail.olderTagsOnly` with the names of the older tags that report it (the `tags[]` entries with `newest_digest` false and status `open`). It is plain inline text: no badge and no separate panel (Approved by the user 2026-11-07, issue #196, decision 24). The Accept risk action and the manual-issue button follow the rules they already have ([api.md](api.md), CVEs). The page is reached by its URL; the CVE list does not link to it.
-- Catalog keys for this change (Decided 2026-11-07, English text delegated, #196; parity kept in `frontend/src/i18n/en.json`):
-
-  | Key | English text |
-  | --- | --- |
-  | `cves.detail.olderTag` | Older tag, not counted |
-  | `cves.detail.olderTagsOnly` | Open on older tags only: {tags} |
-
-- Design approval (2026-11-07, user, #196, decision 24): the older-tag notice is approved as inline text in the CVE row, for example "open on older tags only" with the tag names. No badge and no separate panel. The design needs no further approval.
+- A row for a tag of the newest scanned digest has no marker. A row for any other tag shows the plain text `cves.detail.olderTag`.
+- The page is reached by its URL; the CVE list does not link to it.
+- Catalog keys: `cves.detail.olderTag` ("Older tag, not counted"), `cves.detail.olderTagsOnly` ("Open on older tags only: {tags}").
 
 ## Admin (decided)
 
 - One Admin entry in the rail, shown to admins only.
-- Five tabs:
-  - Jobs: housekeeping and sync jobs, with counts and errors. Includes cleanup and retention runs and polling runs.
-  - Failed syncs: error message and a retry action. Decided (2026-11-08, user, #243, decisions 1 to 4): the tab also has the "Purge failed jobs" action below, always with `scope=all`.
+- Five tabs (`frontend/src/components/shell/AdminTabs.tsx`):
+  - Jobs: housekeeping and job runs, with counts and errors (`job_runs` and the jobs queue).
+  - Failed jobs: error message and a retry action. The tab also has the "Purge failed jobs" action, always with `scope=all`.
   - Audit log: admin actions such as user create and delete, role changes, OIDC config changes, credential rotation.
-  - Health: Harbor and GitHub reachability, token expiry, missing scopes, robot account expiry date with a warning 14 days before it lapses (Decided 2026-11-03, see [integrations.md](integrations.md)). Decided (2026-11-03, delegated): it also shows the code scanning state of each GitHub target (ready, no analysis yet, or unavailable), and the client IP HarborGate sees for the admin's own request, with its source ([api.md](api.md), "Health").
-  - Settings (OIDC, Users, Alerts, Backup and restore): sections for the OIDC, Users, Alerts, and Backup and restore screens.
-- Settings > GitHub (Decided 2026-11-06, user, #184; added 2026-11-07): an admin sets the instance GitHub API base URL and web URL here. Two optional text fields, a save button, and a discard button; empty means github.com. An invalid value shows the catalog text `settings.github_url_invalid`. The stored values are shown in the fields. Rules: [integrations.md](integrations.md), "GitHub base URL". The design is minimal (the existing Settings card, field, and button patterns); no new visual design was approved for it, so the user may ask for changes.
-- Decided (2026-11-03): Settings is the fifth tab, after Health. It holds the OIDC, Users, Alerts, and Backup and restore screens. Admin stays a single rail entry.
-- Settings > OIDC (decided 2026-11-03): OIDC settings and the toggle that restricts regular users to OIDC are managed here, stored encrypted (client secret AES-256-GCM), and every change is audited as `oidc.config_change`. Admin break-glass is always available. The "OIDC only for regular users" toggle restricts regular users to OIDC sign-in (Decided 2026-11-03, see [security.md](security.md)). See [security.md](security.md).
-- Settings > Users (decided 2026-11-03): an admin can create a local user (username, email, password, role; the password must be at least 15 characters and at most 64), change a user's role, and delete a user. Decided (2026-11-03): role changes are for local users only. An OIDC user's role comes from the group claim and is shown read-only. OIDC users appear in the list after their first login. They are not created from this screen.
-- Setup page (first-run, not a Settings screen): shown only while no users exist. Its design was approved on 2026-11-03 (`Setup.dc.html`).
-- Design before build: the screen designs for the four Settings sections and the Setup page were approved on 2026-11-03 (see "Screen designs").
+  - Health: registry reachability, GitHub token state, missing scopes, and the client IP dockward sees for the admin's own request ([api.md](api.md), "Health"). Spinoff: the Harbor rows and the robot account expiry are removed, and per-hub reachability, pinned scanner versions, and free disk are added (spinoff section 10).
+  - Settings: OIDC, Users, Alerts, GitHub, and Backup and restore. Each is a URL (`/admin/settings/oidc`, `/users`, `/alerts`, `/github`, `/backup`). Hubs and Scan settings are not built yet.
+- Settings > GitHub: an admin sets the instance GitHub API base URL and web URL. Two optional text fields, a save button, and a discard button; empty means github.com. An invalid value shows `settings.github_url_invalid`. Rules: [security.md](security.md), "GitHub base URL".
+- Settings > OIDC: OIDC settings and the toggle that restricts regular users to OIDC sign-in. Every change is audited as `oidc.config_change`. Admin break-glass is always available.
+- Settings > Users: an admin can create a local user, change a user's role, and delete a user. The password must be at least 15 characters and at most 64. An OIDC user's role comes from the group claim and is shown read-only.
+- Settings > Alerts: alert channels. Saved config is never returned, so editing a channel means entering its whole config again. The edit form says so.
+- Settings > Backup and restore: creates a backup. Restore is a CLI command, not in this screen ([security.md](security.md)).
+- Setup page (first run, not a Settings screen): shown only while no users exist.
 
 ## Visual direction (decided)
 
