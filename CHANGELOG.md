@@ -2,6 +2,33 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
+## 0.2.0 - 2026-11-11
+
+This release is the first as dockward. HarborGate is renamed, the Harbor integration is removed, and images are scanned locally from any registry.
+
+### Added
+- Images come from any registry: ghcr.io and docker.io by default, with custom registries added by an admin (decisions 7, 11, 13, 44, 45).
+- Images are pulled into local OCI layouts with no Docker daemon. Trivy and Grype run out of process from pinned binaries in the image (decisions 28, 29).
+- Discovery runs hourly per repository; a new or moved tag queues one pull (decisions 16, 17).
+- Each platform of a multi-arch image is scanned; attestation entries are skipped (decision 30).
+- A daily database refresh rescans every stored image when a scanner database is newer (decision 4).
+- Sources, hubs, credentials, tag preview, images and admin scan settings are served under /api/v1 (section 10).
+- Sources and Images screens, a namespace filter on the CVE list, and "Scan now" on a source.
+
+### Changed
+- The product is named dockward. Environment variables are DOCKWARD_*; HARBORGATE_* still works as a logged fallback for this release (decision 57).
+- Stored credentials and the HKDF labels move to dockward/*. Existing credentials are re-encrypted once at startup, and each change is audited as key.migrate_labels. Sessions are reissued, so users sign in again once (decisions 54, 56).
+- The session, CSRF and OIDC cookies are __Host-dockward_*. Existing sessions are rejected and users sign in again once.
+- Sync jobs are jobs: the table, the /api/v1/jobs routes and the Jobs page (decision 58).
+- The published image is ghcr.io/<owner>/dockward.
+
+### Removed
+- Harbor: the client, webhooks, polling, project scanners, scheduled Harbor scans and the robot permissions (decision 34).
+
+### Fixed
+- Sync and scan jobs show their real trigger instead of Webhook.
+- The scanner environment always sets HOME inside the cache root, so Trivy no longer tries to write its cache to /.
+
 ## 0.16.0 - 2026-11-09
 
 ### Changed
