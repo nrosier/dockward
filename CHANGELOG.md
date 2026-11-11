@@ -2,17 +2,22 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
-## Unreleased
+## 0.3.0 - 2026-11-11
 
 ### Changed
 - GitHub identifiers are renamed to dockward. SARIF uploads use the tool and driver name `Dockward` and the category `dockward/<hub host>/<repository>/<tag>/`. New issues carry the label `dockward` and the marker `<!-- dockward:<CVE> -->`. The OCI branch label is `io.github.nrosier.dockward.branch`.
 - One-time issue re-key: on the first publish to each GitHub repository, the `harborgate` label is renamed to `dockward` and the first line of each open old issue is rewritten to the new marker. Closed issues keep their old marker. Old issues stay adoptable under either the old label or the old marker (1-second pacing between writes).
 - Old HarborGate Code Scanning analyses are retired automatically after a successful upload. Dismissals on clear rule groups are carried over to the new open alerts first, then the old analyses of the exact legacy category are deleted on every branch. Mixed groups are not carried over. Deletion cannot be undone, and alert history for those analyses is lost. A token needs the `repo` scope (classic) or "Code scanning alerts" write (fine-grained) for the delete.
+- The CVE tag count is reworded, and the repository filter is named Namespace (#257, PR #315).
+- db_update jobs show the scanner, jobs record real run timings, and the scan timeout is clamped (#308, PR #317).
+- Failed and admin job times are shown in browser local time (#309).
 
 ### Added
 - The branch label `io.github.nrosier.dockward.branch` is read and wins over the legacy `io.github.nrosier.harborgate.branch`, which is still read with a deprecation warning.
+- Admins can open a job log in a wide dialog from the Jobs and admin Jobs pages, backed by per-step redacted scanner logs (#308, PR #318, PR #319).
 
 ### Upgrade notes
+- A HarborGate database (`harborgate.db` or any database with the HarborGate `repo_mappings` table) is refused, not migrated. Dockward starts with a fresh `dockward.db`, and HarborGate data is not carried over.
 - Stop any old HarborGate instance before you upgrade. If one is still running, it creates new `harborgate` issues after the re-key.
 - Rename the OCI label `io.github.nrosier.harborgate.branch` to `io.github.nrosier.dockward.branch` in your image builds.
 - Old categories of deleted sources are not removed automatically. Remove them by hand on the tool status page (docs/SETUP.md, section 10).
