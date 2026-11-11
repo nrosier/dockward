@@ -309,6 +309,47 @@ CREATE TABLE IF NOT EXISTS picker_hidden_items (
 -- Uniqueness: one partial unique index per source. A plain UNIQUE over the nullable harbor_base_url would not stop duplicate github rows, because SQLite treats NULLs as distinct.
 CREATE UNIQUE INDEX IF NOT EXISTS picker_hidden_items_harbor_key ON picker_hidden_items (user_id, harbor_base_url, full_name) WHERE source = 'harbor';
 CREATE UNIQUE INDEX IF NOT EXISTS picker_hidden_items_github_key ON picker_hidden_items (user_id, full_name) WHERE source = 'github';
+
+-- GitHub re-key bookkeeping (#311, migration 0002_github_rekey.sql). Names and owners are case-insensitive (NOCASE).
+-- One row per repository once its issues have been re-keyed (label renamed, old issues adopted).
+CREATE TABLE IF NOT EXISTS issue_rekeys (
+    github_owner TEXT NOT NULL COLLATE NOCASE,
+    github_repo TEXT NOT NULL COLLATE NOCASE,
+    label_result TEXT NOT NULL CHECK (label_result IN ('renamed', 'absent', 'kept')),
+    issues_rekeyed INTEGER NOT NULL CHECK (issues_rekeyed >= 0),
+    completed_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (github_owner, github_repo)
+);
+-- One row per repository and legacy SARIF category once its old HarborGate analyses have been retired (dismissals carried over, old analyses deleted).
+CREATE TABLE IF NOT EXISTS analysis_retirements (
+    github_owner TEXT NOT NULL COLLATE NOCASE,
+    github_repo TEXT NOT NULL COLLATE NOCASE,
+    legacy_category TEXT NOT NULL,
+    analyses_deleted INTEGER NOT NULL CHECK (analyses_deleted >= 0),
+    dismissals_carried INTEGER NOT NULL CHECK (dismissals_carried >= 0),
+    completed_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (github_owner, github_repo, legacy_category)
+);
+-- The carry-over plan of one repository and legacy category, written before the first delete (#311 slice 6b). One row per rule that is carried; `applied` is set once that dismissal has been written.
+CREATE TABLE IF NOT EXISTS alert_carryovers (
+    github_owner TEXT NOT NULL COLLATE NOCASE,
+    github_repo TEXT NOT NULL COLLATE NOCASE,
+    legacy_category TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    comment TEXT,
+    planned_at INTEGER NOT NULL,
+    applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0, 1)),
+    PRIMARY KEY (github_owner, github_repo, legacy_category, rule_id)
+);
+-- The refs the legacy analyses ran on, recorded with the plan so a retry uses the same set even after the analyses are deleted (#311 slice 6b).
+CREATE TABLE IF NOT EXISTS carryover_refs (
+    github_owner TEXT NOT NULL COLLATE NOCASE,
+    github_repo TEXT NOT NULL COLLATE NOCASE,
+    legacy_category TEXT NOT NULL,
+    git_ref TEXT NOT NULL,
+    PRIMARY KEY (github_owner, github_repo, legacy_category, git_ref)
+);
 ```
 
 ## system_config keys
@@ -356,7 +397,8 @@ Decided (2026-11-03) for `restore.run`: the offline restore command appends one 
 - `restore.run`
 - `key.rotate`
 - `key.migrate_labels` (the one-time startup re-encryption of stored credentials from the `harborgate/*` label to `dockward/*`, decision 56; actor `system`; `details` is `{"rows"}`, the count only; written only when at least one row changed)
-- GitHub re-key (planned, decision 60, issue #311; not built yet): the planned one-time re-key of GitHub issues and Code Scanning analyses writes an audit row when it completes. The action name and `details` shape are not decided here and are added to this list before the re-key is built, with the same rule as the other values. Until then no value is written for it.
+- `github.rekey_issues` (the one-time re-key of a repository's GitHub issues, decision 60, issue #311; actor `system`; target `<owner>/<repo>`; `details` is `{"issues", "label"}`: `issues` is the count of old issues re-keyed and `label` is `renamed`, `absent`, or `kept`, the same text stored in `issue_rekeys.label_result`. It carries a count and a fixed word, never a token or a name; written once when the re-key completes). Source: `backend/src/services/issue_rekey.rs` (`AUDIT_ACTION`, `json!`). Verified (2026-11-11) by grep of `backend/src/services/audit.rs` ACTIONS.
+- `github.retire_analyses` (the one-time retirement of a legacy `harborgate` SARIF category's analyses, decision 60, issue #311; actor `system`; target `<owner>/<repo>`; `details` is `{"analyses", "dismissals"}`: the counts of analyses deleted and dismissals carried to the new alerts. Count only; written once when the retirement completes). Source: `backend/src/services/legacy_analyses.rs` (`AUDIT_ACTION`, `json!`). Verified (2026-11-11) by grep of `backend/src/services/audit.rs` ACTIONS.
 - `retention.run`
 - `sync_job.retry` (manual retry of a failed sync job; `details` is `{"job_id","mapping_id"}`; Decided (2026-11-03, delegated))
 - `sync_job.purge` (purge of failed sync jobs; `target` is the fixed text `sync_jobs`; `details` is `{"scope","deleted"}`, where `scope` is `own` (the actor's mappings) or `all` (every mapping, admin only) and `deleted` is the row count, at least 1; the actor columns name the user; no job ids, payloads, error text, or other values; Decided (2026-11-08, user, #243, decisions 1 to 4))
