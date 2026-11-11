@@ -213,12 +213,12 @@ These steps are for the first run and for each user. The first local account you
    - Harbor repository: `<harbor-repository>`, the image name within the project. Harbor's **Repositories** tab shows the full name `<project>/<harbor-repository>` (for example `library/busybox`, the same form as `repo_full_name` in Harbor's webhook payload). Enter only the part after `<project>/`.
    - GitHub repository: `<repo>` (the GitHub repository)
    - GitHub owner: `<owner>`
-   - Default branch: used only when the image has no `io.github.nrosier.harborgate.branch` label (default `main`)
+   - Default branch: used only when the image has neither the `io.github.nrosier.dockward.branch` label nor the legacy `io.github.nrosier.harborgate.branch` label (default `main`)
    - Auto-create issues: on or off
    - Minimum issue severity: `CRITICAL` (default) or `HIGH`
    - Scheduled scan: off (default), daily, or weekly, at a time in UTC. When on, Dockward asks Harbor to scan the newest tagged image in the repository and the Sync jobs page lists only the vulnerabilities that are new for that image. It needs the robot's Scan Create permission (section 3a).
 5. **Copy the webhook URL and auth secret:** after you save the mapping, copy the webhook URL and the auth secret shown for it. They are shown once. Paste the URL into the Harbor project webhook from section 3c, replacing `<mapping_token>`, and paste the secret into the Auth Header.
-6. **SARIF category:** Dockward sets the SARIF run ID to `harborgate/<project>/<harbor-repository>/` automatically. The category is the part before the last `/`, so each image's results stay separate in the Security tab. You do not configure it.
+6. **SARIF category:** Dockward sets the SARIF category to `dockward/<hub host>/<repository>/<tag>/` automatically (`services/sarif.rs`, `automation_id`), so each tag's results stay separate in the Security tab. The tool and driver name are `Dockward`. You do not configure it. Older uploads used the category `harborgate/...`; see section 10.
 
 Creating a mapping also checks the GitHub repository. If code scanning is not available for it (for example, a private repository on a personal account), Dockward rejects the mapping with `422 code_scanning_unavailable`. This shows the problem at setup, not at the first sync.
 
@@ -259,12 +259,12 @@ Dockward reads the commit and repository from OCI labels on the Harbor artifact.
 ```dockerfile
 LABEL org.opencontainers.image.revision="<commit-sha>"
 LABEL org.opencontainers.image.source="https://github.com/<owner>/<repo>"
-LABEL io.github.nrosier.harborgate.branch="<branch>"
+LABEL io.github.nrosier.dockward.branch="<branch>"
 ```
 
 - `org.opencontainers.image.revision` (required): the full commit SHA. If it is missing, the sync is marked `failed` with a clear error. Dockward does not guess the SHA.
 - `org.opencontainers.image.source` (recommended): the repository URL. When present, it must match the mapping's GitHub target, `https://github.com/<owner>/<repo>` (or `<web URL>/<owner>/<repo>` when a custom web URL is set). The comparison ignores case and a trailing `/` or `.git`. On a mismatch the sync is marked `failed`, and nothing is uploaded. When the label is absent, the sync proceeds.
-- `io.github.nrosier.harborgate.branch` (optional): the branch name. When present, Dockward uses it as the target branch. When absent, Dockward uses the mapping's default branch. Dockward does not read `org.opencontainers.image.ref.name` for the branch, because the OCI image spec defines that key as the name of a reference, typically a tag, not a branch.
+- `io.github.nrosier.dockward.branch` (optional): the branch name. When present, Dockward uses it as the target branch. When absent, Dockward uses the mapping's default branch. The legacy label `io.github.nrosier.harborgate.branch` is still read when the new label is absent, and logs a deprecation warning. If both are set, the new label wins. Rename the label in your Dockerfiles. Dockward does not read `org.opencontainers.image.ref.name` for the branch, because the OCI image spec defines that key as the name of a reference, typically a tag, not a branch.
 
 In a CI pipeline you can pass the values at build time, for example `docker build --label org.opencontainers.image.revision=$GIT_SHA ...`. Use placeholders in examples only, and never hardcode a real SHA in the Dockerfile.
 
@@ -360,3 +360,36 @@ Backups made before the rotation open only with the old key.
 | No webhook triggers | Webhook event is not "Scanning finished" (`SCANNING_COMPLETED`), the webhook token does not match the mapping, or the scanned digest has no tag (the sync job fails with "digest has no tags to sync") | Edit the Harbor webhook so it subscribes only to Scan completed, confirm the URL contains the mapping's token, and push the image with a tag. |
 | Issue not created | Severity is below the threshold, the CVE is accepted on the mapping, auto-issues is off, or the GitHub token lacks the Issues permission | Check the mapping's minimum severity and auto-issues setting. Check the CVE's acceptance status. Check that the token has Issues (read and write). |
 | Webhook returns 401 | Authorization header missing or wrong | Paste the Auth header value from Dockward into Harbor exactly as copied, with no extra `Bearer `. If it was copied wrong or exposed, rotate it and paste the new value. |
+| Log: "GitHub refused the legacy analysis retirement" | GitHub refused the delete of an old `HarborGate` analysis (401 or 403). The token lacks `repo` (classic) or "Code scanning alerts" write (fine-grained), or the repository is not selected for the token | Grant the scope (section 10, step 5), or remove the old configuration by hand (section 10, step 6). Dockward retries the step on the next publish. |
+
+## 10. Upgrading from HarborGate
+
+This section is for an operator who ran HarborGate before the rename to Dockward. A new install can skip it.
+
+1. **Stop the old HarborGate instance first.** If an old instance still runs, it creates new `harborgate` issues after the re-key, and those issues are not re-keyed. Stop it before you start Dockward.
+2. **Start with a fresh database.** The database file is `dockward.db`. Dockward refuses a HarborGate database (a file that holds the `repo_mappings` table) with the message "this database was created by HarborGate and cannot be used by this version". It does not migrate that file, and it does not import anything from `harborgate.db`. Mappings, credentials and history from HarborGate are not carried over; create them again in Dockward (sections 5 and 3c).
+3. **Rename the OCI label in your image builds.** Use `io.github.nrosier.dockward.branch` (section 6). The legacy `io.github.nrosier.harborgate.branch` label is still read when the new label is absent, and Dockward logs a deprecation warning each time it reads the legacy label.
+4. **Issue re-key (automatic, once per GitHub repository).** On the next publish to a repository, Dockward runs a one-time re-key of the old HarborGate issues:
+   - The label `harborgate` is renamed to `dockward` in one GitHub call, so the rename covers open and closed issues.
+   - Only the first line of each OPEN old issue is rewritten, from `<!-- harborgate:<CVE> -->` to `<!-- dockward:<CVE> -->`. Closed issues keep their old marker and are not rewritten.
+   - Old issues stay adoptable under either the old label or the old marker, so an existing CVE issue is found and not duplicated.
+   - Each write waits one second after the write before it, so the re-key stays under GitHub's secondary rate limits.
+   - The re-key runs once per repository. A clean pass is recorded, and later publishes skip it. If it does not finish, the next publish runs it again.
+5. **Code Scanning: the new category and tool.** SARIF uploads now use the tool name `Dockward` and the category `dockward/<hub host>/<repository>/<tag>/`. The first upload under the new name creates a new configuration on GitHub. The old `HarborGate` analyses of each published source are then retired automatically:
+   - Dismissals are carried over first. For each rule where every old alert is dismissed with the same reason, the matching new open alerts are dismissed with that reason and the old comment. A mixed group (dismissed with different reasons, or with some alerts still open) is NOT carried over. Decide those again in the new alerts.
+   - Then the old analyses of exactly the legacy category of that source are deleted, on every branch.
+   - The step runs only after the new upload has succeeded. It never fails the publish job.
+   - **Deletion on GitHub cannot be undone.** The alert history for the deleted analyses is lost. Dismissals are carried over before the delete, but the old alerts themselves are gone.
+   - A delete needs a token scope. A classic personal access token needs the `repo` scope for the delete, or `public_repo` if the repository is public (the SARIF upload still needs `security_events`). A fine-grained token needs the "Code scanning alerts" repository permission with write access. Both are from GitHub's REST docs for "Delete a code scanning analysis from a repository".
+   - If GitHub refuses the delete with 401 or 403, the step stops and writes no record. It logs the fixed message "GitHub refused the legacy analysis retirement; remove the GitHub configuration from the tool status page". The next publish tries again.
+6. **Old categories of deleted sources are not removed automatically.** The step only covers sources that are still published. For a source you have deleted, remove its old `harborgate/<hub host>/<repository>/<tag>` configuration by hand:
+   1. In GitHub, open the repository and click the **Security and quality** tab (or open the dropdown and choose it).
+   2. In the left sidebar, click **Code scanning**.
+   3. Click **Tool status** in the tools banner.
+   4. Under configurations, select the old configuration.
+   5. Click the menu at the top right of the page and select **Delete configuration**.
+   6. Read the warning about alerts, then click **Delete** to confirm.
+
+   GitHub only lets you remove configurations for the default branch from this page. For other branches, see GitHub's "Resolving code scanning alerts" documentation.
+7. **Leftover `harborgate` labels on issues.** A repository that was re-keyed has its `harborgate` label renamed, so none should remain. If the re-key found that a `dockward` label already existed, it kept the old `harborgate` label and labelled the issues instead. In that case you may delete the old `harborgate` label by hand in the repository's labels page.
+8. **Backups.** Backups are still written as `harborgate-<yyyymmddThhmmssZ>.hgbk` (section "Restore from a backup").
