@@ -4,7 +4,7 @@
 export type Method = "GET" | "POST" | "PUT" | "DELETE";
 
 const BASE = "/api/v1";
-const CSRF_COOKIE = "__Host-harborgate_csrf";
+const CSRF_COOKIE = "__Host-dockward_csrf";
 
 export class ApiError extends Error {
   status: number;

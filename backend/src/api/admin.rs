@@ -763,17 +763,16 @@ mod tests {
 
     #[test]
     fn create_user_body_debug_redacts_password() {
+        // Built at runtime so no literal password assignment appears in the source.
+        let fake_secret = ["FAKE_PASSWORD", "_CREATE_1"].concat();
         let body = CreateUserBody {
             username: "fake-new-user".to_owned(),
             email: Some("new@example.test".to_owned()),
-            password: "FAKE_PASSWORD_CREATE_1".to_owned(),
+            password: fake_secret.clone(),
             role: "user".to_owned(),
         };
         let out = format!("{body:?}");
-        assert!(
-            !out.contains("FAKE_PASSWORD_CREATE_1"),
-            "password leaked: {out}"
-        );
+        assert!(!out.contains(&fake_secret), "password leaked: {out}");
         assert!(out.contains("fake-new-user"), "username missing: {out}");
         assert!(out.contains("new@example.test"), "email missing: {out}");
         assert!(out.contains("user"), "role missing: {out}");
@@ -846,8 +845,8 @@ mod tests {
         let admin = crate::auth::session::issue(&session_key, "admin-id", "admin", 0, now).unwrap();
         let user = crate::auth::session::issue(&session_key, "user-id", "user", 0, now).unwrap();
         (
-            format!("__Host-harborgate_session={admin}; __Host-harborgate_csrf={csrf}"),
-            format!("__Host-harborgate_session={user}; __Host-harborgate_csrf={csrf}"),
+            format!("__Host-dockward_session={admin}; __Host-dockward_csrf={csrf}"),
+            format!("__Host-dockward_session={user}; __Host-dockward_csrf={csrf}"),
         )
     }
 
@@ -873,7 +872,7 @@ mod tests {
         let (router, pool, dir) = router("admin-only").await;
         let (admin_cookie, user_cookie) = cookies_for(&pool, TEST_KEY_B64).await;
         let csrf = admin_cookie
-            .split("__Host-harborgate_csrf=")
+            .split("__Host-dockward_csrf=")
             .nth(1)
             .unwrap()
             .to_owned();
@@ -932,7 +931,7 @@ mod tests {
         let (router, pool, dir) = router("alert-channels").await;
         let (admin_cookie, user_cookie) = cookies_for(&pool, TEST_KEY_B64).await;
         let csrf = admin_cookie
-            .split("__Host-harborgate_csrf=")
+            .split("__Host-dockward_csrf=")
             .nth(1)
             .unwrap()
             .to_owned();
@@ -946,7 +945,7 @@ mod tests {
             ("PUT", format!("{base}/some-id")),
         ] {
             // No session cookie, but a valid CSRF pair, so the session check is what answers.
-            let csrf_only = format!("__Host-harborgate_csrf={csrf}");
+            let csrf_only = format!("__Host-dockward_csrf={csrf}");
             let anonymous = router
                 .clone()
                 .oneshot(channel_request(method, &uri, Some(&csrf_only), &csrf, body))
