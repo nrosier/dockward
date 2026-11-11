@@ -5,7 +5,7 @@
 //! `publish` job per source reads the OCI labels from the first scanned platform's stored config
 //! ([`labels`]), builds one merged SARIF from the merged findings (one result per (CVE id,
 //! package), with the scanner count and names and the platforms as properties), uploads it to
-//! Code Scanning under the category `harborgate/<hub host>/<repository>/<tag value>`, waits for
+//! Code Scanning under the category `dockward/<hub host>/<repository>/<tag value>`, waits for
 //! GitHub to process it, and then runs the issue rules ([`issue_lifecycle::reconcile`]).
 //!
 //! Older images upload nothing (step 7): the job re-checks that its image is still the source's

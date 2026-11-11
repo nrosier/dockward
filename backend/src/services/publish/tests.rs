@@ -561,8 +561,8 @@ async fn the_sarif_is_merged_valid_and_uploaded_under_the_hub_category() {
     );
     let sarif = &upload["sarif"];
     assert_schema_valid(sarif);
-    assert_eq!(category(upload), "harborgate/ghcr.io/o/app/v1");
-    assert_eq!(sarif["runs"][0]["tool"]["driver"]["name"], "HarborGate");
+    assert_eq!(category(upload), "dockward/ghcr.io/o/app/v1");
+    assert_eq!(sarif["runs"][0]["tool"]["driver"]["name"], "Dockward");
 
     let results = sarif["runs"][0]["results"]
         .as_array()
@@ -644,10 +644,7 @@ async fn two_tags_get_two_categories_and_two_sources_share_one_issue() {
     categories.sort();
     assert_eq!(
         categories,
-        [
-            "harborgate/ghcr.io/o/app/latest",
-            "harborgate/ghcr.io/o/app/v1"
-        ],
+        ["dockward/ghcr.io/o/app/latest", "dockward/ghcr.io/o/app/v1"],
         "two tags of one repository never share a category"
     );
     assert_eq!(

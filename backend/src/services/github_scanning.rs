@@ -36,7 +36,7 @@ pub const DEFAULT_WAIT_SECS: i64 = 60;
 const MAX_BODY: usize = 8 * 1024 * 1024;
 
 /// The `tool_name` sent with each upload.
-const TOOL_NAME: &str = "HarborGate";
+const TOOL_NAME: &str = "Dockward";
 
 /// Why a GitHub code scanning call failed. The `Display` text never includes the token.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -601,7 +601,7 @@ mod tests {
     fn encode_gzips_then_base64s() {
         let doc = json!({
             "version": "2.1.0",
-            "runs": [{"tool": {"driver": {"name": "HarborGate"}}}]
+            "runs": [{"tool": {"driver": {"name": "Dockward"}}}]
         });
         let encoded = encode_sarif(&doc).unwrap();
         let gzipped = STANDARD.decode(&encoded).unwrap();
@@ -641,7 +641,7 @@ mod tests {
         assert_eq!(sent[0].1["commit_sha"], "0123abc");
         assert_eq!(sent[0].1["ref"], "refs/heads/main");
         assert_eq!(sent[0].1["sarif"], "payload");
-        assert_eq!(sent[0].1["tool_name"], "HarborGate");
+        assert_eq!(sent[0].1["tool_name"], "Dockward");
     }
 
     #[tokio::test]
