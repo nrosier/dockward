@@ -171,7 +171,7 @@ export interface TestResult {
 
 export interface HousekeepingRun {
   id: string;
-  job_kind: "poll" | "cleanup" | "retention";
+  job_kind: "cleanup" | "retention" | "discover" | "db_update";
   started_at: string;
   finished_at: string | null;
   status: "done" | "failed";
@@ -179,6 +179,39 @@ export interface HousekeepingRun {
   error_summary: string | null;
   // The scanner a db_update run refreshed ("trivy" or "grype"). Absent on other runs.
   scanner?: string | null;
+  // The job the run was recorded for, so the UI can open its log. Null when none.
+  job_id?: string | null;
+}
+
+export interface JobLogStep {
+  seq: number;
+  command: string;
+  started_at: string;
+  finished_at: string | null;
+  timeout_secs: number;
+  outcome: "running" | "ok" | "failed" | "timed_out" | "output_too_large" | "spawn_failed";
+  exit_code: number | null;
+  truncated: boolean;
+}
+
+export interface JobLogLine {
+  id: number;
+  seq: number;
+  at: string;
+  stream: "stderr" | "stdout";
+  text: string;
+}
+
+// GET /jobs/:id/log, the latest attempt of one job.
+export interface JobLog {
+  job_id: string;
+  kind: string | null;
+  scanner: string | null;
+  status: JobStatus;
+  attempt: number;
+  steps: JobLogStep[];
+  lines: JobLogLine[];
+  next_after: number | null;
 }
 
 export interface AuditEntry {

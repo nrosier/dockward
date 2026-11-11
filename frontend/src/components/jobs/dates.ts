@@ -56,3 +56,12 @@ export function formatDate(iso: string | null): string {
   }
   return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
 }
+
+// `HH:mm:ss` in local time, for a log line.
+export function formatClock(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) {
+    return "";
+  }
+  return `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`;
+}
