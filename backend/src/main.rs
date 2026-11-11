@@ -409,7 +409,7 @@ fn remove_temp_files(temp_path: &Path) {
     }
 }
 
-/// Replaces `<data_dir>/harborgate.db` with the database in the backup `file`.
+/// Replaces `<data_dir>/dockward.db` with the database in the backup `file`.
 ///
 /// The live database is untouched unless the backup passes every check: the GCM tag
 /// (`backup::open`), then `PRAGMA integrity_check` and the migrations on a temporary
@@ -551,35 +551,6 @@ async fn record_restore(
         .map_err(|_| error::AppError::InternalError)
 }
 
-/// Runs the one-time re-encryption of stored credentials to the `dockward/*` label
-/// (decision 56). A row that opens with neither key is logged by table, column and id,
-/// the migration writes nothing, and the app starts on the dual-read fallback; the next
-/// start tries again. A database failure stops the start.
-async fn migrate_credential_labels(
-    pool: &sqlx::SqlitePool,
-    root: &config::EncryptionKey,
-    current: &auth::crypto::DerivedKey,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use services::key_rotation::{MigrateError, migrate_labels};
-    let legacy = auth::crypto::legacy_credentials_key(root)
-        .map_err(|_| "could not derive the previous credentials key")?;
-    match migrate_labels(pool, &legacy, current).await {
-        Ok(Some(rows)) => tracing::info!(
-            rows,
-            "re-encrypted stored credentials to the dockward label"
-        ),
-        Ok(None) => {}
-        Err(MigrateError::Row(failure)) => tracing::error!(
-            table = failure.table,
-            column = failure.column,
-            row_id = %failure.row_id,
-            "a stored value opens with neither credentials key; the label migration wrote nothing"
-        ),
-        Err(MigrateError::Other) => return Err("the credential label migration failed".into()),
-    }
-    Ok(())
-}
-
 async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn std::error::Error>> {
     // Refuse to start without a valid key or settings. This runs before the port is bound.
     let encryption_key = config::load_encryption_key()?;
@@ -603,7 +574,6 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
     let backup_key = Arc::new(
         auth::crypto::backup_key(&encryption_key).map_err(|_| "could not derive the backup key")?,
     );
-    migrate_credential_labels(&pool, &encryption_key, &credentials_key).await?;
     let github = services::github_url::load_target(&pool)
         .await
         .map_err(|_| "could not read the GitHub base URL settings")?;

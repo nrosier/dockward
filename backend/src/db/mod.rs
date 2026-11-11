@@ -38,7 +38,7 @@ pub mod users;
 use crate::error::AppError;
 
 /// File name of the SQLite database inside `DOCKWARD_DATA_DIR`.
-pub const DB_FILE_NAME: &str = "harborgate.db";
+pub const DB_FILE_NAME: &str = "dockward.db";
 
 /// Table that marks a Dockward `main` database. Its presence refuses the file (decision 21).
 pub const LEGACY_TABLE: &str = "repo_mappings";
