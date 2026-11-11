@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useSearchParams } from "react-router";
-import { Badge, formatDateTime, ROW, Segmented, Tag, TD, TH } from "../components/admin/parts";
+import { Badge, ROW, Segmented, Tag, TD, TH } from "../components/admin/parts";
+import { formatDateTime } from "../components/jobs/dates";
 import { JobLogDialog } from "../components/jobs/JobLogDialog";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
