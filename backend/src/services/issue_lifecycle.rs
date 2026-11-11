@@ -903,8 +903,11 @@ impl<G: IssueApi> Ctx<'_, G> {
             (None, None) => {}
             // (b) A row Dockward closed, and the newest digest reports the CVE again: reopen
             // the same issue. A row closed by hand is only reopened if someone reopened the
-            // issue on GitHub (then only the row is updated).
-            (Some(row), Some(_)) if row.status == "closed" => {
+            // issue on GitHub (then only the row is updated). An accepted CVE never reopens
+            // (#196): its closed issue stays closed, with no reopen and no comment.
+            (Some(row), Some(_))
+                if row.status == "closed" && !rules.accepted.iter().any(|id| id == cve_id) =>
+            {
                 if row.closed_manually {
                     if self.github_is_open(&row).await? {
                         self.store_status(&row, "open").await?;
@@ -2408,10 +2411,10 @@ mod tests {
         assert_eq!(fx.github.writes().len(), 1);
     }
 
-    /// The spec has no acceptance exception for reopening: accepting stops new issues and
-    /// does not close one, but a closed issue whose CVE returns is reopened.
+    /// An accepted CVE never reopens its existing issue: accepting stops new issues and a
+    /// closed issue stays closed when the CVE returns. No reopen call and no comment.
     #[tokio::test]
-    async fn accepted_cve_with_a_closed_issue_follows_the_reopen_rule() {
+    async fn accepted_cve_with_a_closed_issue_stays_closed() {
         let fx = Fixture::new("accepted-closed", "CRITICAL", true).await;
         fx.report("v1", "sha256:old", 100).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
@@ -2427,13 +2430,19 @@ mod tests {
         .execute(&fx.pool)
         .await
         .unwrap();
+        let writes_before = fx.github.writes().len();
 
         fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 40)
             .await;
         fx.reconcile("ghcr.io/o/app:v2").await;
 
         assert_eq!(fx.github.creates().len(), 1, "accepting never creates one");
-        assert_eq!(fx.issues().await[0].2, "open");
+        assert_eq!(
+            fx.github.writes().len(),
+            writes_before,
+            "no reopen call and no comment"
+        );
+        assert_eq!(fx.issues().await[0].2, "closed");
     }
 
     /// The merged CVE found by two scanners gets one issue whose body says so, and the line is
