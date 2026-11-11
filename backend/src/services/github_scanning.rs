@@ -566,7 +566,12 @@ fn confirm_route_checked(urls: &GithubUrls, owner: &str, repo: &str, path: &str)
         return false;
     };
     let same_name = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
-    same_name(link_owner, owner) && same_name(link_repo, repo) && id.parse::<u64>().is_ok()
+    // `u64::from_str` accepts a leading `+`, so the id must be ASCII digits before it is parsed.
+    let digits_only = !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit());
+    same_name(link_owner, owner)
+        && same_name(link_repo, repo)
+        && digits_only
+        && id.parse::<u64>().is_ok()
 }
 
 /// Reads the `confirm_delete_url` of a delete answer for `owner`/`repo`: none when it is absent
@@ -1294,5 +1299,22 @@ mod tests {
             .collect();
         assert_eq!(ids, vec![1, 2]);
         assert_eq!(http.requested().len(), 2, "both pages are requested");
+    }
+
+    #[tokio::test]
+    async fn a_follow_up_with_a_signed_analysis_id_is_refused_before_any_request() {
+        // `u64::from_str` accepts a leading `+`, so the id must be checked as ASCII digits first.
+        let fake = Recorded::new(reply(200, json!({ "confirm_delete_url": null })));
+        let outcome = follow_confirm_with(
+            &fake,
+            b"token",
+            "octo",
+            "app",
+            "repos/octo/app/code-scanning/analyses/+42?confirm_delete",
+            0,
+        )
+        .await;
+        assert!(outcome.is_err(), "a signed id is refused");
+        assert!(fake.sent().is_empty(), "no request is sent for a signed id");
     }
 }

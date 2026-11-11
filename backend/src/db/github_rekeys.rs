@@ -231,7 +231,7 @@ pub async fn mark_carry_applied(
     legacy_category: &str,
     rule_id: &str,
 ) -> Result<(), AppError> {
-    sqlx::query!(
+    let result = sqlx::query!(
         "UPDATE alert_carryovers SET applied = 1
          WHERE github_owner = ? AND github_repo = ? AND legacy_category = ? AND rule_id = ?",
         owner,
@@ -241,8 +241,12 @@ pub async fn mark_carry_applied(
     )
     .execute(pool)
     .await
-    .map(|_| ())
-    .map_err(|_| AppError::InternalError)
+    .map_err(|_| AppError::InternalError)?;
+    // A carry-over with no stored plan row must not count as applied.
+    if result.rows_affected() != 1 {
+        return Err(AppError::InternalError);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -316,6 +320,42 @@ mod tests {
         .map_err(|_| AppError::InternalError)?;
         assert_eq!(row.analyses_deleted, 4);
         assert_eq!(row.dismissals_carried, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mark_carry_applied_fails_when_no_plan_row_matches() -> Result<(), AppError> {
+        let pool = test_pool().await?;
+        let result =
+            mark_carry_applied(&pool, "octo", "repo", "harborgate/hub/repo/tag", "rule-x").await;
+        assert_eq!(result, Err(AppError::InternalError));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mark_carry_applied_succeeds_for_a_stored_plan_row() -> Result<(), AppError> {
+        let pool = test_pool().await?;
+        let carries = vec![PlannedCarry {
+            rule_id: "rule-x".to_owned(),
+            reason: "wont_fix".to_owned(),
+            comment: None,
+            applied: false,
+        }];
+        insert_carryover_plan(
+            &pool,
+            "octo",
+            "repo",
+            "harborgate/hub/repo/tag",
+            &["refs/heads/main".to_owned()],
+            &carries,
+            1,
+        )
+        .await?;
+        mark_carry_applied(&pool, "octo", "repo", "harborgate/hub/repo/tag", "rule-x").await?;
+        let plan = carryover_plan(&pool, "octo", "repo", "harborgate/hub/repo/tag")
+            .await?
+            .ok_or(AppError::InternalError)?;
+        assert!(plan.carries[0].applied);
         Ok(())
     }
 
