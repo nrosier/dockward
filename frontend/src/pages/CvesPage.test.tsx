@@ -8,6 +8,7 @@ import CvesPage from "./CvesPage";
 
 const medium: CveSummary = {
   id: "m1:CVE-2026-0002",
+  source_id: "m1",
   mapping_id: "m1",
   cve_id: "CVE-2026-0002",
   severity: "MEDIUM",
