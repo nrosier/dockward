@@ -356,6 +356,7 @@ Decided (2026-11-03) for `restore.run`: the offline restore command appends one 
 - `restore.run`
 - `key.rotate`
 - `key.migrate_labels` (the one-time startup re-encryption of stored credentials from the `harborgate/*` label to `dockward/*`, decision 56; actor `system`; `details` is `{"rows"}`, the count only; written only when at least one row changed)
+- GitHub re-key (planned, decision 60, issue #311; not built yet): the planned one-time re-key of GitHub issues and Code Scanning analyses writes an audit row when it completes. The action name and `details` shape are not decided here and are added to this list before the re-key is built, with the same rule as the other values. Until then no value is written for it.
 - `retention.run`
 - `sync_job.retry` (manual retry of a failed sync job; `details` is `{"job_id","mapping_id"}`; Decided (2026-11-03, delegated))
 - `sync_job.purge` (purge of failed sync jobs; `target` is the fixed text `sync_jobs`; `details` is `{"scope","deleted"}`, where `scope` is `own` (the actor's mappings) or `all` (every mapping, admin only) and `deleted` is the row count, at least 1; the actor columns name the user; no job ids, payloads, error text, or other values; Decided (2026-11-08, user, #243, decisions 1 to 4))

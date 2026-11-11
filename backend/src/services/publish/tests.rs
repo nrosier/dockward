@@ -59,6 +59,8 @@ struct FakeScanning {
     uploads: Mutex<Vec<Value>>,
     upload_error: Mutex<Option<ScanError>>,
     statuses: Mutex<VecDeque<Result<Processing, ScanError>>>,
+    /// How many times the legacy analysis list was read: the retirement step's first call.
+    legacy_lists: Mutex<u32>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -113,6 +115,67 @@ impl CodeScanning for Arc<FakeScanning> {
         lock(&self.statuses)
             .pop_front()
             .unwrap_or(Ok(Processing::Complete))
+    }
+
+    /// The publish tests answer as an empty repository. The retirement has its own fake in
+    /// `legacy_analyses`. The count shows whether the retirement step ran.
+    async fn list_analyses<C: Clock>(
+        &self,
+        _token: &[u8],
+        _owner: &str,
+        _repo: &str,
+        _tool_name: &str,
+        _clock: &C,
+        _deadline: i64,
+    ) -> Result<Vec<Analysis>, ScanError> {
+        *lock(&self.legacy_lists) += 1;
+        Ok(Vec::new())
+    }
+
+    async fn delete_analysis(
+        &self,
+        _token: &[u8],
+        _owner: &str,
+        _repo: &str,
+        _id: u64,
+        _now: i64,
+    ) -> Result<Option<String>, ScanError> {
+        Ok(None)
+    }
+
+    async fn follow_confirm(
+        &self,
+        _token: &[u8],
+        _owner: &str,
+        _repo: &str,
+        _link: &str,
+        _now: i64,
+    ) -> Result<Option<String>, ScanError> {
+        Ok(None)
+    }
+
+    async fn list_alerts<C: Clock>(
+        &self,
+        _token: &[u8],
+        _owner: &str,
+        _repo: &str,
+        _query: AlertQuery<'_>,
+        _clock: &C,
+        _deadline: i64,
+    ) -> Result<Vec<Alert>, ScanError> {
+        Ok(Vec::new())
+    }
+
+    async fn dismiss_alert(
+        &self,
+        _token: &[u8],
+        _owner: &str,
+        _repo: &str,
+        _number: u64,
+        _dismissal: Dismissal<'_>,
+        _now: i64,
+    ) -> Result<(), ScanError> {
+        Ok(())
     }
 }
 
@@ -484,6 +547,35 @@ async fn the_hook_queues_one_publish_job_for_the_newest_image_when_all_has_ended
     );
 }
 
+/// Only the legacy HarborGate branch label is set: the upload goes to that branch, not to the
+/// source's default branch.
+#[tokio::test]
+async fn the_legacy_branch_label_alone_sets_the_upload_ref() {
+    let fx = Fx::new("legacy-branch").await;
+    fx.image(IMG_1).await;
+    fx.platform(
+        P_1,
+        IMG_1,
+        "linux/amd64",
+        &[
+            (labels::LABEL_REVISION, REV_1),
+            (labels::LABEL_SOURCE, "https://github.com/octo/app"),
+            (labels::LEGACY_LABEL_BRANCH, "legacy-release"),
+        ],
+    )
+    .await;
+    fx.observe("s1", "v1", IMG_1, 100).await;
+    fx.run(P_1, "trivy", "done", 10, &[]).await;
+    fx.run(P_1, "grype", "done", 11, &[]).await;
+    fx.recompute(IMG_1).await;
+    assert_eq!(fx.queue(IMG_1).await, 1);
+    assert_eq!(fx.drain().await, vec![("s1".to_owned(), JobOutcome::Done)]);
+
+    let uploads = fx.scanning.uploads();
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(uploads[0]["ref"], "refs/heads/legacy-release");
+}
+
 /// One merged SARIF per source: one result per (CVE id, package) with the scanner and platform
 /// properties, the category and location on the hub host and the repository, valid SARIF 2.1.0,
 /// and the labels read from the first scanned platform.
@@ -532,8 +624,8 @@ async fn the_sarif_is_merged_valid_and_uploaded_under_the_hub_category() {
     );
     let sarif = &upload["sarif"];
     assert_schema_valid(sarif);
-    assert_eq!(category(upload), "harborgate/ghcr.io/o/app/v1");
-    assert_eq!(sarif["runs"][0]["tool"]["driver"]["name"], "HarborGate");
+    assert_eq!(category(upload), "dockward/ghcr.io/o/app/v1");
+    assert_eq!(sarif["runs"][0]["tool"]["driver"]["name"], "Dockward");
 
     let results = sarif["runs"][0]["results"]
         .as_array()
@@ -584,7 +676,7 @@ async fn the_sarif_is_merged_valid_and_uploaded_under_the_hub_category() {
     // The CRITICAL CVE got its issue with the marker.
     assert_eq!(fx.open_issues(), 1);
     let body = fx.github.with(|state| state.issues[0].body.clone());
-    assert!(body.starts_with("<!-- harborgate:CVE-2026-0001 -->"));
+    assert!(body.starts_with("<!-- dockward:CVE-2026-0001 -->"));
 }
 
 /// Two tags of one repository get two categories, and sources that target one GitHub repository
@@ -615,10 +707,7 @@ async fn two_tags_get_two_categories_and_two_sources_share_one_issue() {
     categories.sort();
     assert_eq!(
         categories,
-        [
-            "harborgate/ghcr.io/o/app/latest",
-            "harborgate/ghcr.io/o/app/v1"
-        ],
+        ["dockward/ghcr.io/o/app/latest", "dockward/ghcr.io/o/app/v1"],
         "two tags of one repository never share a category"
     );
     assert_eq!(
@@ -779,6 +868,87 @@ async fn a_missing_revision_or_a_wrong_source_label_fails_the_publish() {
     );
     assert!(fx.scanning.uploads().is_empty());
     assert_eq!(fx.all_issues(), 0);
+}
+
+/// The legacy retirement runs only when this run's own upload reached `complete`. A pending upload
+/// makes no legacy call. A retry that polls an earlier attempt's upload makes none either, because
+/// that upload is not this run's own.
+#[tokio::test]
+async fn the_legacy_retirement_runs_only_after_this_runs_upload_completes() {
+    let fx = Fx::new("gate-retire").await;
+    fx.finished_image(
+        IMG_1,
+        P_1,
+        &labels_ok(),
+        &[("CVE-2026-0001", "zlib", "HIGH")],
+    )
+    .await;
+    fx.observe("s1", "v1", IMG_1, 100).await;
+    fx.recompute(IMG_1).await;
+    fx.queue(IMG_1).await;
+
+    // The first attempt uploads, and every poll answers pending, so the upload never completes.
+    lock(&fx.scanning.statuses).extend(std::iter::repeat_with(|| Ok(Processing::Pending)).take(64));
+    let outcome = fx.drain().await;
+    assert!(
+        matches!(outcome.as_slice(), [(_, JobOutcome::Failed(_))]),
+        "a pending upload fails the attempt: {outcome:?}"
+    );
+    assert_eq!(
+        *lock(&fx.scanning.legacy_lists),
+        0,
+        "no retirement while pending"
+    );
+
+    // The retry polls the same upload and finds it complete. It is not this run's own upload,
+    // so the retirement still does not run.
+    lock(&fx.scanning.statuses).clear();
+    exec(
+        &fx.pool,
+        "UPDATE jobs SET status = 'queued', next_attempt_at = 0",
+        &[],
+    )
+    .await;
+    let outcome = fx.drain().await;
+    assert_eq!(outcome, vec![("s1".to_owned(), JobOutcome::Done)]);
+    assert_eq!(
+        *lock(&fx.scanning.legacy_lists),
+        0,
+        "a retry that polls an earlier upload does not retire"
+    );
+}
+
+/// A fresh upload that reaches `complete` on its first attempt runs the retirement once.
+#[tokio::test]
+async fn a_fresh_upload_that_completes_runs_the_retirement_once() {
+    let fx = Fx::new("fresh-retire").await;
+    fx.finished_image(
+        IMG_1,
+        P_1,
+        &labels_ok(),
+        &[("CVE-2026-0001", "zlib", "HIGH")],
+    )
+    .await;
+    fx.observe("s1", "v1", IMG_1, 100).await;
+    fx.recompute(IMG_1).await;
+    fx.queue(IMG_1).await;
+
+    let outcome = fx.drain().await;
+    assert_eq!(outcome, vec![("s1".to_owned(), JobOutcome::Done)]);
+    // The step lists the legacy analyses, so the count is above zero, and it leaves one row
+    // for the legacy category (the retirement ran and finished).
+    assert!(
+        *lock(&fx.scanning.legacy_lists) > 0,
+        "the retirement lists after complete"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM analysis_retirements")
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap_or_else(|err| panic!("rows: {err}"));
+    assert_eq!(
+        rows, 1,
+        "one retirement row for the source's legacy category"
+    );
 }
 
 /// A job whose image stopped being the newest while it waited uploads nothing.

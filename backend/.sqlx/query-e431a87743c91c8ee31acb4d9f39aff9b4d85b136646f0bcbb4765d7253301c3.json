@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT rule_id, reason, comment, applied AS \"applied!: i64\"\n         FROM alert_carryovers\n         WHERE github_owner = ? AND github_repo = ? AND legacy_category = ?\n         ORDER BY rule_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "rule_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "alert_carryovers",
+            "name": "rule_id"
+          }
+        }
+      },
+      {
+        "name": "reason",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "alert_carryovers",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "comment",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "alert_carryovers",
+            "name": "comment"
+          }
+        }
+      },
+      {
+        "name": "applied!: i64",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "alert_carryovers",
+            "name": "applied"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "e431a87743c91c8ee31acb4d9f39aff9b4d85b136646f0bcbb4765d7253301c3"
+}

@@ -18,11 +18,14 @@ use sqlx::SqlitePool;
 use crate::auth::crypto::DerivedKey;
 use crate::db::credentials as credential_db;
 use crate::db::github_issues::{self as issue_db, FindingRow, IssueRow, NewIssue};
+use crate::db::github_rekeys;
 use crate::db::scan_runs as runs_db;
 use crate::db::sources::{self as source_db, SourceRow};
 use crate::error::AppError;
 use crate::services::credentials::decrypt_token;
-use crate::services::github_issues::{self, GithubIssues, IssueRef};
+use crate::services::github_issues::{
+    self, GithubIssues, IssueRef, LABEL, LEGACY_LABEL, LabelRename, MAX_ID_BYTES, valid_cve_id,
+};
 use crate::services::github_scanning::ScanError;
 use crate::services::ids;
 use crate::services::merged_view::{self, ScannerRef};
@@ -41,9 +44,6 @@ const UNKNOWN_PACKAGE: &str = "unknown package";
 /// The comment when the manual route reopens a closed issue.
 const MANUAL_REOPEN_COMMENT: &str = "CVE reopened manually from Dockward.";
 
-/// The longest CVE id or source id the manual route and the lifecycle accept, in bytes.
-const MAX_ID_BYTES: usize = 128;
-
 /// Serialises "look for a row, look for a marked issue, create an issue, store the row".
 /// Dockward runs as one instance (`specs/architecture.md`), so one process-wide lock is
 /// enough to stop a sync and a manual click from both creating the issue for one CVE.
@@ -52,13 +52,37 @@ static CREATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// The GitHub Issues calls the lifecycle needs. The production impl is [`GithubIssues`];
 /// tests answer from a model of GitHub.
 pub trait IssueApi: Send + Sync + 'static {
+    /// Lists the open issues that carry `label` (`LABEL` or `LEGACY_LABEL`).
+    fn list_open_with_label(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        label: &str,
+        now: i64,
+    ) -> impl Future<Output = Result<Vec<IssueRef>, ScanError>> + Send;
+
+    /// Lists the open issues that carry the current label (`LABEL`).
     fn list_open_labelled(
         &self,
         token: &[u8],
         owner: &str,
         repo: &str,
         now: i64,
-    ) -> impl Future<Output = Result<Vec<IssueRef>, ScanError>> + Send;
+    ) -> impl Future<Output = Result<Vec<IssueRef>, ScanError>> + Send {
+        self.list_open_with_label(token, owner, repo, LABEL, now)
+    }
+
+    /// Renames a label in the repository.
+    fn rename_label(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        from: &str,
+        to: &str,
+        now: i64,
+    ) -> impl Future<Output = Result<LabelRename, ScanError>> + Send;
 
     #[allow(clippy::too_many_arguments)]
     fn create(
@@ -157,14 +181,27 @@ pub trait IssueApi: Send + Sync + 'static {
 }
 
 impl IssueApi for GithubIssues {
-    async fn list_open_labelled(
+    async fn list_open_with_label(
         &self,
         token: &[u8],
         owner: &str,
         repo: &str,
+        label: &str,
         now: i64,
     ) -> Result<Vec<IssueRef>, ScanError> {
-        GithubIssues::list_open_labelled(self, token, owner, repo, now).await
+        GithubIssues::list_open_labelled(self, token, owner, repo, label, now).await
+    }
+
+    async fn rename_label(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        from: &str,
+        to: &str,
+        now: i64,
+    ) -> Result<LabelRename, ScanError> {
+        GithubIssues::rename_label(self, token, owner, repo, from, to, now).await
     }
 
     async fn create(
@@ -458,18 +495,6 @@ fn issue_text(view: &CveView, source: &SourceRow) -> String {
     }
 }
 
-/// True for an id that is safe in the marker line and the route: 1 to 128 bytes of ASCII
-/// letters, digits, `.`, `_`, `-` and `:` (a CVE id may be `RHSA-2023:1234`). A Harbor-supplied
-/// id with a line break or `-->` fails, so it cannot break the first-line marker. Findings
-/// with such an id never get an issue.
-fn valid_cve_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= MAX_ID_BYTES
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':'))
-}
-
 fn valid_source_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_ID_BYTES
@@ -530,11 +555,7 @@ impl<G: IssueApi> Ctx<'_, G> {
             return Ok(Made::Existing(row));
         }
         if listed.is_none() {
-            *listed = Some(
-                self.gh
-                    .list_open_labelled(self.token, self.owner(), self.repo(), self.now)
-                    .await?,
-            );
+            *listed = Some(self.list_open().await?);
         }
         let adopted = listed
             .as_deref()
@@ -601,6 +622,36 @@ impl<G: IssueApi> Ctx<'_, G> {
             status: "open".to_owned(),
             closed_manually: false,
         }))
+    }
+
+    /// The open issues an adoption lookup covers. The current label is always read. Until the
+    /// re-key has completed, or when it kept the old label, the legacy label is read too and the
+    /// two lists are merged by issue number, so an old issue is adopted and no duplicate is made
+    /// (#311).
+    async fn list_open(&self) -> Result<Vec<IssueRef>, Failure> {
+        let current = self
+            .gh
+            .list_open_labelled(self.token, self.owner(), self.repo(), self.now)
+            .await?;
+        let read_legacy =
+            match github_rekeys::issues_done(self.pool, self.owner(), self.repo()).await? {
+                Some(done) => done.label_result == "kept",
+                None => true,
+            };
+        if !read_legacy {
+            return Ok(current);
+        }
+        let legacy = self
+            .gh
+            .list_open_with_label(
+                self.token,
+                self.owner(),
+                self.repo(),
+                LEGACY_LABEL,
+                self.now,
+            )
+            .await?;
+        Ok(github_issues::merge_by_number(current, legacy))
     }
 
     /// An adopted issue gets the new title when its own differs, and the labels it lacks.
@@ -1251,6 +1302,10 @@ pub(crate) mod test_support {
         /// caller time out and go on alone.
         pub rendezvous: bool,
         pub listing: usize,
+        /// Answer `(method, path-prefix)` with the given status and no change, once per entry.
+        pub fail_once: Vec<(&'static str, String, u16)>,
+        /// Replace the body of this issue number before the next body read.
+        pub edit_before_read: Option<(u64, String)>,
     }
 
     /// The fake GitHub for `octo/app`.
@@ -1312,6 +1367,30 @@ pub(crate) mod test_support {
                 if state.unauthorized {
                     return Err(ScanError::Unauthorized);
                 }
+                if let Some(index) = state
+                    .fail_once
+                    .iter()
+                    .position(|(m, p, _)| *m == method && path == p)
+                {
+                    let (_, _, status) = state.fail_once.remove(index);
+                    return Ok(ScanResponse {
+                        status,
+                        retry_after: None,
+                        ratelimit_remaining: None,
+                        ratelimit_reset: None,
+                        link_next: None,
+                        body: json!({"message": "refused"}),
+                    });
+                }
+                if let Some((number, text)) = state.edit_before_read.clone()
+                    && method == "GET"
+                    && path == format!("repos/octo/app/issues/{number}")
+                {
+                    state.edit_before_read = None;
+                    if let Some(issue) = state.issues.iter_mut().find(|i| i.number == number) {
+                        issue.body = text;
+                    }
+                }
                 let reply = |status: u16, body: Value| ScanResponse {
                     status,
                     retry_after: None,
@@ -1339,14 +1418,47 @@ pub(crate) mod test_support {
                             None => Ok(reply(404, json!({}))),
                         }
                     }
-                    ("GET", _) => {
+                    ("GET", list) => {
+                        // The label filter is the `labels=` query of the list path.
+                        let wanted = list
+                            .split_once("labels=")
+                            .map(|(_, rest)| rest.split('&').next().unwrap_or_default());
                         let items: Vec<Value> = state
                             .issues
                             .iter()
                             .filter(|issue| issue.open)
+                            .filter(|issue| {
+                                wanted.is_none_or(|label| issue.labels.iter().any(|l| l == label))
+                            })
                             .map(issue_json)
                             .collect();
                         Ok(reply(200, Value::Array(items)))
+                    }
+                    ("PATCH", label_path) if label_path.starts_with("repos/octo/app/labels/") => {
+                        let from = label_path.trim_start_matches("repos/octo/app/labels/");
+                        let to = body
+                            .get("new_name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        if !state.repo_labels.iter().any(|l| l == from) {
+                            return Ok(reply(404, json!({"message": "Not Found"})));
+                        }
+                        if state.repo_labels.contains(&to) {
+                            return Ok(reply(
+                                422,
+                                json!({"errors": [{"resource": "Label", "code": "already_exists", "field": "new_name"}]}),
+                            ));
+                        }
+                        for label in state.repo_labels.iter_mut().filter(|l| **l == from) {
+                            label.clone_from(&to);
+                        }
+                        for issue in &mut state.issues {
+                            for label in issue.labels.iter_mut().filter(|l| **l == from) {
+                                label.clone_from(&to);
+                            }
+                        }
+                        Ok(reply(200, json!({})))
                     }
                     ("POST", "repos/octo/app/issues") => {
                         let number = state.issues.len() as u64 + 1;
@@ -1457,6 +1569,10 @@ pub(crate) mod test_support {
             self.respond("PATCH", path, body)
         }
 
+        async fn delete(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
+            self.respond("DELETE", path, &Value::Null)
+        }
+
         async fn get(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
             // The answer is read now and delivered later, like a slow network: a caller
             // that lists while another is creating gets a list without the new issue.
@@ -1482,14 +1598,27 @@ pub(crate) mod test_support {
     pub struct FakeIssues(pub std::sync::Arc<FakeGithub>);
 
     impl IssueApi for FakeIssues {
-        async fn list_open_labelled(
+        async fn list_open_with_label(
             &self,
             token: &[u8],
             owner: &str,
             repo: &str,
+            label: &str,
             now: i64,
         ) -> Result<Vec<IssueRef>, ScanError> {
-            github_issues::list_open_labelled_with(&*self.0, token, owner, repo, now).await
+            github_issues::list_open_labelled_with(&*self.0, token, owner, repo, label, now).await
+        }
+
+        async fn rename_label(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            from: &str,
+            to: &str,
+            now: i64,
+        ) -> Result<LabelRename, ScanError> {
+            github_issues::rename_label_with(&*self.0, token, owner, repo, from, to, now).await
         }
 
         async fn create(
@@ -1855,13 +1984,10 @@ mod tests {
         assert_eq!(creates.len(), 1);
         assert_eq!(
             creates[0]["labels"],
-            serde_json::json!(["harborgate", "areai:security", "critical"])
+            serde_json::json!(["dockward", "areai:security", "critical"])
         );
         let body = creates[0]["body"].as_str().unwrap();
-        assert_eq!(
-            body.lines().next(),
-            Some("<!-- harborgate:CVE-2026-0001 -->")
-        );
+        assert_eq!(body.lines().next(), Some("<!-- dockward:CVE-2026-0001 -->"));
         assert_eq!(creates[0]["title"], "CVE-2026-0001 openssl");
         assert!(body.contains("`v1`"));
         assert_eq!(
@@ -2024,7 +2150,7 @@ mod tests {
         assert_eq!(creates.len(), 1);
         assert_eq!(
             creates[0]["labels"],
-            serde_json::json!(["harborgate", "areai:security", "high"])
+            serde_json::json!(["dockward", "areai:security", "high"])
         );
         assert_eq!(creates[0]["title"], "CVE-2024-1 openssl");
     }
@@ -2040,7 +2166,7 @@ mod tests {
 
         assert_eq!(
             fx.github.creates()[0]["labels"],
-            serde_json::json!(["harborgate", "areai:security"])
+            serde_json::json!(["dockward", "areai:security"])
         );
     }
 
@@ -2048,7 +2174,7 @@ mod tests {
     async fn a_missing_label_is_created_and_an_existing_one_is_not_again() {
         let fx = Fixture::new("labels-ensure", "HIGH", true).await;
         fx.github.with(|state| {
-            state.repo_labels = vec!["harborgate".to_owned(), "high".to_owned()];
+            state.repo_labels = vec!["dockward".to_owned(), "high".to_owned()];
         });
         fx.finding("m1", "v1", "CVE-2024-3", "HIGH", 10).await;
         fx.reconcile("ghcr.io/o/app:v1").await;
@@ -2060,9 +2186,9 @@ mod tests {
             .filter_map(|(_, _, body)| body["name"].as_str())
             .collect();
         // Every label is asked for once; the repository ends with each exactly once.
-        assert_eq!(label_posts, vec!["harborgate", "areai:security", "high"]);
+        assert_eq!(label_posts, vec!["dockward", "areai:security", "high"]);
         let repo_labels = fx.github.with(|state| state.repo_labels.clone());
-        assert_eq!(repo_labels, vec!["harborgate", "high", "areai:security"]);
+        assert_eq!(repo_labels, vec!["dockward", "high", "areai:security"]);
         // The create comes after the labels exist.
         let create_at = writes
             .iter()
@@ -2114,11 +2240,11 @@ mod tests {
         fx2.github.with(|state| {
             state.issues.push(test_support::Issue {
                 number: 1,
-                body: "<!-- harborgate:CVE-2024-5 -->".to_owned(),
+                body: "<!-- dockward:CVE-2024-5 -->".to_owned(),
                 open: true,
                 title: "CVE-2024-5 openssl".to_owned(),
                 labels: vec![
-                    "harborgate".to_owned(),
+                    "dockward".to_owned(),
                     "areai:security".to_owned(),
                     "critical".to_owned(),
                 ],
@@ -2332,7 +2458,7 @@ mod tests {
             body.contains("\nFound by 2 scanners: `Grype`, `Trivy`\n"),
             "{body}"
         );
-        assert!(body.starts_with("<!-- harborgate:CVE-2026-0001 -->"));
+        assert!(body.starts_with("<!-- dockward:CVE-2026-0001 -->"));
         assert!(body.contains("| Image | ghcr.io/o/app |"), "{body}");
 
         // One scanner stops reporting: its newer run is clean, and the line is refreshed on the
@@ -2713,14 +2839,31 @@ mod tests {
     }
 
     impl IssueApi for Racing {
-        async fn list_open_labelled(
+        async fn list_open_with_label(
             &self,
             token: &[u8],
             owner: &str,
             repo: &str,
+            label: &str,
             now: i64,
         ) -> Result<Vec<IssueRef>, ScanError> {
-            self.inner.list_open_labelled(token, owner, repo, now).await
+            self.inner
+                .list_open_with_label(token, owner, repo, label, now)
+                .await
+        }
+
+        async fn rename_label(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            from: &str,
+            to: &str,
+            now: i64,
+        ) -> Result<LabelRename, ScanError> {
+            self.inner
+                .rename_label(token, owner, repo, from, to, now)
+                .await
         }
 
         async fn create(

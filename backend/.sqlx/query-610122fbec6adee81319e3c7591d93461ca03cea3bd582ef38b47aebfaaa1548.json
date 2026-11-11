@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO carryover_refs (github_owner, github_repo, legacy_category, git_ref)\n             VALUES (?, ?, ?, ?)\n             ON CONFLICT (github_owner, github_repo, legacy_category, git_ref) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "610122fbec6adee81319e3c7591d93461ca03cea3bd582ef38b47aebfaaa1548"
+}

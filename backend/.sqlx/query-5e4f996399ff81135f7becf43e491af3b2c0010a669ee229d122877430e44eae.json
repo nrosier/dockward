@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO alert_carryovers\n                (github_owner, github_repo, legacy_category, rule_id, reason, comment, planned_at,\n                 applied)\n             VALUES (?, ?, ?, ?, ?, ?, ?, 0)\n             ON CONFLICT (github_owner, github_repo, legacy_category, rule_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "5e4f996399ff81135f7becf43e491af3b2c0010a669ee229d122877430e44eae"
+}

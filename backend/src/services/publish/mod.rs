@@ -5,7 +5,7 @@
 //! `publish` job per source reads the OCI labels from the first scanned platform's stored config
 //! ([`labels`]), builds one merged SARIF from the merged findings (one result per (CVE id,
 //! package), with the scanner count and names and the platforms as properties), uploads it to
-//! Code Scanning under the category `harborgate/<hub host>/<repository>/<tag value>`, waits for
+//! Code Scanning under the category `dockward/<hub host>/<repository>/<tag value>`, waits for
 //! GitHub to process it, and then runs the issue rules ([`issue_lifecycle::reconcile`]).
 //!
 //! Older images upload nothing (step 7): the job re-checks that its image is still the source's
@@ -46,11 +46,14 @@ use crate::services::credentials::decrypt_token;
 use crate::services::discovery::{MSG_BAD_PAYLOAD, fixed_text};
 use crate::services::github_issues::GithubIssues;
 use crate::services::github_scanning::{
-    GithubScanning, Processing, ScanError, Upload, encode_sarif,
+    Alert, AlertQuery, Analysis, Dismissal, GithubScanning, Processing, ScanError, Upload,
+    encode_sarif,
 };
 use crate::services::github_url::GithubTarget;
 use crate::services::ids;
 use crate::services::issue_lifecycle::{self, IssueApi};
+use crate::services::issue_rekey;
+use crate::services::legacy_analyses;
 use crate::services::merged_view::{self, MergedFinding};
 use crate::services::sarif;
 use crate::services::storage::messages::NO_LONGER_STORED;
@@ -97,8 +100,9 @@ pub mod messages {
 const FIRST_WAIT: Duration = Duration::from_secs(5);
 const SECOND_WAIT: Duration = Duration::from_secs(10);
 const LATER_WAIT: Duration = Duration::from_secs(15);
-/// Total time one attempt waits for GitHub to process an upload.
-const MAX_WAIT: Duration = Duration::from_secs(300);
+/// Total time one attempt waits for GitHub to process an upload. The legacy analysis retirement
+/// (`services/legacy_analyses.rs`) uses the same budget.
+pub(crate) const MAX_WAIT: Duration = Duration::from_secs(300);
 
 /// The payload of a `publish` job: ids only (section 9). Never a token or a label.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +173,62 @@ pub trait CodeScanning: Send + Sync + 'static {
         sarif_id: &str,
         now: i64,
     ) -> impl Future<Output = Result<Processing, ScanError>> + Send;
+
+    /// Lists the analyses of one tool, all pages (#311 slice 6b). `deadline` is Unix seconds on
+    /// `clock`; the list stops with `DeadlineExceeded` once `clock.now()` reaches it.
+    fn list_analyses<C: Clock>(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        tool_name: &str,
+        clock: &C,
+        deadline: i64,
+    ) -> impl Future<Output = Result<Vec<Analysis>, ScanError>> + Send;
+
+    /// DELETEs one analysis. Returns the next confirm-delete path, or `None` when done.
+    fn delete_analysis(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        id: u64,
+        now: i64,
+    ) -> impl Future<Output = Result<Option<String>, ScanError>> + Send;
+
+    /// Follows a confirm-delete path of `owner`/`repo`, the relative path a delete returned. Returns
+    /// the next path, or `None` when done.
+    fn follow_confirm(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        path: &str,
+        now: i64,
+    ) -> impl Future<Output = Result<Option<String>, ScanError>> + Send;
+
+    /// Lists the alerts of one tool, state and ref, all pages. `deadline` is as for
+    /// `list_analyses`.
+    fn list_alerts<C: Clock>(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        query: AlertQuery<'_>,
+        clock: &C,
+        deadline: i64,
+    ) -> impl Future<Output = Result<Vec<Alert>, ScanError>> + Send;
+
+    /// Dismisses one alert.
+    fn dismiss_alert(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        dismissal: Dismissal<'_>,
+        now: i64,
+    ) -> impl Future<Output = Result<(), ScanError>> + Send;
 }
 
 impl CodeScanning for GithubScanning {
@@ -190,6 +250,64 @@ impl CodeScanning for GithubScanning {
         now: i64,
     ) -> Result<Processing, ScanError> {
         GithubScanning::status(self, token, owner, repo, sarif_id, now).await
+    }
+
+    async fn list_analyses<C: Clock>(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        tool_name: &str,
+        clock: &C,
+        deadline: i64,
+    ) -> Result<Vec<Analysis>, ScanError> {
+        GithubScanning::list_analyses(self, token, owner, repo, tool_name, clock, deadline).await
+    }
+
+    async fn delete_analysis(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        id: u64,
+        now: i64,
+    ) -> Result<Option<String>, ScanError> {
+        GithubScanning::delete_analysis(self, token, owner, repo, id, now).await
+    }
+
+    async fn follow_confirm(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        path: &str,
+        now: i64,
+    ) -> Result<Option<String>, ScanError> {
+        GithubScanning::follow_confirm(self, token, owner, repo, path, now).await
+    }
+
+    async fn list_alerts<C: Clock>(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        query: AlertQuery<'_>,
+        clock: &C,
+        deadline: i64,
+    ) -> Result<Vec<Alert>, ScanError> {
+        GithubScanning::list_alerts(self, token, owner, repo, query, clock, deadline).await
+    }
+
+    async fn dismiss_alert(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        dismissal: Dismissal<'_>,
+        now: i64,
+    ) -> Result<(), ScanError> {
+        GithubScanning::dismiss_alert(self, token, owner, repo, number, dismissal, now).await
     }
 }
 
@@ -295,7 +413,7 @@ fn scan_outcome(error: ScanError) -> JobOutcome {
         ScanError::NotFound => failed(messages::NOT_FOUND),
         ScanError::TooLarge => permanent(messages::TOO_LARGE),
         ScanError::Rejected(_) => failed(messages::REJECTED),
-        ScanError::Upstream(_) => failed(messages::UPSTREAM),
+        ScanError::Upstream(_) | ScanError::DeadlineExceeded => failed(messages::UPSTREAM),
     }
 }
 
@@ -372,18 +490,27 @@ impl<G: CodeScanning, I: IssueApi, C: Clock> Publisher<G, I, C> {
         let existing = report_db::find_pending_for_job(&self.pool, &job.id)
             .await
             .map_err(database)?;
-        let (report_id, sarif_id) = match existing {
+        let (report_id, sarif_id, git_ref) = match existing {
             Some(report) if report.github_sarif_id.is_some() => {
-                (report.id, report.github_sarif_id.unwrap_or_default())
+                // An earlier attempt uploaded this SARIF. It is not this run's own upload, so
+                // the legacy retirement does not run for it (#311 slice 6b).
+                let sarif_id = report.github_sarif_id.unwrap_or_default();
+                (report.id, sarif_id, None)
             }
             existing => {
-                self.upload_new(&context, &merged.findings, existing)
-                    .await?
+                let (report_id, sarif_id, git_ref) = self
+                    .upload_new(&context, &merged.findings, existing)
+                    .await?;
+                (report_id, sarif_id, Some(git_ref))
             }
         };
+        // `?` returns before the next two steps unless GitHub reported `complete`.
         self.wait_for_processing(&context, &report_id, &sarif_id)
             .await?;
         self.reconcile_issues(&context).await;
+        if let Some(git_ref) = git_ref {
+            self.retire_legacy(&context, &git_ref).await;
+        }
         Ok(JobOutcome::Done)
     }
 
@@ -463,14 +590,15 @@ impl<G: CodeScanning, I: IssueApi, C: Clock> Publisher<G, I, C> {
         Err(permanent(NO_LONGER_STORED))
     }
 
-    /// Reads the labels, builds the SARIF and uploads it. Returns the report id and GitHub's
-    /// SARIF id. A pending report left by an earlier attempt that never uploaded is reused.
+    /// Reads the labels, builds the SARIF and uploads it. Returns the report id, GitHub's SARIF
+    /// id and the full ref the upload used. A pending report left by an earlier attempt that
+    /// never uploaded is reused.
     async fn upload_new(
         &self,
         context: &Context,
         findings: &[MergedFinding],
         existing: Option<report_db::ReportRow>,
-    ) -> Flow<(String, String)> {
+    ) -> Flow<(String, String, String)> {
         let source = &context.source;
         let labels = self.read_labels(context).await?;
         let revision = labels::require_revision(&labels)
@@ -554,7 +682,7 @@ impl<G: CodeScanning, I: IssueApi, C: Clock> Publisher<G, I, C> {
         report_db::set_sarif_id(&self.pool, &report_id, &sarif_id)
             .await
             .map_err(database)?;
-        Ok((report_id, sarif_id))
+        Ok((report_id, sarif_id, git_ref))
     }
 
     /// Polls GitHub after 5 s, 10 s, then every 15 s, for at most 300 s in total. `Complete`
@@ -611,6 +739,29 @@ impl<G: CodeScanning, I: IssueApi, C: Clock> Publisher<G, I, C> {
         Err(failed(messages::PENDING))
     }
 
+    /// Retires the old HarborGate analyses of this source's legacy category (#311 slice 6b). It
+    /// runs only after this run's own upload reached `complete`, and it never fails the job: a
+    /// database error is logged as fixed text, and the next publish runs the step again. The
+    /// GitHub outcomes are logged by `legacy_analyses::retire`.
+    async fn retire_legacy(&self, context: &Context, git_ref: &str) {
+        let started = self.clock.now();
+        let outcome = legacy_analyses::retire(
+            &self.pool,
+            &self.github,
+            &self.clock,
+            &context.token,
+            &context.source,
+            git_ref,
+            started,
+        )
+        .await;
+        if outcome.is_err() {
+            tracing::warn!(
+                "the database failed while retiring legacy analyses; the next publish retries"
+            );
+        }
+    }
+
     /// Makes the GitHub issues follow the findings that were just published. Nothing here can
     /// fail the job: the report is already `success`, so a retry would upload the SARIF again. A
     /// rate limit, a refused token or a database error is logged as fixed text, and the next
@@ -618,6 +769,41 @@ impl<G: CodeScanning, I: IssueApi, C: Clock> Publisher<G, I, C> {
     async fn reconcile_issues(&self, context: &Context) {
         let source = &context.source;
         let scan_label = format!("{}/{}:{}", source.hub_host, source.repository, context.tag);
+        let rekey = issue_rekey::run(
+            &self.pool,
+            &self.issues,
+            &self.clock,
+            &context.token,
+            &source.github_owner,
+            &source.github_repo,
+        )
+        .await;
+        match rekey {
+            Ok(issue_rekey::RekeyOutcome::RateLimited { .. }) => {
+                tracing::warn!(
+                    "GitHub rate limit reached while re-keying issues; the next publish retries"
+                );
+                return;
+            }
+            Ok(issue_rekey::RekeyOutcome::Refused) => {
+                tracing::warn!(
+                    "GitHub refused the issue re-key; check the token's Issues permission"
+                );
+                return;
+            }
+            Ok(issue_rekey::RekeyOutcome::Incomplete { .. }) => {
+                tracing::warn!("some issues could not be re-keyed; the next publish retries");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "the database failed while re-keying issues; the next publish retries"
+                );
+            }
+            Ok(
+                issue_rekey::RekeyOutcome::AlreadyDone
+                | issue_rekey::RekeyOutcome::Completed { .. },
+            ) => {}
+        }
         let result = issue_lifecycle::reconcile(
             &self.pool,
             &self.issues,

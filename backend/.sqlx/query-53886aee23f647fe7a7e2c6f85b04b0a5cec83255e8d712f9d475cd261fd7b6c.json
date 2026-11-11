@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE alert_carryovers SET applied = 1\n         WHERE github_owner = ? AND github_repo = ? AND legacy_category = ? AND rule_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "53886aee23f647fe7a7e2c6f85b04b0a5cec83255e8d712f9d475cd261fd7b6c"
+}
