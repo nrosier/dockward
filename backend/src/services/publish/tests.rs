@@ -484,6 +484,35 @@ async fn the_hook_queues_one_publish_job_for_the_newest_image_when_all_has_ended
     );
 }
 
+/// Only the legacy HarborGate branch label is set: the upload goes to that branch, not to the
+/// source's default branch.
+#[tokio::test]
+async fn the_legacy_branch_label_alone_sets_the_upload_ref() {
+    let fx = Fx::new("legacy-branch").await;
+    fx.image(IMG_1).await;
+    fx.platform(
+        P_1,
+        IMG_1,
+        "linux/amd64",
+        &[
+            (labels::LABEL_REVISION, REV_1),
+            (labels::LABEL_SOURCE, "https://github.com/octo/app"),
+            (labels::LEGACY_LABEL_BRANCH, "legacy-release"),
+        ],
+    )
+    .await;
+    fx.observe("s1", "v1", IMG_1, 100).await;
+    fx.run(P_1, "trivy", "done", 10, &[]).await;
+    fx.run(P_1, "grype", "done", 11, &[]).await;
+    fx.recompute(IMG_1).await;
+    assert_eq!(fx.queue(IMG_1).await, 1);
+    assert_eq!(fx.drain().await, vec![("s1".to_owned(), JobOutcome::Done)]);
+
+    let uploads = fx.scanning.uploads();
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(uploads[0]["ref"], "refs/heads/legacy-release");
+}
+
 /// One merged SARIF per source: one result per (CVE id, package) with the scanner and platform
 /// properties, the category and location on the hub host and the repository, valid SARIF 2.1.0,
 /// and the labels read from the first scanned platform.

@@ -4,7 +4,9 @@
 //! The labels are `config.Labels` of the image config of a stored layout. Labels are image-level
 //! metadata, so one platform's config is enough. The rules are the ones the Harbor-era sync used:
 //! the revision label is required, the source label must match the GitHub target when present,
-//! and the branch label overrides the source's default branch.
+//! and the Dockward branch label (`io.github.nrosier.dockward.branch`) overrides the source's
+//! default branch. The legacy HarborGate branch label is still read when the Dockward one is
+//! absent or empty.
 //!
 //! The layout is a directory this program wrote: `index.json` names the platform manifest, the
 //! manifest names the config blob, and every blob is a file named by its digest hex. A path is
@@ -24,8 +26,15 @@ use crate::services::storage::layout::BLOBS_SHA256;
 pub const LABEL_REVISION: &str = "org.opencontainers.image.revision";
 /// OCI label naming the source repository. Checked against the source when present.
 pub const LABEL_SOURCE: &str = "org.opencontainers.image.source";
-/// HarborGate branch label. Overrides the source's `default_branch` when present.
-pub const LABEL_BRANCH: &str = "io.github.nrosier.harborgate.branch";
+/// Dockward branch label. Overrides the source's `default_branch` when present.
+pub const LABEL_BRANCH: &str = "io.github.nrosier.dockward.branch";
+/// Legacy HarborGate branch label. Still read when `LABEL_BRANCH` is absent or empty, with a
+/// deprecation warning; it never falls back to `default_branch` while set and non-empty.
+pub const LEGACY_LABEL_BRANCH: &str = "io.github.nrosier.harborgate.branch";
+/// The fixed text of the deprecation warning logged when only the legacy branch label is set.
+/// It names no label value.
+pub const MSG_LEGACY_BRANCH_LABEL: &str =
+    "the image uses the deprecated HarborGate branch label; use the Dockward branch label instead.";
 
 /// The most bytes read from one of the layout's JSON files. The registry client caps a manifest
 /// and a config at the same size when it pulls them.
@@ -90,7 +99,8 @@ pub fn read_labels(layout: &Path) -> Result<ImageLabels, LabelFault> {
 }
 
 /// The labels of an image config JSON: the string members of `config.Labels`. Anything that is
-/// not a string member adds nothing.
+/// not a string member adds nothing. The branch is the Dockward label when non-empty, else the
+/// legacy HarborGate label when non-empty (logging `MSG_LEGACY_BRANCH_LABEL`), else `None`.
 pub fn parse_labels(config: &Value) -> ImageLabels {
     let mut labels: BTreeMap<&str, &str> = BTreeMap::new();
     if let Some(Value::Object(map)) = config.pointer("/config/Labels") {
@@ -101,10 +111,21 @@ pub fn parse_labels(config: &Value) -> ImageLabels {
         }
     }
     let get = |key: &str| labels.get(key).map(|text| (*text).to_owned());
+    let non_empty = |key: &str| get(key).filter(|text| !text.is_empty());
+    let branch = match non_empty(LABEL_BRANCH) {
+        Some(branch) => Some(branch),
+        None => {
+            let legacy = non_empty(LEGACY_LABEL_BRANCH);
+            if legacy.is_some() {
+                tracing::warn!("{MSG_LEGACY_BRANCH_LABEL}");
+            }
+            legacy
+        }
+    };
     ImageLabels {
         revision: get(LABEL_REVISION),
         source: get(LABEL_SOURCE),
-        branch: get(LABEL_BRANCH),
+        branch,
     }
 }
 
@@ -150,7 +171,8 @@ fn normalize_source(value: &str) -> String {
     trimmed.strip_suffix(".git").unwrap_or(trimmed).to_owned()
 }
 
-/// The branch to upload to: the HarborGate label, otherwise the source's default branch.
+/// The branch to upload to: the Dockward branch label (or the legacy one, already resolved into
+/// `labels.branch` by `parse_labels`), otherwise the source's default branch.
 pub fn branch_for(labels: &ImageLabels, default_branch: &str) -> String {
     labels
         .branch
@@ -199,6 +221,61 @@ mod tests {
             ..ImageLabels::default()
         };
         assert!(require_revision(&empty).is_err());
+    }
+
+    fn branch_config(entries: &[(&str, &str)]) -> Value {
+        let labels: serde_json::Map<String, Value> = entries
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), json!(value)))
+            .collect();
+        json!({"config": {"Labels": labels}})
+    }
+
+    #[test]
+    fn the_dockward_branch_label_is_read() {
+        let labels = parse_labels(&branch_config(&[(LABEL_BRANCH, "release")]));
+        assert_eq!(labels.branch.as_deref(), Some("release"));
+        assert_eq!(branch_for(&labels, "main"), "release");
+    }
+
+    #[test]
+    fn the_legacy_branch_label_alone_is_read_with_the_warning_path() {
+        let labels = parse_labels(&branch_config(&[(LEGACY_LABEL_BRANCH, "legacy-release")]));
+        assert_eq!(labels.branch.as_deref(), Some("legacy-release"));
+        assert_eq!(branch_for(&labels, "main"), "legacy-release");
+        assert!(!MSG_LEGACY_BRANCH_LABEL.contains("legacy-release"));
+        assert!(!MSG_LEGACY_BRANCH_LABEL.contains(LEGACY_LABEL_BRANCH));
+    }
+
+    #[test]
+    fn the_dockward_label_wins_when_both_are_set() {
+        let labels = parse_labels(&branch_config(&[
+            (LABEL_BRANCH, "new-release"),
+            (LEGACY_LABEL_BRANCH, "legacy-release"),
+        ]));
+        assert_eq!(labels.branch.as_deref(), Some("new-release"));
+    }
+
+    #[test]
+    fn an_empty_dockward_label_falls_back_to_the_legacy_then_the_default() {
+        let legacy = parse_labels(&branch_config(&[
+            (LABEL_BRANCH, ""),
+            (LEGACY_LABEL_BRANCH, "legacy-release"),
+        ]));
+        assert_eq!(branch_for(&legacy, "main"), "legacy-release");
+
+        let neither = parse_labels(&branch_config(&[
+            (LABEL_BRANCH, ""),
+            (LEGACY_LABEL_BRANCH, ""),
+        ]));
+        assert_eq!(neither.branch, None);
+        assert_eq!(branch_for(&neither, "main"), "main");
+    }
+
+    #[test]
+    fn neither_label_uses_the_default_branch() {
+        let labels = parse_labels(&branch_config(&[]));
+        assert_eq!(branch_for(&labels, "trunk"), "trunk");
     }
 
     #[test]
