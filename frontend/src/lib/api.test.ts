@@ -16,7 +16,7 @@ function sentHeaders(fetchMock: ReturnType<typeof vi.fn>): Headers {
 describe("api", () => {
   beforeEach(() => {
     // jsdom drops a `__Host-` cookie over http, so the getter is stubbed.
-    vi.spyOn(document, "cookie", "get").mockReturnValue("theme=x; __Host-harborgate_csrf=csrf-test-value");
+    vi.spyOn(document, "cookie", "get").mockReturnValue("theme=x; __Host-dockward_csrf=csrf-test-value");
   });
 
   afterEach(() => {

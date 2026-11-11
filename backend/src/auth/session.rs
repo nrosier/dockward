@@ -16,7 +16,7 @@ use crate::error::AppError;
 use crate::services::ids;
 
 /// Cookie name. The `__Host-` prefix forces `Secure`, `Path=/`, and no `Domain`.
-pub const SESSION_COOKIE: &str = "__Host-harborgate_session";
+pub const SESSION_COOKIE: &str = "__Host-dockward_session";
 
 /// Session lifetime: 8 hours (`exp` is `iat` plus this value).
 pub const SESSION_LIFETIME_SECS: i64 = 8 * 60 * 60;
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn cookie_attributes_match_the_spec() {
         let cookie = set_cookie("TOKEN");
-        assert!(cookie.starts_with("__Host-harborgate_session=TOKEN;"));
+        assert!(cookie.starts_with("__Host-dockward_session=TOKEN;"));
         for attr in [
             "Path=/",
             "HttpOnly",
@@ -280,11 +280,11 @@ mod tests {
         ".",
         "eyJzdWIiOiJ1c2VyLWthdCIsInJvbGUiOiJhZG1pbiIsImlhdCI6MTAwMCwiZXhwIjoyOTgwMCwianRpIjoia2F0LWp0aS0xIiwidmVyIjozfQ",
         ".",
-        "oL717mJKECgdZl6mBx-Cnh3mMSRlIS6EUdqr4H63gkQ",
+        "UJvzS2LQ6jckQCitjsVd7Cqyy4JYlhyCUVk3PIDw0uw",
     );
     /// HMAC-SHA256 of the signing input (header.payload) under the session key, as hex.
     const KAT_SESSION_HMAC_HEX: &str =
-        "a0bef5ee624a10281d665ea6071f829e1de6312465212e8451daabe07eb78244";
+        "509bf34b62d0ea37244028ad8ec55dec2ab2cb8258961c825159373c80f0d2ec";
 
     #[test]
     fn session_hmac_known_answer() {
@@ -315,7 +315,7 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             COOKIE,
-            "a=1; __Host-harborgate_session=abc; b=2".parse().unwrap(),
+            "a=1; __Host-dockward_session=abc; b=2".parse().unwrap(),
         );
         assert_eq!(read_cookie(&headers, SESSION_COOKIE), Some("abc"));
         assert_eq!(read_cookie(&headers, "missing"), None);

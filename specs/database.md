@@ -355,6 +355,7 @@ Decided (2026-11-03) for `restore.run`: the offline restore command appends one 
 - `backup.run`
 - `restore.run`
 - `key.rotate`
+- `key.migrate_labels` (the one-time startup re-encryption of stored credentials from the `harborgate/*` label to `dockward/*`, decision 56; actor `system`; `details` is `{"rows"}`, the count only; written only when at least one row changed)
 - `retention.run`
 - `sync_job.retry` (manual retry of a failed sync job; `details` is `{"job_id","mapping_id"}`; Decided (2026-11-03, delegated))
 - `sync_job.purge` (purge of failed sync jobs; `target` is the fixed text `sync_jobs`; `details` is `{"scope","deleted"}`, where `scope` is `own` (the actor's mappings) or `all` (every mapping, admin only) and `deleted` is the row count, at least 1; the actor columns name the user; no job ids, payloads, error text, or other values; Decided (2026-11-08, user, #243, decisions 1 to 4))

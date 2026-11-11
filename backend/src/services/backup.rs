@@ -397,7 +397,7 @@ mod tests {
     /// An `HGBK1` file recorded with the aes-gcm 0.10 build, as lowercase hex. The backup
     /// key is derived from the all-zero test root. The nonce is 0x2b repeated 12 times,
     /// and the plaintext is `database bytes`. Test values only.
-    const KAT_HGBK1_HEX: &str = "4847424b312b2b2b2b2b2b2b2b2b2b2b2bb94ab0bc2c33bec3bcaf58cf15178f96bbc433e09b036161efdff639e857";
+    const KAT_HGBK1_HEX: &str = "4847424b312b2b2b2b2b2b2b2b2b2b2b2b80a3b1d5e6144ae58714b13bbe07edcf595c66fb6a4527689d6b721303d5";
 
     fn hex_decode(text: &str) -> Vec<u8> {
         (0..text.len())

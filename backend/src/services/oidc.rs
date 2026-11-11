@@ -239,7 +239,7 @@ impl Provider for HttpProvider {
     }
 }
 
-/// The values for one sign-in attempt. They are kept in the `__Host-harborgate_oidc`
+/// The values for one sign-in attempt. They are kept in the `__Host-dockward_oidc`
 /// cookie (`specs/security.md`, Sessions). Each is 32 random bytes, base64url.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Pending {
@@ -407,7 +407,7 @@ pub async fn begin_login<P: Provider>(
 /// The inputs the callback needs from the request and the settings.
 #[derive(Clone, Copy)]
 pub struct Callback<'a> {
-    /// The `__Host-harborgate_oidc` cookie value, when present.
+    /// The `__Host-dockward_oidc` cookie value, when present.
     pub cookie: Option<&'a str>,
     /// The `state` query value.
     pub state: &'a str,

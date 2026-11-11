@@ -22,7 +22,7 @@ use crate::services::oidc::{self, Callback, HttpProvider, OidcSettings};
 use crate::services::oidc_settings::{self, OidcSettingsBody};
 
 /// Name of the short-lived cookie that holds `state`, the PKCE verifier, and `nonce`.
-pub const OIDC_COOKIE: &str = "__Host-harborgate_oidc";
+pub const OIDC_COOKIE: &str = "__Host-dockward_oidc";
 /// Lifetime of the sign-in cookie: 10 minutes (`specs/security.md`, Sessions).
 pub const OIDC_COOKIE_MAX_AGE_SECS: u32 = 10 * 60;
 
@@ -395,7 +395,7 @@ mod tests {
             crate::auth::session::issue(&session_key, "admin-test-id", "admin", 0, now).unwrap();
         let csrf_value = crate::auth::csrf::issue(&csrf_key).unwrap();
         (
-            format!("__Host-harborgate_session={token}; __Host-harborgate_csrf={csrf_value}"),
+            format!("__Host-dockward_session={token}; __Host-dockward_csrf={csrf_value}"),
             csrf_value,
         )
     }

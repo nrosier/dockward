@@ -14,7 +14,7 @@ use crate::auth::session::{SESSION_LIFETIME_SECS, read_cookie};
 use crate::error::AppError;
 
 /// Cookie name. The `__Host-` prefix forces `Secure`, `Path=/`, and no `Domain`.
-pub const CSRF_COOKIE: &str = "__Host-harborgate_csrf";
+pub const CSRF_COOKIE: &str = "__Host-dockward_csrf";
 
 /// Header the client must echo the cookie value in.
 pub const CSRF_HEADER: HeaderName = HeaderName::from_static("x-csrf-token");
@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn presented_requires_cookie_and_matching_header() {
         let mut headers = HeaderMap::new();
-        headers.insert(COOKIE, "__Host-harborgate_csrf=abc.def".parse().unwrap());
+        headers.insert(COOKIE, "__Host-dockward_csrf=abc.def".parse().unwrap());
         assert_eq!(presented(&headers), None, "header missing");
         headers.insert(CSRF_HEADER, "abc.xyz".parse().unwrap());
         assert_eq!(presented(&headers), None, "header mismatched");
@@ -177,7 +177,7 @@ mod tests {
     /// derived from the all-zero test root. The tag is HMAC-SHA256 of the nonce, as hex
     /// and as the base64url value the cookie carries.
     const KAT_CSRF_TAG_HEX: &str =
-        "e493641318234cd473668382b031307186a45f4bd3bdef25052ab68a62cb66d7";
+        "a839f2861687429bc4da35ae7b02b77ffcdb3d0a6cdad5c9d9d83657b2f33ad5";
 
     /// The recorded nonce, assembled from fixed bytes at runtime. The bytes spell
     /// `kat-csrf-nonce`.
@@ -189,7 +189,7 @@ mod tests {
     /// The recorded token, `<nonce>.<tag>`, assembled from the nonce and the recorded tag
     /// at runtime. The tag is the base64url form of the HMAC.
     fn kat_token() -> String {
-        let tag_b64: [&[u8]; 2] = [b"5JNkExgjTNRzZoOCsDEwcY", b"akX0vTve8lBSq2imLLZtc"];
+        let tag_b64: [&[u8]; 2] = [b"qDnyhhaHQpvE2jWuewK3f_", b"zbPQps2tXJ2dg2V7LzOtU"];
         format!(
             "{}.{}",
             kat_nonce(),
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn csrf_cookie_attributes_match_the_spec() {
         let cookie = set_cookie("v.w");
-        assert!(cookie.starts_with("__Host-harborgate_csrf=v.w;"));
+        assert!(cookie.starts_with("__Host-dockward_csrf=v.w;"));
         for attr in ["Path=/", "Secure", "SameSite=Lax"] {
             assert!(cookie.contains(attr), "missing {attr}");
         }

@@ -551,6 +551,35 @@ async fn record_restore(
         .map_err(|_| error::AppError::InternalError)
 }
 
+/// Runs the one-time re-encryption of stored credentials to the `dockward/*` label
+/// (decision 56). A row that opens with neither key is logged by table, column and id,
+/// the migration writes nothing, and the app starts on the dual-read fallback; the next
+/// start tries again. A database failure stops the start.
+async fn migrate_credential_labels(
+    pool: &sqlx::SqlitePool,
+    root: &config::EncryptionKey,
+    current: &auth::crypto::DerivedKey,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use services::key_rotation::{MigrateError, migrate_labels};
+    let legacy = auth::crypto::legacy_credentials_key(root)
+        .map_err(|_| "could not derive the previous credentials key")?;
+    match migrate_labels(pool, &legacy, current).await {
+        Ok(Some(rows)) => tracing::info!(
+            rows,
+            "re-encrypted stored credentials to the dockward label"
+        ),
+        Ok(None) => {}
+        Err(MigrateError::Row(failure)) => tracing::error!(
+            table = failure.table,
+            column = failure.column,
+            row_id = %failure.row_id,
+            "a stored value opens with neither credentials key; the label migration wrote nothing"
+        ),
+        Err(MigrateError::Other) => return Err("the credential label migration failed".into()),
+    }
+    Ok(())
+}
+
 async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn std::error::Error>> {
     // Refuse to start without a valid key or settings. This runs before the port is bound.
     let encryption_key = config::load_encryption_key()?;
@@ -574,6 +603,7 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
     let backup_key = Arc::new(
         auth::crypto::backup_key(&encryption_key).map_err(|_| "could not derive the backup key")?,
     );
+    migrate_credential_labels(&pool, &encryption_key, &credentials_key).await?;
     let github = services::github_url::load_target(&pool)
         .await
         .map_err(|_| "could not read the GitHub base URL settings")?;
@@ -973,6 +1003,52 @@ pub(crate) mod tests {
         ))))
     }
 
+    /// A session token signed under the pre-rename label, and a cookie under the old
+    /// name, are both plain 401 responses. A token under the new key and cookie name
+    /// passes the signature check (the user is then unknown, also 401, so the check
+    /// below uses `verify` directly).
+    #[tokio::test]
+    async fn stale_session_tokens_and_old_cookie_names_are_a_plain_401() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, pool, dir) = test_router("stale-session").await;
+        let root =
+            config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let old_key = auth::crypto::derive_key(&root, b"harborgate/session-v1").unwrap();
+        let now = auth::session::now_unix().unwrap();
+        let stale = auth::session::issue(&old_key, "u-1", "admin", 0, now).unwrap();
+        let new_key = auth::crypto::session_key(&root).unwrap();
+        assert!(auth::session::verify(&new_key, &stale, now).is_err());
+        let fresh = auth::session::issue(&new_key, "u-1", "admin", 0, now).unwrap();
+        assert!(auth::session::verify(&new_key, &fresh, now).is_ok());
+        assert!(auth::session::set_cookie(&fresh).starts_with("__Host-dockward_session="));
+        assert!(auth::csrf::set_cookie("v.w").starts_with("__Host-dockward_csrf="));
+
+        for cookie in [
+            format!("__Host-dockward_session={stale}"),
+            format!("__Host-harborgate_session={fresh}"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    with_peer(
+                        Request::builder()
+                            .uri("/api/v1/admin/audit-log")
+                            .header("cookie", cookie),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A state-changing `/api` route returns `403 csrf_invalid` with no token, and with
     /// a header that does not match the cookie. A matching token passes the guard.
     #[tokio::test]
@@ -987,7 +1063,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let good = auth::csrf::issue(&k).unwrap();
-        let cookie = format!("__Host-harborgate_csrf={good}");
+        let cookie = format!("__Host-dockward_csrf={good}");
 
         let missing = with_peer(
             Request::builder()

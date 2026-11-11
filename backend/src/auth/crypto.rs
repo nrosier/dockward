@@ -22,17 +22,24 @@ const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 const KEY_LEN: usize = 32;
 
-const LABEL_CREDENTIALS: &[u8] = b"harborgate/credentials-v1";
-const LABEL_SESSION: &[u8] = b"harborgate/session-v1";
-const LABEL_BACKUP: &[u8] = b"harborgate/backup-v1";
-const LABEL_CSRF: &[u8] = b"harborgate/csrf-v1";
+const LABEL_CREDENTIALS: &[u8] = b"dockward/credentials-v1";
+const LABEL_SESSION: &[u8] = b"dockward/session-v1";
+const LABEL_BACKUP: &[u8] = b"dockward/backup-v1";
+const LABEL_CSRF: &[u8] = b"dockward/csrf-v1";
+/// The credential label before the rename (decisions 54 and 56). It is read only, as a
+/// fallback for stored ciphertexts the startup migration has not resealed yet.
+pub const LABEL_CREDENTIALS_LEGACY: &[u8] = b"harborgate/credentials-v1";
 
-/// A 32-byte derived key. It is zeroed on drop.
-pub struct DerivedKey(Zeroizing<[u8; KEY_LEN]>);
+/// A 32-byte derived key. It is zeroed on drop. The credential key also carries the
+/// pre-rename key as a read-only fallback, which [`decrypt`] tries after this key.
+pub struct DerivedKey {
+    key: Zeroizing<[u8; KEY_LEN]>,
+    legacy: Option<Zeroizing<[u8; KEY_LEN]>>,
+}
 
 impl DerivedKey {
     pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
-        &self.0
+        &self.key
     }
 }
 
@@ -42,12 +49,23 @@ pub fn derive_key(root: &EncryptionKey, label: &[u8]) -> Result<DerivedKey, AppE
     let mut out = Zeroizing::new([0u8; KEY_LEN]);
     hk.expand(label, out.as_mut_slice())
         .map_err(|_| AppError::InternalError)?;
-    Ok(DerivedKey(out))
+    Ok(DerivedKey {
+        key: out,
+        legacy: None,
+    })
 }
 
-/// The credential key used for every stored ciphertext.
+/// The credential key used for every stored ciphertext. [`decrypt`] falls back to the
+/// pre-rename key when a value does not open with this one; [`encrypt`] never uses it.
 pub fn credentials_key(root: &EncryptionKey) -> Result<DerivedKey, AppError> {
-    derive_key(root, LABEL_CREDENTIALS)
+    let mut key = derive_key(root, LABEL_CREDENTIALS)?;
+    key.legacy = Some(derive_key(root, LABEL_CREDENTIALS_LEGACY)?.key);
+    Ok(key)
+}
+
+/// The pre-rename credential key, without a fallback. The label migration uses it.
+pub fn legacy_credentials_key(root: &EncryptionKey) -> Result<DerivedKey, AppError> {
+    derive_key(root, LABEL_CREDENTIALS_LEGACY)
 }
 
 /// The session signing key.
@@ -94,7 +112,27 @@ pub fn encrypt(key: &DerivedKey, aad: &str, plaintext: &[u8]) -> Result<String, 
 }
 
 /// Decrypts a `v1:` string that was encrypted for `aad`. The result is zeroed on drop.
+/// A credential key tries the current key first and then the pre-rename key.
 pub fn decrypt(key: &DerivedKey, aad: &str, stored: &str) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    match decrypt_exact(key, aad, stored) {
+        Ok(plain) => Ok(plain),
+        Err(err) => match &key.legacy {
+            Some(legacy) => open(legacy, aad, stored),
+            None => Err(err),
+        },
+    }
+}
+
+/// Like [`decrypt`], but only with `key` itself: no fallback.
+pub fn decrypt_exact(
+    key: &DerivedKey,
+    aad: &str,
+    stored: &str,
+) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    open(&key.key, aad, stored)
+}
+
+fn open(key: &[u8; KEY_LEN], aad: &str, stored: &str) -> Result<Zeroizing<Vec<u8>>, AppError> {
     let encoded = stored
         .strip_prefix(V1_PREFIX)
         .ok_or(AppError::InternalError)?;
@@ -107,7 +145,7 @@ pub fn decrypt(key: &DerivedKey, aad: &str, stored: &str) -> Result<Zeroizing<Ve
         .try_into()
         .map_err(|_| AppError::InternalError)?;
 
-    let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|_| AppError::InternalError)?;
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| AppError::InternalError)?;
     let plaintext = cipher
         .decrypt(
             nonce,
@@ -287,12 +325,12 @@ mod tests {
     /// bytes, the salt is absent, and each output is 32 bytes. Assertions print no
     /// key bytes. Test values only.
     const KAT_HKDF_CREDENTIALS: &str =
-        "903052f15afc94615e653837fd963ea1308221f2a78e288ce35bee6d63d9ab7c";
+        "abcba23a3c0c5925919235d93ced37fcf41cc12a6bb30903def31c69bc9a250f";
     const KAT_HKDF_SESSION: &str =
-        "d6b8e87ab1be6ee9ff84c47538e25f3ae088edf20d481adb12992b67ba8babb5";
+        "ad161010832c5a8ad79a07d0239b13b7117d95a9505dbc566d10755f41675216";
     const KAT_HKDF_BACKUP: &str =
-        "3ff22b0bdd4edc2113e02adf9368e9fd8d07ff877e9ef7db3acac2f9d5861adb";
-    const KAT_HKDF_CSRF: &str = "3ade9c704ec82e0cb8479adc0463e794282466fa5ac03f5693cf9bfddda28a25";
+        "c4e40cb5e0b551c6facc945339d4bc403219c6eea73145d877582370a5ae7d57";
+    const KAT_HKDF_CSRF: &str = "619cdafedd6038348d155862ceafae632ee5bdcdf35878938516265b22d7a3d1";
 
     #[test]
     fn hkdf_known_answers_per_label() {
@@ -313,6 +351,39 @@ mod tests {
                 "an HKDF output changed for a label"
             );
         }
+    }
+
+    /// The pre-rename credential label, recorded with the same build.
+    const KAT_HKDF_CREDENTIALS_LEGACY: &str =
+        "903052f15afc94615e653837fd963ea1308221f2a78e288ce35bee6d63d9ab7c";
+
+    #[test]
+    fn legacy_credentials_label_known_answer() {
+        let derived = match derive_key(&root(), LABEL_CREDENTIALS_LEGACY) {
+            Ok(k) => k,
+            Err(_) => panic!("derivation must succeed"),
+        };
+        assert!(to_hex(derived.as_bytes()) == KAT_HKDF_CREDENTIALS_LEGACY);
+    }
+
+    /// A value sealed under the old label opens through the fallback, the new key alone
+    /// refuses it, and a new seal never uses the old key.
+    #[test]
+    fn old_label_ciphertext_opens_through_the_fallback() {
+        let legacy = match legacy_credentials_key(&root()) {
+            Ok(k) => k,
+            Err(_) => panic!("derivation must succeed"),
+        };
+        let a = aad("user_credentials", "encrypted_token", "9");
+        let old = encrypt(&legacy, &a, b"fake-old-token").unwrap_or_default();
+        let key = cred();
+        let out = decrypt(&key, &a, &old);
+        assert!(matches!(out, Ok(ref v) if v.as_slice() == b"fake-old-token"));
+        assert!(decrypt_exact(&key, &a, &old).is_err());
+        let fresh = encrypt(&key, &a, b"fake-new-token").unwrap_or_default();
+        assert!(decrypt_exact(&key, &a, &fresh).is_ok());
+        assert!(decrypt(&legacy, &a, &fresh).is_err());
+        assert!(decrypt(&key, "user_credentials:encrypted_token:8", &old).is_err());
     }
 
     /// SHA-256 of "abc" and of the 56-byte NIST FIPS 180-2 message.

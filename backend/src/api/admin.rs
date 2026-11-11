@@ -846,8 +846,8 @@ mod tests {
         let admin = crate::auth::session::issue(&session_key, "admin-id", "admin", 0, now).unwrap();
         let user = crate::auth::session::issue(&session_key, "user-id", "user", 0, now).unwrap();
         (
-            format!("__Host-harborgate_session={admin}; __Host-harborgate_csrf={csrf}"),
-            format!("__Host-harborgate_session={user}; __Host-harborgate_csrf={csrf}"),
+            format!("__Host-dockward_session={admin}; __Host-dockward_csrf={csrf}"),
+            format!("__Host-dockward_session={user}; __Host-dockward_csrf={csrf}"),
         )
     }
 
@@ -873,7 +873,7 @@ mod tests {
         let (router, pool, dir) = router("admin-only").await;
         let (admin_cookie, user_cookie) = cookies_for(&pool, TEST_KEY_B64).await;
         let csrf = admin_cookie
-            .split("__Host-harborgate_csrf=")
+            .split("__Host-dockward_csrf=")
             .nth(1)
             .unwrap()
             .to_owned();
@@ -932,7 +932,7 @@ mod tests {
         let (router, pool, dir) = router("alert-channels").await;
         let (admin_cookie, user_cookie) = cookies_for(&pool, TEST_KEY_B64).await;
         let csrf = admin_cookie
-            .split("__Host-harborgate_csrf=")
+            .split("__Host-dockward_csrf=")
             .nth(1)
             .unwrap()
             .to_owned();
@@ -946,7 +946,7 @@ mod tests {
             ("PUT", format!("{base}/some-id")),
         ] {
             // No session cookie, but a valid CSRF pair, so the session check is what answers.
-            let csrf_only = format!("__Host-harborgate_csrf={csrf}");
+            let csrf_only = format!("__Host-dockward_csrf={csrf}");
             let anonymous = router
                 .clone()
                 .oneshot(channel_request(method, &uri, Some(&csrf_only), &csrf, body))
