@@ -172,10 +172,7 @@ async fn an_unchanged_database_queues_nothing() {
     assert!(matches!(fx.run(Scanner::Trivy).await, JobOutcome::Done));
 
     assert_eq!(fx.rescans("trivy").await, 0);
-    assert_eq!(
-        count(&fx.pool, "SELECT COUNT(*) FROM sync_jobs", &[]).await,
-        0
-    );
+    assert_eq!(count(&fx.pool, "SELECT COUNT(*) FROM jobs", &[]).await, 0);
 }
 
 #[tokio::test]
@@ -195,7 +192,7 @@ async fn a_newer_database_queues_one_rescan_per_stored_platform_image() {
     assert_eq!(
         count(
             &fx.pool,
-            "SELECT COUNT(*) FROM sync_jobs WHERE source_id IS NULL AND status = 'queued'
+            "SELECT COUNT(*) FROM jobs WHERE source_id IS NULL AND status = 'queued'
              AND payload LIKE '%\"scan\"%'",
             &[]
         )
@@ -413,7 +410,7 @@ async fn the_schedule_queues_one_job_per_scanner_and_skips_an_open_one() {
     assert_eq!(
         count(
             &fx.pool,
-            "SELECT COUNT(*) FROM sync_jobs WHERE source_id IS NULL
+            "SELECT COUNT(*) FROM jobs WHERE source_id IS NULL
              AND payload LIKE '%\"db_update\"%'",
             &[]
         )
@@ -421,9 +418,9 @@ async fn the_schedule_queues_one_job_per_scanner_and_skips_an_open_one() {
         2
     );
     // Once the jobs are done (or failed), the next pass queues them again.
-    exec(&fx.pool, "UPDATE sync_jobs SET status = 'done'", &[]).await;
+    exec(&fx.pool, "UPDATE jobs SET status = 'done'", &[]).await;
     assert_eq!(schedule_once(&fx.pool, 3_000).await.ok(), Some(2));
-    exec(&fx.pool, "UPDATE sync_jobs SET status = 'failed'", &[]).await;
+    exec(&fx.pool, "UPDATE jobs SET status = 'failed'", &[]).await;
     assert_eq!(schedule_once(&fx.pool, 4_000).await.ok(), Some(2));
 }
 

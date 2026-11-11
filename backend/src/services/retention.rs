@@ -25,9 +25,9 @@ const DAY: i64 = 86_400;
 // is not true in SQL.
 /// Age limit for `sync_reports`: 90 days (`specs/cve-lifecycle.md` Retention).
 const SYNC_REPORT_AGE: i64 = 90 * DAY;
-/// Age limit for finished `sync_jobs`: 90 days (`specs/cve-lifecycle.md` Retention,
+/// Age limit for finished `jobs`: 90 days (`specs/cve-lifecycle.md` Retention,
 /// `specs/database.md` Retention).
-const SYNC_JOB_AGE: i64 = 90 * DAY;
+const JOB_AGE: i64 = 90 * DAY;
 /// Age limit for `job_runs`: 90 days (`specs/database.md` Retention).
 const JOB_RUN_AGE: i64 = 90 * DAY;
 /// Age limit for `alert_deliveries`: 30 days (`specs/cve-lifecycle.md` Retention,
@@ -48,7 +48,7 @@ const FAILED_SUMMARY: &str = "retention deletes failed; no rows were removed";
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Counts {
     sync_reports: u64,
-    sync_jobs: u64,
+    jobs: u64,
     job_runs: u64,
     alert_deliveries: u64,
     audit_log: u64,
@@ -59,7 +59,7 @@ impl Counts {
     fn total(&self) -> Result<u64, AppError> {
         [
             self.sync_reports,
-            self.sync_jobs,
+            self.jobs,
             self.job_runs,
             self.alert_deliveries,
             self.audit_log,
@@ -74,7 +74,7 @@ impl Counts {
     fn details(&self) -> serde_json::Value {
         json!({
             "sync_reports": self.sync_reports,
-            "sync_jobs": self.sync_jobs,
+            "sync_jobs": self.jobs,
             "job_runs": self.job_runs,
             "alert_deliveries": self.alert_deliveries,
             "audit_log": self.audit_log,
@@ -119,7 +119,7 @@ async fn delete_expired(pool: &SqlitePool, now: i64) -> Result<Counts, AppError>
 async fn delete_and_audit(conn: &mut SqliteConnection, now: i64) -> Result<Counts, AppError> {
     let counts = Counts {
         sync_reports: retention_db::delete_sync_reports(conn, now - SYNC_REPORT_AGE).await?,
-        sync_jobs: retention_db::delete_sync_jobs(conn, now - SYNC_JOB_AGE).await?,
+        jobs: retention_db::delete_jobs(conn, now - JOB_AGE).await?,
         job_runs: retention_db::delete_job_runs(conn, now - JOB_RUN_AGE).await?,
         alert_deliveries: retention_db::delete_alert_deliveries(conn, now - ALERT_DELIVERY_AGE)
             .await?,
@@ -242,14 +242,14 @@ mod tests {
         .map_err(|_| AppError::InternalError)
     }
 
-    async fn insert_sync_job(
+    async fn insert_job(
         pool: &SqlitePool,
         id: &str,
         status: &str,
         updated_at: i64,
     ) -> Result<(), AppError> {
         sqlx::query(
-            "INSERT INTO sync_jobs (id, source_id, status, payload, updated_at)
+            "INSERT INTO jobs (id, source_id, status, payload, updated_at)
              VALUES (?, 'map-1', ?, '{}', ?)",
         )
         .bind(id)
@@ -321,8 +321,8 @@ mod tests {
         // Each table gets one row 1 s older than its limit and one row 1 s newer.
         insert_sync_report(&pool, "sync_reports-old", NOW - SYNC_REPORT_AGE - 1).await?;
         insert_sync_report(&pool, "sync_reports-new", NOW - SYNC_REPORT_AGE + 1).await?;
-        insert_sync_job_done(&pool, "sync_jobs-old", NOW - SYNC_JOB_AGE - 1).await?;
-        insert_sync_job_done(&pool, "sync_jobs-new", NOW - SYNC_JOB_AGE + 1).await?;
+        insert_job_done(&pool, "jobs-old", NOW - JOB_AGE - 1).await?;
+        insert_job_done(&pool, "jobs-new", NOW - JOB_AGE + 1).await?;
         insert_job_run(&pool, "job_runs-old", NOW - JOB_RUN_AGE - 1).await?;
         insert_job_run(&pool, "job_runs-new", NOW - JOB_RUN_AGE + 1).await?;
         insert_alert_delivery(&pool, "alert_deliveries-old", NOW - ALERT_DELIVERY_AGE - 1).await?;
@@ -337,7 +337,7 @@ mod tests {
                 "sync_reports",
                 "SELECT COUNT(*) FROM publish_reports WHERE id = ?",
             ),
-            ("sync_jobs", "SELECT COUNT(*) FROM sync_jobs WHERE id = ?"),
+            ("jobs", "SELECT COUNT(*) FROM jobs WHERE id = ?"),
             ("job_runs", "SELECT COUNT(*) FROM job_runs WHERE id = ?"),
             (
                 "alert_deliveries",
@@ -358,14 +358,10 @@ mod tests {
         Ok(())
     }
 
-    /// `sync_jobs` rows in `done` for the boundary test. Queued and running rows are
+    /// `jobs` rows in `done` for the boundary test. Queued and running rows are
     /// covered by the next test.
-    async fn insert_sync_job_done(
-        pool: &SqlitePool,
-        id: &str,
-        updated_at: i64,
-    ) -> Result<(), AppError> {
-        insert_sync_job(pool, id, "done", updated_at).await
+    async fn insert_job_done(pool: &SqlitePool, id: &str, updated_at: i64) -> Result<(), AppError> {
+        insert_job(pool, id, "done", updated_at).await
     }
 
     #[tokio::test]
@@ -373,7 +369,7 @@ mod tests {
         let pool = test_pool().await?;
         seed_parents(&pool).await?;
         insert_sync_report(&pool, "sync_reports-edge", NOW - SYNC_REPORT_AGE).await?;
-        insert_sync_job(&pool, "sync_jobs-edge", "done", NOW - SYNC_JOB_AGE).await?;
+        insert_job(&pool, "jobs-edge", "done", NOW - JOB_AGE).await?;
         insert_job_run(&pool, "job_runs-edge", NOW - JOB_RUN_AGE).await?;
         insert_alert_delivery(&pool, "alert_deliveries-edge", NOW - ALERT_DELIVERY_AGE).await?;
         insert_audit(&pool, "audit_log-edge", NOW - AUDIT_LOG_AGE).await?;
@@ -385,7 +381,7 @@ mod tests {
                 "sync_reports",
                 "SELECT COUNT(*) FROM publish_reports WHERE id = ?",
             ),
-            ("sync_jobs", "SELECT COUNT(*) FROM sync_jobs WHERE id = ?"),
+            ("jobs", "SELECT COUNT(*) FROM jobs WHERE id = ?"),
             ("job_runs", "SELECT COUNT(*) FROM job_runs WHERE id = ?"),
             (
                 "alert_deliveries",
@@ -402,31 +398,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleting_a_sync_job_keeps_its_report_with_a_null_job_id() -> Result<(), AppError> {
+    async fn deleting_a_job_keeps_its_report_with_a_null_job_id() -> Result<(), AppError> {
         let pool = test_pool().await?;
         seed_parents(&pool).await?;
-        insert_sync_job(&pool, "job-old", "done", NOW - SYNC_JOB_AGE - 1).await?;
+        insert_job(&pool, "job-old", "done", NOW - JOB_AGE - 1).await?;
         // The report is recent, so only the job is expired.
         insert_sync_report(&pool, "report-recent", NOW).await?;
-        sqlx::query(
-            "UPDATE publish_reports SET sync_job_id = 'job-old' WHERE id = 'report-recent'",
-        )
-        .execute(&pool)
-        .await
-        .map_err(|_| AppError::InternalError)?;
+        sqlx::query("UPDATE publish_reports SET job_id = 'job-old' WHERE id = 'report-recent'")
+            .execute(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
 
         run_once(&pool, NOW).await?;
 
-        let jobs = count(
-            &pool,
-            "SELECT COUNT(*) FROM sync_jobs WHERE id = ?",
-            "job-old",
-        )
-        .await?;
+        let jobs = count(&pool, "SELECT COUNT(*) FROM jobs WHERE id = ?", "job-old").await?;
         assert_eq!(jobs, 0, "the expired job was kept");
         let linked = count(
             &pool,
-            "SELECT COUNT(*) FROM publish_reports WHERE id = ? AND sync_job_id IS NULL",
+            "SELECT COUNT(*) FROM publish_reports WHERE id = ? AND job_id IS NULL",
             "report-recent",
         )
         .await?;
@@ -443,15 +432,15 @@ mod tests {
         let pool = test_pool().await?;
         seed_parents(&pool).await?;
         // Far older than the limit, so only the status can keep them.
-        let long_ago = NOW - SYNC_JOB_AGE - DAY;
-        insert_sync_job(&pool, "job-queued", "queued", long_ago).await?;
-        insert_sync_job(&pool, "job-running", "running", long_ago).await?;
-        insert_sync_job(&pool, "job-done", "done", long_ago).await?;
-        insert_sync_job(&pool, "job-failed", "failed", long_ago).await?;
+        let long_ago = NOW - JOB_AGE - DAY;
+        insert_job(&pool, "job-queued", "queued", long_ago).await?;
+        insert_job(&pool, "job-running", "running", long_ago).await?;
+        insert_job(&pool, "job-done", "done", long_ago).await?;
+        insert_job(&pool, "job-failed", "failed", long_ago).await?;
 
         run_once(&pool, NOW).await?;
 
-        let sql = "SELECT COUNT(*) FROM sync_jobs WHERE id = ?";
+        let sql = "SELECT COUNT(*) FROM jobs WHERE id = ?";
         assert_eq!(
             count(&pool, sql, "job-queued").await?,
             1,

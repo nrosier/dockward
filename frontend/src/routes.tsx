@@ -25,7 +25,7 @@ import LoginPage from "./pages/LoginPage";
 import SourceFormPage from "./pages/SourceFormPage";
 import SourcesPage from "./pages/SourcesPage";
 import SetupPage from "./pages/SetupPage";
-import SyncJobsPage from "./pages/SyncJobsPage";
+import JobsPage from "./pages/JobsPage";
 
 // The route table from specs/frontend.md ("Screen designs"), plus the edit
 // screens for mappings and credentials.
@@ -44,7 +44,7 @@ export const routes: RouteObject[] = [
           { path: "sources/:id", element: <SourceFormPage /> },
           { path: "cves", element: <CvesPage /> },
           { path: "cves/:id", element: <CveDetailPage /> },
-          { path: "sync-jobs", element: <SyncJobsPage /> },
+          { path: "jobs", element: <JobsPage /> },
           {
             path: "account",
             element: <AccountLayout />,

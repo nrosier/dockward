@@ -3,7 +3,7 @@ import { useHubs, useSources } from "../components/sources/useSources";
 import { PageHeader } from "../components/mappings/PageHeader";
 import { INPUT, LINK, TABLE, TD, TH } from "../components/mappings/styles";
 import { TableScroll } from "../components/mappings/TableScroll";
-import { Time } from "../components/syncjobs/Time";
+import { Time } from "../components/jobs/Time";
 import { buttonClass } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { ErrorMessage, LoadingMessage } from "../components/ui/StatusMessage";

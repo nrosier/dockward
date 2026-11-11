@@ -101,7 +101,7 @@ pub async fn insert_queued_run(
     job_id: &str,
 ) -> Result<(), AppError> {
     sqlx::query!(
-        "INSERT INTO scan_runs (id, image_platform_id, scanner, trigger, status, sync_job_id)
+        "INSERT INTO scan_runs (id, image_platform_id, scanner, trigger, status, job_id)
          VALUES (?, ?, ?, ?, 'queued', ?)",
         run_id,
         platform_id,
@@ -334,13 +334,13 @@ pub async fn release_run(
     .map_err(db_err)
 }
 
-/// Fails every `queued` or `running` run whose job no longer exists (`sync_job_id` is NULL
+/// Fails every `queued` or `running` run whose job no longer exists (`job_id` is NULL
 /// after the job was deleted, for example with its source). Such a run can never start, and
 /// would keep its image from eviction. Returns the number failed.
 pub async fn fail_orphan_runs(conn: &mut SqliteConnection, now: i64) -> Result<u64, AppError> {
     sqlx::query!(
         "UPDATE scan_runs SET status = 'failed', error = 'scan job was removed', finished_at = ?
-         WHERE sync_job_id IS NULL AND status IN ('queued', 'running')",
+         WHERE job_id IS NULL AND status IN ('queued', 'running')",
         now
     )
     .execute(conn)

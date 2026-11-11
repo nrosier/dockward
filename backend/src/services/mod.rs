@@ -30,6 +30,8 @@ pub mod ids;
 pub mod images;
 pub mod issue_lifecycle;
 pub mod job_runs;
+#[allow(dead_code)] // Used by the job worker and the retry route.
+pub mod jobs;
 pub mod key_rotation;
 pub mod merged_view;
 #[allow(dead_code)] // The list routes that use this are added with the admin routes.
@@ -48,8 +50,6 @@ pub mod source_credentials;
 pub mod sources;
 #[allow(dead_code)] // The pull and eviction jobs call the store (Steps 4 and 5).
 pub mod storage;
-#[allow(dead_code)] // Used by the job worker and the retry route.
-pub mod sync_jobs;
 #[allow(dead_code)] // Used by the login service.
 pub mod throttle;
 #[allow(dead_code)] // Used by the user response shape.

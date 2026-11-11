@@ -3,10 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { t } from "../i18n";
 import { json, renderAt, stubApi, user } from "../test/render";
-import type { DashboardSummary, SyncJob } from "../types/api";
+import type { DashboardSummary, Job } from "../types/api";
 import DashboardPage from "./DashboardPage";
 
-function job(over: Partial<SyncJob>): SyncJob {
+function job(over: Partial<Job>): Job {
   return {
     id: "j1",
     mapping_id: "m1",
@@ -42,7 +42,7 @@ function stub(onRetry?: () => void) {
     if (path.startsWith("/api/v1/mappings")) {
       return json({ items: [], page: 1, page_size: 200, total: 0 });
     }
-    if (path === "/api/v1/sync-jobs/j2/retry" && init?.method === "POST") {
+    if (path === "/api/v1/jobs/j2/retry" && init?.method === "POST") {
       onRetry?.();
       return json(job({ id: "j2", status: "queued" }));
     }
@@ -85,7 +85,7 @@ describe("DashboardPage", () => {
     const retried = vi.fn();
     const fetchMock = stub(retried);
     renderAt(<DashboardPage />);
-    await userEvent.click(await screen.findByRole("button", { name: t("syncJobs.retry") }));
+    await userEvent.click(await screen.findByRole("button", { name: t("jobs.retry") }));
     await vi.waitFor(() => expect(retried).toHaveBeenCalledTimes(1));
     const summaryCalls = () => fetchMock.mock.calls.filter(([path]) => String(path).startsWith("/api/v1/dashboard/summary"));
     await vi.waitFor(() => expect(summaryCalls().length).toBeGreaterThanOrEqual(2));

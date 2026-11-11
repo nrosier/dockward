@@ -1,8 +1,8 @@
 //! The in-process job worker (`specs/backend.md`, Durable job queue).
 //!
-//! The worker claims one due `sync_jobs` row at a time and passes it to a [`JobHandler`].
+//! The worker claims one due `jobs` row at a time and passes it to a [`JobHandler`].
 //! A success marks the job `done`. A failure is recorded with the backoff from
-//! [`crate::services::sync_jobs`]. A deferral puts the job back in `queued` without using
+//! [`crate::services::jobs`]. A deferral puts the job back in `queued` without using
 //! an attempt. A panic in a handler fails that job only. The worker stops taking new jobs
 //! after the stop signal.
 //!
@@ -18,9 +18,9 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use tokio::sync::watch;
 
-use crate::db::sync_jobs::{self, ClaimedJob};
+use crate::db::jobs::{self, ClaimedJob};
 use crate::error::AppError;
-use crate::services::sync_jobs::{AfterFailure, after_failure};
+use crate::services::jobs::{AfterFailure, after_failure};
 
 /// How many times a failed write after the handler is retried before the step returns
 /// the error. One original write plus this many retries makes 4 writes in total.
@@ -117,7 +117,7 @@ pub async fn step<H: JobHandler>(
     handler: &Arc<H>,
     now: i64,
 ) -> Result<Step, AppError> {
-    let Some(job) = sync_jobs::claim_next(pool, now).await? else {
+    let Some(job) = jobs::claim_next(pool, now).await? else {
         return Ok(Step::Idle);
     };
     let joined = tokio::spawn({
@@ -138,11 +138,11 @@ pub async fn step<H: JobHandler>(
     let id = job.id.as_str();
     match outcome {
         JobOutcome::Done => {
-            with_write_retries(|| sync_jobs::mark_done(pool, id, now)).await?;
+            with_write_retries(|| jobs::mark_done(pool, id, now)).await?;
             Ok(Step::Done)
         }
         JobOutcome::DoneWithNote(note) => {
-            with_write_retries(|| sync_jobs::mark_done_with_note(pool, id, &note, now)).await?;
+            with_write_retries(|| jobs::mark_done_with_note(pool, id, &note, now)).await?;
             Ok(Step::Done)
         }
         JobOutcome::Failed(message) => {
@@ -178,9 +178,8 @@ pub async fn step<H: JobHandler>(
             Ok(Step::GaveUp)
         }
         JobOutcome::Deferred { until, reason } => {
-            tracing::info!(reason = %reason, "sync job deferred");
-            let next_attempt_at =
-                with_write_retries(|| sync_jobs::defer(pool, id, until, now)).await?;
+            tracing::info!(reason = %reason, "job deferred");
+            let next_attempt_at = with_write_retries(|| jobs::defer(pool, id, until, now)).await?;
             Ok(Step::Deferred { next_attempt_at })
         }
     }
@@ -197,7 +196,7 @@ async fn record_failure_tx(
     now: i64,
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
-    sync_jobs::record_failure(
+    jobs::record_failure(
         &mut tx,
         id,
         attempts,
@@ -219,12 +218,9 @@ pub async fn tick<H: JobHandler>(
     handler: &Arc<H>,
     now: i64,
 ) -> Result<Step, AppError> {
-    let requeued = sync_jobs::requeue_running(pool, now).await?;
+    let requeued = jobs::requeue_running(pool, now).await?;
     if requeued > 0 {
-        tracing::warn!(
-            requeued,
-            "re-queued sync jobs left running by a failed write"
-        );
+        tracing::warn!(requeued, "re-queued jobs left running by a failed write");
     }
     step(pool, handler, now).await
 }
@@ -341,14 +337,14 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        db::sync_jobs::enqueue(pool, job_id, Some("m1"), "{}", 1_000)
+        db::jobs::enqueue(pool, job_id, Some("m1"), "{}", 1_000)
             .await
             .unwrap();
     }
 
     async fn job_row(pool: &SqlitePool, job_id: &str) -> (String, i64, Option<i64>) {
         sqlx::query_as::<_, (String, i64, Option<i64>)>(
-            "SELECT status, attempts, next_attempt_at FROM sync_jobs WHERE id = ?",
+            "SELECT status, attempts, next_attempt_at FROM jobs WHERE id = ?",
         )
         .bind(job_id)
         .fetch_one(pool)
@@ -357,7 +353,7 @@ mod tests {
     }
 
     async fn last_error(pool: &SqlitePool, job_id: &str) -> Option<String> {
-        sqlx::query_scalar::<_, Option<String>>("SELECT last_error FROM sync_jobs WHERE id = ?")
+        sqlx::query_scalar::<_, Option<String>>("SELECT last_error FROM jobs WHERE id = ?")
             .bind(job_id)
             .fetch_one(pool)
             .await
@@ -418,7 +414,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn giving_up_a_job_triggers_a_sync_failed_alert() {
+    async fn giving_up_a_job_triggers_a_job_failed_alert() {
         use crate::services::alerts::{ChannelConfig, Notifier};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -442,7 +438,7 @@ mod tests {
         );
 
         // The alert: one enabled channel, a recording sender. The notifier sends one
-        // `sync_failed` alert keyed `sync_failed:<job id>`, with mapping names and fixed text.
+        // `job_failed` alert keyed `job_failed:<job id>`, with mapping names and fixed text.
         let key = Arc::new(
             crate::auth::crypto::credentials_key(
                 &crate::config::parse_encryption_key(
@@ -476,7 +472,7 @@ mod tests {
             log.lock().unwrap().push(alert);
             Box::pin(async { Ok(()) })
         });
-        notifier.spawn_sync_failed("j-alert", "m1", now);
+        notifier.spawn_job_failed("j-alert", "m1", now);
         for _ in 0..200 {
             if calls.load(Ordering::SeqCst) > 0 {
                 break;
@@ -487,7 +483,7 @@ mod tests {
         let alert = seen.lock().unwrap()[0].clone();
         assert_eq!(
             alert.event,
-            crate::services::alert_send::AlertEvent::SyncFailed
+            crate::services::alert_send::AlertEvent::JobFailed
         );
         assert_eq!(alert.harbor, "ghcr.io/p/r");
         assert_eq!(alert.github, "o/g");
@@ -495,7 +491,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(key_used, "sync_failed:j-alert");
+        assert_eq!(key_used, "job_failed:j-alert");
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -505,14 +501,11 @@ mod tests {
         let (pool, dir) = fresh_pool("requeue").await;
         queued_job(&pool, "j2").await;
         // Simulate a crash mid-run: the job is claimed and never finished.
-        let claimed = db::sync_jobs::claim_next(&pool, 1_000)
-            .await
-            .unwrap()
-            .unwrap();
+        let claimed = db::jobs::claim_next(&pool, 1_000).await.unwrap().unwrap();
         assert_eq!(claimed.attempts, 0);
         assert_eq!(job_row(&pool, "j2").await.0, "running");
 
-        let requeued = db::sync_jobs::requeue_running(&pool, 2_000).await.unwrap();
+        let requeued = db::jobs::requeue_running(&pool, 2_000).await.unwrap();
         assert_eq!(requeued, 1);
         let (status, attempts, _) = job_row(&pool, "j2").await;
         assert_eq!((status.as_str(), attempts), ("queued", 1));
@@ -525,12 +518,12 @@ mod tests {
         let (pool, dir) = fresh_pool("requeue-limit").await;
         queued_job(&pool, "j-limit").await;
         // A job already interrupted seven times, and now running again.
-        sqlx::query("UPDATE sync_jobs SET status = 'running', attempts = 7 WHERE id = 'j-limit'")
+        sqlx::query("UPDATE jobs SET status = 'running', attempts = 7 WHERE id = 'j-limit'")
             .execute(&pool)
             .await
             .unwrap();
 
-        let requeued = db::sync_jobs::requeue_running(&pool, 2_000).await.unwrap();
+        let requeued = db::jobs::requeue_running(&pool, 2_000).await.unwrap();
         assert_eq!(requeued, 1);
         let (status, attempts, next) = job_row(&pool, "j-limit").await;
         assert_eq!((status.as_str(), attempts, next), ("failed", 8, None));
@@ -547,10 +540,7 @@ mod tests {
         let (pool, dir) = fresh_pool("loop-requeue").await;
         queued_job(&pool, "j-loop").await;
         // A write after an earlier run failed, so the job was left `running`.
-        db::sync_jobs::claim_next(&pool, 1_000)
-            .await
-            .unwrap()
-            .unwrap();
+        db::jobs::claim_next(&pool, 1_000).await.unwrap().unwrap();
         assert_eq!(job_row(&pool, "j-loop").await.0, "running");
 
         let handler = Arc::new(NoopHandler);
@@ -577,7 +567,7 @@ mod tests {
         let (pool, dir) = fresh_pool("panic").await;
         queued_job(&pool, "j-panic").await;
         // Due one second later, so it is taken after `j-panic`.
-        db::sync_jobs::enqueue(&pool, "j-next", Some("m1"), "{}", 1_001)
+        db::jobs::enqueue(&pool, "j-next", Some("m1"), "{}", 1_001)
             .await
             .unwrap();
         let handler = Arc::new(PanicOnOne);
@@ -607,7 +597,7 @@ mod tests {
     async fn deferred_job_is_requeued_without_using_an_attempt() {
         let (pool, dir) = fresh_pool("defer").await;
         queued_job(&pool, "j-defer").await;
-        sqlx::query("UPDATE sync_jobs SET last_error = 'earlier' WHERE id = 'j-defer'")
+        sqlx::query("UPDATE jobs SET last_error = 'earlier' WHERE id = 'j-defer'")
             .execute(&pool)
             .await
             .unwrap();

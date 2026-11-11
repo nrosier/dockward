@@ -23,7 +23,7 @@ describe("AdminFailedPage", () => {
   it("retry posts and shows the owner username", async () => {
     let failed = [job];
     const fetchMock = stubApi((path, init) => {
-      if (path.startsWith("/api/v1/sync-jobs?")) {
+      if (path.startsWith("/api/v1/jobs?")) {
         return json({ items: failed, page: 1, page_size: 50, total: failed.length });
       }
       if (path === "/api/v1/mappings?scope=all&page_size=200") {
@@ -37,7 +37,7 @@ describe("AdminFailedPage", () => {
       if (path === "/api/v1/admin/users") {
         return json([{ ...user("user"), id: "u7", username: "j.devries" }]);
       }
-      if (path === "/api/v1/sync-jobs/j1/retry" && init?.method === "POST") {
+      if (path === "/api/v1/jobs/j1/retry" && init?.method === "POST") {
         failed = [];
         return json({ ...job, status: "queued" });
       }
@@ -52,7 +52,7 @@ describe("AdminFailedPage", () => {
     await userEvent.click(screen.getByRole("button", { name: t("admin.failed.retry") }));
     expect(await screen.findByText(t("admin.failed.empty"))).toBeInTheDocument();
     const retried = fetchMock.mock.calls.some(
-      (call) => String(call[0]) === "/api/v1/sync-jobs/j1/retry" && (call[1] as RequestInit).method === "POST",
+      (call) => String(call[0]) === "/api/v1/jobs/j1/retry" && (call[1] as RequestInit).method === "POST",
     );
     expect(retried).toBe(true);
   });

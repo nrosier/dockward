@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use crate::db::sync_jobs::ClaimedJob;
+use crate::db::jobs::ClaimedJob;
 use crate::services::alerts::Notifier;
 use crate::services::discovery::Discovery;
 use crate::services::publish::Publisher;
@@ -93,11 +93,11 @@ impl JobHandler for SpinoffJobs {
         }
     }
 
-    /// A discover, pull or scan job that failed for good raises the sync-failed alert with fixed
+    /// A discover, pull or scan job that failed for good raises the job-failed alert with fixed
     /// text.
     fn on_give_up(&self, job: &ClaimedJob, now: i64) {
         if let Some(source_id) = job.source_id.as_deref() {
-            self.notifier.spawn_sync_failed(&job.id, source_id, now);
+            self.notifier.spawn_job_failed(&job.id, source_id, now);
         }
     }
 }

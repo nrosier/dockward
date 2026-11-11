@@ -298,7 +298,7 @@ impl Env {
     }
 
     async fn pulls(&self) -> i64 {
-        self.count("SELECT COUNT(*) FROM sync_jobs WHERE json_extract(payload, '$.kind') = 'pull'")
+        self.count("SELECT COUNT(*) FROM jobs WHERE json_extract(payload, '$.kind') = 'pull'")
             .await
     }
 
@@ -372,7 +372,7 @@ async fn a_moved_tag_queues_one_pull_and_keeps_the_old_digest() {
     assert_eq!(env.pulls().await, 2);
     assert_eq!(env.count("SELECT COUNT(*) FROM tag_observations").await, 2);
     let triggers: Vec<String> = sqlx::query_scalar(
-        "SELECT json_extract(payload, '$.trigger') FROM sync_jobs ORDER BY created_at, rowid",
+        "SELECT json_extract(payload, '$.trigger') FROM jobs ORDER BY created_at, rowid",
     )
     .fetch_all(&env.pool)
     .await
@@ -468,7 +468,7 @@ async fn a_multi_arch_index_yields_one_platform_row_each_and_skips_attestations(
     );
     assert_eq!(env.pulls().await, 3);
     // Each pull job names a platform row and its digest, and no secret.
-    let payloads: Vec<String> = sqlx::query_scalar("SELECT payload FROM sync_jobs")
+    let payloads: Vec<String> = sqlx::query_scalar("SELECT payload FROM jobs")
         .fetch_all(&env.pool)
         .await
         .unwrap();
@@ -633,7 +633,7 @@ async fn the_schedule_queues_one_job_per_repository_each_hour() {
     );
 
     // A finished job lets the next hour queue again.
-    sqlx::query("UPDATE sync_jobs SET status = 'done'")
+    sqlx::query("UPDATE jobs SET status = 'done'")
         .execute(&env.pool)
         .await
         .unwrap();
@@ -645,7 +645,7 @@ async fn the_schedule_queues_one_job_per_repository_each_hour() {
     );
 
     // A job that failed after its attempts is not re-queued by the schedule.
-    sqlx::query("UPDATE sync_jobs SET status = 'failed' WHERE created_at = ?")
+    sqlx::query("UPDATE jobs SET status = 'failed' WHERE created_at = ?")
         .bind(NOW + 7200)
         .execute(&env.pool)
         .await
@@ -658,7 +658,7 @@ async fn the_schedule_queues_one_job_per_repository_each_hour() {
     );
 
     let payloads: Vec<String> =
-        sqlx::query_scalar("SELECT payload FROM sync_jobs WHERE created_at = ? ORDER BY payload")
+        sqlx::query_scalar("SELECT payload FROM jobs WHERE created_at = ? ORDER BY payload")
             .bind(NOW)
             .fetch_all(&env.pool)
             .await
@@ -762,7 +762,7 @@ async fn the_job_handler_maps_pull_errors_to_fixed_text_and_other_kinds_permanen
         )
         .unwrap(),
     );
-    let job = |payload: &str| crate::db::sync_jobs::ClaimedJob {
+    let job = |payload: &str| crate::db::jobs::ClaimedJob {
         id: "j".to_owned(),
         source_id: None,
         attempts: 0,

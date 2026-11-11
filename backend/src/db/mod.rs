@@ -19,6 +19,8 @@ pub mod github_issues;
 pub mod hubs;
 pub mod image_sources;
 pub mod job_runs;
+#[allow(dead_code)] // Used by the job worker and the retry route.
+pub mod jobs;
 pub mod key_rotation;
 pub mod publish;
 pub mod retention;
@@ -29,8 +31,6 @@ pub mod setup;
 pub mod sources;
 #[allow(dead_code)] // Used by the pull and eviction jobs (Steps 4 and 5).
 pub mod storage;
-#[allow(dead_code)] // Used by the job worker and the retry route.
-pub mod sync_jobs;
 pub mod sync_reports;
 #[allow(dead_code)] // Used by the session service and the account and admin routes.
 pub mod users;
@@ -217,12 +217,12 @@ mod tests {
             "image_sources",
             "images",
             "job_runs",
+            "jobs",
             "publish_reports",
             "scan_runs",
             "scanner_databases",
             "scanner_findings",
             "source_credentials",
-            "sync_jobs",
             "system_config",
             "tag_observations",
             "user_credentials",

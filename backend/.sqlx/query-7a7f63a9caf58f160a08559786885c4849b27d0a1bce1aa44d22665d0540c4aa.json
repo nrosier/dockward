@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO scan_runs (id, image_platform_id, scanner, trigger, status, job_id)\n         VALUES (?, ?, ?, ?, 'queued', ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "7a7f63a9caf58f160a08559786885c4849b27d0a1bce1aa44d22665d0540c4aa"
+}

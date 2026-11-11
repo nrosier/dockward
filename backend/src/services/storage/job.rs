@@ -9,7 +9,7 @@
 use sqlx::SqlitePool;
 
 use crate::db::discovery as db;
-use crate::db::sync_jobs::ClaimedJob;
+use crate::db::jobs::ClaimedJob;
 use crate::error::AppError;
 use crate::services::discovery::{Discovery, MSG_BAD_PAYLOAD, PullPayload, failure, fixed_text};
 use crate::services::scan::queue::queue_scans;

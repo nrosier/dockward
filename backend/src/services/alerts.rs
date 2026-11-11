@@ -1,4 +1,4 @@
-//! The alert dispatcher: sends sync failures and new CRITICAL CVEs to every enabled
+//! The alert dispatcher: sends job failures and new CRITICAL CVEs to every enabled
 //! channel, at most once per 24 hours per dedupe key and channel.
 //! Sources: `specs/alerts.md` (Triggers, Deduplication, Decisions: scope is all tenants),
 //! `specs/database.md` (the `alert_deliveries` write rule).
@@ -28,8 +28,8 @@ use crate::services::alert_send::{self, Alert, AlertEvent, SendError};
 use crate::services::ids;
 use crate::worker::now_secs;
 
-/// The error text on a `sync_failed` alert. Fixed, so no stored error text can leak.
-const SYNC_FAILED_TEXT: &str = "the sync job failed after all retries";
+/// The error text on a `job_failed` alert. Fixed, so no stored error text can leak.
+const JOB_FAILED_TEXT: &str = "the sync job failed after all retries";
 /// Used for the mapping names when the mapping no longer exists.
 const UNKNOWN: &str = "unknown";
 
@@ -225,19 +225,19 @@ impl Notifier {
     }
 
     /// Alerts for a job that was given up, on a background task. The dedupe key is
-    /// `sync_failed:<job_id>`. The payload has the mapping names and fixed text only.
-    pub fn spawn_sync_failed(&self, job_id: &str, mapping_id: &str, now: i64) {
+    /// `job_failed:<job_id>`. The payload has the mapping names and fixed text only.
+    pub fn spawn_job_failed(&self, job_id: &str, mapping_id: &str, now: i64) {
         let notifier = self.clone();
         let job_id = job_id.to_owned();
         let mapping_id = mapping_id.to_owned();
         spawn_logged(async move {
-            let alert = notifier.sync_failed_alert(&mapping_id, now).await;
-            let dedupe_key = format!("sync_failed:{job_id}");
+            let alert = notifier.job_failed_alert(&mapping_id, now).await;
+            let dedupe_key = format!("job_failed:{job_id}");
             notifier.notify(&alert, &dedupe_key, now).await;
         });
     }
 
-    async fn sync_failed_alert(&self, mapping_id: &str, now: i64) -> Alert {
+    async fn job_failed_alert(&self, mapping_id: &str, now: i64) -> Alert {
         let found = match self.pool.acquire().await {
             Ok(mut conn) => sources::find_by_id(&mut conn, mapping_id)
                 .await
@@ -253,7 +253,7 @@ impl Notifier {
             None => (UNKNOWN.to_owned(), UNKNOWN.to_owned()),
         };
         Alert {
-            event: AlertEvent::SyncFailed,
+            event: AlertEvent::JobFailed,
             occurred_at: now,
             mapping_id: mapping_id.to_owned(),
             harbor,
@@ -261,7 +261,7 @@ impl Notifier {
             cve_id: None,
             severity: None,
             image_tag: None,
-            error: Some(SYNC_FAILED_TEXT.to_owned()),
+            error: Some(JOB_FAILED_TEXT.to_owned()),
         }
     }
 }

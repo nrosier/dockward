@@ -75,7 +75,7 @@ pub async fn store_built_at(
 /// True while a job with exactly `payload` is `queued` or `running`.
 pub async fn open_job_exists(pool: &SqlitePool, payload: &str) -> Result<bool, AppError> {
     let count = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM sync_jobs
+        r#"SELECT COUNT(*) AS "n!: i64" FROM jobs
            WHERE payload = ? AND status IN ('queued', 'running')"#,
         payload
     )

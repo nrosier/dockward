@@ -14,7 +14,7 @@ pub struct NewReport<'a> {
     pub source_id: &'a str,
     /// The image the report publishes (`publish_reports.image_id`).
     pub image_id: Option<&'a str>,
-    pub sync_job_id: &'a str,
+    pub job_id: &'a str,
     pub image_tag: &'a str,
     pub image_digest: &'a str,
     pub commit_sha: Option<&'a str>,
@@ -37,13 +37,13 @@ pub async fn insert_pending(
 ) -> Result<(), AppError> {
     sqlx::query!(
         "INSERT INTO publish_reports
-            (id, source_id, image_id, sync_job_id, image_tag, image_digest,
+            (id, source_id, image_id, job_id, image_tag, image_digest,
              commit_sha, vulnerability_summary, sarif_status)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
         report.id,
         report.source_id,
         report.image_id,
-        report.sync_job_id,
+        report.job_id,
         report.image_tag,
         report.image_digest,
         report.commit_sha,
@@ -65,7 +65,7 @@ pub async fn find_pending_for_job(
         ReportRow,
         r#"SELECT id AS "id!", github_sarif_id
            FROM publish_reports
-           WHERE sync_job_id = ? AND sarif_status = 'pending'
+           WHERE job_id = ? AND sarif_status = 'pending'
            ORDER BY rowid DESC
            LIMIT 1"#,
         job_id
@@ -95,17 +95,17 @@ pub async fn last_result_for_digest(
     pool: &SqlitePool,
     source_id: &str,
     digest: &str,
-    sync_job_id: &str,
+    job_id: &str,
 ) -> Result<Option<(String, Option<String>)>, AppError> {
     let row = sqlx::query!(
         r#"SELECT r.image_tag AS "image_tag!" FROM publish_reports r
            WHERE r.source_id = ?1 AND r.image_digest = ?2 AND r.sarif_status = 'success'
-             AND (r.sync_job_id IS NULL OR r.sync_job_id <> ?3)
+             AND (r.job_id IS NULL OR r.job_id <> ?3)
            ORDER BY r.synced_at DESC, r.rowid DESC
            LIMIT 1"#,
         source_id,
         digest,
-        sync_job_id
+        job_id
     )
     .fetch_optional(pool)
     .await

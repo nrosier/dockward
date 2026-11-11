@@ -21,11 +21,11 @@ pub async fn delete_sync_reports(
         .map_err(|_| AppError::InternalError)
 }
 
-/// Deletes finished (`done` or `failed`) `sync_jobs` rows last updated before `cutoff`.
+/// Deletes finished (`done` or `failed`) `jobs` rows last updated before `cutoff`.
 /// Rows in `queued` or `running` are never deleted.
-pub async fn delete_sync_jobs(conn: &mut SqliteConnection, cutoff: i64) -> Result<u64, AppError> {
+pub async fn delete_jobs(conn: &mut SqliteConnection, cutoff: i64) -> Result<u64, AppError> {
     sqlx::query!(
-        "DELETE FROM sync_jobs WHERE status IN ('done', 'failed') AND updated_at < ?",
+        "DELETE FROM jobs WHERE status IN ('done', 'failed') AND updated_at < ?",
         cutoff
     )
     .execute(conn)

@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET status = 'running', updated_at = ?\n           WHERE id = (\n               SELECT id FROM jobs\n               WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)\n               ORDER BY next_attempt_at, created_at\n               LIMIT 1\n           )\n           RETURNING id AS \"id!\", source_id AS \"source_id?: String\", attempts AS \"attempts!: i64\", payload AS \"payload!\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "source_id?: String",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "source_id"
+          }
+        }
+      },
+      {
+        "name": "attempts!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "attempts"
+          }
+        }
+      },
+      {
+        "name": "payload!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "payload"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "d80caa948888f334475098a90dfc3b32deba739a5038b7cd40aa38d4bc4cfe93"
+}

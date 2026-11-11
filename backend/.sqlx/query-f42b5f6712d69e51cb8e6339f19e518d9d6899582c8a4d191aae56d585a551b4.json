@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM jobs WHERE status IN ('done', 'failed') AND updated_at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "f42b5f6712d69e51cb8e6339f19e518d9d6899582c8a4d191aae56d585a551b4"
+}

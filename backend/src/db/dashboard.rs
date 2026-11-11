@@ -164,19 +164,19 @@ pub async fn open_issues(pool: &SqlitePool, user_id: Option<&str>) -> Result<i64
     Ok(row.n)
 }
 
-/// Failed syncs: `sync_jobs` rows with `status = 'failed'` last updated at or after `since`
+/// Failed syncs: `jobs` rows with `status = 'failed'` last updated at or after `since`
 /// (Unix seconds).
 ///
 /// Implements the spec bullet (`specs/cve-lifecycle.md`, Dashboard counts): "Failed syncs:
-/// count of `sync_jobs` rows with `status = 'failed'` ... Period: last 90 days". The period is
-/// measured on `sync_jobs.updated_at` (decided on #55).
+/// count of `jobs` rows with `status = 'failed'` ... Period: last 90 days". The period is
+/// measured on `jobs.updated_at` (decided on #55).
 pub async fn failed_syncs_since(
     pool: &SqlitePool,
     user_id: Option<&str>,
     since: i64,
 ) -> Result<i64, AppError> {
     let row = sqlx::query!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM sync_jobs j
+        r#"SELECT COUNT(*) AS "n!: i64" FROM jobs j
            LEFT JOIN image_sources m ON m.id = j.source_id
            WHERE j.status = 'failed' AND j.updated_at >= ?2
              AND (?1 IS NULL OR m.user_id = ?1)"#,

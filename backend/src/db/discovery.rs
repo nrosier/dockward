@@ -97,7 +97,7 @@ pub async fn latest_job_status(
     payload: &str,
 ) -> Result<Option<String>, AppError> {
     let row = sqlx::query!(
-        r#"SELECT status AS "status!" FROM sync_jobs WHERE payload = ?
+        r#"SELECT status AS "status!" FROM jobs WHERE payload = ?
            ORDER BY created_at DESC, rowid DESC LIMIT 1"#,
         payload
     )

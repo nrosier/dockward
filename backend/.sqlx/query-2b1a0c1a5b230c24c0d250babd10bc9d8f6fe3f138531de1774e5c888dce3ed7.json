@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", github_sarif_id\n           FROM publish_reports\n           WHERE job_id = ? AND sarif_status = 'pending'\n           ORDER BY rowid DESC\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "publish_reports",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "github_sarif_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "publish_reports",
+            "name": "github_sarif_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "2b1a0c1a5b230c24c0d250babd10bc9d8f6fe3f138531de1774e5c888dce3ed7"
+}

@@ -22,7 +22,7 @@ use super::db_refresh::{DatabaseTool, RefreshStore, refresh};
 use super::process::{Invocation, Limits};
 use super::{Scanner, cache_dir, environment, update_args};
 use crate::db::job_runs::{self, JobRun};
-use crate::db::{db_refresh as db, sync_jobs};
+use crate::db::{db_refresh as db, jobs};
 use crate::error::{AppError, ScannerFault};
 use crate::services::discovery::{MSG_BAD_PAYLOAD, fixed_text};
 use crate::services::ids;
@@ -71,7 +71,7 @@ pub async fn schedule_once(pool: &SqlitePool, now: i64) -> Result<usize, AppErro
             continue;
         }
         let id = ids::new_id()?;
-        sync_jobs::enqueue(pool, &id, None, &payload, now).await?;
+        jobs::enqueue(pool, &id, None, &payload, now).await?;
         queued += 1;
     }
     Ok(queued)

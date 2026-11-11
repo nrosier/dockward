@@ -15,7 +15,7 @@ export function mappingName(mapping: { harbor_project: string; harbor_repository
   return `${mapping.harbor_project}/${mapping.harbor_repository}`;
 }
 
-// Every mapping in scope (up to 200), loaded once so CVE and sync job rows can
+// Every mapping in scope (up to 200), loaded once so CVE and job rows can
 // look up the name by `mapping_id`.
 export function useAllMappings(scopeAll: boolean) {
   return useQuery({

@@ -117,17 +117,11 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/admin/scan-settings",
             get(api::scan_settings::get).put(api::scan_settings::put),
         )
-        .route("/api/v1/sync-jobs", get(api::sync_jobs::list))
-        .route(
-            "/api/v1/sync-jobs/failed-count",
-            get(api::sync_jobs::failed_count),
-        )
-        .route(
-            "/api/v1/sync-jobs/purge-failed",
-            post(api::sync_jobs::purge_failed),
-        )
-        .route("/api/v1/sync-jobs/{id}", get(api::sync_jobs::get))
-        .route("/api/v1/sync-jobs/{id}/retry", post(api::sync_jobs::retry))
+        .route("/api/v1/jobs", get(api::jobs::list))
+        .route("/api/v1/jobs/failed-count", get(api::jobs::failed_count))
+        .route("/api/v1/jobs/purge-failed", post(api::jobs::purge_failed))
+        .route("/api/v1/jobs/{id}", get(api::jobs::get))
+        .route("/api/v1/jobs/{id}/retry", post(api::jobs::retry))
         .route("/api/v1/dashboard/summary", get(api::dashboard::summary))
         .route("/api/v1/cves", get(api::cves::list))
         .route("/api/v1/cves/{id}", get(api::cves::get))
@@ -631,11 +625,11 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
 
     // Jobs left `running` by a previous process go back to `queued` before the worker
     // starts (`specs/backend.md`, Durable job queue).
-    let requeued = db::sync_jobs::requeue_running(&state.pool, worker::now_secs())
+    let requeued = db::jobs::requeue_running(&state.pool, worker::now_secs())
         .await
-        .map_err(|_| "could not re-queue running sync jobs")?;
+        .map_err(|_| "could not re-queue running jobs")?;
     if requeued > 0 {
-        tracing::info!(requeued, "re-queued sync jobs left running at startup");
+        tracing::info!(requeued, "re-queued jobs left running at startup");
     }
 
     // Store repair (section 4): a pull cut off by the last process is marked failed so its retry
@@ -2250,7 +2244,7 @@ pub(crate) mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO sync_jobs (id, source_id, status, attempts, payload, created_at, updated_at)
+            "INSERT INTO jobs (id, source_id, status, attempts, payload, created_at, updated_at)
              VALUES ('job-owner', 'rm1', 'failed', 8, '{}', 1000, 2000)",
         )
         .execute(&pool)
@@ -2284,8 +2278,8 @@ pub(crate) mod tests {
 
         // Anonymous requests are 401 on every new route.
         for uri in [
-            "/api/v1/sync-jobs",
-            "/api/v1/sync-jobs/job-owner",
+            "/api/v1/jobs",
+            "/api/v1/jobs/job-owner",
             "/api/v1/dashboard/summary",
             "/api/v1/admin/jobs",
         ] {
@@ -2294,11 +2288,10 @@ pub(crate) mod tests {
         }
 
         // Tenancy: the owner reads the job, another user gets 404 with no oracle.
-        let (owner_status, _) = get_json(&router, "/api/v1/sync-jobs/job-owner", &owner).await;
-        let (other_status, other_body) =
-            get_json(&router, "/api/v1/sync-jobs/job-owner", &other).await;
+        let (owner_status, _) = get_json(&router, "/api/v1/jobs/job-owner", &owner).await;
+        let (other_status, other_body) = get_json(&router, "/api/v1/jobs/job-owner", &other).await;
         let (missing_status, missing_body) =
-            get_json(&router, "/api/v1/sync-jobs/no-such-job", &other).await;
+            get_json(&router, "/api/v1/jobs/no-such-job", &other).await;
         assert_eq!(owner_status, StatusCode::OK);
         assert_eq!(other_status, StatusCode::NOT_FOUND);
         assert_eq!(missing_status, StatusCode::NOT_FOUND);
@@ -2309,14 +2302,13 @@ pub(crate) mod tests {
 
         // A foreign source_id filter is an empty page, not 404.
         let (foreign_status, foreign_page) =
-            get_json(&router, "/api/v1/sync-jobs?source_id=rm1", &other).await;
+            get_json(&router, "/api/v1/jobs?source_id=rm1", &other).await;
         assert_eq!(foreign_status, StatusCode::OK);
         assert_eq!(foreign_page["total"], 0);
 
         // scope=all is admin only.
-        let (user_all, _) = get_json(&router, "/api/v1/sync-jobs?scope=all", &other).await;
-        let (admin_all, admin_page) =
-            get_json(&router, "/api/v1/sync-jobs?scope=all", &admin).await;
+        let (user_all, _) = get_json(&router, "/api/v1/jobs?scope=all", &other).await;
+        let (admin_all, admin_page) = get_json(&router, "/api/v1/jobs?scope=all", &admin).await;
         assert_eq!(user_all, StatusCode::FORBIDDEN);
         assert_eq!(admin_all, StatusCode::OK);
         assert_eq!(admin_page["total"], 1);
@@ -2344,7 +2336,7 @@ pub(crate) mod tests {
     /// a missing `X-CSRF-Token` is `403 csrf_invalid` before the handler runs, and the
     /// failed job stays failed. With a matching token and the owner's session it is `200`.
     #[tokio::test]
-    async fn sync_job_retry_checks_csrf_session_and_tenancy() {
+    async fn job_retry_checks_csrf_session_and_tenancy() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
@@ -2372,7 +2364,7 @@ pub(crate) mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO sync_jobs (id, source_id, status, attempts, payload, created_at, updated_at)
+            "INSERT INTO jobs (id, source_id, status, attempts, payload, created_at, updated_at)
              VALUES ('job-1', 'rm1', 'failed', 8, '{}', 1000, 2000)",
         )
         .execute(&pool)
@@ -2391,7 +2383,7 @@ pub(crate) mod tests {
             let mut builder = with_peer(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/sync-jobs/job-1/retry")
+                    .uri("/api/v1/jobs/job-1/retry")
                     .header("cookie", cookie),
             );
             if let Some(token) = token {
@@ -2406,11 +2398,10 @@ pub(crate) mod tests {
             .oneshot(post(&other, Some(&csrf)))
             .await
             .unwrap();
-        let still_failed: String =
-            sqlx::query_scalar("SELECT status FROM sync_jobs WHERE id = 'job-1'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let still_failed: String = sqlx::query_scalar("SELECT status FROM jobs WHERE id = 'job-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         let owner_retry = router.oneshot(post(&owner, Some(&csrf))).await.unwrap();
         let owner_status = owner_retry.status();
         let retry_body = axum::body::to_bytes(owner_retry.into_body(), 64 * 1024)
@@ -2559,7 +2550,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let pulls: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sync_jobs WHERE json_extract(payload, '$.kind') = 'pull'",
+            "SELECT COUNT(*) FROM jobs WHERE json_extract(payload, '$.kind') = 'pull'",
         )
         .fetch_one(&pool)
         .await
@@ -2591,7 +2582,7 @@ pub(crate) mod tests {
     /// `csrf_invalid` and deletes nothing, `scope=all` is admin only (`403` for a user),
     /// another scope is `400`, and the owner's purge returns `{"deleted"}` and a count of 0.
     #[tokio::test]
-    async fn sync_job_purge_routes_check_csrf_session_and_scope() {
+    async fn job_purge_routes_check_csrf_session_and_scope() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
@@ -2622,7 +2613,7 @@ pub(crate) mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO sync_jobs (id, source_id, status, attempts, payload, created_at, updated_at)
+            "INSERT INTO jobs (id, source_id, status, attempts, payload, created_at, updated_at)
              VALUES ('pj-1', 'pm1', 'failed', 8, '{}', 1000, 2000),
                     ('pj-2', 'pm1', 'queued', 0, '{}', 1000, 2000)",
         )
@@ -2649,8 +2640,8 @@ pub(crate) mod tests {
             }
             builder.body(Body::empty()).unwrap()
         };
-        let purge = "/api/v1/sync-jobs/purge-failed";
-        let count = "/api/v1/sync-jobs/failed-count";
+        let purge = "/api/v1/jobs/purge-failed";
+        let count = "/api/v1/jobs/failed-count";
         let body_of = |response: axum::response::Response| async move {
             let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
                 .await
@@ -2672,7 +2663,7 @@ pub(crate) mod tests {
             .clone()
             .oneshot(request(
                 "POST",
-                "/api/v1/sync-jobs/purge-failed?scope=all",
+                "/api/v1/jobs/purge-failed?scope=all",
                 Some(&other),
                 Some(&csrf),
             ))
@@ -2682,7 +2673,7 @@ pub(crate) mod tests {
             .clone()
             .oneshot(request(
                 "GET",
-                "/api/v1/sync-jobs/failed-count?scope=mine",
+                "/api/v1/jobs/failed-count?scope=mine",
                 Some(&owner),
                 None,
             ))
@@ -2698,7 +2689,7 @@ pub(crate) mod tests {
             .clone()
             .oneshot(request(
                 "GET",
-                "/api/v1/sync-jobs/failed-count?scope=all",
+                "/api/v1/jobs/failed-count?scope=all",
                 Some(&admin),
                 None,
             ))
@@ -2717,7 +2708,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let other_purge = body_of(other_purge).await;
-        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_jobs")
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -2728,7 +2719,7 @@ pub(crate) mod tests {
             .unwrap();
         let owner_status = owner_purge.status();
         let owner_purge = body_of(owner_purge).await;
-        let after: Vec<String> = sqlx::query_scalar("SELECT id FROM sync_jobs")
+        let after: Vec<String> = sqlx::query_scalar("SELECT id FROM jobs")
             .fetch_all(&pool)
             .await
             .unwrap();

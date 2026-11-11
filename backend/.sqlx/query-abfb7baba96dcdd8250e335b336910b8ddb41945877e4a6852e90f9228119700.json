@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET\n            attempts = attempts + 1,\n            status = CASE WHEN attempts + 1 >= 8 THEN 'failed' ELSE 'queued' END,\n            next_attempt_at = CASE WHEN attempts + 1 >= 8 THEN NULL ELSE ? END,\n            last_error = CASE WHEN attempts + 1 >= 8 THEN 'interrupted by restart' ELSE last_error END,\n            updated_at = ?\n         WHERE status = 'running'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "abfb7baba96dcdd8250e335b336910b8ddb41945877e4a6852e90f9228119700"
+}
