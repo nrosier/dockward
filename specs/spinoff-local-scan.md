@@ -1,11 +1,13 @@
-# Spinoff: local image scanner (working name `localscan`, PROVISIONAL)
+# dockward 0.2.0: local image scanner (design spec)
 
-Purpose: the build specification for a spinoff of HarborGate that drops Harbor entirely. The spinoff pulls container images from OCI registries ("hubs") through the registry API into OCI image layouts on disk, scans them with Trivy and Grype running out of process, and keeps the SARIF upload, the GitHub issues and the CVE rules.
+Status: this is the 0.2.0 design spec. The spinoff is merged to `main` and released as dockward 0.2.0. Its current architecture is in [architecture.md](architecture.md). Where the code differs from this spec, the difference is named in the file that owns it, and the decision log records the change.
 
-The product name is not decided (decision 22). `localscan` is a provisional working name. Where this spec names a new identifier with it (environment variables, a metric, a directory), the identifier is provisional and is renamed together with the product (section 14, rename set).
+Purpose: the build specification for the spinoff of HarborGate that drops Harbor entirely. The spinoff pulls container images from OCI registries ("hubs") through the registry API into OCI image layouts on disk, scans them with Trivy and Grype running out of process, and keeps the SARIF upload, the GitHub issues and the CVE rules.
 
-Branch: `spinoff-local-scan`. It must never be merged to `main`. Every other spec file on this branch still describes HarborGate with Harbor. This file overrides them on this branch; where they disagree, this file wins, and section 1 names what it replaces. The binding source is [spinoff-decisions.md](spinoff-decisions.md) (decisions 1 to 45). Where an older spec file or an earlier draft of this file conflicts with a decision, the decision wins.
-Decision 58 rename (2026-11-11): the table `sync_jobs` is now `jobs`, `/api/v1/sync-jobs` is `/api/v1/jobs`, the column `sync_job_id` is `job_id`, and the sync-failed alert is the job-failed alert (event `job_failed`). Where this file says `sync_jobs` or `sync-jobs` below, read `jobs`. Kinds and behaviour are unchanged; the audit actions `sync_job.retry` and `sync_job.purge` are kept.
+The product name is dockward (decisions 24, 54). The name is no longer provisional. Every identifier is `dockward` where this spec names one (environment variables, cookies, HKDF labels), and `localscan` no longer appears in the spec.
+
+The spinoff was developed on the branch `spinoff-local-scan` and is merged to `main` (decision 24, dockward 0.2.0). The binding source is [spinoff-decisions.md](spinoff-decisions.md). Where an older spec file or an earlier draft of this file conflicts with a decision, the decision wins. Section 1 names what each older spec file has become.
+Decision 58 (2026-11-11): the table is `jobs`, the route is `/api/v1/jobs`, the column is `job_id`, and the alert is the job-failed alert (event `job_failed`). There are no sync jobs. Kinds and behaviour are unchanged; the audit actions `sync_job.retry` and `sync_job.purge` are kept.
 
 
 Marks follow [README.md](README.md). `Decided (spinoff N)` cites a decision. `Decided (spec author, spinoff)` is a gap-filler inside the decisions with its reason; the user can overturn it. `UNVERIFIED:` can only be checked by a test run or a live system. Section 15 lists the open items. Nothing in section 15 is decided.
@@ -25,7 +27,7 @@ Each decision and where it lands.
 | 7 | Default hubs, custom hubs, encrypted credentials (host string superseded by 11; scope superseded by 35) | 2, 9 |
 | 8 | Each match scanned once per digest (extended by 17) | 5, 8 |
 | 9 | Count-based retention, never evict a running scan (refined by 18) | 4 |
-| 10, 22 | Name undecided; `localscan` provisional | header, 14 |
+| 10, 22, 24 | Name: dockward, not provisional (decision 24 supersedes decision 22) | header, 14 |
 | 11 | Docker Hub stored as `docker.io`; pulls go to `registry-1.docker.io` | 2 |
 | 12 | Own registry client on reqwest; redirects followed, address checked on every hop | 3, 12 |
 | 13 | Default hubs not removable; custom hubs addable and removable | 2 |
@@ -36,7 +38,7 @@ Each decision and where it lands.
 | 18 | Retention count default 20; eviction deletes the layout only | 4 |
 | 19 | Limits and defaults, operator-configurable | 7, 13 |
 | 20 | Keep SARIF, issue, close, reopen, accepted-CVE rules; remove Harbor parts only | 1, 9 |
-| 21 | Fresh install only; no import | 9 |
+| 21 | Fresh install only; no import; no data migration (the label migration of decision 56 was removed, PR #307) | 9 |
 | 33 | No project layer; a source is hub, repository and tag value; the first path segment of the repository is the namespace | 5, 9, 10, 11 |
 | 34 | Step 1 held; schema and Harbor removal land with the sync and scanner steps (supersedes 31) | 1, 9 |
 | 35 | Credentials per source; no namespace-level default | 2, 9, 10 |
@@ -166,7 +168,7 @@ Contract:
 6. **Publish**: when every enabled scanner's run for every platform of the source's newest image has ended, one `publish` job reads the labels from the pulled config (`config.Labels`, the rules in [integrations.md](integrations.md), "OCI labels", unchanged; for a multi-platform image the first scanned platform's config is used, because labels are image-level metadata), builds one merged SARIF, uploads it and runs the issue rules. Decided (spec author, spinoff): findings are merged across platforms and scanners by (CVE id, package) into one result; the platforms that report a result are added to its property bag as `harborgate/platforms`. A failed run does not hold the SARIF back, and it holds issue closing open, as the existing rule says ([cve-lifecycle.md](cve-lifecycle.md), #224 d14). A missing `org.opencontainers.image.revision` fails the publish with the existing clear error.
 7. Decided (spec author, spinoff): publish and issue updates run for the source's newest image only (section 9, newest image). Older images' scans update their tag's `cve_findings` but upload nothing.
 
-Fixed error strings. A job's `last_error`, an alert and the Sync jobs API carry only these, never a registry body, URL, header or scanner stderr.
+Fixed error strings. A job's `last_error`, an alert and the Jobs API carry only these, never a registry body, URL, header or scanner stderr.
 
 | Cause | `last_error` |
 | --- | --- |
@@ -214,7 +216,7 @@ The `docker hub rate limit reached` error is shown through a fixed catalog messa
 
 ## 9. Data model
 
-A fresh schema in one `backend/migrations/0001_init.sql` (decision 21). There is no import from an existing HarborGate database and no upgrade path. Decided (spec author, spinoff): at startup, and in `harborgate restore` before it replaces anything, a database file that contains a `repo_mappings` table (a HarborGate `main` database) is refused with the fixed error `this database was created by HarborGate and cannot be used by this version`. Reason: opening it would silently skip the migration and break on the first query. SQLx offline metadata is regenerated.
+A fresh schema in one `backend/migrations/0001_init.sql` (decision 21). There is no import from an existing HarborGate database and no upgrade path, and no data migration of any kind (decision 21; the label migration of decision 56 was removed). Decided (spec author, spinoff): at startup, and in `harborgate restore` before it replaces anything, a database file that contains a `repo_mappings` table (a HarborGate `main` database) is refused with the fixed error `this database was created by HarborGate and cannot be used by this version`. Reason: opening it would silently skip the migration and break on the first query. SQLx offline metadata is regenerated.
 
 ### Kept from [database.md](database.md), with the stated changes
 
@@ -227,7 +229,7 @@ A fresh schema in one `backend/migrations/0001_init.sql` (decision 21). There is
 | `cve_acceptances` | Kept; `mapping_id` becomes `source_id`. |
 | `audit_log`, `alert_channels`, `alert_deliveries` | Kept. |
 | `job_runs` | Kept; `job_kind` values `cleanup`, `retention`, `discover`, `db_update`. |
-| `sync_jobs` | Kept; `mapping_id` becomes nullable `source_id` (a `db_update` job has none). Payload `kind`: `discover`, `pull`, `scan`, `publish`, `db_update`. Payloads hold ids and the tag only, never a token. |
+| `jobs` | Renamed from `sync_jobs` (decision 58). `source_id` is nullable (a `db_update` job has none). Payload `kind`: `discover`, `pull`, `scan`, `publish`, `db_update`. Payloads hold ids and the tag only, never a token. |
 
 Removed: `repo_mappings`, `project_webhooks`, `project_webhook_unmatched`, `picker_hidden_items`, `harbor_scanners`, `scanner_reports`, `project_scanner_locks`, `sync_reports`.
 
@@ -328,7 +330,7 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     db_built_at INTEGER,
     trigger TEXT NOT NULL CHECK (trigger IN ('first_pull', 'tag_moved', 'db_update')),
     status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed')),
-    sync_job_id TEXT REFERENCES sync_jobs(id) ON DELETE SET NULL,
+    job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
     started_at INTEGER,
     finished_at INTEGER,
     error TEXT                            -- one fixed string from section 6
@@ -352,7 +354,7 @@ CREATE TABLE IF NOT EXISTS publish_reports (
     id TEXT PRIMARY KEY,
     source_id TEXT NOT NULL REFERENCES image_sources(id) ON DELETE CASCADE,
     image_id TEXT REFERENCES images(id) ON DELETE SET NULL,
-    sync_job_id TEXT REFERENCES sync_jobs(id) ON DELETE SET NULL,
+    job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
     image_tag TEXT NOT NULL,
     image_digest TEXT NOT NULL,
     commit_sha TEXT,
@@ -369,7 +371,7 @@ CREATE TABLE IF NOT EXISTS publish_reports (
 ```
 
 - Source identity (decisions 33, 37): a source is identified by hub, repository and tag value, and `UNIQUE (hub_id, repository, tag_value)` enforces it. The same repository on two hubs is two sources, each with its own tag observations, findings, acceptances, alerts (its own Code Scanning category, below) and issue rows. A second source with the same three values is `409 conflict`. Decided (spec author, spinoff): the key has no user, as the old `UNIQUE (harbor_base_url, harbor_project, harbor_repository)` had none, so two users cannot register the same source. The user can overturn this. The namespace is the first path segment of `repository`; it is not a column and no table holds it.
-- Retention: `publish_reports` and `scan_runs` follow the existing 90-day rule (by `synced_at`, `finished_at`), except that the latest `done` run per (platform image, scanner) is never deleted, because it carries the findings the view and the issue rules read. `sync_jobs` and `job_runs` 90 days, `alert_deliveries` 30 days, `audit_log` 365 days, unchanged. `images`, `tag_observations` and `image_platforms` are not under age retention (they are the "already scanned" memory).
+- Retention: `publish_reports` and `scan_runs` follow the existing 90-day rule (by `synced_at`, `finished_at`), except that the latest `done` run per (platform image, scanner) is never deleted, because it carries the findings the view and the issue rules read. `jobs` and `job_runs` 90 days, `alert_deliveries` 30 days, `audit_log` 365 days, unchanged. `images`, `tag_observations` and `image_platforms` are not under age retention (they are the "already scanned" memory).
 - Deleting a source removes its `tag_observations`, `cve_findings`, `publish_reports`, acceptances and `source_credentials` row. Images, platforms and runs that no remaining source observes are deleted and their layouts removed. GitHub issues stay open and are listed in the `source.delete` audit row, as for a deleted mapping today.
 - Audit vocabulary. Removed: `mapping.*`, `project_webhook.*`, `artifact.remove`. Added: `hub.create`, `hub.delete`, `source.create`, `source.update`, `source.delete`, `source.scan`, `image.evict` (actor `system`; `details` has hub, repository, platform digest, never a path with a secret), `settings.change` (scan limits and retention; `details` old and new values), plus the existing `credential.*` for source credentials (target names the source's hub and repository, never the token). All other existing actions are kept.
 
@@ -411,7 +413,7 @@ Rate limits. HarborGate has no default limit on authenticated routes; each route
 | GET | `/api/v1/image-sources/:id/images`, `/api/v1/images` | session (owner; admin read) | list of images with per-platform `state`, `size_bytes`, `pulled_at`, per-scanner latest run (`status`, `version`, `error`, `db_built_at`); filters `state`, `source_id`, admin `scope=all` | 200, 404 |
 | GET, PUT | `/api/v1/admin/scan-settings` | admin | `{"max_stored","scanners_enabled","scanner_timeout_s","scanner_output_max_bytes","pull_cap_bytes","min_free_disk_bytes"}` | 200, 401, 403, 422 |
 
-Kept routes: auth, account, credentials (GitHub only; `service_type` removed from the body; the GitHub repository picker `GET /api/v1/credentials/:id/github-repositories` kept), `cves` (renaming `mapping` to `source`, Harbor parameters removed, `namespace` filter added: see below), `sync-jobs` (retry, failed count, purge-failed), dashboard (recent syncs become recent scans), admin (users, oidc, github-url, alert-channels, audit-log, jobs, backup, logs, log-level), `/healthz`. `GET /api/v1/admin/health` drops the Harbor and robot fields and adds: per-hub reachability, the pinned scanner versions found, the database build time per scanner, and free disk space of the store.
+Kept routes: auth, account, credentials (GitHub only; `service_type` removed from the body; the GitHub repository picker `GET /api/v1/credentials/:id/github-repositories` kept), `cves` (renaming `mapping` to `source`, Harbor parameters removed, `namespace` filter added: see below), `jobs` (retry, failed count, purge-failed), dashboard (recent syncs become recent scans), admin (users, oidc, github-url, alert-channels, audit-log, jobs, backup, logs, log-level), `/healthz`. `GET /api/v1/admin/health` drops the Harbor and robot fields and adds: per-hub reachability, the pinned scanner versions found, the database build time per scanner, and free disk space of the store.
 
 CVE list namespace filter (decision 38): `namespace` replaces the removed `project` filter on `GET /api/v1/cves` and `GET /api/v1/image-sources/:id/cves`. It takes one value, matched exactly and case-sensitively against the first path segment of the source's repository (so `nrosier` matches `nrosier/walley` and `nrosier/other`, on any hub; the Repository filter, which lists `<hub host>/<repository>`, narrows by hub). It is not split on commas, follows the other text filters' limits (at most 256 characters, no control character, otherwise `400 invalid_request`), combines with the other filters by AND, and is bound as a SQL parameter, never part of the SQL text. An empty value means no filter. The `q` search matches the CVE id, the package and the repository. The Harbor parameters `project`, `harbor_project` and `harbor_repository` are not read.
 
@@ -429,7 +431,7 @@ Every screen needs the user's design approval before it is built ([frontend.md](
 ### Outbound requests
 
 - The rules of [security.md](security.md), "Outbound HTTP (SSRF)", apply to every hub host and every redirect hop (decision 12): HTTPS only; every resolved address must pass the deny-list (loopback, link-local, private, shared, reserved and multicast ranges listed there, including `169.254.169.254`); the check runs on the addresses actually connected to, not once at save time. The only change is that redirects are followed (section 3) with the check on each hop.
-- Opt-out (decision 14): the environment variable `LOCALSCAN_ALLOW_PRIVATE_REGISTRIES` (provisional name), default empty, is a comma-separated list of hub hosts. A named hub may use plain HTTP and private addresses, and so may the pull endpoint of a named custom hub (decision 44). An endpoint of a hub that is not named gets no exemption. It is environment-only, not an admin setting, and applies to named hubs only: a redirect from a named hub to an unnamed private or HTTP host is refused. An empty value means off.
+- Opt-out (decision 14): the environment variable `DOCKWARD_ALLOW_PRIVATE_REGISTRIES`, default empty, is a comma-separated list of hub hosts. A named hub may use plain HTTP and private addresses, and so may the pull endpoint of a named custom hub (decision 44). An endpoint of a hub that is not named gets no exemption. It is environment-only, not an admin setting, and applies to named hubs only: a redirect from a named hub to an unnamed private or HTTP host is refused. An empty value means off.
 - Adding a hub is admin-only, because an entered host is an outbound destination for the whole instance.
 - Names and tags are validated against the grammars before any request. A name outside the grammar is `422` with no request made.
 - Manifests, configs and blobs are untrusted input: byte caps and digest verification while streaming (section 3).
@@ -470,15 +472,15 @@ Decision 19 sets the defaults. All are operator-configurable. Decided (spec auth
 
 Decision 19 does not say whether MB and GB are decimal or binary. Decided (spec author, spinoff): stored in bytes, entered in the UI with an explicit unit, the defaults read as MiB and GiB (the larger reading, so the default is not stricter than the user may have meant).
 
-Environment (new, provisional names): `LOCALSCAN_ALLOW_PRIVATE_REGISTRIES` (section 12); the paths or locations of the scanner executables (open item 3). Existing `HARBORGATE_*` variables are kept; `HARBORGATE_ALLOW_PRIVATE_HARBOR` is removed.
+Environment (`DOCKWARD_*`): `DOCKWARD_ALLOW_PRIVATE_REGISTRIES` (section 12); the paths or locations of the scanner executables (open item 3). Existing `HARBORGATE_*` variables are kept; `HARBORGATE_ALLOW_PRIVATE_HARBOR` is removed.
 
-## 14. Name (provisional)
+## 14. Name (decided)
 
-Decision 22: the name is decided later. `localscan` stays provisional. When the name is decided, these are renamed together, and only then: the `HARBORGATE_*` variables, the `LOCALSCAN_*` variables, the `__Host-harborgate_*` cookies, the SARIF tool name, the Code Scanning category prefix (changing it makes GitHub create new alerts), the issue label and the issue marker (changing the marker needs a re-adoption rule), the crate and image names. The `harborgate/*` HKDF labels are not renamed unless the user says so, because renaming changes the derived keys and breaks every stored ciphertext.
+Decisions 24 and 54: the name is dockward. Every name is renamed together with the release: the `DOCKWARD_*` variables (decision 57, with a fallback in 0.2 only), the `__Host-dockward_*` cookies, the `dockward/*` HKDF labels, the Code Scanning category prefix, and the issue marker `dockward:<CVE id>`. Existing data is handled by the rename migration of decision 56, which was removed (PR #307). The SARIF tool name and the crate and image names follow the same rename. The code at `origin/main` still uses the `harborgate` marker and category prefix; see the CONFLICT in [backend.md](backend.md).
 
 ## 15. Open items
 
-Each is asked exactly as written. None is decided.
+Each is asked exactly as written. Items 1 to 4 were answered by the scanner spike and the design decisions of 2026-11-09 to 2026-11-10 (decisions 23, 29, 30). Items 5 and 6 are open.
 
 1. Exact Grype and Trivy command-line behaviour for an OCI layout: the input form, the flag that disables database downloads during a scan, the exit codes, and the JSON field names. These are UNVERIFIED and need a test run. Details to settle: the input form (for Trivy, whether `trivy image --input <layout directory>` or another form is the call for a layout directory; for Grype, whether the form is `oci-dir:<path>` or another), the flag or setting that disables database downloads during a scan (Trivy: `--skip-db-update`, `--skip-java-db-update`, `--skip-check-update`, `--offline-scan` exist in the documentation; Grype: the name of its auto-update setting), the exit codes (whether a non-zero exit with a valid report is possible), and the JSON field names (Trivy `Results[].Vulnerabilities[]` with `VulnerabilityID`, `PkgName`, `InstalledVersion`, `FixedVersion`, `Severity`, `Description`, `CVSS`; Grype `matches[]` with `vulnerability`, `artifact`, `fix`, and Grype's severity names). Also: the update commands for both databases, and how to disable Trivy's usage telemetry. Capture real reports as test fixtures.
 2. The registry client's handling of Docker Hub's token service (the auth challenge flow) must be verified against the live registry before the client is built: the realm and service values, the scope string, how `docker.io` maps to `registry-1.docker.io`, the access-token scopes Docker Hub offers, and its behaviour with anonymous pulls and rate limits, including whether an anonymous rate limit is signalled as `429` (decision 40).

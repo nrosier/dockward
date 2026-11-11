@@ -17,7 +17,7 @@ This release is the first as dockward. HarborGate is renamed, the Harbor integra
 
 ### Changed
 - The product is named dockward. Environment variables are DOCKWARD_*; HARBORGATE_* still works as a logged fallback for this release (decision 57).
-- Stored credentials and the HKDF labels move to dockward/*. Existing credentials are re-encrypted once at startup, and each change is audited as key.migrate_labels. Sessions are reissued, so users sign in again once (decisions 54, 56).
+- The database is dockward.db. This is a fresh database: HarborGate data is not migrated, and an old HarborGate database is refused with an error. The stored-credential and HKDF labels are dockward/*, so stored credentials and sessions from HarborGate do not open; users create their credentials again and sign in again (decisions 54, 56).
 - The session, CSRF and OIDC cookies are __Host-dockward_*. Existing sessions are rejected and users sign in again once.
 - Sync jobs are jobs: the table, the /api/v1/jobs routes and the Jobs page (decision 58).
 - The published image is ghcr.io/<owner>/dockward.

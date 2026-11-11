@@ -1,606 +1,174 @@
 # Integrations
 
-Purpose: Harbor webhook, Harbor API usage, polling, OCI labels, and GitHub SARIF upload and issues.
-
-Decisions are marked `Decided (<date>)`. On 2026-11-03 the user delegated every remaining proposal; those decisions are marked `Decided (2026-11-03, delegated)`. `Verified (<date>)` marks a claim checked against the cited source on that date. `UNVERIFIED:` marks a claim that can only be checked against a live system or a later build. Route-level contracts are in [api.md](api.md).
-
-## Harbor webhook
-
-- Endpoint: `POST /api/v1/webhooks/harbor/:mapping_token`. Public (no session, no CSRF token). See [api.md](api.md).
-- The mapping token is only in the URL path. It is never placed in a header or body.
-- The URL token is redacted or omitted from access logs and traces.
-- Trigger: Harbor event `SCANNING_COMPLETED` only.
-  - Source: Harbor webhook documentation (https://goharbor.io/docs/latest/working-with-projects/project-configuration/configure-webhooks/), which lists "Artifact scan completed" with event type `SCANNING_COMPLETED`. Harbor's web UI labels the same type "Scanning finished" (`src/portal/src/app/base/project/webhook/webhook.service.ts`, checked 2026-11-05). The type string is unchanged. Harbor source `src/controller/event/topic.go` defines the same string.
-- Payloads: accepts both Harbor's default JSON payload and the CloudEvents payload. Both produce the same internal event.
-  - Harbor offers a payload format choice of `Default` and `CloudEvents` (Harbor API swagger, `PayloadFormatType`; [docs/SETUP.md](../docs/SETUP.md) step 3c).
-  - Each format has its own test fixture.
-
-### Project webhook (one per Harbor project)
-
-Decided (2026-11-05, user, #132): Harbor webhooks are set per project, so one project webhook serves every mapping in that project. The per-mapping URL stays valid, and the project webhook is the recommended setup for a project with more than one mapping.
-
-- **Owner.** The project webhook belongs to the user who created it (the first creator, `POST /api/v1/project-webhooks`), not to the creator of the first mapping on that Harbor base URL and project (`harbor_base_url`, `harbor_project`). The owner is kept when mappings are removed. Other users' mappings on the same project are routed through it. They cannot change its URL or auth secret.
-  - **Owner account deleted.** The project webhook is not deleted by the user cascade. Ownership transfers to another user who has a mapping on the same `harbor_base_url` and `harbor_project`: the owner moves to the user whose earliest mapping on that project was created first (a mapping with no creation time counts as latest), and ties are broken by the lowest user id. The transfer is audited as `project_webhook.owner_transfer`.
-  - **No candidate.** If no such user exists, the project webhook is deleted by the same cascade. Its mappings stop receiving events through the project URL, which no longer resolves. Each mapping's own per-mapping URL is separate and is not affected by this deletion.
-- **Endpoint.** `POST /api/v1/webhooks/harbor/project/:project_token`. Public, CSRF-exempt, like the mapping endpoint. The project token is a random value of at least 256 bits from a CSPRNG, base64url without padding, and only its SHA-256 digest is stored. It is shown once, when the project webhook is created.
-- **Auth.** The same `Authorization: Bearer <secret>` rule as the mapping endpoint, with one project secret. Only the digest is stored, shown once.
-- **Routing.** The event's `repository.repo_full_name` selects the mapping: the one mapping on that project whose `harbor_project`/`harbor_repository` equals the event's repository and whose `harbor_base_url` equals the project's. No mapping matches: the request returns `202` and stores nothing, and the event is recorded as unmatched (see below). More than one match cannot occur, because a mapping's Harbor repository is unique per Harbor instance.
-- **Unmatched events.** An event for a repository with no mapping returns `202` and is counted, with its repository name, so the owner can see that Harbor sends events HarborGate does not map. Not silently dropped.
-- **Project scope.** Decided (2026-11-06, user, #145): an event on a project webhook must name a repository in the webhook's own Harbor project, `repository.repo_full_name` starting with `<harbor_project>/`. An event for a repository in any other Harbor project returns `202`, stores nothing, and is not counted as unmatched, because it is not for this project. The repository name in the event is used only after this check. The repository name is never taken from the event for a mapping; it is always the mapping's `harbor_repository`.
-- **Unmatched name rule.** Decided (2026-11-06, user, #145): a repository name is stored as an unmatched row only if it passes Harbor's name rule (lowercase letters, digits, dot, underscore and hyphen, with one slash between project and repository) and is at most 255 characters. A name that fails is ignored and not stored. The response is still `202`.
-- **Rotation.** Only the project owner can rotate the project token or the project secret. A non-owner, including an admin, gets `403`. Rotation shows the new URL and secret once and lists every mapping on the project that will use them. The old value stops working immediately. Rotation is audited as `project_webhook.token_rotate` or `project_webhook.secret_rotate`.
-- **Read access.** An admin may read the project webhook (`GET`) but may not rotate it. See [api.md](api.md), "Project webhooks".
-- **Setup guidance.** When the Harbor project already has a project webhook, the mapping-created screen shows a note that the project has a project webhook and that its owner must share the project URL. The project URL is never shown again, so the note does not repeat it. The per-mapping URL is shown only when no project webhook exists for that Harbor base URL and project.
-- **Proposal on save.** Decided (2026-11-06, user, #179): after a user saves a mapping (create or edit), the mapping form proposes creating the project webhook only when HarborGate has no `project_webhooks` row for that mapping's `harbor_base_url` and `harbor_project`. When a row exists, no proposal is shown and the mapping reuses that webhook. The check reads only the stored record; HarborGate makes no Harbor call for it. The proposal is per Harbor project: it names the project, not a repository, and one webhook covers every repository in it. A declined proposal is not stored, so the next save of a mapping in that project proposes again until a record exists. Each mapping is checked against its own Harbor base URL and project. Accepting calls `POST /api/v1/project-webhooks` with the saved mapping's id; a `409 conflict` (another user created it first) shows the setup guidance note instead. The proposal changes no per-mapping URL or secret. Decided (2026-11-06, user, #179): the proposal is an inline banner on the saved-mapping result, with a "Create project webhook" button. It is not a modal, does not block the user, and can be dismissed.
-- **Migration.** Existing per-mapping URLs keep working unchanged. A mapping whose Harbor project already has a project webhook shows the project URL as the recommended setup, and keeps its own URL until the owner switches Harbor to the project URL.
-- **Scope of the trigger.** The same rules apply as for the mapping endpoint: `SCANNING_COMPLETED` only, `scan_type` `vulnerability`, a digest present and valid (the tag may be absent), and a `repo_full_name` that matches a mapping. Only the routing step differs. Decided (2026-11-05, user, #132): an untagged event is handled by a resolve job, see "Responses". Decided (2026-11-05, user, #132): a `SCANNING_COMPLETED` vulnerability event whose digest is missing or invalid returns `400`, whether or not it has a tag.
-
-Status: the project webhook receiver and its management API (create, owner-only rotation, owner transfer, and the unmatched list) are built and merged under #132. See [api.md](api.md), "Project webhooks".
-
-### Payload format detection
-
-- Decided (2026-11-03, delegated): the format is detected from the parsed JSON body. If the top-level object has a `specversion` member, the body is CloudEvents. Otherwise it is Harbor's default JSON.
-  - Source: CloudEvents JSON Event Format, which requires `specversion` as a REQUIRED attribute in the JSON event (https://github.com/cloudevents/spec/blob/main/cloudevents/formats/json-format.md; fetched in this session, section "Examples" and the attribute table).
-  - Source for the default payload shape: Harbor source `src/pkg/notifier/formats/default.go` (top-level `type`, `occur_at`, `operator`, `event_data`). Harbor `src/pkg/notifier/formats/cloudevents.go` sets `Content-Type: application/cloudevents+json` for the CloudEvents form.
-- Detection is based on the body, not on the `Content-Type` header. A header can be wrong or missing.
-- If the body is valid JSON with neither a `specversion` member nor the Harbor default shape, the request returns 400.
-
-### Auth header
-
-- Harbor's webhook configuration has a single `auth_header` value (Harbor API swagger, `WebhookTargetObject.auth_header`, "The webhook auth header"). Harbor source `src/pkg/notifier/handler/notification/http_handler.go` sends that value as the HTTP `Authorization` header (`header.Set("Authorization", event.Target.AuthHeader)`).
-- Decided (2026-11-03): `Authorization: Bearer <secret>`, see decision. Harbor sends the configured value as the `Authorization` header, so the `Bearer` scheme prefix is part of the value entered in Harbor. A custom auth header name is not used.
-  - Source for Harbor sending the value as `Authorization`: Harbor source `http_handler.go` (fetched in this session). Source for the Bearer scheme: RFC 6750 section 2.1 (https://www.rfc-editor.org/rfc/rfc6750).
-  - The `Authorization` header is sent with every webhook request. Harbor's UI text is "If your webhook listener implements authentication, enter the authentication header" (Harbor webhook docs, fetched in this session).
-- Secret value: Decided (2026-11-03, delegated): 256 bits from a CSPRNG, encoded as base64url without padding (43 characters). Source for the 256-bit sizing: OWASP Session Management Cheat Sheet, "Session ID Entropy" (at least 64 bits required, and 256 bits is a stronger choice that the spec picks; https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html). Source for base64url: RFC 4648 section 5 (https://www.rfc-editor.org/rfc/rfc4648).
-- Decided (2026-11-03): the secret itself is not stored. HarborGate stores only its SHA-256 digest (lowercase hex) in `repo_mappings.webhook_auth_secret_hash`. The secret is shown once, at creation and at rotation. To verify a request, the handler strips the `Bearer ` prefix, hashes the presented value, and compares the digests in constant time. A fast hash is enough because the value is 256 random bits and cannot be guessed offline; no external source.
-- The secret is rotatable. Rotation writes a new digest and audits `mapping.auth_secret_rotate`.
-- Compare values in constant time.
-- Requests with a missing or wrong `Authorization` value are rejected with 401.
-- The header value is never logged.
-
-### Webhook URL token
-
-- Decided (2026-11-03, delegated): the webhook token is a random value of at least 256 bits from a CSPRNG, encoded as base64url without padding.
-  - Source: OWASP Session Management Cheat Sheet, "Session ID Entropy", which requires at least 64 bits of entropy from a strong CSPRNG (https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html). 256 bits is a stronger choice, which the spec makes deliberately.
-- The URL is a secret. Anyone who has it can trigger syncs for that mapping. It is not logged.
-- Decided (2026-11-03): only the SHA-256 digest (lowercase hex) of the token is stored, in `repo_mappings.webhook_token_hash` (UNIQUE). The full webhook URL is shown once, at mapping creation and at token rotation, and cannot be shown again. A lost URL is replaced by rotating the token. The handler hashes the path token and looks up the mapping by digest. The URL is built from `HARBORGATE_PUBLIC_URL` ([deployment.md](deployment.md)), never from the request's `Host` header.
-- Rotation is `POST /api/v1/mappings/:id/rotate-webhook-token`. The old token stops working immediately.
-
-### Responses
-
-- Decided (2026-11-03, delegated) response codes for `POST /api/v1/webhooks/harbor/:mapping_token`:
-  - `202 Accepted`: the body is valid and a `sync_jobs` row was stored (a sync job, or for an untagged event a resolve job). Source: RFC 9110 section 15.3.3 (202 Accepted, https://www.rfc-editor.org/rfc/rfc9110).
-  - `401 Unauthorized`: the mapping token is unknown, or the `Authorization` value is missing or wrong. Both auth failures return the same 401 with the same body, so the response does not reveal which check failed. Source: OWASP Authentication Cheat Sheet, which requires generic error messages that do not distinguish the failure reason (https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html). Source for 401: RFC 9110 section 15.5.2.
-  - `400 Bad Request`: the body is not parseable JSON, it matches neither format, or it is a `SCANNING_COMPLETED` vulnerability event whose digest is missing or invalid, tagged or not. Decided (2026-11-05, user, #132) for the digest case. Source: RFC 9110 section 15.5.1.
-  - `413 Content Too Large`: the body is over the cap. Source: RFC 9110 section 15.5.14.
-  - `429 Too Many Requests`: the rate limit is exceeded. Source: RFC 6585 section 4.
-- The body cap and rate limits are in [security.md](security.md).
-- Handling is durable: validate, store a `sync_jobs` row, return. Decided (2026-11-05, user, #132): the webhook makes no outbound call, to Harbor or to anyone else. See [backend.md](backend.md).
-- Decided (2026-11-03, delegated): a job is created only when all three conditions hold. Otherwise the request returns `202` and stores nothing.
-  - The top-level `type` is `SCANNING_COMPLETED` (default format) or `harbor.scan.completed` (CloudEvents). Verified (2026-11-03) in the Harbor source: `src/controller/event/topic.go` defines `SCANNING_COMPLETED`, and the type table in `src/pkg/notifier/formats/cloudevents.go` maps it to `harbor.scan.completed`.
-  - The event's `scan.scan_type` is `vulnerability`. Harbor also sends `SCANNING_COMPLETED` for SBOM generation, with `scan_type` `sbom` (verified (2026-11-03), `src/pkg/scan/rest/v1/spec.go` and `src/controller/event/model/event.go`).
-  - `repository.repo_full_name` equals `<harbor_project>/<harbor_repository>` of the mapping. Harbor webhooks are configured per project, so a webhook URL receives events for every repository in its project.
-  - Decided (2026-11-03, user; amended 2026-11-05, user, #132): CVEs are tracked per tag, so each sync job needs a tag. Harbor's `SCANNING_COMPLETED` event carries the digest in `resources[0].digest` and may omit `resources[0].tag` (observed on Harbor v2.15.2, in both the Default and the CloudEvents formats). If the event has a tag, it is used as before: one sync job, no lookup. The untagged rule is below.
-  - **Untagged event (resolve job).** Decided (2026-11-05, user, #132): an event with a valid digest and no tag stores ONE `sync_jobs` row, a resolve job, and returns `202`. The webhook makes no Harbor call. A resolve job is a `sync_jobs` row whose payload has `"kind": "resolve"`, the `digest`, and no `tag`. A payload with no `kind` is a sync job. Decided (2026-11-05, user, #132): any `SCANNING_COMPLETED` vulnerability event with a missing or invalid digest, tagged or not, returns `400` and stores nothing. A valid digest is `sha256:` followed by 64 lowercase hex characters (Decided (2026-11-05, delegated, #132): the same form Harbor returns, and a strict check keeps the digest safe as a path segment).
-  - **Resolve worker.** Decided (2026-11-05, user, #132): the worker takes a resolve job and reads the digest's tags from `GET /api/v2.0/projects/{project}/repositories/{repository}/artifacts/{digest}` (Artifact Read) and from `GET .../artifacts/{digest}/tags` (Tag List). The resolve job needs both permissions. A live check (2026-11-06) showed the artifact read returns `tags` as null, so the tags endpoint is the source of the tag names. It keeps the newest 10 tags by tag `push_time` and queues one sync job per kept tag, with payload `{"repo_full_name","digest","tag"}`. It skips a tag when a `queued` or `running` sync job for the same mapping, digest and tag exists. Only `queued` and `running` count. A rescan of an already-synced tag re-syncs it: a `done` job does not block a new one, because a rescan means the report changed. Decided (2026-11-05, delegated, #132): tags with an equal `push_time` are ordered by tag name, so the cut is stable.
-  - **Transaction.** Decided (2026-11-05, user, #132): the dedupe check, the sync job inserts and the resolve job's `done` mark commit in one `BEGIN IMMEDIATE` transaction. A crash or error leaves no sync jobs and the resolve job not `done`, so a retry cannot double-queue. The Harbor lookup runs before the transaction opens, and no HTTP call is held inside it.
-  - **Failure and backoff.** Decided (2026-11-05, user, #132): a failed lookup, or a digest with no tags, is a failure outcome of the resolve job. It uses the existing backoff ([backend.md](backend.md)): 8 attempts, the last attempt 63 min 30 s after the first (30 + 60 + 120 + 240 + 480 + 960 + 1920 s). A digest with no tags is retried for the whole window because the tag may be added after the scan. After the last attempt the job is `failed` with a fixed reason from the table below and raises the existing sync-failed alert ([alerts.md](alerts.md)). A zero-tag digest therefore fails visibly after the window and is never dropped silently. Decided (2026-11-05, user, #132): a Harbor rate limit defers the resolve job like other jobs. The job waits for the Retry-After header Harbor sends, capped at 1 hour (the cap on any deferral, [backend.md](backend.md) and the GitHub rate limits in [integrations.md](integrations.md)), and the deferral does not count toward the 8 attempts. Decided (2026-11-05, user, #132): when Harbor sends no Retry-After header, the job defers 5 minutes, the 1-hour cap still applies, and this deferral also does not count toward the 8 attempts.
-  - Decided (2026-11-05, delegated, #132): the `last_error` of a failed resolve job is one of these fixed strings, so no Harbor body or URL reaches the job record or the alert:
-
-    | Cause | `last_error` |
-    | --- | --- |
-    | Harbor cannot be reached (network error) | `Harbor could not be reached` |
-    | Harbor answers 401 or 403 | `Harbor rejected the robot account credentials` |
-    | The artifact is not found (404) | `digest not found in Harbor` |
-    | Any other non-2xx answer except 429, with N the status code | `Harbor returned status N` |
-    | The answer body is unreadable | `Harbor returned an artifact that could not be read` |
-    | The artifact has no tags | `digest has no tags to sync` |
-
-    Decided (2026-11-05, user, #132): fixed failure messages match the built code (PR #165). The code names each lookup cause, so the table lists them separately.
-
-    Reason: fixed text keeps the alert and the Sync jobs API free of upstream content.
-  - **Covered by a parent index.** Decided (2026-11-06, user, #132): when the resolve job finds no tags, it lists the repository's artifacts (top-level, with tags, the same list endpoint as polling). If a tagged index references the digest in its `references`, the job is marked `done` with the fixed note `covered by parent index` (catalog key `sync.note.coveredByParent`), and it queues nothing. The note is stored in the job's `last_error` column, so no schema change is needed. Otherwise the existing retry rule above applies unchanged. Reason: the rule against silently dropping digests still holds, because the parent's own scan event syncs its tags. A child digest of a tagged index is a platform image, not a separate tag, so it does not need its own sync.
-  - **Deleted artifact removes its data.** Decided (2026-11-08, user, #249; supersedes the 2026-11-06 #197 rule that marked the job `done` with the note `artifact no longer in Harbor`): when the Harbor artifact or digest returns 404 (the image was deleted after the job was queued), the sync or resolve job is final, not failed: no retry and no sync-failed alert. The job removes that tag's data ("Removing deleted artifacts" under Polling) and the note is not written. A 404 on the report request while the report is not ready is different: it still retries (see the report-not-ready rule).
-  - Field paths: under `event_data` in the default format and under `data` in CloudEvents (verified (2026-11-03), `src/pkg/notifier/formats/default.go` and `cloudevents.go`). The artifact digest is `resources[0].digest`.
-- Verified (2026-11-03) in `src/jobservice/job/impl/notification/webhook_job.go`: Harbor treats any response status outside 200 to 299 as a failure and retries the delivery, 3 times by default (`maxFails`, overridable by environment). Returning `202` for ignored events therefore stops needless retries.
-
-## Harbor API
-
-### Vulnerability report endpoint
-
-- Endpoint used: `GET /api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts/{reference}/additions/vulnerabilities`.
-  - Source: Harbor API v2.0 swagger (https://github.com/goharbor/harbor/blob/main/api/v2.0/swagger.yaml), operation `getVulnerabilitiesAddition`, path `/projects/{project_name}/repositories/{repository_name}/artifacts/{reference}/additions/vulnerabilities`. Verified in this session.
-- `{repository_name}` is the Harbor repository name. If it contains a slash, encode it twice (Harbor swagger, `repositoryName`: "If it contains slash, encode it twice over with URL encoding"). Example: `a/b` becomes `a%252Fb`.
-- `{reference}` is the artifact digest (`sha256:...`). Decided (2026-11-03, delegated): use the digest, not a tag, because a tag can move between the event and the fetch. Harbor swagger, `reference`: "The reference can be digest or tag".
-- Request header: `X-Accept-Vulnerabilities: application/vnd.security.vulnerability.report; version=1.1` is the Trivy report MIME type. Harbor swagger, `acceptVulnerabilities`, lists `application/vnd.security.vulnerability.report; version=1.1` as the default. Decided (2026-11-03, delegated): send only this MIME type. Verified (2026-11-03): the Harbor Trivy adapter (`goharbor/harbor-scanner-trivy`, `pkg/http/api/v1/handler.go`) produces only this MIME type for vulnerability reports. The response `Content-Type` is always `application/json` (`src/server/v2.0/handler/artifact.go`), so the format is checked by the key of the response object, not by the header.
-- Response, verified (2026-11-03) in `src/server/v2.0/handler/artifact.go` and `src/pkg/scan/vuln/report.go`: a JSON object keyed by MIME type, `{"application/vnd.security.vulnerability.report; version=1.1": Report}`. `Report` has `generated_at`, `scanner`, `severity`, and `vulnerabilities[]`. Each item has `id` (the CVE or advisory id), `package`, `version`, `fix_version`, `severity`, `status`, `description`, `links[]`, `preferred_cvss` (`score_v3`, `score_v2`, `vector_v3`, `vector_v2`), `cwe_ids[]`, `artifact_digests[]`, and `vendor_attributes`.
-  - The field is `fix_version`, not `fixed_version` as in the swagger's summary `VulnerabilityItem`. `fix_version` maps to `cve_findings.fixed_in_version`.
-  - Severity values are title case. The Trivy adapter emits only `Critical`, `High`, `Medium`, `Low`, and `Unknown` (verified (2026-11-03), `pkg/scan/transformer.go`). The converter upper-cases them.
-  - The converter fixture is still captured from a real Harbor response, to cover adapter-version differences.
-- Status codes: 200, 400, 401, 403, 404, and 500 (Harbor swagger, `getVulnerabilitiesAddition`). Verified (2026-11-03) in the handler: when the artifact has no report for the requested MIME type, Harbor returns `200` with an empty object `{}`. A `404` means the artifact digest does not exist.
-- Decided (2026-11-07, user, #224 d2, d11): this endpoint returns the report of the project's current scanner only (verified 2026-11-07, `GetReport` uses `GetRegistrationByProject`). A report from a chosen scanner is therefore read while that scanner is set on the project; see "Scanner reports and scan launch". The `scanner` object in the report (`name`, `vendor`, `version`) is stored with it.
-- Decided (2026-11-03, delegated): an empty object and a `404` are both retried with backoff (see [backend.md](backend.md)), because the report or a just-pushed artifact may not be visible yet. Neither is an immediate failure.
-
-### Credentials and robot account
-
-- Robot account username: `robot$<name>`. Source: Harbor robot account documentation (https://goharbor.io/docs/latest/administration/robot-accounts/, fetched in this session), "robot$ prefix". Verified (2026-11-03) in `src/controller/robot/controller.go`: a project robot is named `<prefix><project>+<name>`. The prefix is Harbor's configurable robot name prefix, default `robot$`, so operators copy the exact name Harbor shows.
-- Robot account expiry: 30 days by default. Source: Harbor robot account documentation (fetched in this session; the default expiry text is confirmed). The system-wide duration is `robot_token_duration` in days (Harbor API swagger). A per-robot `duration` of `-1` means never expires (Harbor API swagger, `RobotCreate.duration`).
-- The stored credential has `user_credentials.username` and `user_credentials.expires_at` (see [database.md](database.md)).
-- Health: the app warns before `expires_at` (see [frontend.md](frontend.md)). Decided (2026-11-03): the warning window is 14 days before `expires_at`. The window is fixed in v1, not user-set.
-
-### Harbor base URL and transport
-
-- The Harbor base URL is stored per Harbor credential in `user_credentials.base_url`. Each mapping uses its credential's `base_url`. Decided: 2026-11-02.
-- Decided (2026-11-03, delegated): the base URL must be `https://`. Plain HTTP is rejected on save.
-- Decided (2026-11-03, delegated): the resolved address must not be loopback, link-local, or private, unless `HARBORGATE_ALLOW_PRIVATE_HARBOR=true`. The address check and the blocked ranges are in [security.md](security.md) under "Outbound HTTP (SSRF)".
-  - Source: OWASP SSRF Prevention Cheat Sheet (https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html).
-- Redirects are not followed.
-- Harbor API paths are relative to `base_url` and begin with `/api/v2.0/` (Harbor swagger `basePath: /api/v2.0`).
-
-### Test button
-
-- Harbor test: Decided (2026-11-03, delegated): `GET /api/v2.0/users/current` with the robot's basic auth. `412` means the robot credential works. `401` means the secret is wrong, or the robot is disabled or expired. `200` means the credentials belong to a human user, which is rejected, because only robot accounts are accepted.
-  - Reason, verified (2026-11-03) in the Harbor source: a wrong, disabled, or expired robot secret does not fail the request. The robot authenticator returns no security context (`src/server/middleware/security/robot.go`), so the request continues as anonymous. A project or artifact call can then succeed on a public project with a wrong secret. `users/current` returns `401` for anonymous callers and `412` for a robot (`src/server/v2.0/handler/user.go`).
-  - Repository access is checked when a mapping is saved: `GET /api/v2.0/projects/{project}/repositories/{repository}/artifacts?page_size=1` must return `200`.
-  - Verified: Harbor swagger `/users/current` returns 412 for robot accounts ("Returns 412 if the caller is authenticated via a non-local context such as a robot account"). That 412 is what makes it the test.
-  - Verified: `GET /api/v2.0/systeminfo` is documented as callable anonymously ("this can be called by anonymous request"), so it cannot prove the robot secret is valid. Not used for the test.
-  - The `projects?name=` call is not used: with a wrong secret it runs as anonymous and can still return a public project.
-- GitHub test: the token's first visible repository is checked with three probes. See [api.md](api.md), "Test button", and [security.md](security.md), "GitHub token scope".
-
-## Polling
-
-- Webhooks are the primary trigger.
-- Backup polling runs every 15 minutes across all mapped Harbor projects. The 15-minute interval is a user decision.
-- Polling lists artifacts per mapping and uses the digest to decide whether to sync.
-- Decided (2026-11-03, user): polling considers only artifacts with at least one tag, and queues one job per (digest, tag) pair. Decided (2026-11-05, user, #132): polling also caps each digest to its newest 10 tags by tag `push_time`, the same cut as the resolve job. Polling recovers digests that were tagged after the scan, which no webhook announces. Fan-out from a resolve job does not use the polling success rule below. The job payload has the same shape as a webhook job: `{"repo_full_name","digest","tag"}`. Decided (2026-11-03, user, #35): a polling job's payload also has `"trigger": "poll"`. Webhook jobs omit the field, and readers treat a missing `trigger` as `webhook`. The sync handler ignores the field.
-- Decided: polling skips an image whose digest already has a successful sync for that mapping and tag. "Successful" means `sync_jobs.status = 'done'` and `sarif_status = 'success'` on the linked report (Decided 2026-11-03 in [database.md](database.md)).
-- Source for the artifact list endpoint: Harbor swagger, `GET /api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts`, with `page` and `page_size` query parameters. The artifact object includes `digest`, `tags`, `push_time`, and `pull_time` (verified in this session).
-- Note: "backup polling" here means Harbor polling. It is not the admin backup command. See [security.md](security.md).
-- Decided (2026-11-05, user, #131): a page holds 100 artifacts, and polling reads at most 10 pages per mapping per run, so a large repository cannot flood Harbor.
-- Manual pull (Decided 2026-11-05, user, #131): `POST /api/v1/mappings/:id/pull` ([api.md](api.md), Mappings) runs the same per-mapping poll for one mapping on demand. It calls the same code as the scheduled poll, with no second implementation, so it obeys the same rules: tagged artifacts only, one job per `(digest, tag)`, the same dedupe (no successful sync and no queued or running job), the same page cap, and the same payload, including `"trigger": "poll"`. Digests that Harbor is still scanning are queued and handled by the existing "report not yet" backoff. The pull uses the mapping's Harbor credential on the server; no token reaches the browser. A Harbor error fails only that pull with a fixed message. A manual pull is not recorded in `job_runs`; it is audited as `mapping.pull`.
-- **Removing deleted artifacts.** Decided (2026-11-08, user, #249; source: user, issue #249):
-  - Scope: when Harbor no longer has the artifact for a tracked tag, HarborGate removes that tag's `cve_findings`, `sync_reports`, `scanner_reports` (with their `scanner_findings`) and `sync_jobs` rows (queued, running, done or failed) for the mapping. GitHub issues (`github_issues`) and SARIF already uploaded to GitHub are kept and not changed.
-  - Timing: on a scheduled poll and a manual pull (a refresh), for each tracked tag of the mapping's repository that the complete artifact listing no longer holds; and when a sync or resolve job gets a 404 for the artifact. Harbor's delete event is not used. A poll that did not read the whole listing (a page cap hit, or a Harbor error) removes nothing.
-  - Per tag: removal is per `(mapping, repository, tag)`. If the removed tag's digest is still under another tag, that tag keeps its findings, reports and jobs. A `scanner_reports` row is keyed by digest, so it is removed only when no tag of the mapping still points to that digest.
-  - One transaction per removed tag. It writes one `artifact.remove` audit row ([database.md](database.md)) with the mapping, the tag and the count removed, and no secret.
-  - The done note `artifact no longer in Harbor` (#197) is no longer written for a missing artifact. Existing rows that hold it keep it.
-
-## Scheduled scan
-
-Decided (2026-11-06, user, #191; recorded on the issue): a mapping can ask Harbor to scan the newest image in its repository on a schedule, and reports only the vulnerabilities that are new for that image. Decisions taken on 2026-11-06 and 2026-11-07 by the user in the #191 dialogue, and recorded as comments on #191; the items marked `delegated` were chosen by the implementer under the rule "the most conservative option that fits the spec", with a one-line reason, and are listed on #191.
-
-- **Harbor scan call.** `POST /api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts/{reference}/scan`, with the body `{"scan_type":"vulnerability"}` and the robot's basic auth. `{reference}` is the artifact digest, encoded as in the other artifact calls. Verified (2026-11-07) in the Harbor swagger (`scanArtifact`: responses `202`, `400`, `401`, `403`, `404`, `422`, `500`; body `ScanType` with `scan_type` `vulnerability` or `sbom`) and in `src/server/v2.0/handler/scan.go` (`ScanArtifact` checks `RequireProjectAccess(..., rbac.ActionCreate, rbac.ResourceScan)` for a vulnerability scan). The call goes through the Harbor client in `services/harbor_client.rs`, with the same outbound rules (HTTPS, address check, no redirects).
-- **Robot permission.** Decided (2026-11-06, user, #191): the robot is granted **Scan** on each project it serves; the user grants it in Harbor. The permission the call checks is Scan **Create** (verified above; Harbor's robot permission list shows it as resource Scan, action Create). [docs/SETUP.md](../docs/SETUP.md) lists it, and its earlier "do not grant Scan" rule is replaced.
-- **Newest image.** Decided (2026-11-07, user, #191): the newest tagged artifact by push time, the same rule as the label suggestion ("Source suggestion"): `GET .../artifacts?page=1&page_size=1&sort=-push_time&q=tags%3D*`. The sync job uses that artifact's newest tag by tag `push_time` (the resolve job's order). A repository with no tagged artifact is done with the note `no tagged image to scan` (catalog key `sync.note.noTaggedImage`), and nothing is scanned.
-- **Schedule.** Decided (2026-11-07, user, #191): off by default; daily or weekly, in UTC, at a chosen time (`HH:MM`); a weekly run also has a weekday (Monday to Sunday). It is set in the mapping form. Decided (2026-11-07, delegated, #191): the granularity is one minute and there is no other minimum interval, because daily is the most frequent schedule offered. Reason: the user named daily and weekly only.
-- **Scheduler.** Decided (2026-11-07, delegated, #191): a background task checks every minute which mappings have a slot due, and for each due slot queues one `sync_jobs` row, a scan job, with payload `{"kind":"scan","repo_full_name","trigger":"schedule"}`. Recording the slot and queueing the job commit in one `BEGIN IMMEDIATE` transaction, so a slot runs once. The scheduler makes no Harbor call. A slot before the time the schedule was saved never runs. Slots missed while HarborGate was stopped run once, as the latest due slot, not once per missed slot. A scan job still queued or running when the next slot is due is not doubled. Reason: one scan per slot, never a burst after downtime.
-- **Skip a running scan.** Decided (2026-11-06, user, #191): a run is skipped when a scan for the same digest is already running. HarborGate counts a scan as running when it has a `queued` or `running` sync job with `"trigger":"schedule"` for that mapping and digest (a scan it started that has no report yet), or when Harbor answers the scan call with `409` (Harbor's own scan of the artifact is not finished; verified (2026-11-07) in `src/pkg/scan/vulnerability/vul.go`, `MakePlaceHolder`, which returns a conflict while a previous report is not final). A skipped run is done with the note `a scan of this image is already running` (catalog key `sync.note.scanAlreadyRunning`). No scan call is made in the first case.
-- **After the scan call.** On `202` the scan job queues one sync job `{"repo_full_name","digest","tag","trigger":"schedule"}` for the digest and the tag above, in the same transaction as its own `done` mark, and with the same dedupe as the resolve job (no `queued` or `running` job for the same mapping, digest and tag). The sync job waits for the report through the existing "report not yet" backoff (an empty report or a `404` on the report request). It then runs the existing sync rules unchanged: SARIF upload, findings, issue open, close and reopen ([cve-lifecycle.md](cve-lifecycle.md)), and alerts ([alerts.md](alerts.md)).
-- **New vulnerabilities.** Decided (2026-11-07, user, #191): the new vulnerabilities are the CVE ids in the new scan that are not in the last stored result for the same digest. The last stored result is the newest successful `sync_reports` row of the mapping for that digest, on any tag, stored before the scheduled sync job was queued (a sync of the same new scan from Harbor's own webhook that finishes first is not taken as the last result). Every successful report stores its CVE ids (`sync_reports.cve_ids`); a scheduled sync also stores the new ids (`sync_reports.new_cve_ids`). Decided (2026-11-07, delegated, #191): a report stored before migration 0008 has no stored ids, so the open findings of its tag stand in for them; a digest with no earlier successful report has every id new. Reason: the earlier report is the only "last result" there is. The Sync jobs view shows the new ids on the scheduled sync's row ([api.md](api.md), Sync jobs). A clean scan reports nothing new: an empty list, shown as "No new vulnerabilities".
-- **Scanner scans (#224).** Decided (2026-11-07, user, #224 d5, d11): this section describes a scan with the project's current scanner. A scan with a chosen scanner, and the scheduled run over several scanners, are in "Scanner reports and scan launch". With one enabled scanner, or a robot without Scanner Create, the scheduled run is exactly as written here.
-- **Failure.** Decided (2026-11-06, user, #191): a scan that Harbor refuses or never finishes uses the existing backoff in [backend.md](backend.md), with a fixed message, and no new retry rule. A refusal fails the scan job: `403` with `Harbor refused to start the scan; grant the robot account the Scan permission` (catalog key `sync.note.scanForbidden`), and `401` with `Harbor rejected the robot account credentials`, the same text as the other Harbor calls. Any other non-2xx answer except `404`, `409` and `429` fails it with `Harbor refused to start the scan (status N)`. Harbor unreachable is `Harbor could not be reached`. The job retries with the 8-attempt backoff and, after the last attempt, is `failed` and raises the existing sync-failed alert. A Harbor `429` defers it like a resolve job. A `404` (the image was deleted) removes that tag's data, as for a sync job (Decided 2026-11-08, user, #249, "Removing deleted artifacts"). A scan that never finishes leaves the scheduled sync job retrying on `Harbor report not available yet` through the same backoff, after which it is `failed` with that message and the same alert. No Harbor body, URL or header reaches a job row, the log or an alert.
-- **Live check.** UNVERIFIED: a scheduled run against the test Harbor (#191, last acceptance criterion). It is not run in CI.
-
-## Scanner reports and scan launch
-
-Decided (2026-11-07, user, #224): HarborGate can start a scan with a chosen Harbor scanner and keeps one report per scanner. Source tags used below: "#224 d1" to "#224 d12" are the numbered decisions on the issue; d1 to d4 are in comment 1, d5 to d7 in comment 2, d8 to d10 in comment 3, d11 and d12 in comment 4. d11 replaces d7: the d7 premise (the Harbor scan call takes a scanner) is wrong. Items marked `delegated` were chosen by the spec author, each with a one-line reason, and are listed in the PR.
-
-Where the other parts live: tables and migration in [database.md](database.md); the merge rule, the lifecycle and the issue close rule in [cve-lifecycle.md](cve-lifecycle.md); the project lock, the restore job and the wait in [backend.md](backend.md); routes in [api.md](api.md); the Scans card and catalog keys in [frontend.md](frontend.md); robot permissions in [docs/SETUP.md](../docs/SETUP.md).
-
-### Why the scanner is switched (d11)
-
-Verified (2026-11-07) in the Harbor swagger on `main` and in the handler source (`src/server/v2.0/handler/scan.go`, `project.go`, `src/controller/scan/base_controller.go`, `src/controller/scanner/base_controller.go`):
-
-- `POST .../artifacts/{reference}/scan` takes only `{"scan_type"}`. The scan uses the scanner of the project (`GetRegistrationByProject`: the project's own scanner, else the system default).
-- `GET .../additions/vulnerabilities` and the artifact's `scan_overview` come from `GetReport` and `GetSummary`, which also use only the project's current scanner.
-- The project scanner has a `GET` and a `PUT` and no `DELETE` (swagger, `/projects/{project_name_or_id}/scanner`). There is no call that clears it.
-- So the only way to scan with, and read the report of, a chosen scanner is to make it the project's scanner for the length of the scan. This is design A.
-
-### Harbor calls
-
-All calls go through the Harbor client with the same outbound rules (HTTPS, address check, no redirects), the robot's basic auth, and the project name rule. Project paths send `X-Is-Resource-Name: true` so a numeric project name is not read as an id (swagger `isResourceName`, verified 2026-11-07).
-
-| # | Call | Robot permission (project) | Source |
-| --- | --- | --- | --- |
-| 1 | `GET /api/v2.0/projects/{p}/scanner` (`getScannerOfProject`): the project's scanner, or the system default if none is set | Scanner **Read** | Verified (2026-11-07): `GetScannerOfProject` checks `RequireProjectAccess(..., ActionRead, ResourceScanner)` |
-| 2 | `GET /api/v2.0/projects/{p}/scanner/candidates?page=&page_size=100` (`listScannerCandidatesOfProject`): every scanner registration | Scanner **Create** | Verified (2026-11-07): `ListScannerCandidatesOfProject` checks `ActionCreate, ResourceScanner`. Not Scanner Read or List. |
-| 3 | `PUT /api/v2.0/projects/{p}/scanner` with `{"uuid"}` (`setScannerOfProject`) | Scanner **Create** | Verified (2026-11-07): `SetScannerOfProject` checks `ActionCreate, ResourceScanner` |
-| 4 | `POST .../artifacts/{reference}/scan` with `{"scan_type":"vulnerability"}` | Scan **Create** | Existing, see "Scheduled scan" |
-| 5 | `GET .../artifacts/{reference}?with_scan_overview=true`: the scan state of the artifact for the project's current scanner | Artifact **Read** (already granted) | swagger `getArtifact` has `with_scan_overview` (verified 2026-11-07) |
-| 6 | `GET .../artifacts/{reference}/additions/vulnerabilities` | Artifact Addition **Read** (already granted) | Existing |
-
-- `GET /api/v2.0/scanners` is not used. It needs a system-level permission a project robot cannot hold. Verified (2026-11-07): the project-scope permission list in `src/common/rbac/const.go` has Scanner Read and Create (the `ScopeProject` block), and the Scanner List, Update and Delete actions only in `ScopeSystem`.
-- Decided (2026-11-07, user, #224 d12; effect): listing scanners needs Scanner Create, the same permission that lets the robot change the project's scanner. A robot without it cannot list scanners and cannot switch. See "Scanner choice".
-- Only these `ScannerRegistration` fields are read: `uuid`, `name`, `vendor`, `version`, `disabled`, `is_default`. `url`, `auth` and `access_credential` are never read, stored, returned or logged, even if Harbor sends them (swagger `ScannerRegistration` has `access_credential`; Harbor blanks `url` for a caller without the system List permission, `project.go`). Decided (2026-11-07, delegated, #224): the response type has no field for them, so they cannot leak by accident.
-- `scan_overview` is keyed by report MIME type; each value has `scan_status`, `scanner` (`name`, `vendor`, `version` only; swagger `NativeReportSummary` and `Scanner`, verified 2026-11-07) and a summary. The overview carries no scanner UUID. The job status constants in `src/jobservice/job/status.go` are `Pending`, `Running`, `Stopped`, `Error`, `Success`, `Scheduled`. UNVERIFIED: whether `scan_status` uses exactly these strings. To confirm against live Harbor: "What are the exact `scan_status` values in `scan_overview` for a queued, running, finished, stopped and failed scan, and what is `scan_overview` for an artifact the current scanner has never scanned?"
-
-### Scan sequence (design A)
-
-Decided (2026-11-07, user, #224 d11): a scan with a chosen scanner is one `scanner_scan` job (payload and states in [backend.md](backend.md)). One run of its handler does these steps in order. Every run repeats steps 1 to 3, so a retry after a crash or a failure needs no memory of how far the last run got.
-
-1. **Resolve.** Resolve the tag to its digest (`GET .../artifacts/{tag}`, call 5 without the overview). A 404 is final and removes that tag's data (Decided 2026-11-08, user, #249, "Removing deleted artifacts"); the note `artifact no longer in Harbor` is no longer written.
-2. **Take the project lock.** See [backend.md](backend.md), "Per-project scanner lock". The row records the previous scanner.
-3. **Read and switch.** Call 1 gives the previous scanner (UUID and name), recorded once in the lock row. If the chosen scanner is already the project's scanner, no `PUT` is sent. Otherwise call 3 sets the chosen scanner.
-4. **Check the state.** Call 5. If the overview shows a final successful report, go to step 7 without a new scan. If it shows `Pending` or `Running`, go to step 6. Otherwise (no overview, or the last scan of this scanner failed) call 4 and go to step 6. A `409` from call 4 means a scan is still running (verified 2026-11-07, `vul.go` `MakePlaceHolder`): go to step 6 as well. It is not a skip, because the aim is the report, not a new scan. Decided (2026-11-07, delegated, #224): this differs from the scheduled-scan skip rule, which skips because it has no report to wait for.
-5. A `403`, `401`, network error or other refusal on calls 1, 3 or 4 ends the run as a failure (see the message table) after the restore step.
-6. **Wait for the report.** Decided (2026-11-07, delegated, #224): by polling call 5, not by the webhook. Reasons: the webhook may be missing or filtered; the switch must end in bounded time; and the handler must restore the scanner on a known event, not when an external delivery arrives. The poll is a deferral, not a held connection: the run returns `Deferred` and the job comes back after the interval, so the single worker serves other jobs between polls. Poll schedule and ceiling: the same as the SARIF processing wait ("SARIF conversion and upload", decided 2026-11-03, user): after 5 s and 10 s, then every 15 s, at most 5 minutes from the first poll, stored in `project_scanner_locks.wait_started_at` so it survives deferrals and restarts. Decided (2026-11-07, delegated, #224): reusing an existing decided schedule avoids a new constant; the user may change it. `Success`: go to step 7. `Error` or `Stopped`: failure `scanner failed the scan`. Ceiling reached: failure `Harbor report not available yet`. A webhook for this scan, if it arrives, only queues a normal sync job (see "Webhook and poll jobs"); it does not end the wait.
-7. **Fetch.** Call 6 while the chosen scanner is still the project's scanner. The body must have a report under the Trivy MIME type key, as for other reports ("Vulnerability report endpoint"); an empty object is a failure of this attempt, `Harbor report not available yet`. The report's `scanner` (`name`, `vendor`, `version`) is stored with it.
-8. **Store.** In one `BEGIN IMMEDIATE` transaction: replace the stored report for (mapping, digest, chosen scanner UUID) ([database.md](database.md), `scanner_reports`), recompute the merged findings for the digest's tracked tags ([cve-lifecycle.md](cve-lifecycle.md)), and queue one sync job `{"repo_full_name","digest","tag","scanner_uuid","trigger"}` that uploads the SARIF and runs the issue rules from the stored reports. The sync job is deduped like the resolve job's (no `queued` or `running` job for the same mapping, digest and tag); if one exists it already reads the stored reports when it runs. No Harbor call is held inside the transaction.
-9. **Restore.** Always, see below. Then the job is `done`.
-
-### Restore (d11)
-
-- Decided (2026-11-07, user, #224 d11): the previous scanner is always restored. A run that ends in any outcome except a wait deferral restores before it returns: success, failure, permanent failure, rate-limit deferral, a 404. Only the wait deferral (step 6) keeps the switch, and it is bounded by the 5-minute ceiling above.
-- Restore is `PUT` of the previous scanner's UUID (call 3), skipped when the project scanner already equals it. Because Harbor cannot clear a project scanner, a project that had no scanner of its own is left with the system default pinned as its own scanner. Decided (2026-11-07, delegated, #224): accepted, and stated in [docs/SETUP.md](../docs/SETUP.md). The effect is that a later change of the Harbor system default no longer moves that project. The user confirmed this (decision 13).
-- A restore that fails does not undo the report that was stored. The handler queues a `scanner_restore` job and gives it the lock row, then returns its own outcome. The restore job uses the existing three outcomes and the 8-attempt backoff ([backend.md](backend.md)). After the last attempt it is `failed` with `last_error` `Harbor project scanner could not be restored` and raises the existing sync-failed alert ([alerts.md](alerts.md)). The lock stays held, so no other scanner switch starts on that project until the restore succeeds. A manual retry of the failed restore job uses the existing route ([api.md](api.md)).
-- If the previous scanner's registration no longer exists (the restore `PUT` is refused and call 2 does not list it), the restore job ends `done` with the note `previous scanner no longer in Harbor` (catalog `sync.note.previousScannerGone`). Harbor falls back to the system default for such a project (verified 2026-11-07, `GetRegistrationByProject` clears the dead reference and returns the default).
-- Restore uses the credential of the mapping stored in the lock row. If that mapping was deleted, the restore uses the earliest-created remaining mapping on the same Harbor base URL and project. If none remains, the lock row is deleted and a fixed line is logged (`scanner restore skipped: no mapping left on the project`). Decided (2026-11-07, delegated, #224): there is no credential to restore with.
-
-### Scanner choice and listing (d1, d8, d12)
-
-- Decided (2026-11-07, user, #224 d8): the Scan button is on the mapping page, per tag. Decided (2026-11-07, user, #224 d1): the scanner is chosen per scan and nothing is stored as a default.
-- The picker lists scanners by name (#224 d12) and appears only when Harbor has more than one enabled scanner. Source of the list: call 2. Disabled registrations (`disabled: true`) are not offered. Decided (2026-11-07, delegated, #224): a disabled scanner cannot scan.
-- Decided (2026-11-07, user, #224 d12; consequence): call 2 needs Scanner Create. A robot without it gets `403` on the list. Decided (2026-11-07, delegated, #224): then there is no picker, the list route answers `scanner_choice: "unavailable"` ([api.md](api.md)), and Scan starts a scan with the project's current scanner with no switch (the "Scheduled scan" path). The UI says why with `mapping.scan.noScannerAccess`. Reason: a robot without Scanner Create can still scan today, and no switch is possible for it. With exactly one enabled scanner, Scan runs with no prompt, and also with no switch (the project's scanner is that scanner or the default), so Scanner Create is not exercised.
-- Every page of call 2 is read, 100 per page, at most 10 pages (the picker cap, "Search, paging, and cache"). Decided (2026-11-07, delegated, #224): the same cap as the other Harbor lists.
-
-### Scanner identity (d12)
-
-- Decided (2026-11-07, user, #224 d12): the key is the Harbor scanner registration UUID. The name is shown. The UUID is from call 1 or call 2.
-- Name refresh (Decided 2026-11-07, delegated, #224): every successful read of call 1 or call 2 upserts the scanner into `harbor_scanners` ([database.md](database.md)), updating `name`, `vendor` and `version` and `last_seen_at`. A stored report keeps its own snapshot of the name and version from its fetch, so history does not change when a scanner is renamed. The UI shows the current `harbor_scanners.name` for a UUID if the row exists, else the snapshot. A scanner whose UUID is missing from a complete call 2 list is marked `removed_at` (see "Scheduled scan").
-- UNVERIFIED: whether Harbor enforces unique scanner registration names. To confirm against live Harbor: "Can two scanner registrations in one Harbor have the same name?" The design does not depend on it, except in the webhook name match below.
-
-### Webhook and poll jobs (d10)
-
-- Decided (2026-11-07, user, #224 d10): a scan-completed event from any scanner stores that scanner's report.
-- The webhook still makes no outbound call. From the event the handler copies one more value into the job payload: `resources[0].scan_overview[<mime>].scanner.name`, as `scanner_name` (the vulnerability report MIME key only; absent if the event has none). Not a secret. The event carries `name`, `vendor` and `version` and no UUID, so a UUID match from the event is not possible. UNVERIFIED: to confirm against live Harbor: "Does the webhook `scan_overview[<mime>].scanner` ever carry a registration UUID, and is `scan_overview` present in both the Default and the CloudEvents payload?"
-- The sync job (webhook, poll, resolve fan-out) first reads call 1. If it returns `403` (no Scanner Read) the job continues as today and stores the report under the unknown scanner (below).
-  - No `scanner_name`, or it equals the name from call 1: fetch the report as today (call 6) and store it under the UUID from call 1. Decided (2026-11-07, delegated, #224): the current scanner is the one Harbor read the report from.
-  - `scanner_name` differs: the event is from another scanner (for example one whose scan finished while HarborGate had switched, or scan-on-push of a scanner that is no longer the project's). The sync job matches `scanner_name` to a registration in `harbor_scanners` for this Harbor base URL (case-sensitive equality; also compares `vendor` when the event carries it). A match queues a fetch-only `scanner_scan` job for that UUID (next bullet), and the sync job itself stores nothing for it. An unmatched name triggers one refresh by call 2; still unmatched, or call 2 refused, stores nothing under that name. The sync job then ends `done` with the note `scanner not recognised` (catalog `sync.note.scannerUnmatched`) and stores nothing from this event. Decided (2026-11-07, delegated, #224): the current scanner's own report is fetched by the sync job as before, and only when the event names the current scanner. Decided (2026-11-07, delegated, #224): never invent a registration; never fetch under a guessed scanner.
-- A webhook sync job whose event scanner differs from the current scanner does not call Harbor itself. It queues a `scanner_scan` job for the matched UUID with `"fetch_only":true` and `"trigger":"webhook"` and is `done`. A fetch-only job never starts a scan: at step 4, with no final successful report, it fails the attempt with `Harbor report not available yet` and retries on the normal backoff. It still takes the project lock and restores, because the fetch needs the scanner switched.
-- Identity of a report that cannot be tied to a UUID (the robot has no Scanner Read, so call 1 is refused): it is stored under the literal `scanner_uuid` `unknown`. Decided (2026-11-09, user, #277): the report's own scanner `name`, `vendor` and `version` (its `scanner` object) are stored with it, the same as for a known scanner, and the name is shown marked as not linked to a Harbor registration (UI: `mapping.scan.notLinked`; backend text in the issue body and SARIF: `<name> (not linked to a Harbor registration)`). A report with no scanner name is shown as "Unknown scanner" (`cves.scanner.unknown`). The uuid stays `unknown`, so the report is still never tied to a registration. There is one `unknown` report per (mapping, digest); a later such sync replaces it. Reports that existed before the migration are `unknown` too ([database.md](database.md)). Decided (2026-11-07, delegated, #224): an `unknown` report is replaced by the first normal sync (webhook, poll, resolve fan-out; not a chosen scan) of that digest that has a known current scanner, because before this feature HarborGate read only the project's scanner, and the old data came from it. A chosen scan never replaces an `unknown` report, so an old report is never counted as another scanner's. Reason: replacing would drop CVEs only the old scanner knew, and the lifecycle would then close their issues.
-
-### Scheduled scans (d5)
-
-- Decided (2026-11-07, user, #224 d5): a scheduled run starts one scan per scanner Harbor has, each through the sequence above, one at a time per project.
-- The existing scan job (`"kind":"scan"`, from the scheduler, which still makes no Harbor call) resolves the newest tagged image as in "Scheduled scan", then reads call 2. With more than one enabled scanner it queues one `scanner_scan` job per enabled scanner for the same tag and digest, in one `BEGIN IMMEDIATE` transaction with its own `done` mark, deduped by (mapping, tag, scanner UUID) against `queued` and `running` jobs. The project lock runs them one after another. With one enabled scanner, or when call 2 is refused, it queues one job with no `scanner_uuid`: the project's current scanner, no switch (the behaviour from #191, unchanged).
-- Scanner added between runs: it appears in the next call 2 and is scanned in that run. Its report joins the merged view from then. Decided (2026-11-07, delegated, #224): nothing is backfilled for older digests.
-- Scanner removed between runs: it is absent from call 2 and is not scanned. Decided (2026-11-07, delegated, #224): on a complete call 2 read, a UUID that is in `harbor_scanners` for this base URL and missing from the list gets `removed_at`, and its stored reports are deleted in the same transaction as the merged-findings recompute, so issues can close. A scanner removed after the fan-out but before its job runs fails that job at once, final, with `scanner no longer in Harbor` (catalog `sync.note.scannerGone`), and the same cleanup. A scanner that is `disabled` is not scanned and its stored reports stay in the merged view. Reason: a disabled scanner still existed at its last scan; the user may re-enable it.
-- A scheduled `scanner_scan` job's sync job carries `"trigger":"schedule"`. "New vulnerabilities" (#191) is computed over the merged CVE ids of the digest: the new ids are those not in the previous stored merged list for the digest ([database.md](database.md)). Decided (2026-11-07, delegated, #224): one scanner finding an id that another scanner already reported earlier is not new.
-
-### Side effects of a switch (d11)
-
-- While a switch is active (from step 3 until restore), other users of that Harbor project see the chosen scanner in Harbor's UI, a scan started by Harbor itself (scan-on-push, a manual scan in Harbor, Harbor's own scan schedule) runs with the chosen scanner, and its report is the chosen scanner's report. Those scans are not wrong; they are stored by the scanner that ran them (webhook rule above) and replace that scanner's report for the digest. Known and accepted by the user (d11).
-- A Harbor user who changes the project scanner during the switch makes HarborGate's restore overwrite that change. Decided (2026-11-07, delegated, #224): the restore compares the project's current scanner with the chosen one first (call 1); if it is neither the chosen nor the previous scanner, the restore does not `PUT` and ends with the note `project scanner was changed by someone else` (catalog `sync.note.scannerChangedElsewhere`). Reason: do not overwrite a person's change.
-- Rule: a switch is always restored (above). The mapping page shows an active switch from the lock row, with `mapping.scan.switchActive` ("Harbor project scanner is set to {scanner} for a scan. It is restored when the scan ends."), and shows a failed restore as `mapping.scan.restoreFailed`. Decided (2026-11-07, delegated, #224): shown to every viewer of the mapping, because other Harbor users are affected.
-- Scans of different projects do not block each other. Scans of one project run one at a time (lock). Different mappings on the same Harbor base URL and project share the lock.
-
-### Failure and messages (d4)
-
-- Decided (2026-11-07, user, #224 d4): a failed or unavailable scanner retries on the existing backoff ([backend.md](backend.md)): 8 attempts, 30 s doubling. Reports from other scanners are kept and used as they arrive; the failed scanner shows a fixed catalog message; the whole scan does not fail, because each scanner is its own job.
-- After the last attempt the `scanner_scan` job is `failed` and raises the existing sync-failed alert. A Harbor `429` defers it as in "Responses"; the restore still runs first.
-- Fixed `last_error` strings (no Harbor body, URL or header reaches a job row, the log or an alert):
-
-  | Cause | `last_error` | Catalog key (job note) |
-  | --- | --- | --- |
-  | Harbor cannot be reached | `Harbor could not be reached` | existing |
-  | Harbor answers 401 | `Harbor rejected the robot account credentials` | existing |
-  | 403 on call 1, 2 or 3 | `Harbor refused to switch the project scanner; grant the robot account the Scanner permissions` | `sync.note.scannerForbidden` |
-  | 403 on call 4 | `Harbor refused to start the scan; grant the robot account the Scan permission` | `sync.note.scanForbidden` (existing) |
-  | The scanner is not in Harbor, or is disabled | `scanner no longer in Harbor` | `sync.note.scannerGone` |
-  | The scan ended in `Error` or `Stopped` | `scanner failed the scan` | `sync.note.scannerFailed` |
-  | The 5-minute wait ended | `Harbor report not available yet` | existing |
-  | The restore failed after all attempts | `Harbor project scanner could not be restored` | `sync.note.restoreFailed` |
-  | Any other non-2xx answer except 404 and 429, with N the status | `Harbor returned status N` | existing |
-
-  Retryable: all rows except `scanner no longer in Harbor` (final, `done` with that note) and 403 on a switch (retries, because a grant may be fixed in time).
-- A scanner's per-tag state on the mapping page (queued, running, ok, failed with the reason above) is read from its latest `scanner_scan` job and `scanner_reports` row ([api.md](api.md)); the keys are in [frontend.md](frontend.md).
-
-### Secrets and logs
-
-- No token, secret, header value or webhook URL reaches a log, an SSE stream, an error body or a job row from any of the calls above. The Harbor client logs the method, the path and the status only ([backend.md](backend.md), Application log). Scanner names, UUIDs and report contents are not secrets and may appear in the UI, the SARIF and the issue body.
-- Harbor error bodies are never copied; only the fixed strings above are stored or returned.
-
-### Grype report reader
-
-Changed (2026-11-07, user, #224 d18, d19, d20): the Grype adapter is the user's own, `nrosier/harbor-scanner-grype`. This section replaces the text merged in PR #226, which was written from two community adapters. Those adapters, their facts and the rules that only existed for them are removed. Every adapter fact below was read from the user's repository and cites `file:line`. Decided (2026-11-07, user, #224 d16, d17): the Harbor instance runs Trivy and Grype, and HarborGate reads both reports. The Trivy rules ("Vulnerability report endpoint") are unchanged.
-
-Decisions applied here:
-
-- d18: the adapter is the user's own; MIME type, fields and severities come from its source; differences from Trivy are recorded.
-- d19: the severity `Negligible` maps to `LOW`, so it shows with the Low label.
-- d20: the merge key stays the CVE id plus the package name (d2).
-
-**Sources.** Verified (2026-11-07):
-
-- Adapter: `nrosier/harbor-scanner-grype` at commit `9c55174ccbb99fad2f0bb904745c85f405380ea7`. That commit was the head of `main` and the commit of the tag `v0.2.0` when read. Paths below are relative to it. The repository is a GitHub fork of `TechPrototyper/harbor-scanner-grype` (GitHub API `fork: true`; `go.mod:1` still names that module path), and it is Apache-2.0 licensed (`README.md:213`).
-- Harbor, for the Harbor-side facts only: `goharbor/harbor` at `3852755e06aa621ebfc7b665545de1e7d0032b47`, `src/pkg/scan/vuln/severity.go`, and the files already cited in "Vulnerability report endpoint".
-
-**Adapter release.** Verified (2026-11-07): one release exists, `v0.2.0` (annotated tag on commit `9c55174`; GitHub release published 2026-11-07T11:52:24Z). The chart has `version` and `appVersion` `0.2.0` (`charts/harbor-scanner-grype/Chart.yaml:7-8`). The release workflow publishes `ghcr.io/nrosier/harbor-scanner-grype` with the tags `0.2.0` and `0.2` (`.github/workflows/release.yml:77-79`), and the registry listing shows `0.2.0`, `0.2` and `latest`. The image bundles Grype `v0.112.0` (`Dockerfile:20,23`). So the version range this section is written for is exactly `v0.2.0`; no later release exists. Which tag the user's Harbor has registered is not in the repository; see UNVERIFIED 1. The author's own status line, "Working and tested against Harbor 2.15 with Grype 0.112" (`README.md:186`), is not checked here.
-
-**Report MIME type.** Verified (2026-11-07): the adapter produces `application/vnd.security.vulnerability.report; version=1.1` (`pkg/harbor/model.go:19`, used by `pkg/api/server.go:125`). It also produces the legacy `application/vnd.scanner.adapter.vuln.report.harbor+json; version=1.0` (`model.go:20`; `README.md:62-63`), with the same JSON shape (`model.go:16-18`). When the request has no `Accept` header or `*/*`, the adapter answers with the v1.1 type (`server.go:497-499`), and the body is written with the negotiated type (`server.go:489`). This is the key Trivy uses, so the request header, the response key check and the "empty object means not yet" rule are the Trivy ones, unchanged. Decided (2026-11-07, user, #224 d17, d18): no second MIME type is requested; the legacy type is not read. The adapter also advertises an SBOM report type (`model.go:23`; `server.go:148-158`); HarborGate requests no SBOM, so that capability is not read.
-
-**Scanner object.** Verified (2026-11-07): the report's `scanner` is `{name: "Grype", vendor: "Anchore", version: <Grype version>}`. The name and vendor are fixed in code (`cmd/adapter/main.go:83`). The version is read once at start from `grype version -o json` (`pkg/grype/runner.go:304-319`; `main.go:84-90`) and is empty if that call fails (`main.go:85-87`). The same object is used in `GET /api/v1/metadata` and in every report (`server.go:134-164,393`; `pkg/grype/mapper.go:85`). The image pins Grype `v0.112.0` (`Dockerfile:23`), so the version is expected to name that release; the exact string is UNVERIFIED 1. The version is stored with the report as the snapshot, as for Trivy, and is never used to choose a rule. The registration `name` in Harbor is chosen by the admin and may differ from `Grype`; see UNVERIFIED 4.
-
-**Field mapping.** The item is Harbor's `VulnerabilityItem`, so the key names are the Trivy ones. The adapter's item type is `pkg/harbor/model.go:165-177`, filled by `newItem` (`pkg/grype/mapper.go:133-149`).
-
-| Item field (as the converter reads it) | What the adapter writes | Source | Reader rule |
-| --- | --- | --- | --- |
-| `id` | Grype `vulnerability.id`. If `SCANNER_PREFER_CVE` is on (default on) and the id does not start with `CVE-`, the first related vulnerability id that starts with `CVE-`; if there is none, the Grype id stays. The replaced id is kept in `vendor_attributes.grype_id`. | `mapper.go:118-131`; default on: `internal/config/config.go:61`, `charts/.../values.yaml:38` | Read as is. No rewriting. An id that is not a CVE (for example `GHSA-...`) is a valid finding id. |
-| `package` | Grype `artifact.name` (the installed package name; the `upstreams` field of the Grype model is never read). Key always written. | `mapper.go:138`; `model.go:167`; `pkg/grype/model.go:100-103` | Missing, `null` or empty is `''`. |
-| `version` | Grype `artifact.version`. Key always written. | `mapper.go:139`; `model.go:168` | Missing, `null` or empty is no version. |
-| `fix_version` | The first entry of Grype `fix.versions`; the key is left out when there is none. Only the first fixed version is kept. | `mapper.go:140,254-259`; `model.go:169` | Missing, `null` or empty is no fix. |
-| `severity` | One of `Critical`, `High`, `Medium`, `Low`, `Negligible`, `Unknown`. | `mapper.go:92-109`; `model.go:46-53` | See "Severity" below. |
-| `description` | Grype `vulnerability.description`. Key always written, so it can be `""`. | `mapper.go:142`; `model.go:171` | Read as is. |
-| `links` | Grype `dataSource`, then `urls`, then each related vulnerability's `dataSource` and `urls`; no duplicates; order kept; never `null`. | `mapper.go:171-199`; `mapper_test.go:205` | Read as is. Empty list allowed. |
-| `preferred_cvss` | The first CVSS entry whose version starts with `3.` fills `score_v3` and `vector_v3`; the first that starts with `2.` fills `score_v2` and `vector_v2`; other versions (CVSS 4.x) are ignored; the object is left out when neither exists. Record order, not highest score. | `mapper.go:225-244`; `model.go:156-162`; regression test `pkg/grype/mapper_test.go:238-271`; `README.md:69-70` | Read as for Trivy. A `vector_v3` always comes with a `score_v3` here. |
-| `cwe_ids` | Grype `cwes[].id`; left out when empty. | `mapper.go:146,246-252`; `model.go:175` | Optional, as for Trivy. |
-| `layer` | `layer.digest` from the first location's layer id; left out when none. | `mapper.go:218-223`; `model.go:150-154,173` | Not read. |
-| `vendor_attributes` | Only the non-empty ones of `purl`, `namespace`, `matcher`, `fix_state`, `grype_id`. | `mapper.go:35-42,151-169`; `model.go:176` | Not read. Decided (2026-11-07, delegated, #224): HarborGate reads no adapter-specific field. |
-| `status` | No field in the adapter's item type; never written. | `model.go:165-177` | Not needed by the reader. |
-| `artifact_digests` | No field in the adapter's item type; never written by the adapter. | `model.go:165-177` | Optional, and not needed by the reader. Whether Harbor sets it on the read path is not checked here. |
-
-- A missing field never fails the report.
-- Inside the adapter, rows are merged on id, package and version, with links joined and the first layer kept (`mapper.go:60-67,111-116`), and rows are sorted by severity (high first), then id, then package (`mapper.go:68-76`). The report's own `severity` is the highest item severity, `Unknown` for no items (`mapper.go:77-82`). Decided (2026-11-07, delegated, #224): the reader maps each item's severity and does not use the report-level one. Two rows can still share an id and package and differ in version, because the adapter's key includes the version. Duplicate rows are handled as for a Trivy report. No new rule.
-
-**Differences from the Trivy rules.** The Trivy column is what "Vulnerability report endpoint" records; where it records nothing, the cell says so and no claim is made.
-
-| Point | Trivy (this spec) | Grype, user's adapter v0.2.0 | Effect on the reader |
-| --- | --- | --- | --- |
-| Report key | `application/vnd.security.vulnerability.report; version=1.1` only | the same key; also the legacy v1.0 type, which is not requested | None. |
-| Severity values | `Critical`, `High`, `Medium`, `Low`, `Unknown` only (line "Severity values are title case") | the same five, plus `Negligible` | `Negligible` is new; it maps to `LOW` (d19). |
-| `id` kinds | "the CVE or advisory id" | a `CVE-` id, or another id when no related CVE exists or `SCANNER_PREFER_CVE` is off | A non-CVE id is read as is and never merges with a CVE id. |
-| `fix_version` | key `fix_version` | key `fix_version`, only the first fixed version, left out when none | None; the rest of the fixed versions cannot be recovered. |
-| `status` | key listed in the item | never written | None; the reader never needs it. |
-| `artifact_digests` | key listed in the item | never written by the adapter | None. |
-| `layer` | not listed in the item | written as `layer.digest` | None; not read. |
-| `vendor_attributes` | key listed; contents not recorded | `purl`, `namespace`, `matcher`, `fix_state`, `grype_id` | None; not read. |
-| `preferred_cvss` | key names `score_v3`, `score_v2`, `vector_v3`, `vector_v2`; selection rule not recorded | the same key names; first v3.x and first v2.x; CVSS 4.x ignored; left out when none | A Grype finding with only a v4 score has no `preferred_cvss`. |
-| `package` | key listed; how it is filled is not recorded | `artifact.name`, the installed package name | Whether it equals Trivy's string for the same flaw is UNVERIFIED 3. |
-| `scanner` object | `name`, `vendor`, `version` stored with the report; the values are not recorded | `Grype`, `Anchore`, the Grype version (empty if unreadable) | None; stored as the snapshot. |
-
-**Severity.** Verified (2026-11-07): Harbor's own scale is `None`, `Unknown`, `Negligible`, `Low`, `Medium`, `High`, `Critical`, in title case (`severity.go:22-45`). The adapter emits only `Critical`, `High`, `Medium`, `Low`, `Negligible` and `Unknown`; it matches the Grype value case-insensitively and writes any other value, or an empty one, as `Unknown` (`mapper.go:92-109`; `mapper_test.go:64-76`). It never emits `None`. HarborGate stores five values ([cve-lifecycle.md](cve-lifecycle.md)). Compare case-insensitively, then store upper-case:
-
-| Value the adapter emits | Stored by HarborGate | Source of the rule |
-| --- | --- | --- |
-| `Critical` | `CRITICAL` | same name |
-| `High` | `HIGH` | same name |
-| `Medium` | `MEDIUM` | same name |
-| `Low` | `LOW` | same name |
-| `Negligible` | `LOW` | Decided (2026-11-07, user, #224 d19) |
-| `Unknown` | `UNKNOWN` | same name |
-| any other value, `None`, or empty (the adapter does not emit these) | `UNKNOWN` | guard; Harbor defines `Unknown` as "a priority that the scanner did not recognize" (`severity.go:27-29`) |
-
-- Effect of d19 (user): a `Negligible` finding counts as `LOW` for `min_issue_severity`, shows with the Low label, and takes part in the merged "highest severity" as `LOW`. No sixth stored value is added, so the schema, the labels and the threshold list do not change.
-- The adapter's own comment says Harbor remaps `Negligible` to `None` when it aggregates (`model.go:43`). Harbor's `ParseSeverityVersion3` does that for CVSS v3 ratings (`severity.go:75-89`). Whether the per-item report that HarborGate reads still carries `Negligible` is UNVERIFIED 2. If Harbor returns `None` for it, the guard row above applies and the finding is `UNKNOWN`, not `LOW`.
-
-**Merge consequences** (rules in [cve-lifecycle.md](cve-lifecycle.md), "Merged view", unchanged; user, #224 d20):
-
-- The merge key is the exact CVE id plus the exact package name. This adapter fills `package` from `artifact.name`, so a Grype finding merges with a Trivy finding when both strings are equal, and the finding then has scanner count 2.
-- With `SCANNER_PREFER_CVE` on (default), a `GHSA-...` match is reported under its related CVE id, so the ids line up with Trivy's. A non-CVE id that remains (no related CVE, or the setting off) never merges with a `CVE-...` id for the same flaw.
-- Package names may differ between the two scanners for the same flaw. The rule stays exact (d20); no normalisation. See UNVERIFIED 3.
-
-**Timing facts for the report wait** (d15 is unchanged: the ceiling stays 5 minutes, and a report not ready in time retries on the existing backoff). The adapter's default scan timeout is 5 minutes (`internal/config/config.go:33,58`), it runs 2 scans at once by default and holds further scans as pending (`config.go:42-44,64`; `server.go:289-306`), and it drops finished jobs after 1 hour (`config.go:34,59`). The deployment may override these (`charts/.../values.yaml:33,43`). The author reports a first scan of about 40 seconds including the database download (`README.md:186-187`; `docs/ARCHITECTURE.md:140-142`); that is the author's figure, not measured here.
-
-**Required tests** (Decided 2026-11-07, delegated, #224). Fixtures are real responses captured from Harbor, as for Trivy ("Vulnerability report endpoint"); until a capture exists, the fixture is built from the field table above and marked synthetic in the file. Cases: (a) a report with every field the adapter writes; (b) an item with a non-CVE id, no `fix_version`, no `cwe_ids`, no `preferred_cvss`, no `layer`, no `status` and no `artifact_digests` reads without error; (c) each of the six severity values and a case variant maps as in the table, `Negligible` becomes `LOW`, and `None`, an empty string and an unlisted string become `UNKNOWN`; (d) the body keyed by the v1.1 MIME type is read, and an empty object is "not yet"; (e) an item with a `score_v2` and no `score_v3` reads, and no v3 value is invented; (f) a Trivy and a Grype report of one digest merge on id and package into one finding with count 2, and the same CVE with different package strings stays two findings.
-
-**UNVERIFIED** (the user answers or runs the check):
-
-1. UNVERIFIED: to confirm against live Harbor: "Which image tag of `ghcr.io/nrosier/harbor-scanner-grype` is registered in your Harbor, what does its `GET /api/v1/metadata` return for `scanner.version` (the image pins Grype `v0.112.0`; is the string `0.112.0` or `v0.112.0`, or empty), and is `SCANNER_PREFER_CVE` set to `false` in your deployment?" Source cannot answer this: the version string comes from `grype version -o json` at run time, and the deployment environment is not in the repository.
-2. UNVERIFIED: to confirm against live Harbor: "For one image scanned by Grype, what does `GET .../additions/vulnerabilities` return: is the key exactly `application/vnd.security.vulnerability.report; version=1.1`, do the items carry a non-empty `package` and `version`, which `id` kinds occur (`CVE-`, `GHSA-`, other), and is an item with a Negligible rating returned as `Negligible`, as `None`, or not at all?" The answer is the fixture for the reader.
-3. UNVERIFIED: to confirm against live Harbor: "For the same image and the same CVE, do Trivy and Grype give the same `package` string (for example for Debian or Alpine packages whose source and binary names differ; the Grype adapter writes the installed package name, `artifact.name`)?" If not, the exact-match merge key lists them as two findings; the rule stays until this is answered.
-4. UNVERIFIED: to confirm against live Harbor: "In a webhook payload and in `with_scan_overview`, what are `scan_overview[<mime>].scanner.name` and `.vendor` for a Grype scan, and does that name equal the registration `name` that call 1 returns?" The adapter reports `Grype` and `Anchore` (`main.go:83`), but a registration name is chosen by the Harbor admin, and the webhook name match compares with the registration name ("Webhook and poll jobs"). If they differ, the name match fails and the event is noted `scanner not recognised`.
-
-### Open questions for the user
-
-All five items are decided or answered. Nothing here is open.
-
-1. Decided (2026-11-07, user, #224, dialogue): a project that had no scanner keeps the system default pinned on it after the first switch, and HarborGate does not refuse to switch such a project (decision 13). Harbor cannot clear a project's scanner setting, and its response is the same for a set and an unset scanner.
-2. Decided (2026-11-07, user, #224, dialogue): an issue waits until every enabled scanner has reported on the newest digest, and closes only when none of those reports has the CVE (decision 14).
-3. Answered (2026-11-07, user, #224 d16, d17): the Harbor instance runs Trivy and Grype, and both reports are read. Grype's MIME type, field mapping and severity mapping are in "Grype report reader" above, with the points still UNVERIFIED.
-4. Decided (2026-11-07, user, #224, dialogue): the Scans card design is approved as specified in [frontend.md](frontend.md), "Placement", and is built as written.
-5. Decided (2026-11-07, user, #224, dialogue): the 5-minute report wait and the 5-minute scan cooldown stay (decision 15). A scan that is not done in 5 minutes fails the attempt and retries on the 8-attempt backoff with a new switch each time.
-
-### Verification and acceptance changes (#224)
-
-Required test scenarios (Decided 2026-11-07, delegated, #224): (a) the sequence with a fake Harbor: switch, scan, wait, fetch, store, restore, in order; (b) restore runs after a failed scan, a failed fetch and a rate-limit deferral; (c) a failed restore queues `scanner_restore`, holds the lock, retries on the backoff, raises the alert; (d) two jobs for one project never switch at the same time, and a restart mid-wait resumes and restores; (e) a second scanner's report does not replace the first, and the same scanner's replaces its own; (f) the merge: same CVE id and package from two scanners is one finding with count 2 and names in the fixed order, one scanner gives count 1; (g) the issue stays open while one scanner still reports, stays open while an enabled scanner has no report for the newest digest, and closes only when every enabled scanner has reported and none reports the CVE (d14); (h) SARIF has one result per (CVE, package) with the two property keys and validates against the SARIF 2.1.0 schema in `backend/tests/schemas`; (i) the migration gives one `unknown` report per digest and leaves counts and issues unchanged; (j) a robot without Scanner Create gets `unavailable` and a plain scan; (k) no secret, scanner `url` or `access_credential` appears in a log, job row, response or alert.
-
-Changes the spec makes to the acceptance criteria on #224 (the issue body is not edited here; the criteria stay unticked):
-
-- Criterion 1: met by this spec once merged; it records the decisions in `integrations.md`, `database.md` and `cve-lifecycle.md`, and also `backend.md`, `api.md`, `frontend.md`.
-- Criterion 2: "Harbor runs it with the chosen scanner" becomes: HarborGate sets the project's scanner to the chosen one, starts the scan, waits, and restores (d11). Harbor's scan call cannot take a scanner.
-- Criterion 3: "with one scanner, no prompt" also holds when the robot cannot list scanners (`unavailable`); the picker lists scanners by name.
-- Criterion 4: "name and version" are the report's scanner object (snapshot); the scanner key is the registration UUID.
-- Criterion 5: stored per (digest, scanner UUID); the same scanner replaces its own.
-- Criteria 6 and 7: merge key is CVE id plus package; names are in the fixed order of `cve-lifecycle.md`.
-- Criterion 8: scanner count and names are in the issue body line and in the SARIF result properties `harborgate/scannerCount` and `harborgate/scannerNames`.
-- Criterion 9: add: the scan is per scanner; other scanners' reports are kept; the fixed messages are in "Failure and messages"; a failed restore also raises the alert.
-- Criterion 10: also covers scanner `url`, `auth` and `access_credential`, which are never read.
-- Criterion 12: `docs/SETUP.md` lists Scanner Read and Scanner Create (optional) beside Scan Create, with the side effects.
-- Criterion 13: unchanged. Note: the issue lists 14 criteria, not 13.
-- Criterion 14: the live check needs a Harbor with two scanners and covers the UNVERIFIED items below; add to it a check that the previous scanner is restored after each scan and after a forced failure.
-- New criterion proposed (not added to the issue): a switch is always restored, or the failed restore is visible on the mapping page and in an alert.
-
-### Live checks (UNVERIFIED)
-
-Run against a Harbor with two scanners. Record here when done.
-
-- A restore while the chosen scanner's scan is still `Running` does not abort it, and its report is then readable after a switch back to that scanner.
-- The exact `scan_overview.scan_status` strings (question above).
-- Whether a webhook `scan_overview[<mime>].scanner` ever carries a UUID.
-- Whether scanner registration names are unique.
-- Whether `PUT .../scanner` with a disabled scanner's UUID is refused.
-- Whether a project robot with Scanner Read and Scanner Create but no system permission gets `403` on `GET /scanners` (the design assumes it does).
+Purpose: how Dockward discovers images in container registries and pulls them, how the pinned scanners run, and how results go to GitHub (SARIF upload and issues). Harbor is removed in 0.2.0. There is no Harbor webhook, no polling of a Harbor API, no Harbor client, no project webhook and no sync job.
+
+Decisions are marked `Decided (<date>, <who>)`. `Verified (<date>)` marks a claim checked against the cited source on that date. `UNVERIFIED:` marks a claim that only a live system or a later build can check. `OPEN:` marks a question the user has not answered. Route contracts are in [api.md](api.md). The engine design is in [spinoff-local-scan.md](spinoff-local-scan.md) and its binding decisions in [spinoff-decisions.md](spinoff-decisions.md).
+
+## Scope
+
+- Dockward discovers images (a registry tag list), pulls each platform image into a local OCI layout on disk, scans it with a pinned scanner binary run as a child process, converts the result to SARIF 2.1.0, and publishes to GitHub Code Scanning and issues.
+- No Docker daemon is used. Dockward reads registries itself.
+- Verified (2026-11-11): the source files `harbor_client.rs`, `harbor_webhook.rs`, `poller.rs`, `sync_jobs.rs`, `sync_reports.rs` and `project_webhooks.rs` do not exist in `backend/src`.
+
+## Registry hubs
+
+- A hub is a registry host. Table `hubs` (see [database.md](database.md)): `host` (unique), `kind` (`default` or `custom`), `pull_endpoint` (custom hubs only; `NULL` means the stored host is used).
+- Verified (2026-11-11, `backend/src/db/mod.rs`, test `default_hubs_are_seeded`): a fresh install seeds `ghcr.io` and `docker.io`, both `kind = default`, with no pull endpoint.
+- Custom hubs are added by an admin. A hub host is checked with the hub grammar (`services/registry/grammar.rs`, `validate_hub_host`), and a repository name is checked with `validate_repository` (at most 255 bytes). A tag is checked with `validate_tag` (at most 128 bytes). A digest is `sha256:` followed by 64 lowercase hex characters (`is_sha256_digest`).
+- Source selection: a source is `(hub, repository, tag value)`. The tag value is an exact tag or a glob with `*` and `?` (pattern at most 128 bytes, `services/discovery/glob.rs`). `image_sources` holds the rows; `UNIQUE (hub_id, repository, tag_value)`.
+- Each source has at most one registry credential (`source_credentials`, encrypted, see [security.md](security.md)). There is no hub-wide or namespace-wide credential.
+
+### Discovery
+
+- A `discover` job runs once per distinct hub and repository, covering every source on it. Verified (2026-11-11, `services/discovery/schedule.rs`): the schedule runs hourly (`INTERVAL` 3600 s), first run 60 s after start.
+- It lists tags with `GET /v2/<repository>/tags/list?n=100`, following the `Link` header (`rel="next"`), at most 100 pages (`MAX_TAG_PAGES`, `services/registry/transport.rs`).
+- Each tag matching a source's value is resolved to its manifest digest. The observation is stored in `tag_observations`.
+- Caps per run (`services/discovery/mod.rs`): at most 50 new digests recorded (`MAX_NEW_DIGESTS_PER_RUN`) and at most 500 manifest fetches (`MAX_MANIFEST_FETCHES_PER_RUN`). Items beyond a cap are found by the next hourly run, because nothing is recorded for them.
+
+### Pull
+
+- A `pull` job fetches each platform image into an OCI layout under the data directory (`services/storage/pull.rs`). The index is read, the platform manifests are read, and the blobs are written by digest.
+- Manifest media types accepted (`services/registry/manifest.rs`): OCI image index, Docker manifest list, OCI image manifest, Docker image manifest. Attestation manifests are recognised by the annotation `vnd.docker.reference.type` with value `attestation-manifest` and are not scanned as platforms.
+- Manifest size cap: 4 MiB (`MANIFEST_MAX_BYTES`). Pull size cap and minimum free disk space are operator settings (`services/scan_settings.rs`): the pull cap range is 1 MiB to 1 TiB, the minimum-free range is 0 to 1 TiB. A pull that would break the disk guard does not start.
+- Credentials: the source credential is sent as a bearer token obtained from the registry's token service, or as basic auth. The credential is held only in the pull session and zeroized when the session ends (`Credential`, `services/registry/transport.rs`). Its `Debug` output is `Credential(redacted)`. It is never logged.
+
+### Address and transport rules
+
+- HTTPS only. A plain `http://` endpoint is allowed only for a host listed in `DOCKWARD_ALLOW_PRIVATE_REGISTRIES` with the `http://host[:port]` form (`services/registry/policy.rs`).
+- The resolved address is checked against the outbound deny-list before connecting, and again for every redirect hop (`AddressPolicy`, `is_blocked`). A host is refused when any resolved address is blocked. Private addresses are allowed only for a host in `DOCKWARD_ALLOW_PRIVATE_REGISTRIES`. The address rules are in [security.md](security.md), "Outbound HTTP (SSRF)".
+- Redirects: followed, at most 10 (`MAX_REDIRECTS`), each hop checked.
+- Timeouts (`services/registry/transport.rs`): connect 10 s, whole request 300 s. Token lifetime is 60 s by default, capped at 300 s.
+
+### Rate limits
+
+- Verified (2026-11-11, `services/registry/transport.rs`): a registry `429` is retried inside the client at most 2 times (`MAX_429_RETRIES`), and only when the wait is at most 10 s (`MAX_IN_CLIENT_WAIT`). The wait is `Retry-After` in seconds, or 1 s when the header is missing or unusable (an HTTP date counts as unusable).
+- A longer wait, or a `429` after the retries, returns `RateLimited` to the caller. The job is deferred by 300 s (`RATE_LIMIT_DEFER_SECS`, `services/discovery/mod.rs`) and does not count as a failed attempt. The fixed text shown for an anonymous Docker Hub refusal is in the same module.
+- Dockward never retries a rate-limited request in a loop.
+
+## Scanners (Trivy and Grype)
+
+- Two scanners, fixed keys `trivy` and `grype` (`services/scanner/mod.rs`, `Scanner`).
+- Each runs as a child process from a fixed absolute path in the image: `/usr/local/bin/trivy` and `/usr/local/bin/grype`. Verified (2026-11-11).
+- Out of process. Dockward never links a scanner library. The scanner's output is read from stdout, bounded by `scanner.output_max_bytes` (default 64 MiB) and killed at `scanner.timeout_s` (default 600 s) (`services/scanner/process.rs`, `services/scan/mod.rs`).
+
+### Pinned binaries
+
+- The Dockerfile copies the scanners from digest-pinned release images, never a floating tag: Trivy from `aquasec/trivy@sha256:8f6bb947...` (`/usr/local/bin/trivy`), Grype from `anchore/grype@sha256:13113eec...` (`/grype`). Both are static, so they run on `scratch`. See [deployment.md](deployment.md).
+- Versions. Trivy 0.76.2 is the pinned version in the test fixtures (`backend/tests/fixtures/scanner/`), `services/scanner/parse/tests.rs` and `.github/workflows/security-scan.yml`. Grype 0.121.2 is the version in `services/scanner/db_update/tests.rs`, in the test fixtures and in the CI pin `GRYPE_VERSION` in `security-scan.yml`. Decision 29 verified Grype v0.121.2 at digest `6a36234d...`, which is not the digest the Dockerfile pins. The Dockerfile states no version, so the Grype version of the shipped image is not known from the repository (see the OPEN item below).
+
+### Run arguments
+
+Verified (2026-11-11, `services/scanner/mod.rs`, `scan_args`):
+
+- Trivy: `image --input <layout dir> --format json --skip-db-update --skip-java-db-update`, JSON on stdout.
+- Grype: `oci-dir:<layout dir> -o json`, JSON on stdout.
+
+### Environment
+
+Only an allow-list of variables is passed (`environment`, `services/scanner/mod.rs`). No secret is ever added, and `DOCKWARD_ENCRYPTION_KEY` and the old key are never read.
+
+- Both: `HOME` = the scanner cache root, `LC_ALL=C.UTF-8`.
+- Trivy: `TRIVY_CACHE_DIR` = the scanner's cache directory, `TRIVY_DISABLE_TELEMETRY=true`, `TRIVY_SKIP_VERSION_CHECK=true`.
+- Grype: `GRYPE_DB_CACHE_DIR` = the scanner's cache directory, `GRYPE_CHECK_FOR_APP_UPDATE=false`. On a scan run, `GRYPE_DB_AUTO_UPDATE=false`, so a scan never downloads a database.
+
+### Cache location
+
+- The scanner cache root is `<data dir>/scanner-cache` (`services/scan/mod.rs`). Each scanner's database is under `<cache root>/<scanner key>`.
+- `HOME` is set to the cache root so a scanner never writes into the container's home directory, which does not exist on `scratch`.
+
+### Database update
+
+- A `db_update` job runs per scanner on a 24-hour schedule, first run 120 s after start (`services/scanner/db_update.rs`, `INTERVAL` 86400 s). It is recorded in `job_runs` with `job_kind = 'db_update'`.
+- Update commands (`update_args`): Trivy `image --download-db-only` and `image --download-java-db-only`; Grype `db update`. Both print nothing that is stored.
+- The update is the only job that reaches the network for a scanner, and it reaches only the scanner's database location.
+- Build time: read from the database metadata (Trivy `db/metadata.json`, Grype `db status -o json`). Source: [spinoff-local-scan.md](spinoff-local-scan.md), section 8.
+- A failed update keeps the old database in use and fails the `db_update` job under the existing retry rules. A scan never starts without a database.
+- UNVERIFIED: whether a scan that runs against a database older than the update window is acceptable. The spinoff does not set a limit.
+
+## Scan and publish
+
+- A `scan` job scans one stored platform image with each enabled scanner, and writes one `scan_runs` row per (platform image, scanner) with its state (`scanner_findings` holds the findings). Only `done` runs count for results.
+- A `publish` job converts the merged result to SARIF, uploads it to GitHub, and updates the issues. See "GitHub SARIF upload" and "GitHub issues" below, and [cve-lifecycle.md](cve-lifecycle.md).
+- Job kinds (`services/jobs.rs`, `JOB_KINDS`): `discover`, `pull`, `scan`, `publish`, `db_update`. `job_runs` also records `cleanup` and `retention` (`services/job_runs.rs`).
+- Retry and backoff: [backend.md](backend.md), "Durable job queue".
 
 ## OCI labels
 
-Read these from the Harbor artifact (`GET .../artifacts/{reference}` or the artifact's config labels):
+Read from the image config of the scanned platform image (`extra_attrs`-style config labels in the stored OCI config blob; the label names are in `services/publish/labels.rs`).
 
-- Commit SHA: `org.opencontainers.image.revision`. Required. If missing, the sync is marked `failed` with a clear error. Never guess the SHA.
-- Repository: `org.opencontainers.image.source`. Decided (2026-11-03): when present, it must match the mapping's GitHub target, `<github web URL>/<github_owner>/<github_repo>` (`https://github.com` unless the admin set a custom web URL, see "GitHub base URL"), compared case-insensitively and ignoring a trailing `/` or `.git`. On a mismatch the sync is marked `failed` with a clear error and nothing is uploaded. Decided (2026-11-03, delegated): when the label is absent, the sync proceeds.
-- Branch: Decided (2026-11-03): from the HarborGate label `io.github.nrosier.harborgate.branch` if present, otherwise the mapping's `default_branch` (default `main`). Decided (2026-11-03, delegated): the label name uses reverse-domain notation under the project's GitHub Pages domain `nrosier.github.io`. The OCI annotation rules say keys SHOULD use reverse domain notation (verified (2026-11-03)). `org.opencontainers.image.ref.name` is not read for the branch, because the OCI image spec defines it as the name of a reference, typically a tag such as `1.2.3`, not a branch.
-- Source for the label names: OCI Image Format Specification, annotations (https://github.com/opencontainers/image-spec/blob/main/annotations.md). Verified (2026-11-03): the page defines `org.opencontainers.image.source` (URL to get the source code), `org.opencontainers.image.revision` (source control revision identifier), and `org.opencontainers.image.ref.name` ("Name of the reference for a target").
-- Decided (2026-11-06, user, #132): for a multi-arch index, labels are read from the platform child, the first non-attestation child, as in the existing check. An index has no labels of its own. The field path is `extra_attrs.config.Labels` on the child artifact.
-
-## SARIF conversion and upload
-
-- Convert the Trivy report to SARIF 2.1.0. Output must conform to the SARIF 2.1.0 schema (OASIS SARIF 2.1.0, https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html).
-- Gzip, then base64-encode the SARIF payload.
-- Decided (2026-11-03): the upload's `ref` field is always the fully qualified `refs/heads/<branch>`, built from the branch rule under "OCI labels". Verified (2026-11-03) in GitHub's OpenAPI description (`github/rest-api-description`): `ref` is required and is "The full Git reference, formatted as `refs/heads/<branch name>`" (or a tag or pull request ref).
-- Upload with `POST /repos/{owner}/{repo}/code-scanning/sarifs`. The request body fields are `commit_sha`, `ref`, `sarif` (base64 gzip), and optional `checkout_uri`, `started_at`, `tool_name`, `validate`.
-  - Source: GitHub REST API, "Code scanning" (https://docs.github.com/en/rest/code-scanning). Verified (2026-11-03) in GitHub's OpenAPI description: `commit_sha`, `ref`, and `sarif` are required; `checkout_uri`, `started_at`, `tool_name`, and `validate` are optional. Responses: `202` (with an `id`), `400`, `403`, `404`, `413`, `503`.
-  - Limits, verified in the same description and in GitHub's "SARIF support for code scanning": 20 runs per file; 25,000 results and 25,000 rules per run, of which only the top 5,000 results are kept; 1,000 locations per result; 20 tags per rule; at most 10 MB of gzip-compressed SARIF per upload; 1,000 upload requests per hour per user.
-  - Decided (2026-11-03, delegated): after the upload, the worker polls `GET /repos/{owner}/{repo}/code-scanning/sarifs/{id}` until `processing_status` is `complete` or `failed` (verified (2026-11-03): the values are `pending`, `complete`, and `failed`). It records the result in `sync_reports.sarif_status`. A SARIF over 10 MB compressed fails the sync with a clear error, and nothing is uploaded.
-  - Decided (2026-11-03, user), processing wait: the worker polls after 5 s and 10 s, then every 15 s, for at most 5 minutes in one attempt. `complete` sets `sarif_status = 'success'`. `failed` sets `sarif_status = 'failed'` and fails the job permanently, with GitHub's `errors` in `error_message` and no retry. Still `pending` after 5 minutes: the report keeps `github_sarif_id` with `sarif_status = 'pending'`, and the attempt fails with 'GitHub processing still pending'. The backoff retry polls the same `github_sarif_id` again instead of uploading a second time.
-  - Decided (2026-11-03, user), rate limits: a GitHub `429`, or a `403` with `x-ratelimit-remaining: 0` or a `retry-after` header, defers the job. It is requeued at the time GitHub gives (`retry-after` seconds, or `x-ratelimit-reset`), capped at 1 hour, and `attempts` is not incremented, so rate limits never move a job to `failed`. See [backend.md](backend.md), Durable job queue.
-- SARIF category: Decided (2026-11-06, user, #185): one Code Scanning category per Harbor repository. Each SARIF file has one run, with `runAutomationDetails.id` = `harborgate/<harbor_project>/<harbor_repository>/`, so the category is `harborgate/<harbor_project>/<harbor_repository>`. The category uses the Harbor project and repository names as stored, joined by `/`, with no escaping or case change. Each mapping's alerts stay separate, and two Harbor repositories that feed one GitHub repository do not overwrite each other. Earlier, the rule was Decided (2026-11-03, delegated) with the same run id. Verified (2026-11-03) in GitHub's "SARIF support for code scanning": the `id` is read as `category/run-id`, where the category is everything before the last `/`, and an `id` without a `/` has an empty category. The trailing `/` keeps the whole path as the category, including repository names that contain `/`.
-- Converter rules: Decided (2026-11-03, delegated), using the properties GitHub marks as required (verified (2026-11-03), same page):
-  - Top level: `$schema`, `version` `2.1.0`, and `runs[]`. The run has `tool.driver.name` `HarborGate` and `tool.driver.rules[]`.
-  - Each rule has `id` (the vulnerability id), `shortDescription.text`, `fullDescription.text`, `help.text`, and `properties.security-severity`. Each result has `ruleId`, `message.text`, `locations[]`, and `partialFingerprints`.
-  - Location: an image finding has no source file, so `physicalLocation.artifactLocation.uri` is `<harbor_project>/<harbor_repository>`, and the region is line 1, column 1 to 1. That is what Trivy's own SARIF writer does when a package has no file location (verified (2026-11-03), `aquasecurity/trivy`, `pkg/report/sarif.go`).
-  - `partialFingerprints`: GitHub requires them, because API uploads without them can create duplicate alerts. The value is `{"harborgate/v1": sha256(<vulnerability id> + "|" + <package>)}`, which stays stable across image rebuilds and tags.
-  - `security-severity`: the CVSS v3 score from `preferred_cvss.score_v3` when present, otherwise `9.5` (CRITICAL), `8.0` (HIGH), `5.5` (MEDIUM), `2.0` (LOW), or `0.0` (UNKNOWN). This is Trivy's own fallback (verified (2026-11-03), `severityToScore` in `pkg/report/sarif.go`).
-- Decided (2026-11-07, user, #224 d2, d6): the converter reads the merged CVE list of the digest ([cve-lifecycle.md](cve-lifecycle.md), "Merged view"), not one scanner's report. There is one result per (CVE id, package), never one per scanner, so Code Scanning gets one alert per CVE and package. The result's `partialFingerprints` value is unchanged (`sha256(<id>|<package>)`), so existing alerts are not duplicated by the change.
-  - Result `properties` (a SARIF property bag, `additionalProperties: true` in the SARIF 2.1.0 schema, verified 2026-11-07 in `backend/tests/schemas/sarif-schema-2.1.0.json`, `propertyBag`): `harborgate/scannerCount` (integer, at least 1) and `harborgate/scannerNames` (array of strings, sorted as in the merged view, unique). Decided (2026-11-07, delegated, #224): the keys follow the `harborgate/` prefix already used by the fingerprint key `harborgate/v1`, and SARIF 2.1.0 section 3.8.1 recommends a namespaced key for custom properties. The schema only requires that the bag is an object, so the output stays valid; the schema test in the converter's test module must cover a result with the two keys.
-  - Where a CVE has several rows (different scanners report different severity, version or fixed-in), the rule text, `security-severity`, message and fixed version come from the merged row ([cve-lifecycle.md](cve-lifecycle.md)): the highest severity, and the highest CVSS v3 score among the scanners that report it.
-  - The `tool.driver.name` stays `HarborGate`. The Code Scanning category stays one per Harbor repository. Decided (2026-11-07, delegated, #224): one SARIF file per sync, not one per scanner, because per-scanner categories would show one alert per scanner, which d6 rules out.
-  - A report of one scanner with no CVE for a package other scanners report is not an error: the merged list is the union.
-- Validate output against SARIF 2.1.0 (see [testing-and-ci.md](testing-and-ci.md)).
+- Commit SHA: `org.opencontainers.image.revision`. Required. If missing, the publish job fails with a clear error. Never guess the SHA. Verified (2026-11-11, `LABEL_REVISION`).
+- Repository: `org.opencontainers.image.source`. When present, it must match the source's GitHub target, `<github web URL>/<owner>/<repo>`, compared case-insensitively and ignoring a trailing `/` or `.git`. A mismatch fails the publish job with a clear error and uploads nothing. When absent, the publish proceeds (Decided 2026-11-03, delegated; kept).
+- Branch: the label `io.github.nrosier.harborgate.branch` (`LABEL_BRANCH`) if present, otherwise the source's `default_branch` (default `main`). Verified (2026-11-11). `OPEN:` the label name still uses the old project name. Renaming it changes which images are read, so it needs the user's decision. The OCI annotation rule for keys (reverse domain) is met by the name as built.
+- `org.opencontainers.image.ref.name` is not read for the branch. The OCI spec defines it as the name of a reference, typically a tag.
 
 ## GitHub base URL
 
-- Decided (2026-11-06, user, #184): the GitHub API base URL and the GitHub web URL are instance settings, set by the admin. There is one pair for the whole HarborGate instance, not one per user or per credential.
-- An empty value means the default: `https://api.github.com` for the API and `https://github.com` for the web URL. The default is used unless a custom value is entered.
-- The API base URL is used as a prefix for every GitHub REST path. For example, `https://ghes.example.com/api/v3` plus `/repos/...` gives `https://ghes.example.com/api/v3/repos/...`. GHE.com is `https://api.SUBDOMAIN.ghe.com` (no path).
-- A custom API base URL must be an `https` URL with a host; it may include a path. A custom web URL must be an `https` URL with a host only. Any other value is rejected with the fixed validation message `settings.github_url_invalid` (catalog key, English text: "Enter an https address with a host, for example https://ghes.example.com."). The rules (no credentials, no port, no query or fragment, no traversal in the API path; web URL host-only) are in [security.md](security.md), "GitHub base URL".
-- The values are stored in the `system_config` table (keys `github.api_base_url` and `github.web_url`, see [database.md](database.md)), not in a secret, and are shown in the Admin view (Settings tab, see [frontend.md](frontend.md)).
-- A custom API base URL is for GitHub Enterprise Server (for example `https://ghes.example.com/api/v3`) and GHE.com (`https://api.SUBDOMAIN.ghe.com`). Every GitHub request in this file uses the configured API base URL, not a fixed host.
+- Decided (2026-11-06, user, #184): the GitHub API base URL and the GitHub web URL are instance settings, set by the admin. One pair for the whole instance.
+- Empty means the default: `https://api.github.com` for the API and `https://github.com` for the web URL (`services/github_url.rs`, `DEFAULT_API`, `DEFAULT_WEB`). Verified (2026-11-11).
+- Stored in `system_config` under the keys `github.api_base_url` and `github.web_url`. Not secret.
+- A custom API base URL must be `https` with a host and may include a path. A custom web URL must be `https` with a host only. Any other value is rejected with the fixed validation message `settings.github_url_invalid`. Rules: [security.md](security.md), "GitHub base URL".
+- Every GitHub request in this file uses the configured API base URL.
+
+## GitHub SARIF upload
+
+- The converter writes SARIF 2.1.0. The output must conform to the SARIF 2.1.0 schema. Validated per [testing-and-ci.md](testing-and-ci.md).
+- Gzip, then base64-encode the SARIF payload (`encode_sarif`, `services/github_scanning.rs`).
+- Upload: `POST /repos/{owner}/{repo}/code-scanning/sarifs`. Body fields: `commit_sha`, `ref`, `sarif` (base64 gzip), and optional `checkout_uri`, `started_at`, `tool_name`, `validate`. Responses `202` (with `id`), `400`, `403`, `404`, `413`, `503`. Source: GitHub REST API, Code scanning (verified 2026-11-03 in GitHub's OpenAPI description).
+- `ref` is always `refs/heads/<branch>` (the branch rule above). Required by GitHub.
+- Limits: 10 MB of gzip-compressed SARIF per upload (`MAX_COMPRESSED_BYTES`, verified in code). Larger fails the publish job with a clear error and uploads nothing. Other GitHub limits (20 runs per file, 25,000 results and rules per run, 1,000 upload requests per hour per user) are as documented by GitHub (verified 2026-11-03).
+- Processing status: after the upload, poll `GET /repos/{owner}/{repo}/code-scanning/sarifs/{id}` until `processing_status` is `complete` or `failed` (values `pending`, `complete`, `failed`). The status is stored in `publish_reports`.
+  - Decided (2026-11-03, user): the poll runs after 5 s and 10 s, then every 15 s, for at most 5 minutes in one attempt. `complete` is success. `failed` fails the job permanently with GitHub's `errors` in `error_message` and no retry. Still `pending` after 5 minutes keeps the `github_sarif_id` and fails the attempt. The retry polls the same id and does not upload again.
+- Rate limits: a GitHub `429`, or a `403` with `x-ratelimit-remaining: 0` or a `retry-after` header, defers the job. It is requeued at the time GitHub gives (`retry-after` seconds, or `x-ratelimit-reset`), capped at 1 hour, and `attempts` is not incremented (Decided 2026-11-03, user). When neither is present, the default wait is 60 s (`DEFAULT_WAIT_SECS`, verified in code). `OPEN:` whether the 60 s default must match the 5-minute defer used for registries.
+
+### SARIF document
+
+- Verified (2026-11-11, `services/sarif.rs`): the tool driver name is `HarborGate`. `OPEN:` the driver name still uses the old project name. The user decides whether the rename is in 0.2.0.
+- Run `automationDetails.id` is `harborgate/<hub host>/<repository>/<tag value>/` (`automation_id`). The trailing `/` keeps the whole path as the Code Scanning category (see below).
+- Rule and result fields: each rule has `id`, `shortDescription.text`, `fullDescription.text`, `help.text`, and `properties.security-severity`. Each result has `ruleId`, `message.text`, `locations[]`, and `partialFingerprints`.
+- `partialFingerprints["harborgate/v1"]` = SHA-256 of `<vulnerability id>|<package>` (`FINGERPRINT_KEY`). Stable across rebuilds and tags.
+- Location: an image finding has no source file. `artifactLocation.uri` is `<hub host>/<repository>`, and the region is line 1, column 1 to 1.
+- `security-severity`: the CVSS v3 score when present, otherwise `9.5` (CRITICAL), `8.0` (HIGH), `5.5` (MEDIUM), `2.0` (LOW), or `0.0` (UNKNOWN). This is Trivy's own fallback (verified 2026-11-03).
+- One result per (CVE id, package), from the merged view ([cve-lifecycle.md](cve-lifecycle.md), "Merged view"), never one per scanner.
+- Result property bag (verified 2026-11-11): `harborgate/scannerCount` (integer, at least 1), `harborgate/scannerNames` (unique names, merged-view order), and `harborgate/platforms` (`PLATFORMS_KEY`). The bag is an object, which the schema allows.
+- Category: one Code Scanning category per source. The category is `harborgate/<hub host>/<repository>/<tag value>` (decision 46 of the spinoff; `automation_id`). Each source's alerts stay separate. Verified (2026-11-03) in GitHub's SARIF documentation: the category is everything before the last `/` of the run id, and the trailing `/` keeps the whole path.
 
 ## GitHub issues
 
-- Decided (2026-11-06, user, #192): issue labels. Every issue HarborGate creates carries `areai:security` and one plain severity label: `critical`, `high`, `medium`, or `low`, matching the CVE's severity. The severity labels are plain words, with no prefix. The labels are created in the GitHub repository when missing, and an existing label is not duplicated. Unknown severity still needs a decision: it is not decided here (the issue leaves it open).
-- Decided (2026-11-06, user, #192): issue title is `<CVE id> <package>` and nothing else. This replaces the title format in the 2026-11-04 (#30) rule below. Re-adoption of issues created with the old title is decided: the rule is the bullet below. The marker rule in [cve-lifecycle.md](cve-lifecycle.md) still finds them.
-- Decided (2026-11-06, user, #192): a CVE whose severity is Unknown gets no severity label. Its issue carries only `areai:security`.
-- Decided (2026-11-06, user, #192): when an existing issue is adopted by its marker and its title is not `<CVE id> <package>`, HarborGate renames it to that title. The rename is a PATCH on the issue, and the adoption comment and the marker are unchanged.
-- Auto-create issues for CRITICAL and HIGH findings. The `min_issue_severity` setting defaults to CRITICAL and may be lowered to HIGH (user decision).
-- Automatic issues: only CRITICAL and HIGH create issues. MEDIUM, LOW, and UNKNOWN never create an issue automatically. Decided (2026-11-05, user, #129): this stays as it is; there is no per-mapping MEDIUM minimum, and `min_issue_severity` still accepts only `CRITICAL` or `HIGH`.
-- Manual issue creation is also supported: `POST /api/v1/cves/:id/issue`. See [api.md](api.md). Decided (2026-11-05, user, #129): a manual issue may be logged for a CVE of any severity (CRITICAL, HIGH, MEDIUM, LOW, or UNKNOWN). This lifts the #30 HIGH-and-above restriction for manual logging only; automatic creation is unchanged.
-- Decided (2026-11-05, user, #129): a manual issue for a CVE whose highest open severity (`open_severity` in [api.md](api.md)) is LOW or UNKNOWN asks the user for confirmation first. CRITICAL and HIGH stay one click. Decided (2026-11-05, delegated, #129): MEDIUM is not named by the user's decision, so it is one click as well; the user may change this when the screen design is approved. The confirmation is a frontend step: the server does not take a confirm flag, because the route is already owner-only and CSRF-protected and the confirmation guards against a mis-click, not an attacker. The server returns `open_severity` so the UI can decide when to ask.
-- Decided (2026-11-05, user, #129): one issue per CVE, as before. Manual logging at any severity uses the same marker, label, re-adoption and create lock as automatic creation, so a second click or a concurrent sync never creates a duplicate.
-- Every issue carries the HarborGate label and body marker used to re-adopt issues. The rule is in [cve-lifecycle.md](cve-lifecycle.md).
-- Issue lifecycle (one open issue per CVE per repo, close, reopen) is defined in [cve-lifecycle.md](cve-lifecycle.md).
-- GitHub issues API permission: `Issues: read and write` (see [security.md](security.md)).
-- Decided (2026-11-04, user, #30): issue title, `<CVE-ID>: <package> (<SEVERITY>) in <harbor_project>/<harbor_repository>`. The package and severity come from the CVE's rows: the package from the most recently scanned open tag row, the severity the highest across open rows, over all five severities (CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN; #129). A row with no package shows `unknown package`.
-- Decided (2026-11-07, user, #224 d2): the issue body adds a line `Found by <n> scanner(s): <names>` right after the table, from the merged view of the newest digest (the example in the issue is `found by 2 scanners: Trivy, Grype`; one scanner reads `Found by 1 scanner: Trivy`). It is refreshed with a PATCH on the issue body when the scanner set for the CVE changes, as part of the sync that changed it; the marker line stays the first line. Names are written as inline code, like the package. The line is catalog-free fixed text built by the backend (GitHub issue text is not UI text).
-- Decided (2026-11-04, user, #30): the issue body is the marker line, the table (CVE, severity, package, fixed in, Harbor repository), and a line `Affected tags:` that lists every tracked tag that still reports the CVE (open row), including tags outside the newest digest (Changed 2026-11-07, user, #196, decision 25). Issue closing still follows the newest digest ([cve-lifecycle.md](cve-lifecycle.md), "GitHub issue rules"). The package and fixed-in version come from the most recently scanned open tag row. The severity is the highest across open rows, the same as in the title. A row with no package shows `unknown package`, as in the title. The package is written as inline code, so a name such as `@scope/pkg` cannot @-mention a GitHub user or organisation. Source for the title limit: GitHub rejects a longer title with `title is too long (maximum is 256 characters)`, so the title is cut at 256 characters.
-- Decided (2026-11-04, user, #30): the scan named in the close and reopen comments is `<harbor_project>/<harbor_repository>:<tag>` (no digest). The close and reopen comment texts are in [cve-lifecycle.md](cve-lifecycle.md), "GitHub issue rules" (changed 2026-11-07, user, #224 d3: they name scanners).
-- Decided (2026-11-04, user, #30): the manual route follows [api.md](api.md): `:id` is `<mapping_id>:<cve_id>`. It is allowed when the CVE is open on at least one tracked tag of the mapping, ignoring `min_issue_severity` and `auto_create_issues` because the manual action overrides the automatic threshold. Changed (2026-11-05, user, #129): any open severity is allowed; until then only CRITICAL or HIGH was. A CVE that is fixed on every tag is refused with `422`. It returns `409` while an active acceptance exists or an open issue exists, and it reopens a closed issue instead of creating a second one, with the comment `CVE reopened manually from HarborGate.` (Decided 2026-11-04, delegated in review of #106; no external source).
-- Brief #30, step 3: `auto_create_issues = false` skips only the creation of new issues. Existing issue rows still close and reopen by the lifecycle rules.
-- Decided (2026-11-04, user, #30): a GitHub rate limit while the issues are updated after a scan is logged as fixed text (no secrets) and the sync job still finishes `Done`. The job is not deferred, because the report is already `success` and a retry would upload the SARIF again. The next sync or poll reconciles the issues. A database error during the issue updates is handled the same way. Decided (2026-11-04, review of #106): a `401` or `403` from GitHub stops the run at the first refusal and logs the fixed variant name (`Unauthorized` or `Forbidden`), because every later call would fail the same way. Another GitHub error on one CVE is logged as fixed text and the next CVE continues.
-- Decided (2026-11-04, review of #106): one process-wide lock serialises "look for the row, look for a marked issue, create, store the row", so a sync and a manual request (or two manual requests) never create two issues for one CVE. HarborGate is single-instance ([architecture.md](architecture.md)). The store is `INSERT ... ON CONFLICT DO NOTHING`; when another writer stored the row first, its row wins and the request is not an error (the manual route answers `409` with that issue's URL).
-- Decided (2026-11-04, review of #106): a CVE id gets an issue only when it is 1 to 128 ASCII letters, digits, `.`, `_`, `-` or `:`, so a Harbor-supplied id cannot break the first-line marker. The manual route's `<mapping_id>:<cve_id>` uses the same rule (no `:` in the mapping id), and anything else is `404` before any database call.
+- Auto-create issues for CRITICAL and HIGH findings. `min_issue_severity` is per source, default `CRITICAL`, may be lowered to `HIGH`, and accepts no other value (`image_sources`, verified in migration 0001).
+- Automatic issues: only CRITICAL and HIGH. MEDIUM, LOW and UNKNOWN never create an issue automatically (Decided 2026-11-05, user, #129).
+- Manual issue creation: `POST /api/v1/cves/:id/issue` ([api.md](api.md)). Any severity is allowed for a manual issue. A manual issue for a CVE whose highest open severity is LOW or UNKNOWN asks the user for confirmation in the UI first; the server does not take a confirm flag (Decided 2026-11-05, user, #129).
+- One issue per CVE per GitHub repository. Manual and automatic creation share the marker, the labels, the re-adoption rule and one process-wide create lock (`services/issue_lifecycle.rs`). A second click or a concurrent publish never creates a duplicate.
+- Labels: every issue carries `harborgate` (`LABEL`, verified) and `areai:security` (`SECURITY_LABEL`). The severity label is plain and lowercase: `critical`, `high`, `medium` or `low` (`severity_label`). A CVE whose severity is `UNKNOWN` gets no severity label. The labels are created in the repository when missing, and an existing label is not duplicated (Decided 2026-11-06, user, #192).
+- Title: `<CVE id> <package>`, cut at 256 characters, because GitHub rejects longer titles (verified 2026-11-04). The package is the most recent open row's package; a row with no package shows `unknown package`.
+- Body: the first line is the hidden marker `<!-- harborgate:<CVE id> -->`. Then a table (CVE, severity, package, fixed in, source), then `Found by N scanner(s): names` (names as inline code; `Found by 1 scanner: \`Trivy\``), then `Affected tags:` listing every tracked tag that still reports the CVE (Decided 2026-11-07, user, #196 and #224 d2). The package is inline code, so `@scope/pkg` cannot mention a user.
+- Re-adoption: before creating an issue for a CVE with no `github_issues` row, the publish job lists open issues with the `harborgate` label (all pages, not the search API) and adopts one whose first line is the marker for that CVE. Closed issues are not adopted. An adopted issue whose title differs is renamed to the title above (Decided 2026-11-06, user, #192).
+- CVE id rule: an id gets an issue only when it is 1 to 128 ASCII letters, digits, `.`, `_`, `-` or `:` (Decided 2026-11-04, review of #106). Anything else is refused, so an upstream id cannot break the marker.
+- Errors: a GitHub `401` or `403` stops the run at the first refusal and logs the fixed variant name. Another GitHub error on one CVE is logged as fixed text and the next CVE continues. A rate limit during issue updates is logged as fixed text and the publish job still finishes (Decided 2026-11-04, user, #30). No upstream body reaches the log.
+- Issue permission: `Issues: read and write` ([security.md](security.md), GitHub token scope).
+- Issue closing, reopening and the comment texts are in [cve-lifecycle.md](cve-lifecycle.md), "GitHub issue rules". Verified (2026-11-11): the close comment is `No scanner reports this CVE since scan <scan>.`, the reopen comment is `CVE is back in scan <scan>, found by <names>.`, and the manual reopen comment is `CVE reopened manually from Dockward.`. The scan is named `<hub host>/<repository>:<tag>`.
+- Hub-and-repository naming in comments and bodies is the same as the SARIF one.
 
 ## GitHub target
 
-- A GitHub repository (owner, repo) may be the target of several mappings, each for a different Harbor repository, regardless of branch (Decided 2026-11-06, user, #185). Each mapping's Code Scanning category is its own (see "SARIF category"). Issues are shared per GitHub repository and CVE (see [database.md](database.md)). The 2026-11-03 rule of one mapping per GitHub repository is withdrawn.
-- The app never moves a target between mappings. See [frontend.md](frontend.md) for the duplicate error.
+- One GitHub repository (owner, repo) may be the target of several sources, each for a different hub repository, regardless of branch (Decided 2026-11-06, user, #185). Each source's Code Scanning category is its own. Issues are shared per GitHub repository and CVE.
+- The app never moves a target between sources.
+- GitHub name check: `owner` is 1 to 39 ASCII letters, digits or `-`; `repo` is 1 to 100 ASCII letters, digits, `.`, `_` or `-`, and is not `.` or `..` (Decided 2026-11-05, delegated, #126).
 
-- Decided (2026-11-03): the sync status definition used by the polling dedupe rule is `sync_jobs.status = 'done'` plus `sarif_status = 'success'`. See [database.md](database.md).
+## GitHub token and listing
 
-## Mapping pickers
+- The GitHub credential is an encrypted `user_credentials` row (GitHub only). Token scope is in [security.md](security.md), "GitHub token scope".
+- Source pickers and their routes are in [api.md](api.md). Lists are live per credential, names only, with a 5-minute in-memory cache, and never stored (Decided 2026-11-05, user, #126). Tokens never reach the browser.
 
-Decided (2026-11-05, user, #126): when a user creates or edits a mapping, they pick the Harbor project, the Harbor repository and the GitHub repository from lists instead of typing them. The routes are in [api.md](api.md), "Pickers". The hide table is in [database.md](database.md), `picker_hidden_items`. Decisions marked `delegated` below were not covered by the #126 decisions; each has a one-line reason so the user can review it.
+## Secrets and logs
 
-Status: built (backend, #126): the Harbor and GitHub list methods, the in-memory list cache, the hide table, the suggestion reader and the routes. The mapping form that uses them is not built yet.
+- Hub credentials, GitHub tokens, encryption keys, webhook URLs and alert headers are never logged, printed, traced, or sent over Server-Sent Events. Error bodies from registries, scanners and GitHub are never copied; only fixed strings are stored or shown. The full rule is in [security.md](security.md), "Secrets in logs".
+- Scanner names, versions, CVE ids, package names and report contents are not secrets and may appear in the UI, the SARIF and the issue body.
 
-### Basis
+## OPEN
 
-- Decided (2026-11-05, user, #126): lists are live, per credential. HarborGate calls Harbor `GET /api/v2.0/projects` and `GET /api/v2.0/projects/{project_name}/repositories`, and GitHub `GET /user/repos`, with the credential the user picked in the form, on the server. Nothing is fetched or stored in the background. A list shows only what that credential can see.
-- Decided (2026-11-05, user, #126): tokens are never sent to the browser. The list responses hold names only. Errors from Harbor and GitHub are replaced with fixed text; no upstream body, header, or URL reaches the response or the log.
-- Decided (2026-11-05, user, #126; verified with a real robot 2026-11-05, see the #126 comments): a Harbor project robot sees only the projects it was granted. The project list is therefore the basis for which projects a user may pick. The check listed one project (`nrosier`) for a robot granted only that project; a second project (`test`) was absent from the list and from `?name=test`, and `GET /api/v2.0/projects/test` returned `403`.
-  - Verified (2026-11-05) in the Harbor source, `src/server/v2.0/handler/project.go`, `ListProjects`: for a robot without an all-projects scope, Harbor filters by the robot's permission namespaces and also sets `WithPublic = true`, so public projects are listed too, unless the caller sends `public=false`. A system robot with an all-projects scope is treated as a system admin and sees every project. HarborGate does not send `public` and lists what Harbor returns, which is what the credential can read. UNVERIFIED: the live check did not include a public project the robot was not granted. See "Open live checks".
-- Decided (2026-11-05, user, #126): a picked value is not trusted because it came from a list. `POST` and `PUT /api/v1/mappings` keep every existing check (name validation, credential ownership, the artifact probe, the code scanning probe), so a stale list entry or a stale suggestion fails at save, not silently. Decided (2026-11-05, delegated, #126): the mapping routes still accept values that are not in any list. Reason: a repository beyond the fetch cap, or not visible to the list call, must still be mappable, and the save probes already protect it.
-
-### Harbor project and repository lists
-
-- Projects: `GET /api/v2.0/projects?page=<n>&page_size=100&sort=name`, with `name=<text>` when the user searches. Verified (2026-11-05) in the Harbor swagger (`listProjects`: `q`, `page`, `page_size`, `sort`, `name`, `public`, `owner`, `with_detail`) and in `project.go`, where `name` is a fuzzy match (`q.FuzzyMatchValue`). The response is an array of `Project` with `X-Total-Count`. HarborGate reads `name` only.
-- Repositories: `GET /api/v2.0/projects/{project_name}/repositories?page=<n>&page_size=100&sort=name`, with `q=name=~<text>` when the user searches. Verified (2026-11-05) in the swagger (`listRepositories`: `q`, `sort`, `page`, `page_size`) and in `src/server/v2.0/handler/repository.go`, which first requires Repository List on the project (`RequireProjectAccess(..., rbac.ActionList, rbac.ResourceRepository)`), then returns `X-Total-Count` and an array of `Repository`. Harbor's `Repository.name` is the full name, `<project>/<repository>`. HarborGate strips the `<project>/` prefix for the `repository` field and keeps the full name.
-- `page_size` 100 is Harbor's maximum (swagger `pageSize`: default 10, maximum 100).
-- `{project_name}` is validated with the Harbor name rule before the call and percent-encoded ([security.md](security.md), Outbound HTTP). A name outside the rule returns `422` and no request is made.
-- Identity first. Decided (2026-11-05, delegated, #126): before it fills a Harbor list cache entry, HarborGate calls `GET /api/v2.0/users/current` with the robot's basic auth and continues only on `412`. Reason: a wrong, disabled, or expired robot secret runs as anonymous and the project list then returns public projects with `200` (see "Test button"), which would show the user a wrong list. Decided (2026-11-05, user, #126): a `4xx` refusal (such as `401`, or a `200` that is not a robot identity) gives `422 validation_failed`, detail `harbor_identity`, and the fixed message "The Harbor credential does not work. Test it on the Account page."; a `5xx` gives `502 upstream_unreachable`. The identity result is cached with the list entry, so a cached list makes no call.
-- Every Harbor list request uses the credential's `base_url` and the outbound rules (HTTPS, address check, no redirects).
-
-### GitHub repository list
-
-- `GET <github_api_base_url>/user/repos?per_page=100&page=<n>&sort=full_name&direction=asc`, with the token of the picked GitHub credential and the same request headers as the existing probes. Verified (2026-11-05) in GitHub's OpenAPI description (`github/rest-api-description`, `/user/repos`): parameters `visibility`, `affiliation` (default `owner,collaborator,organization_member`), `type`, `sort` (`full_name` default), `direction`, `per_page` (maximum 100), `page`, `since`, `before`; responses `200`, `304`, `401`, `403`, `422`. HarborGate sends neither `type` nor `visibility` nor `affiliation`, so GitHub's defaults apply. Pages are followed through the `Link` header `rel="next"`.
-- HarborGate reads `full_name`, `owner.login`, `name`, `private`, and `archived` from each item (all present in the OpenAPI `repository` schema, verified 2026-11-05). `owner` and `repo` must pass the GitHub name check below; an item that does not is skipped.
-- Decided (2026-11-05, user, #126): the list relies on the Metadata read permission the token already requires ([security.md](security.md), GitHub token scope). Contents read is not added.
-- Decided (2026-11-05, user, #126): repositories of an organisation the token cannot see do not appear, and the picker says so. HarborGate cannot detect an organisation it cannot see, so the note is a fixed catalog string shown under the GitHub picker every time, and a specific note is shown when a source suggestion names a repository that is not in the token's list (see "Source suggestion").
-- Decided (2026-11-05, delegated, #126): GitHub name check. `owner` is 1 to 39 ASCII letters, digits, or `-`; `repo` is 1 to 100 ASCII letters, digits, `.`, `_`, or `-`, and is not `.` or `..`. Reason: the same check is needed for list items, hide requests, and parsed labels, and these are GitHub's documented account and repository name limits; the live check records any real name that fails it.
-- Decided (2026-11-05, delegated, #126): archived repositories are listed with `archived: true` and are not filtered out. Reason: the decisions do not say, and an archived repository is a valid list entry the user may want to hide; the mapping save probe decides whether it can be used.
-
-### Search, paging, and cache
-
-- Decided (2026-11-05, user, #126): pickers use server-side search with a text filter and a capped page size. The browser never receives a whole upstream list.
-- Decided (2026-11-05, user, #126): lists are cached per credential for 5 minutes. The cache is in memory, holds names only (no token, no upstream header), and is lost on restart. Nothing is written to the database.
-- Decided (2026-11-05, delegated, #126): cache key and fetch cap. The key is `(credential id, list, project, search text)`, where `list` is `harbor_projects`, `harbor_repositories`, or `github_repositories`, and `search text` is used only for Harbor (GitHub has no name filter). On a miss HarborGate reads upstream pages of 100, at most 10 pages (1,000 items), and stores the items and a `truncated` flag (the upstream total is not stored). Decided (2026-11-05, user, #126): a list is `truncated` only when the cap stopped the read and a further item exists. For Harbor, that is when the 10th page is full and `X-Total-Count` is above the 1,000 items read, or, when the header is missing, when a request for the 11th page returns at least one item. For GitHub, that is when the 10th page still has a `rel="next"` link. A list of exactly 1,000 items with nothing after it is not truncated. Reason: the cap matches the polling page cap (#131), bounds one fill to up to 10 page calls plus, for a Harbor list with no `X-Total-Count`, one identity call and one extra probe page, and keeps a page of the picker cheap.
-- Decided (2026-11-05, delegated, #126): every picker upstream response body is capped at 8 MiB (`MAX_BODY` in `backend/src/services/picker_upstream.rs`); a larger body is an upstream error. Reason: it bounds the memory one tenant-chosen Harbor base URL can use per response.
-- Decided (2026-11-05, delegated, #126): Harbor search goes to Harbor (`name` for projects, `q=name=~<text>` for repositories), so a project or repository beyond the 1,000-item cap is still found by name. GitHub search is a case-insensitive substring match on `full_name` over the cached list. Reason: Harbor supports a name filter; `/user/repos` has none, and the GitHub search API does not limit results to what the token can reach and has its own lower rate limit.
-  - Consequence: a GitHub token that can reach more than 1,000 repositories cannot find the ones past the cap in the picker. The response carries `truncated: true` and the UI shows a fixed note; the user can still type the repository in the mapping form.
-- Decided (2026-11-05, delegated, #126): Harbor search text is lowercased and trimmed. Text with a character that cannot occur in a Harbor name (anything but `a-z`, `0-9`, `.`, `_`, `-`, `/`) returns an empty list with `200` and makes no upstream call. Reason: Harbor names are lowercase, and this keeps the `q` syntax characters (`,`, `=`, `~`, quotes, brackets) out of the Harbor query.
-- After the cache, HarborGate removes the caller's hidden items (see "Hide and restore"): for a Harbor list, only those recorded on the credential's Harbor base URL. Then HarborGate applies the API page (`page`, `page_size`; [api.md](api.md), Lists). `total` counts the items after the hidden filter and the search filter. Hiding and restoring take effect at once, without waiting for the cache.
-- Decided (2026-11-05, delegated, #126): a cache entry is dropped when its credential is updated (`PUT /credentials/:id`) or deleted. Concurrent requests for the same key share one upstream fill. The cache holds at most 500 entries; the oldest is evicted first. Reason: a rotated token or changed base URL must not serve the old view, and the bound stops a stream of distinct search texts from growing memory without limit.
-- Decided (2026-11-05, delegated, #126): there is no forced refresh in v1. A repository created upstream appears when the 5-minute entry expires. Reason: a refresh button would bypass the cache the rate-limit decision depends on; the user can add it at design review.
-- Only successful fills are cached. An upstream error is not cached.
-
-### Hide and restore
-
-- Decided (2026-11-05, user, #126): a user can hide a Harbor project, a Harbor repository, or a GitHub repository from their own pickers, and restore it later. Hiding is per user and reversible. It never changes another user's view, never changes a mapping, and never changes a sync. A mapping whose project or repository is hidden keeps working, and its edit form still shows its current values. Changed (2026-11-06, user, #189, answered via dialogue on the issue): this per-user rule now covers user hides only. A Harbor repository that already has a mapping is no longer something a user hides or restores: it is greyed out in the repository picker for every user on the instance, by the rule at the end of this section. That rule is instance-wide, not per user, and the user cannot restore it.
-- Decided (2026-11-05, user, #126): the table is keyed by user, source (`harbor` or `github`), and the item's full name, and for `harbor` source also the Harbor base URL ([database.md](database.md), `picker_hidden_items`).
-- Full names. Decided (2026-11-05, delegated, #126): a Harbor project is stored as `<project>`, a Harbor repository as `<project>/<repository>`, and a GitHub repository as `<owner>/<repo>` lowercased. A Harbor project name has no `/`, so a project and a repository never share a full name. Reason: the decided key has no separate kind column, and GitHub names are case-insensitive, so `Owner/Repo` and `owner/repo` must be one row.
-- Decided (2026-11-05, user, #126): hidden items are keyed by Harbor base URL. Hiding is per Harbor instance: a hidden Harbor project or repository applies only to the Harbor base URL it was hidden on, so the same name on another Harbor instance stays visible. GitHub items have no base URL and are keyed as before.
-- A hidden item stays hidden when it reappears upstream, because the row is keyed by name, not by an upstream id. A new item is shown unless it is hidden. For Harbor items the match includes the Harbor base URL, so a hidden project is left out of the project list only for the base URL it was hidden on. Its repositories have no rows of their own, but the repository picker opens only from a picked project, so hiding a project also hides its repositories from the picker (issue #126, "Hidden items and new items").
-- Hiding makes no upstream call and does not check that the item exists. The name is checked with the Harbor name rule or the GitHub name check.
-- Decided (2026-11-05, delegated, #126): at most 1,000 hidden items per user; the next hide returns `422 validation_failed`. Reason: the table is user-writable and otherwise unbounded.
-- Hidden items are listed separately, newest first by default, and each can be restored ([api.md](api.md), Pickers).
-- No audit row (issue #126, "Auditing"): hiding and restoring is a user preference.
-- Decided (2026-11-06, user, #189): a Harbor repository that already has a mapping on this Harbor base URL is shown greyed out in the repository picker, with the "Already mapped" note (catalog key `mapping.picker.alreadyMapped`). It is not hidden and not removed from the list, and it cannot be picked. This is shared, not a user hide: every user on the instance (the owner and others) sees the same greyed-out entry. It does not write `picker_hidden_items`, and the user cannot restore it. Visibility is per Harbor base URL: only a mapping whose `harbor_base_url` equals the picker credential's base URL marks a repository, so a mapping on one Harbor instance does not affect another, and a repository of the same name in another project is not marked. A Harbor repository with no mapping is listed and pickable as before. A mapping's own repository stays pickable in its own edit form, which still shows its current values. The repository list carries `mapped` per item ([api.md](api.md), Pickers). It is read from `repo_mappings` on each request, after the cache, so a new mapping shows at once. It carries no mapping id or owner. The save-time duplicate check (`409` with detail `harbor_repository_mapped`) is unchanged.
-
-### Source suggestion
-
-- Decided (2026-11-05, user, #126): automatic detection suggests only. It reads only the `org.opencontainers.image.source` label; there is no name matching. The user confirms each suggestion. Nothing is created automatically, and the suggestion is never stored.
-- Decided (2026-11-05, delegated, #126): the label is read from the newest tagged artifact of the picked Harbor repository: `GET .../repositories/{repository}/artifacts?page=1&page_size=1&sort=-push_time&q=tags%3D*` for the digest, then `GET .../artifacts/{digest}`, reading `extra_attrs.config.Labels`. Reason: an untagged artifact is never synced (see "Polling"), the newest push is the most likely to carry the current label, and the artifact read uses only the Artifact List and Artifact Read permissions HarborGate already needs. Verified (2026-11-05) in the Harbor source, `src/controller/artifact/processor/image/manifest_v2.go`: the image config, including `Labels`, is stored in `extra_attrs.config`. The `tags=*` query is from the swagger's `listArtifacts` description.
-- Parsing reuses the "OCI labels" rule: the label must be `https://github.com/<owner>/<repo>`, host compared case-insensitively, a trailing `/` or `.git` ignored. Decided (2026-11-05, delegated, #126): a label with userinfo, a port, a query, a fragment, or a path deeper than `<owner>/<repo>` gives no suggestion, and `owner` and `repo` must pass the GitHub name check. Reason: the label is Harbor-supplied text and can carry credentials in userinfo; it is never echoed, only the parsed `owner` and `repo` are returned.
-- No suggestion is an answer, not an error. The reason is one of `no_tagged_artifact`, `no_label`, `not_github` (the label is a URL on another host), and `invalid_label`.
-- Decided (2026-11-05, delegated, #126): when the request names a GitHub credential, HarborGate also says whether the suggested repository is in that credential's cached GitHub list (`github_listed`). The UI then shows the fixed note that the token may not reach that repository or its organisation. Reason: this is the one case where HarborGate can tell the user that an organisation is not visible, which decision 5 asks to show.
-- Decided (2026-11-05, delegated, #126): the suggestion is cached for 5 minutes per `(Harbor credential id, project, repository)`, like the lists. Reason: the same rate-limit and no-background rules apply to it.
-
-### Robot permissions
-
-- Decided (2026-11-05, user, #126): the Harbor robot needs, on each project it serves: Project list visibility (the project is in the robot's grant, so it appears in `GET /api/v2.0/projects`), Repository List, Repository Read, Artifact List, Artifact Read, Artifact Addition Read, and Tag List. Repository List and Repository Read are new for the pickers and are required.
-  - Decided (2026-11-06, user, #132): Tag List is required for the resolve job's tag reads. Verified (2026-11-06) live (#132): for a digest tagged `latest`, `GET .../artifacts/{digest}/tags` returned `403` without Tag List, and the artifact read returned `200` with `tags` null.
-  - Decided (2026-11-06, user, #191): Scan is also granted to the robot, on each project it serves. Reason: Harbor's artifact scan call (`POST .../artifacts/{reference}/scan`) needs it, so a mapping's scheduled scan can start. The user grants it in Harbor. This is the only change to the list above; the rest is unchanged. [docs/SETUP.md](../docs/SETUP.md) lists it. Verified (2026-11-07) in `src/server/v2.0/handler/scan.go`: the action checked is Scan Create. See "Scheduled scan".
-  - Verified (2026-11-05) live (#126 comments): without Repository List and Repository Read the repository list returned `403`; with them it returned `200`, and the artifact list returned `200` for the repositories tried.
-  - Verified (2026-11-05) in `repository.go`: the repository list needs Repository List; the repository read (`GET .../repositories/{repository}`) needs Repository Read. Listing projects needs no permission of its own; Harbor filters the list by the robot's grant (see "Basis").
-  - Decided (2026-11-07, user, #224 d11, d12): Scanner **Read** and Scanner **Create** are added, on each project it serves, for scanning with a chosen scanner. Read gives the current project scanner (call 1) and names; Create lists the scanners and sets the project scanner (calls 2 and 3). Both are optional: without them HarborGate scans with the project's current scanner only, and shows the report's own scanner name, marked as not linked to a Harbor registration, for a report it cannot tie to a registration (Changed 2026-11-09, user, #277; "Unknown scanner" only when the report has no name). See "Scanner reports and scan launch".
-  - [docs/SETUP.md](../docs/SETUP.md) section 3a lists every permission above, including Scan Create (#191) and Scanner Read and Create (#224).
-- A robot without Repository List gets `403` from the repository list. HarborGate returns `422 validation_failed` with the fixed message "The Harbor robot cannot list repositories in this project. Grant it Repository List and Repository Read."
-
-### Errors and rate limits
-
-- Decided (2026-11-05, user, #126): errors use fixed text, and an upstream rate limit shows a fixed message with no retry loop. The upstream answer is mapped as follows (codes in [api.md](api.md), Error envelope):
-  - Detail codes (Decided 2026-11-05, user, #126): each of the `422 validation_failed` answers below carries a `detail` code: `harbor_identity` (Harbor identity refused), `robot_scope` (Harbor `403` on the repository or artifact list), `github_token` (GitHub `401` or the GitHub `403` token case), `wrong_credential_type` (wrong credential type, see [api.md](api.md), Pickers). Other `422` answers have no `detail`.
-  - Harbor identity: a `4xx` refusal gives `422`, a `5xx` gives `502`. A Harbor identity refusal (a `4xx` such as `401`, or a `200` that is not a robot identity), or GitHub `401`: `422 validation_failed`, fixed message per service ("The Harbor credential does not work. Test it on the Account page." or "The GitHub token is not valid. Test it on the Account page.").
-  - Harbor `403` on the repository list: `422 validation_failed`, the Repository List message above.
-  - Harbor `404` on the repository list (no such project): `404 not_found`, "Harbor project not found."
-  - Harbor `403` on the artifact list or read (the source suggestion): `422 validation_failed`, detail `robot_scope`, "The Harbor robot cannot read artifacts in this repository. Grant it Artifact List and Artifact Read."
-  - Harbor `404` on the artifact list or read (no such repository): `404 not_found`, "Harbor repository not found."
-  - GitHub `429`, or a `403` with `x-ratelimit-remaining: 0` or a `retry-after` header (the same test as the SARIF upload, see "SARIF conversion and upload"), and a Harbor `429`: `429 rate_limited` with "GitHub rate limit reached. Try again later." or "Harbor rate limit reached. Try again later.", and `Retry-After`.
-  - Any other GitHub `403`: `422 validation_failed`, "The GitHub token cannot list repositories. Check its permissions."
-  - Unreachable, a timeout, a redirect, a `5xx`, another status, or a body that does not parse: `502 upstream_unreachable` with its fixed message.
-- Decided (2026-11-05, delegated, #126): after an upstream rate limit, HarborGate makes no call to that service with that credential until the time the service gave (`retry-after` seconds, or `x-ratelimit-reset`), capped at 1 hour, as for SARIF upload deferral; requests in that window return the same `429` at once. HarborGate never retries a list call on its own, and the UI does not retry automatically. Reason: decision 8 forbids a retry loop, and repeated clicks must not keep hitting a rate-limited token.
-- HarborGate's own request limit on the picker routes is in [api.md](api.md), Pickers.
-
-### Open live checks
-
-- OPEN: GitHub `GET /user/repos` with a real fine-grained token (#126 question 2, decided as "verify live"). To record: whether the list returns exactly the repositories selected for the token, including private ones; whether repositories of the token's resource owner that were not selected are left out; whether public repositories outside the token's selection appear; and the status and body for an organisation the token cannot reach. GitHub's OpenAPI description marks `/user/repos` with `enabledForGitHubApps: false` (checked 2026-11-05); that flag is about GitHub App installation tokens, and whether a fine-grained personal access token is accepted is part of this check. If the token is refused, the GitHub picker cannot be built as decided and the user must decide again.
-- Done: Harbor robot scope (#126 question 1). Verified (2026-11-05) with a real project robot, read-only: it listed only its granted project, and a project it was not granted was absent and returned `403` on direct lookup. Still UNVERIFIED: whether a public project the robot was not granted is listed, which the Harbor source says it is (see "Basis"). That changes only which public projects appear, not tenancy, because the list uses the user's own credential.
+- OPEN: the Grype version of the shipped image. The Dockerfile pins `anchore/grype@sha256:13113eec...` with no version comment. Decision 29 verified v0.121.2 at digest `6a36234d...`, and CI pins v0.121.2. The repository does not show which version `13113eec...` is. Decide whether to pin the verified digest, or record the version the digest is confirmed to be.
+- OPEN: names still using the old project name. The driver name `HarborGate` (`services/sarif.rs`), the issue label and marker `harborgate`, the branch label `io.github.nrosier.harborgate.branch`, and the SARIF keys `harborgate/...`. Renaming changes what GitHub shows and how old issues are re-adopted, so the user decides.
+- OPEN: the alert payload key `mapping.harbor` (see [alerts.md](alerts.md)). It holds a hub and repository, not a Harbor value.
+- OPEN: the Rust config reads `DOCKWARD_ALLOW_PRIVATE_HARBOR` (`backend/src/config.rs`) but no service uses it (verified by search of `backend/src`). Remove or keep.
+- UNVERIFIED: a live pull from `ghcr.io` and `docker.io` with a real credential, the anonymous Docker Hub rate-limit answer, and whether `docker.io` returns a `Retry-After` header on `429`. Only a live run can check these.
+- UNVERIFIED: whether Trivy and Grype report the same `package` string for the same CVE (exact-match merge key). Answer by a live comparison.

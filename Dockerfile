@@ -66,6 +66,6 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD ["/us
 LABEL org.opencontainers.image.title="Dockward" \
       org.opencontainers.image.source="https://github.com/nrosier/dockward" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.description="Harbor to GitHub Code Scanning relay" \
+      org.opencontainers.image.description="Dockward: local container image scanner and GitHub Code Scanning relay." \
       org.opencontainers.image.revision="$REVISION"
 ENTRYPOINT ["/usr/local/bin/dockward"]
