@@ -174,14 +174,16 @@ pub trait CodeScanning: Send + Sync + 'static {
         now: i64,
     ) -> impl Future<Output = Result<Processing, ScanError>> + Send;
 
-    /// Lists the analyses of one tool, all pages (#311 slice 6b).
-    fn list_analyses(
+    /// Lists the analyses of one tool, all pages (#311 slice 6b). `deadline` is Unix seconds on
+    /// `clock`; the list stops with `DeadlineExceeded` once `clock.now()` reaches it.
+    fn list_analyses<C: Clock>(
         &self,
         token: &[u8],
         owner: &str,
         repo: &str,
         tool_name: &str,
-        now: i64,
+        clock: &C,
+        deadline: i64,
     ) -> impl Future<Output = Result<Vec<Analysis>, ScanError>> + Send;
 
     /// DELETEs one analysis. Returns the next confirm-delete path, or `None` when done.
@@ -204,14 +206,16 @@ pub trait CodeScanning: Send + Sync + 'static {
         now: i64,
     ) -> impl Future<Output = Result<Option<String>, ScanError>> + Send;
 
-    /// Lists the alerts of one tool, state and ref, all pages.
-    fn list_alerts(
+    /// Lists the alerts of one tool, state and ref, all pages. `deadline` is as for
+    /// `list_analyses`.
+    fn list_alerts<C: Clock>(
         &self,
         token: &[u8],
         owner: &str,
         repo: &str,
         query: AlertQuery<'_>,
-        now: i64,
+        clock: &C,
+        deadline: i64,
     ) -> impl Future<Output = Result<Vec<Alert>, ScanError>> + Send;
 
     /// Dismisses one alert.
@@ -247,15 +251,16 @@ impl CodeScanning for GithubScanning {
         GithubScanning::status(self, token, owner, repo, sarif_id, now).await
     }
 
-    async fn list_analyses(
+    async fn list_analyses<C: Clock>(
         &self,
         token: &[u8],
         owner: &str,
         repo: &str,
         tool_name: &str,
-        now: i64,
+        clock: &C,
+        deadline: i64,
     ) -> Result<Vec<Analysis>, ScanError> {
-        GithubScanning::list_analyses(self, token, owner, repo, tool_name, now).await
+        GithubScanning::list_analyses(self, token, owner, repo, tool_name, clock, deadline).await
     }
 
     async fn delete_analysis(
@@ -280,15 +285,16 @@ impl CodeScanning for GithubScanning {
         GithubScanning::follow_confirm(self, token, owner, repo, link, now).await
     }
 
-    async fn list_alerts(
+    async fn list_alerts<C: Clock>(
         &self,
         token: &[u8],
         owner: &str,
         repo: &str,
         query: AlertQuery<'_>,
-        now: i64,
+        clock: &C,
+        deadline: i64,
     ) -> Result<Vec<Alert>, ScanError> {
-        GithubScanning::list_alerts(self, token, owner, repo, query, now).await
+        GithubScanning::list_alerts(self, token, owner, repo, query, clock, deadline).await
     }
 
     async fn dismiss_alert(
@@ -406,7 +412,7 @@ fn scan_outcome(error: ScanError) -> JobOutcome {
         ScanError::NotFound => failed(messages::NOT_FOUND),
         ScanError::TooLarge => permanent(messages::TOO_LARGE),
         ScanError::Rejected(_) => failed(messages::REJECTED),
-        ScanError::Upstream(_) => failed(messages::UPSTREAM),
+        ScanError::Upstream(_) | ScanError::DeadlineExceeded => failed(messages::UPSTREAM),
     }
 }
 

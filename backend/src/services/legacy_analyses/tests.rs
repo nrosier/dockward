@@ -118,6 +118,9 @@ struct State {
     fail_delete_ids: Vec<u64>,
     /// List every analysis whatever `tool_name` asks for, as a list that ignores the filter would.
     ignore_tool_filter: bool,
+    /// Answer the analysis list with `DeadlineExceeded` from this list call (1-based) on, as a
+    /// paged list does once its deadline has passed between pages.
+    fail_list_from: Option<usize>,
 }
 
 /// Removes one analysis, as GitHub does, and returns its confirm link. When no analysis of its ref
@@ -214,16 +217,25 @@ impl CodeScanning for FakeCode {
         Err(ScanError::Upstream("unused by the retirement".to_owned()))
     }
 
-    async fn list_analyses(
+    async fn list_analyses<C: Clock>(
         &self,
         _token: &[u8],
         _owner: &str,
         _repo: &str,
         tool_name: &str,
-        _now: i64,
+        _clock: &C,
+        _deadline: i64,
     ) -> Result<Vec<Analysis>, ScanError> {
         self.with(|state| {
             state.calls.push(Call::ListAnalyses);
+            let list_number = state
+                .calls
+                .iter()
+                .filter(|call| matches!(call, Call::ListAnalyses))
+                .count();
+            if state.fail_list_from.is_some_and(|from| list_number >= from) {
+                return Err(ScanError::DeadlineExceeded);
+            }
             Ok(state
                 .analyses
                 .iter()
@@ -283,13 +295,14 @@ impl CodeScanning for FakeCode {
         })
     }
 
-    async fn list_alerts(
+    async fn list_alerts<C: Clock>(
         &self,
         _token: &[u8],
         _owner: &str,
         _repo: &str,
         query: AlertQuery<'_>,
-        _now: i64,
+        _clock: &C,
+        _deadline: i64,
     ) -> Result<Vec<Alert>, ScanError> {
         self.with(|state| {
             state
@@ -1569,4 +1582,70 @@ async fn a_confirm_link_for_another_repo_or_family_sends_no_request() {
             "{link} sends no request"
         );
     }
+}
+
+/// The analysis list runs past its deadline on its third call, as a paged list does when the
+/// clock passes the deadline between pages. The two deletes of the first pass happen before it.
+/// The run stops with `Incomplete`, writes no row, and makes no DELETE after the list stop.
+#[tokio::test]
+async fn a_list_past_the_deadline_stops_the_step_with_no_row_and_no_later_delete() {
+    let fx = Fx::new("deadline").await;
+    fx.analysis(
+        1,
+        REF_MAIN,
+        LEGACY,
+        LEGACY_TOOL_NAME,
+        true,
+        "2026-01-01T00:00:00Z",
+    );
+    fx.analysis(
+        2,
+        REF_MAIN,
+        LEGACY,
+        LEGACY_TOOL_NAME,
+        true,
+        "2026-01-02T00:00:00Z",
+    );
+    fx.gh.with(|state| state.fail_list_from = Some(3));
+
+    let clock = Clock2::new(0);
+    let outcome = fx.retire(&clock, REF_MAIN, NOW).await;
+    assert_eq!(outcome.map_err(|_| "error"), Ok(RetireOutcome::Incomplete));
+    assert_eq!(fx.row_count().await, 0, "a deadline stop writes no row");
+    assert_eq!(fx.gh.deleted(), vec![2, 1], "the first pass deletes both");
+    let calls = fx.gh.calls();
+    let stop = calls
+        .iter()
+        .rposition(|call| matches!(call, Call::ListAnalyses))
+        .unwrap_or_else(|| panic!("the list was called"));
+    assert!(
+        calls[stop + 1..]
+            .iter()
+            .all(|call| !matches!(call, Call::Delete(_) | Call::Confirm(_))),
+        "no DELETE follows the list stop: {calls:?}"
+    );
+}
+
+/// The converse: a list that finishes inside its deadline completes and writes the row.
+#[tokio::test]
+async fn a_list_inside_its_deadline_completes_and_writes_the_row() {
+    let fx = Fx::new("inside").await;
+    fx.analysis(
+        1,
+        REF_MAIN,
+        LEGACY,
+        LEGACY_TOOL_NAME,
+        true,
+        "2026-01-01T00:00:00Z",
+    );
+    let clock = Clock2::new(0);
+    let outcome = fx.retire(&clock, REF_MAIN, NOW).await;
+    assert_eq!(
+        outcome.map_err(|_| "error"),
+        Ok(RetireOutcome::Completed {
+            deleted: 1,
+            carried: 0
+        })
+    );
+    assert_eq!(fx.row_count().await, 1, "a clean pass writes the row");
 }

@@ -119,13 +119,14 @@ impl CodeScanning for Arc<FakeScanning> {
 
     /// The publish tests answer as an empty repository. The retirement has its own fake in
     /// `legacy_analyses`. The count shows whether the retirement step ran.
-    async fn list_analyses(
+    async fn list_analyses<C: Clock>(
         &self,
         _token: &[u8],
         _owner: &str,
         _repo: &str,
         _tool_name: &str,
-        _now: i64,
+        _clock: &C,
+        _deadline: i64,
     ) -> Result<Vec<Analysis>, ScanError> {
         *lock(&self.legacy_lists) += 1;
         Ok(Vec::new())
@@ -153,13 +154,14 @@ impl CodeScanning for Arc<FakeScanning> {
         Ok(None)
     }
 
-    async fn list_alerts(
+    async fn list_alerts<C: Clock>(
         &self,
         _token: &[u8],
         _owner: &str,
         _repo: &str,
         _query: AlertQuery<'_>,
-        _now: i64,
+        _clock: &C,
+        _deadline: i64,
     ) -> Result<Vec<Alert>, ScanError> {
         Ok(Vec::new())
     }

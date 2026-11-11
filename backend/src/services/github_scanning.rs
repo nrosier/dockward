@@ -21,6 +21,7 @@ use std::sync::Arc;
 use crate::services::credential_probe::valid_github_name;
 use crate::services::github_url::{GithubTarget, GithubUrls};
 use crate::services::outbound::{self, OutboundClient};
+use crate::services::publish::Clock;
 
 /// Largest gzip-compressed SARIF that GitHub accepts in one upload.
 pub const MAX_COMPRESSED_BYTES: usize = 10 * 1024 * 1024;
@@ -55,6 +56,8 @@ pub enum ScanError {
     Rejected(String),
     /// GitHub failed (`5xx`), or the answer could not be used.
     Upstream(String),
+    /// A list ran past its deadline between pages. Only the paged list calls return this.
+    DeadlineExceeded,
 }
 
 impl fmt::Display for ScanError {
@@ -76,6 +79,7 @@ impl fmt::Display for ScanError {
             }
             ScanError::Rejected(message) => write!(f, "GitHub rejected the request: {message}"),
             ScanError::Upstream(message) => write!(f, "GitHub failed: {message}"),
+            ScanError::DeadlineExceeded => f.write_str("the GitHub list ran past its deadline"),
         }
     }
 }
@@ -620,20 +624,26 @@ fn parse_alert(item: &Value) -> Result<Alert, ScanError> {
 }
 
 /// Reads every page of a list, following `link: rel="next"` through the URLs' own check. A next
-/// link to another host is refused and never fetched.
-async fn list_pages<H: ScanHttp, T>(
+/// link to another host is refused and never fetched. The clock is checked before each page
+/// request, so a list that passes `deadline` between pages stops with
+/// [`ScanError::DeadlineExceeded`] and requests no further page.
+async fn list_pages<H: ScanHttp, C: Clock, T>(
     http: &H,
     token: &[u8],
     first: String,
-    now: i64,
+    clock: &C,
+    deadline: i64,
     parse: impl Fn(&Value) -> Result<T, ScanError>,
 ) -> Result<Vec<T>, ScanError> {
     let mut path = first;
     let mut found = Vec::new();
     for _ in 0..MAX_LIST_PAGES {
+        if clock.now() >= deadline {
+            return Err(ScanError::DeadlineExceeded);
+        }
         let response = http.get(&path, token).await?;
         if response.status != 200 {
-            return Err(classify(&response, now));
+            return Err(classify(&response, clock.now()));
         }
         let items = response.body.as_array().ok_or_else(bad_answer)?;
         for item in items {
@@ -653,21 +663,23 @@ async fn list_pages<H: ScanHttp, T>(
     ))
 }
 
-/// Lists the code scanning analyses of one tool, all pages. See [`Analysis`].
-pub async fn list_analyses_with<H: ScanHttp>(
+/// Lists the code scanning analyses of one tool, all pages. See [`Analysis`]. `deadline` is
+/// Unix seconds; see [`list_pages`].
+pub async fn list_analyses_with<H: ScanHttp, C: Clock>(
     http: &H,
     token: &[u8],
     owner: &str,
     repo: &str,
     tool_name: &str,
-    now: i64,
+    clock: &C,
+    deadline: i64,
 ) -> Result<Vec<Analysis>, ScanError> {
     check_names(owner, repo)?;
     let tool = query_value(tool_name)?;
     let first =
         format!("repos/{owner}/{repo}/code-scanning/analyses?tool_name={tool}&per_page=100");
     let urls = http.urls();
-    list_pages(http, token, first, now, |item| {
+    list_pages(http, token, first, clock, deadline, |item| {
         parse_analysis(&urls, owner, repo, item)
     })
     .await
@@ -713,14 +725,16 @@ pub async fn follow_confirm_with<H: ScanHttp>(
     confirm_answer_for(&urls, owner, repo, &response.body)
 }
 
-/// Lists the code scanning alerts for a tool, state and ref, all pages. See [`Alert`].
-pub async fn list_alerts_with<H: ScanHttp>(
+/// Lists the code scanning alerts for a tool, state and ref, all pages. See [`Alert`]. `deadline`
+/// is Unix seconds; see [`list_pages`].
+pub async fn list_alerts_with<H: ScanHttp, C: Clock>(
     http: &H,
     token: &[u8],
     owner: &str,
     repo: &str,
     query: AlertQuery<'_>,
-    now: i64,
+    clock: &C,
+    deadline: i64,
 ) -> Result<Vec<Alert>, ScanError> {
     check_names(owner, repo)?;
     let tool = query_value(query.tool_name)?;
@@ -729,7 +743,7 @@ pub async fn list_alerts_with<H: ScanHttp>(
     let first = format!(
         "repos/{owner}/{repo}/code-scanning/alerts?tool_name={tool}&state={state}&ref={git_ref}&per_page=100"
     );
-    list_pages(http, token, first, now, parse_alert).await
+    list_pages(http, token, first, clock, deadline, parse_alert).await
 }
 
 /// PATCHes one alert to `dismissed`. The reason must be one of [`DISMISSAL_REASONS`].
@@ -805,15 +819,16 @@ impl GithubScanning {
     }
 
     /// Lists the analyses of one tool, all pages. See [`list_analyses_with`].
-    pub async fn list_analyses(
+    pub async fn list_analyses<C: Clock>(
         &self,
         token: &[u8],
         owner: &str,
         repo: &str,
         tool_name: &str,
-        now: i64,
+        clock: &C,
+        deadline: i64,
     ) -> Result<Vec<Analysis>, ScanError> {
-        list_analyses_with(&self.http(), token, owner, repo, tool_name, now).await
+        list_analyses_with(&self.http(), token, owner, repo, tool_name, clock, deadline).await
     }
 
     /// DELETEs one analysis. See [`delete_analysis_with`].
@@ -841,15 +856,16 @@ impl GithubScanning {
     }
 
     /// Lists the alerts of one tool, state and ref, all pages. See [`list_alerts_with`].
-    pub async fn list_alerts(
+    pub async fn list_alerts<C: Clock>(
         &self,
         token: &[u8],
         owner: &str,
         repo: &str,
         query: AlertQuery<'_>,
-        now: i64,
+        clock: &C,
+        deadline: i64,
     ) -> Result<Vec<Alert>, ScanError> {
-        list_alerts_with(&self.http(), token, owner, repo, query, now).await
+        list_alerts_with(&self.http(), token, owner, repo, query, clock, deadline).await
     }
 
     /// Dismisses one alert. See [`dismiss_alert_with`].
@@ -1127,5 +1143,145 @@ mod tests {
             status_with(&complete, b"token", "octo", "app", "abc-123", 1000).await,
             Ok(Processing::Complete)
         );
+    }
+
+    /// A clock whose value a test sets. The list reads it before each page, so a value set
+    /// between two page requests lands between pages.
+    struct PagedClock {
+        now: Mutex<i64>,
+    }
+
+    impl PagedClock {
+        fn at(now: i64) -> Self {
+            Self {
+                now: Mutex::new(now),
+            }
+        }
+
+        fn set(&self, now: i64) {
+            *self.now.lock().unwrap_or_else(|p| p.into_inner()) = now;
+        }
+    }
+
+    impl Clock for PagedClock {
+        fn now(&self) -> i64 {
+            *self.now.lock().unwrap_or_else(|p| p.into_inner())
+        }
+
+        async fn sleep(&self, _duration: std::time::Duration) {}
+    }
+
+    /// Serves two pages of analyses. Page 1 links to page 2. Each page request is recorded, and
+    /// `move_clock_after` moves the clock once a page has been served.
+    struct TwoPages<'a> {
+        clock: &'a PagedClock,
+        /// The clock value to set after the page with this index (0 or 1) is served.
+        move_clock_after: Option<(usize, i64)>,
+        requested: Mutex<Vec<String>>,
+    }
+
+    impl TwoPages<'_> {
+        fn requested(&self) -> Vec<String> {
+            self.requested
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        }
+    }
+
+    impl ScanHttp for TwoPages<'_> {
+        async fn post(
+            &self,
+            _path: &str,
+            _token: &[u8],
+            _body: &Value,
+        ) -> Result<ScanResponse, ScanError> {
+            Err(ScanError::Upstream("unused".to_owned()))
+        }
+
+        async fn patch(
+            &self,
+            _path: &str,
+            _token: &[u8],
+            _body: &Value,
+        ) -> Result<ScanResponse, ScanError> {
+            Err(ScanError::Upstream("unused".to_owned()))
+        }
+
+        async fn get(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
+            let index = {
+                let mut requested = self.requested.lock().unwrap_or_else(|p| p.into_inner());
+                requested.push(path.to_owned());
+                requested.len() - 1
+            };
+            let (body, link_next) = if index == 0 {
+                (
+                    json!([{"id": 1, "ref": "refs/heads/main", "tool": {"name": "harborgate"}}]),
+                    Some("https://api.github.com/repos/octo/app/code-scanning/analyses?page=2"),
+                )
+            } else {
+                (
+                    json!([{"id": 2, "ref": "refs/heads/main", "tool": {"name": "harborgate"}}]),
+                    None,
+                )
+            };
+            if let Some((after, value)) = self.move_clock_after
+                && after == index
+            {
+                self.clock.set(value);
+            }
+            Ok(ScanResponse {
+                status: 200,
+                retry_after: None,
+                ratelimit_remaining: None,
+                ratelimit_reset: None,
+                link_next: link_next.map(str::to_owned),
+                body,
+            })
+        }
+
+        async fn delete(&self, _path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
+            Err(ScanError::Upstream("a list makes no DELETE".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_list_past_its_deadline_between_pages_stops_before_the_next_page() {
+        // The clock reads 1000 before page 1 and passes the deadline of 1500 once page 1 is
+        // served. Page 2 must not be requested.
+        let clock = PagedClock::at(1000);
+        let http = TwoPages {
+            clock: &clock,
+            move_clock_after: Some((0, 1600)),
+            requested: Mutex::new(Vec::new()),
+        };
+        let outcome =
+            list_analyses_with(&http, b"token", "octo", "app", "harborgate", &clock, 1500).await;
+        assert_eq!(outcome, Err(ScanError::DeadlineExceeded));
+        assert_eq!(
+            http.requested().len(),
+            1,
+            "page 2 is never requested once the deadline has passed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_list_that_finishes_inside_its_deadline_completes_every_page() {
+        // The clock stays inside the budget through both pages.
+        let clock = PagedClock::at(1000);
+        let http = TwoPages {
+            clock: &clock,
+            move_clock_after: Some((0, 1400)),
+            requested: Mutex::new(Vec::new()),
+        };
+        let outcome =
+            list_analyses_with(&http, b"token", "octo", "app", "harborgate", &clock, 1500).await;
+        let ids: Vec<u64> = outcome
+            .unwrap_or_else(|err| panic!("list failed: {err}"))
+            .iter()
+            .map(|analysis| analysis.id)
+            .collect();
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(http.requested().len(), 2, "both pages are requested");
     }
 }

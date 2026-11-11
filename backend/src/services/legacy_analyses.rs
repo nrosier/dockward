@@ -126,6 +126,8 @@ struct Run<'a, G, C> {
     /// The legacy category of this run, the key of the stored plan.
     legacy: &'a str,
     started: i64,
+    /// `started` plus [`MAX_WAIT`], in Unix seconds. Every list stops at it, on the same clock.
+    deadline: i64,
     /// True once a write has been made, so the next write waits [`PAUSE`] first.
     wrote: bool,
     /// Every DELETE request made so far, first deletes and confirm steps alike.
@@ -154,7 +156,8 @@ impl<G: CodeScanning, C: Clock> Run<'_, G, C> {
         self.within_budget()
     }
 
-    /// The HarborGate analyses of this repository, all pages.
+    /// The HarborGate analyses of this repository, all pages. The list stops at the deadline
+    /// between pages.
     async fn legacy_analyses(&self) -> Flow<Vec<Analysis>> {
         self.within_budget()?;
         check(
@@ -164,13 +167,15 @@ impl<G: CodeScanning, C: Clock> Run<'_, G, C> {
                     self.owner,
                     self.repo,
                     LEGACY_TOOL_NAME,
-                    self.clock.now(),
+                    self.clock,
+                    self.deadline,
                 )
                 .await,
         )
     }
 
-    /// The alerts of one tool, state and ref, all pages.
+    /// The alerts of one tool, state and ref, all pages. The list stops at the deadline between
+    /// pages.
     async fn alerts(&self, tool: &str, state: &str, git_ref: &str) -> Flow<Vec<Alert>> {
         self.within_budget()?;
         let query = AlertQuery {
@@ -180,7 +185,14 @@ impl<G: CodeScanning, C: Clock> Run<'_, G, C> {
         };
         check(
             self.gh
-                .list_alerts(self.token, self.owner, self.repo, query, self.clock.now())
+                .list_alerts(
+                    self.token,
+                    self.owner,
+                    self.repo,
+                    query,
+                    self.clock,
+                    self.deadline,
+                )
                 .await,
         )
     }
@@ -473,6 +485,7 @@ pub async fn retire<G: CodeScanning, C: Clock>(
         sarif::automation_id(&source.hub_host, &source.repository, &source.tag_value);
     let new = new_with_slash.trim_end_matches('/');
 
+    let budget = i64::try_from(MAX_WAIT.as_secs()).unwrap_or(i64::MAX);
     let mut run = Run {
         pool,
         gh,
@@ -482,6 +495,7 @@ pub async fn retire<G: CodeScanning, C: Clock>(
         repo,
         legacy: &legacy,
         started,
+        deadline: started.saturating_add(budget),
         wrote: false,
         delete_calls: 0,
     };
