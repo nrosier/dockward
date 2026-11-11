@@ -39,6 +39,7 @@ use crate::db::credentials as credential_db;
 use crate::db::jobs::{self, ClaimedJob};
 use crate::db::publish as publish_db;
 use crate::db::scans as scans_db;
+use crate::db::scans::PlatformImage;
 use crate::db::sources::{self as source_db, SourceRow};
 use crate::db::sync_reports::{self as report_db, NewReport};
 use crate::error::AppError;
@@ -104,20 +105,37 @@ const LATER_WAIT: Duration = Duration::from_secs(15);
 /// (`services/legacy_analyses.rs`) uses the same budget.
 pub(crate) const MAX_WAIT: Duration = Duration::from_secs(300);
 
-/// The payload of a `publish` job: ids only (section 9). Never a token or a label.
+/// The payload of a `publish` job: ids, and the image it is about (repository, digest, the tag
+/// the source observed) with the trigger. Never a token or a label. The image fields are
+/// `serde(default)` so a job queued before they existed still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishPayload {
     pub kind: String,
     pub source_id: String,
     pub image_id: String,
+    #[serde(default)]
+    pub repo_full_name: Option<String>,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub digest: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<String>,
 }
 
+/// The trigger of a publish job: the scan that ended the image's last open run led to it.
+pub const PUBLISH_TRIGGER: &str = "scan";
+
 impl PublishPayload {
-    pub fn new(source_id: &str, image_id: &str) -> Self {
+    pub fn new(source_id: &str, image_id: &str, image: &PlatformImage) -> Self {
         Self {
             kind: "publish".to_owned(),
             source_id: source_id.to_owned(),
             image_id: image_id.to_owned(),
+            repo_full_name: Some(image.repo_full_name.clone()),
+            tag: image.tag.clone(),
+            digest: Some(image.digest.clone()),
+            trigger: Some(PUBLISH_TRIGGER.to_owned()),
         }
     }
 
@@ -144,10 +162,13 @@ pub async fn queue_publish(pool: &SqlitePool, image_id: &str, now: i64) -> Resul
     }
     let mut queued = 0usize;
     for source_id in publish_db::sources_with_newest_image(&mut tx, image_id).await? {
-        let payload = PublishPayload::new(&source_id, image_id).to_text()?;
-        if publish_db::open_publish_job_exists(&mut tx, &payload).await? {
+        if publish_db::open_publish_job_exists(&mut tx, &source_id, image_id).await? {
             continue;
         }
+        let Some(image) = scans_db::image_in(&mut tx, image_id, Some(&source_id)).await? else {
+            return Err(AppError::InternalError);
+        };
+        let payload = PublishPayload::new(&source_id, image_id, &image).to_text()?;
         let job_id = ids::new_id()?;
         jobs::enqueue_in(&mut tx, &job_id, Some(&source_id), &payload, now).await?;
         queued += 1;

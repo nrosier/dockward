@@ -798,3 +798,41 @@ mod scanner_tests {
         assert_eq!(run.scanner.as_deref(), Some("grype"));
     }
 }
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_db_update_job_lists_with_no_image() {
+        let dir = std::env::temp_dir().join(format!("dockward-jobs-image-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = crate::db::open(&dir).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, token_version)
+             VALUES ('owner', 'owner', NULL, 'user', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, source_id, status, attempts, payload, created_at, updated_at) VALUES
+             ('j-db', NULL, 'queued', 0, '{\"kind\":\"db_update\",\"scanner\":\"grype\"}', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let query = ListQuery {
+            all_users: true,
+            ..ListQuery::default()
+        };
+        let page = list(&pool, "owner", &query).await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let job = page.items.iter().find(|job| job.id == "j-db").unwrap();
+        assert_eq!(job.image.repo_full_name, None);
+        assert_eq!(job.image.tag, None);
+        assert_eq!(job.image.digest, None);
+    }
+}

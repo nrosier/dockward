@@ -90,17 +90,25 @@ pub async fn image_has_pending_pull(
     Ok(row.pending != 0)
 }
 
-/// True when a `publish` job with exactly this payload is `queued` or `running`. A second job
-/// for the same source and image adds nothing.
+/// True when a `publish` job for this source and image is `queued` or `running`. A second job
+/// for the same source and image adds nothing. Matches the payload fields, not the text, so the
+/// payload can carry more fields.
 pub async fn open_publish_job_exists(
     conn: &mut SqliteConnection,
-    payload: &str,
+    source_id: &str,
+    image_id: &str,
 ) -> Result<bool, AppError> {
     let row = sqlx::query!(
         r#"SELECT EXISTS (
-               SELECT 1 FROM jobs WHERE payload = ? AND status IN ('queued', 'running')
+               SELECT 1 FROM jobs
+               WHERE json_valid(payload)
+                 AND json_extract(payload, '$.kind') = 'publish'
+                 AND json_extract(payload, '$.source_id') = ?
+                 AND json_extract(payload, '$.image_id') = ?
+                 AND status IN ('queued', 'running')
            ) AS "open!: i64""#,
-        payload
+        source_id,
+        image_id
     )
     .fetch_one(conn)
     .await
