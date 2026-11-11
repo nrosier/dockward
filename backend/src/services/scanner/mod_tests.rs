@@ -97,3 +97,24 @@ fn trivy_environment_points_at_its_cache() {
         .map(|(_, value)| value.to_string_lossy().into_owned());
     assert_eq!(cache.as_deref(), Some("/data/scanner-cache/trivy"));
 }
+
+/// Regression: without a HOME, Trivy falls back to `/` and fails with `mkdir /.cache: permission
+/// denied`. The child environment must always carry a HOME inside the cache root, for both scanners.
+#[test]
+fn scanner_environments_always_set_a_home_inside_the_cache_root() {
+    let root = Path::new("/data/scanner-cache");
+    for scanner in [Scanner::Trivy, Scanner::Grype] {
+        for scan in [true, false] {
+            let env = environment(root, scanner, scan);
+            let home = env
+                .iter()
+                .find(|(name, _)| name == "HOME")
+                .map(|(_, value)| value.to_string_lossy().into_owned());
+            assert_eq!(
+                home.as_deref(),
+                Some("/data/scanner-cache"),
+                "{scanner:?} scan={scan}"
+            );
+        }
+    }
+}
