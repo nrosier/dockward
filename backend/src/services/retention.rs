@@ -155,6 +155,7 @@ async fn record_run(
             status: status.to_owned(),
             processed_count: processed,
             error_summary: error_summary.map(str::to_owned),
+            scanner: None,
         },
     )
     .await

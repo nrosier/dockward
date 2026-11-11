@@ -349,6 +349,99 @@ async fn a_timeout_is_permanent_with_the_fixed_text() {
     );
 }
 
+#[tokio::test]
+async fn a_run_records_the_scanner_it_refreshed() {
+    let fx = Fx::new("run-scanner", TRIVY_NEW).await;
+    fx.store_built_at("trivy", TRIVY_OLD_SECS).await;
+
+    assert!(matches!(fx.run(Scanner::Trivy).await, JobOutcome::Done));
+
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM job_runs WHERE job_kind = 'db_update' AND scanner = 'trivy'",
+            &[]
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_run_records_its_real_start_and_finish() {
+    let fx = Fx::new("run-timing", TRIVY_NEW).await;
+    fx.store_built_at("trivy", TRIVY_OLD_SECS).await;
+    // The update takes at least a second, so the finish time must be later than the start.
+    write_script(
+        &fx.dir.join("bin/trivy"),
+        &format!(
+            "/bin/sleep 1.2\nmkdir -p \"$TRIVY_CACHE_DIR/db\"\n\
+             printf '{{\"Version\":2,\"UpdatedAt\":\"{TRIVY_NEW}\"}}' \
+             > \"$TRIVY_CACHE_DIR/db/metadata.json\""
+        ),
+    );
+
+    assert!(matches!(fx.run(Scanner::Trivy).await, JobOutcome::Done));
+
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM job_runs WHERE job_kind = 'db_update'
+             AND finished_at > started_at",
+            &[]
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_non_scanner_error_has_the_same_text_on_the_job_and_the_run() {
+    let fx = Fx::new("non-scanner-error", TRIVY_NEW).await;
+    // The update succeeds, then reading the stored build time fails inside the store.
+    exec(&fx.pool, "DROP TABLE scanner_databases", &[]).await;
+
+    let outcome = fx.run(Scanner::Trivy).await;
+
+    // The job's last_error and the run's error_summary are the same fixed text.
+    assert!(
+        matches!(&outcome, JobOutcome::Failed(text) if text == "scanner failed"),
+        "got {outcome:?}"
+    );
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM job_runs WHERE job_kind = 'db_update' AND status = 'failed'
+             AND error_summary = 'scanner failed'",
+            &[]
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_stored_timeout_is_clamped_to_the_settings_range() {
+    let fx = Fx::new("clamp", TRIVY_NEW).await;
+    for (stored, expected) in [("1", 10), ("999999", 86_400), ("600", 600)] {
+        exec(
+            &fx.pool,
+            "INSERT OR REPLACE INTO system_config (key, value) VALUES ('scanner.timeout_s', ?)",
+            &[stored],
+        )
+        .await;
+        let limits = match process_limits(&SqlStoreRepository::new(fx.pool.clone())).await {
+            Ok(limits) => limits,
+            Err(err) => panic!("limits: {err:?}"),
+        };
+        assert_eq!(
+            limits.timeout,
+            Duration::from_secs(expected),
+            "stored {stored}"
+        );
+    }
+}
+
 #[test]
 fn the_child_sees_the_cache_path_and_no_secret() {
     let runtime = match tokio::runtime::Builder::new_current_thread()

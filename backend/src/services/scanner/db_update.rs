@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::sync::watch;
 
-use super::db_refresh::{DatabaseTool, RefreshStore, refresh};
+use super::db_refresh::{DatabaseTool, RefreshStore, RunTiming, refresh, run_error_text};
 use super::process::{Invocation, Limits};
 use super::{Scanner, cache_dir, environment, update_args};
 use crate::db::job_runs::{self, JobRun};
@@ -129,7 +129,7 @@ pub async fn run_db_update(pool: &SqlitePool, env: &ScanEnv, job_payload: &str) 
         limits,
     };
     let store = SqlRefreshStore { pool: pool.clone() };
-    match refresh(&tool, &store, scanner).await {
+    match refresh(&tool, &store, scanner, now_secs).await {
         Ok(outcome) => {
             tracing::info!(
                 scanner = scanner.key(),
@@ -138,11 +138,11 @@ pub async fn run_db_update(pool: &SqlitePool, env: &ScanEnv, job_payload: &str) 
             );
             JobOutcome::Done
         }
-        Err(AppError::Scanner(fault @ (ScannerFault::TimedOut | ScannerFault::OutputTooLarge))) => {
-            JobOutcome::Permanent(fault.text().to_owned())
+        // The job's `last_error` is the same fixed text the run's `error_summary` holds.
+        Err(err @ AppError::Scanner(ScannerFault::TimedOut | ScannerFault::OutputTooLarge)) => {
+            JobOutcome::Permanent(run_error_text(&err).to_owned())
         }
-        Err(AppError::Scanner(fault)) => JobOutcome::Failed(fault.text().to_owned()),
-        Err(err) => JobOutcome::Failed(fixed_text(&err)),
+        Err(err) => JobOutcome::Failed(run_error_text(&err).to_owned()),
     }
 }
 
@@ -219,18 +219,23 @@ struct SqlRefreshStore {
 }
 
 impl RefreshStore for SqlRefreshStore {
-    async fn record_run(&self, _scanner: Scanner, error: Option<&str>) -> Result<(), AppError> {
-        let now = now_secs();
+    async fn record_run(
+        &self,
+        scanner: Scanner,
+        run: RunTiming,
+        error: Option<&str>,
+    ) -> Result<(), AppError> {
         job_runs::insert(
             &self.pool,
             &JobRun {
                 id: ids::new_id()?,
                 job_kind: "db_update".to_owned(),
-                started_at: now,
-                finished_at: Some(now),
+                started_at: run.started_at,
+                finished_at: Some(run.finished_at),
                 status: if error.is_none() { "done" } else { "failed" }.to_owned(),
                 processed_count: 0,
                 error_summary: error.map(str::to_owned),
+                scanner: Some(scanner.key().to_owned()),
             },
         )
         .await

@@ -1067,6 +1067,7 @@ mod tests {
                 status: "done".to_owned(),
                 processed_count: 3,
                 error_summary: None,
+                scanner: None,
             },
         )
         .await
