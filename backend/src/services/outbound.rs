@@ -182,7 +182,8 @@ impl Resolve for GuardedResolver {
 }
 
 /// The only outbound client. The inner reqwest client is private, and requests are built
-/// only through [`OutboundClient::get`], [`OutboundClient::post`] and [`OutboundClient::patch`]. Each runs
+/// only through [`OutboundClient::get`], [`OutboundClient::post`], [`OutboundClient::patch`] and
+/// [`OutboundClient::delete`]. Each runs
 /// [`check_target`] before a request builder is returned, so a caller cannot send a
 /// request that skipped the check, including one to an IP literal.
 pub struct OutboundClient {
@@ -229,6 +230,13 @@ impl OutboundClient {
     pub fn patch(&self, url: &reqwest::Url) -> Result<reqwest::RequestBuilder, OutboundError> {
         self.check(url)?;
         Ok(self.inner.patch(url.as_str()))
+    }
+
+    /// A DELETE request builder for `url`, after the target check. Used only for the GitHub
+    /// code scanning analysis deletes (#311 slice 6b).
+    pub fn delete(&self, url: &reqwest::Url) -> Result<reqwest::RequestBuilder, OutboundError> {
+        self.check(url)?;
+        Ok(self.inner.delete(url.as_str()))
     }
 }
 

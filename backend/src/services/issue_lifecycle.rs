@@ -1569,6 +1569,10 @@ pub(crate) mod test_support {
             self.respond("PATCH", path, body)
         }
 
+        async fn delete(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
+            self.respond("DELETE", path, &Value::Null)
+        }
+
         async fn get(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
             // The answer is read now and delivered later, like a slow network: a caller
             // that lists while another is creating gets a list without the new issue.

@@ -20,7 +20,6 @@ pub const TOOL_NAME: &str = "Dockward";
 
 /// The tool driver name of SARIF uploaded before the rename. Used only to find the legacy
 /// Code Scanning analyses that the rename replaces (slice 6b).
-#[allow(dead_code)] // Used by slice 6b; clippy -D dead-code rejects it until then.
 pub const LEGACY_TOOL_NAME: &str = "HarborGate";
 
 /// The fingerprint key. The value is stable across image rebuilds and tags.
@@ -76,7 +75,6 @@ pub fn automation_id(hub_host: &str, repository: &str, tag_value: &str) -> Strin
 
 /// The category the rename replaces: `harborgate/<hub host>/<repository>/<tag value>`, with no
 /// trailing `/`. Used only to find the legacy analyses (slice 6b).
-#[allow(dead_code)] // Used by slice 6b; clippy -D dead-code rejects it until then.
 pub fn legacy_category(hub_host: &str, repository: &str, tag_value: &str) -> String {
     format!("harborgate/{hub_host}/{repository}/{tag_value}")
 }

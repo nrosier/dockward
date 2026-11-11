@@ -34,6 +34,7 @@ pub mod job_runs;
 #[allow(dead_code)] // Used by the job worker and the retry route.
 pub mod jobs;
 pub mod key_rotation;
+pub mod legacy_analyses;
 pub mod merged_view;
 #[allow(dead_code)] // The list routes that use this are added with the admin routes.
 pub mod pagination;

@@ -789,6 +789,10 @@ mod tests {
         async fn get(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
             self.answer("GET", path, Value::Null)
         }
+
+        async fn delete(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
+            self.answer("DELETE", path, Value::Null)
+        }
     }
 
     fn reply(status: u16, body: Value) -> ScanResponse {

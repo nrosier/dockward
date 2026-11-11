@@ -13,7 +13,7 @@ use std::io::Write;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use flate2::{Compression, write::GzEncoder};
 use reqwest::Url;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::error::AppError;
 use std::sync::Arc;
@@ -140,6 +140,12 @@ pub trait ScanHttp {
         path: &str,
         token: &[u8],
     ) -> impl Future<Output = Result<ScanResponse, ScanError>> + Send;
+    /// DELETEs `path`, which is relative to the configured API base URL. No body is sent.
+    fn delete(
+        &self,
+        path: &str,
+        token: &[u8],
+    ) -> impl Future<Output = Result<ScanResponse, ScanError>> + Send;
     /// The GitHub URLs the requests go to. A `Link` next URL is checked against them. Test
     /// fakes keep the default, `https://api.github.com`.
     fn urls(&self) -> Arc<GithubUrls> {
@@ -184,6 +190,13 @@ impl ScanHttp for LiveHttp<'_> {
         let builder = self.client.get(&url).map_err(|_| transport())?;
         let sent = authorized(builder, token)?.send().await;
         logged_response("GET", &url, sent).await
+    }
+
+    async fn delete(&self, path: &str, token: &[u8]) -> Result<ScanResponse, ScanError> {
+        let url = api_url(&self.urls, path)?;
+        let builder = self.client.delete(&url).map_err(|_| transport())?;
+        let sent = authorized(builder, token)?.send().await;
+        logged_response("DELETE", &url, sent).await
     }
 
     fn urls(&self) -> Arc<GithubUrls> {
@@ -429,6 +442,273 @@ pub async fn status_with<H: ScanHttp>(
     }
 }
 
+/// The most pages the analysis and alert lists read (100 items each) before they give up.
+const MAX_LIST_PAGES: usize = 100;
+
+/// The dismissal reasons GitHub accepts for a code scanning alert.
+pub const DISMISSAL_REASONS: &[&str] =
+    &["false positive", "won't fix", "used in tests", "mitigated"];
+
+/// One code scanning analysis, as far as the legacy retirement needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Analysis {
+    /// GitHub's analysis id. Parsed as `u64`, so it is only ever formatted into a path.
+    pub id: u64,
+    pub git_ref: Option<String>,
+    pub category: Option<String>,
+    pub tool_name: Option<String>,
+    pub deletable: bool,
+    /// `created_at` as GitHub sends it (ISO 8601, so text order is time order).
+    pub created_at: Option<String>,
+    /// The API path of the `confirm_delete_url` the answer carried, when it passes
+    /// [`confirm_path`]. A link on any other host is dropped and never fetched.
+    pub confirm_path: Option<String>,
+}
+
+/// One code scanning alert, as far as the carry-over needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alert {
+    /// The alert number. Parsed as `u64`, so it is only ever formatted into a path.
+    pub number: u64,
+    pub rule_id: String,
+    pub state: String,
+    pub dismissed_reason: Option<String>,
+    pub dismissed_comment: Option<String>,
+    /// `most_recent_instance.category`.
+    pub category: Option<String>,
+}
+
+/// The query of an alert list: the tool, the state and the full ref.
+#[derive(Debug, Clone, Copy)]
+pub struct AlertQuery<'a> {
+    pub tool_name: &'a str,
+    pub state: &'a str,
+    pub git_ref: &'a str,
+}
+
+/// The dismissal sent with a PATCH: a reason from [`DISMISSAL_REASONS`] and an optional comment.
+#[derive(Debug, Clone, Copy)]
+pub struct Dismissal<'a> {
+    pub reason: &'a str,
+    pub comment: Option<&'a str>,
+}
+
+fn bad_answer() -> ScanError {
+    ScanError::Upstream("GitHub returned an unexpected answer".to_owned())
+}
+
+/// A query value from our own code (a tool name, a state, a ref). Anything outside a small
+/// set of characters is refused, so no value can add a parameter.
+fn query_value(text: &str) -> Result<&str, ScanError> {
+    if !text.is_empty()
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/'))
+    {
+        Ok(text)
+    } else {
+        Err(ScanError::Rejected("a query value is not valid".to_owned()))
+    }
+}
+
+/// The API path of a `confirm_delete_url`. The link must be https on the configured API host,
+/// under its base path, and its path must pass the same checks as any request path. Any other
+/// link gives `None`, and the caller never fetches it.
+pub(crate) fn confirm_path(urls: &GithubUrls, link: &str) -> Option<String> {
+    let path = urls.relative_path(link)?;
+    urls.api_url(&path)?;
+    Some(path)
+}
+
+/// Reads the `confirm_delete_url` of a delete answer: none when it is absent or `null`, the
+/// validated path when it is on the API host, and an error for any other host.
+pub(crate) fn confirm_answer(urls: &GithubUrls, body: &Value) -> Result<Option<String>, ScanError> {
+    match body.get("confirm_delete_url") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(link)) => confirm_path(urls, link).map(Some).ok_or_else(|| {
+            ScanError::Upstream("GitHub sent a confirm link to another host".to_owned())
+        }),
+        Some(_) => Err(bad_answer()),
+    }
+}
+
+fn parse_analysis(urls: &GithubUrls, item: &Value) -> Result<Analysis, ScanError> {
+    let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
+    Ok(Analysis {
+        id: item
+            .get("id")
+            .and_then(Value::as_u64)
+            .ok_or_else(bad_answer)?,
+        git_ref: text(item.get("ref")),
+        category: text(item.get("category")),
+        tool_name: text(item.get("tool").and_then(|tool| tool.get("name"))),
+        deletable: item
+            .get("deletable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        created_at: text(item.get("created_at")),
+        confirm_path: text(item.get("confirm_delete_url"))
+            .and_then(|link| confirm_path(urls, &link)),
+    })
+}
+
+fn parse_alert(item: &Value) -> Result<Alert, ScanError> {
+    let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
+    Ok(Alert {
+        number: item
+            .get("number")
+            .and_then(Value::as_u64)
+            .ok_or_else(bad_answer)?,
+        rule_id: text(item.get("rule").and_then(|rule| rule.get("id"))).ok_or_else(bad_answer)?,
+        state: text(item.get("state")).ok_or_else(bad_answer)?,
+        dismissed_reason: text(item.get("dismissed_reason")),
+        dismissed_comment: text(item.get("dismissed_comment")),
+        category: text(
+            item.get("most_recent_instance")
+                .and_then(|instance| instance.get("category")),
+        ),
+    })
+}
+
+/// Reads every page of a list, following `link: rel="next"` through the URLs' own check. A next
+/// link to another host is refused and never fetched.
+async fn list_pages<H: ScanHttp, T>(
+    http: &H,
+    token: &[u8],
+    first: String,
+    now: i64,
+    parse: impl Fn(&Value) -> Result<T, ScanError>,
+) -> Result<Vec<T>, ScanError> {
+    let mut path = first;
+    let mut found = Vec::new();
+    for _ in 0..MAX_LIST_PAGES {
+        let response = http.get(&path, token).await?;
+        if response.status != 200 {
+            return Err(classify(&response, now));
+        }
+        let items = response.body.as_array().ok_or_else(bad_answer)?;
+        for item in items {
+            found.push(parse(item)?);
+        }
+        match response.link_next.as_deref() {
+            Some(link) => {
+                path = http.urls().relative_path(link).ok_or_else(|| {
+                    ScanError::Upstream("GitHub sent a next link to another host".to_owned())
+                })?;
+            }
+            None => return Ok(found),
+        }
+    }
+    Err(ScanError::Upstream(
+        "GitHub returned too many pages".to_owned(),
+    ))
+}
+
+/// Lists the code scanning analyses of one tool, all pages. See [`Analysis`].
+pub async fn list_analyses_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    tool_name: &str,
+    now: i64,
+) -> Result<Vec<Analysis>, ScanError> {
+    check_names(owner, repo)?;
+    let tool = query_value(tool_name)?;
+    let first =
+        format!("repos/{owner}/{repo}/code-scanning/analyses?tool_name={tool}&per_page=100");
+    let urls = http.urls();
+    list_pages(http, token, first, now, |item| parse_analysis(&urls, item)).await
+}
+
+/// DELETEs one analysis with `confirm_delete=true`. Returns the validated path of the next
+/// confirm-delete link, or `None` when the delete is complete. See [`follow_confirm_with`].
+pub async fn delete_analysis_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    id: u64,
+    now: i64,
+) -> Result<Option<String>, ScanError> {
+    check_names(owner, repo)?;
+    let path = format!("repos/{owner}/{repo}/code-scanning/analyses/{id}?confirm_delete=true");
+    let response = http.delete(&path, token).await?;
+    if response.status != 200 {
+        return Err(classify(&response, now));
+    }
+    confirm_answer(&http.urls(), &response.body)
+}
+
+/// DELETEs a confirm-delete path returned by [`delete_analysis_with`] or by an earlier call
+/// here. The path is checked again before the request. Returns the next path, or `None`.
+pub async fn follow_confirm_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    path: &str,
+    now: i64,
+) -> Result<Option<String>, ScanError> {
+    let urls = http.urls();
+    if urls.api_url(path).is_none() {
+        return Err(ScanError::Upstream(
+            "GitHub sent a confirm link to another host".to_owned(),
+        ));
+    }
+    let response = http.delete(path, token).await?;
+    if response.status != 200 {
+        return Err(classify(&response, now));
+    }
+    confirm_answer(&urls, &response.body)
+}
+
+/// Lists the code scanning alerts for a tool, state and ref, all pages. See [`Alert`].
+pub async fn list_alerts_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    query: AlertQuery<'_>,
+    now: i64,
+) -> Result<Vec<Alert>, ScanError> {
+    check_names(owner, repo)?;
+    let tool = query_value(query.tool_name)?;
+    let state = query_value(query.state)?;
+    let git_ref = query_value(query.git_ref)?;
+    let first = format!(
+        "repos/{owner}/{repo}/code-scanning/alerts?tool_name={tool}&state={state}&ref={git_ref}&per_page=100"
+    );
+    list_pages(http, token, first, now, parse_alert).await
+}
+
+/// PATCHes one alert to `dismissed`. The reason must be one of [`DISMISSAL_REASONS`].
+pub async fn dismiss_alert_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    number: u64,
+    dismissal: Dismissal<'_>,
+    now: i64,
+) -> Result<(), ScanError> {
+    check_names(owner, repo)?;
+    if !DISMISSAL_REASONS.contains(&dismissal.reason) {
+        return Err(ScanError::Rejected(
+            "the dismissal reason is not allowed".to_owned(),
+        ));
+    }
+    let path = format!("repos/{owner}/{repo}/code-scanning/alerts/{number}");
+    let body = json!({
+        "state": "dismissed",
+        "dismissed_reason": dismissal.reason,
+        "dismissed_comment": dismissal.comment,
+    });
+    let response = http.patch(&path, token, &body).await?;
+    if response.status != 200 {
+        return Err(classify(&response, now));
+    }
+    Ok(())
+}
+
 /// The GitHub code scanning client. Built on the guarded outbound client for the configured
 /// GitHub API base URL.
 pub struct GithubScanning {
@@ -470,6 +750,65 @@ impl GithubScanning {
         now: i64,
     ) -> Result<Processing, ScanError> {
         status_with(&self.http(), token, owner, repo, sarif_id, now).await
+    }
+
+    /// Lists the analyses of one tool, all pages. See [`list_analyses_with`].
+    pub async fn list_analyses(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        tool_name: &str,
+        now: i64,
+    ) -> Result<Vec<Analysis>, ScanError> {
+        list_analyses_with(&self.http(), token, owner, repo, tool_name, now).await
+    }
+
+    /// DELETEs one analysis. See [`delete_analysis_with`].
+    pub async fn delete_analysis(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        id: u64,
+        now: i64,
+    ) -> Result<Option<String>, ScanError> {
+        delete_analysis_with(&self.http(), token, owner, repo, id, now).await
+    }
+
+    /// Follows a confirm-delete path. See [`follow_confirm_with`].
+    pub async fn follow_confirm(
+        &self,
+        token: &[u8],
+        path: &str,
+        now: i64,
+    ) -> Result<Option<String>, ScanError> {
+        follow_confirm_with(&self.http(), token, path, now).await
+    }
+
+    /// Lists the alerts of one tool, state and ref, all pages. See [`list_alerts_with`].
+    pub async fn list_alerts(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        query: AlertQuery<'_>,
+        now: i64,
+    ) -> Result<Vec<Alert>, ScanError> {
+        list_alerts_with(&self.http(), token, owner, repo, query, now).await
+    }
+
+    /// Dismisses one alert. See [`dismiss_alert_with`].
+    pub async fn dismiss_alert(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        dismissal: Dismissal<'_>,
+        now: i64,
+    ) -> Result<(), ScanError> {
+        dismiss_alert_with(&self.http(), token, owner, repo, number, dismissal, now).await
     }
 }
 
@@ -530,6 +869,14 @@ mod tests {
         }
 
         async fn get(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
+            self.sent
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push((path.to_owned(), Value::Null));
+            Ok(self.reply.clone())
+        }
+
+        async fn delete(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
             self.sent
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
