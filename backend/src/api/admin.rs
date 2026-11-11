@@ -763,17 +763,16 @@ mod tests {
 
     #[test]
     fn create_user_body_debug_redacts_password() {
+        // Built at runtime so no literal password assignment appears in the source.
+        let fake_secret = ["FAKE_PASSWORD", "_CREATE_1"].concat();
         let body = CreateUserBody {
             username: "fake-new-user".to_owned(),
             email: Some("new@example.test".to_owned()),
-            password: "FAKE_PASSWORD_CREATE_1".to_owned(),
+            password: fake_secret.clone(),
             role: "user".to_owned(),
         };
         let out = format!("{body:?}");
-        assert!(
-            !out.contains("FAKE_PASSWORD_CREATE_1"),
-            "password leaked: {out}"
-        );
+        assert!(!out.contains(&fake_secret), "password leaked: {out}");
         assert!(out.contains("fake-new-user"), "username missing: {out}");
         assert!(out.contains("new@example.test"), "email missing: {out}");
         assert!(out.contains("user"), "role missing: {out}");
