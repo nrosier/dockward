@@ -2,6 +2,11 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
+## 0.3.1 - 2026-11-11
+
+### Fixed
+- The scanner's temp and home directories now live under the data volume, so a database download no longer fails with 'mkdir /.cache: read-only file system' or 'no space left on device' on a read-only root or a small /tmp (#321).
+
 ## 0.3.0 - 2026-11-11
 
 ### Changed
