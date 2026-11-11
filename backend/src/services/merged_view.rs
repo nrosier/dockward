@@ -189,7 +189,7 @@ pub async fn load_in(
 
 /// The merged findings as a report (`{"vulnerabilities": [...]}`), the shape the SARIF converter
 /// and the findings store read. Each item also carries `scanner_names`, which the converter
-/// writes as the `harborgate/scannerCount` and `harborgate/scannerNames` properties, and
+/// writes as the `dockward/scannerCount` and `dockward/scannerNames` properties, and
 /// `platforms`.
 pub fn to_report(findings: &[MergedFinding]) -> Value {
     let items: Vec<Value> = findings

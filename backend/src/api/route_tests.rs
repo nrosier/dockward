@@ -1031,3 +1031,132 @@ async fn every_section_10_route_is_mounted() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     fx.finish().await;
 }
+
+/// The job log route (#308). Seeds an owned `scan` job with one step and one line, and an admin
+/// `db_update` job, and checks access, the shape, paging and a running job.
+mod job_log {
+    use super::*;
+
+    /// Adds a `scan` job owned by `o1` (through source `s-log`), and an admin `db_update` job.
+    async fn seed(fx: &Fixture) {
+        sqlx::query(
+            "INSERT INTO image_sources (id, user_id, hub_id, repository, tag_value, github_cred_id,
+                 github_owner, github_repo)
+             VALUES ('s-log', 'o1', 'hub-fake', 'team/app', '*', 'gc1', 'octo', 'app')",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, source_id, status, attempts, payload)
+             VALUES ('job-scan', 's-log', 'done', 0, '{\"kind\":\"scan\"}'),
+                    ('job-db', NULL, 'done', 0, '{\"kind\":\"db_update\",\"scanner\":\"trivy\"}')",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO job_log_steps (id, job_id, attempt, seq, command, started_at, finished_at,
+                 timeout_secs, outcome, exit_code, truncated)
+             VALUES ('st-scan', 'job-scan', 1, 0, 'trivy scan', 100, 103, 600, 'failed', 3, 0),
+                    ('st-db', 'job-db', 1, 0, 'trivy image --download-db-only', 200, 230, 600, 'ok', 0, 1)",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO job_log_lines (step_id, at, stream, text) VALUES
+                 ('st-scan', 101, 'stderr', 'first'),
+                 ('st-scan', 102, 'stderr', 'second'),
+                 ('st-db', 201, 'stderr', 'db line')",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_log_route_checks_session_access_and_existence() {
+        let fx = fixture("job-log-access").await;
+        seed(&fx).await;
+        let anon = fx.read("/api/v1/jobs/job-scan/log", &fx.anonymous).await.0;
+        assert_eq!(anon, StatusCode::UNAUTHORIZED);
+        // Another user is refused as a missing job, so the id is not revealed.
+        let other = fx.read("/api/v1/jobs/job-scan/log", &fx.other).await.0;
+        assert_eq!(other, StatusCode::NOT_FOUND);
+        let missing = fx.read("/api/v1/jobs/no-such/log", &fx.owner).await.0;
+        assert_eq!(missing, StatusCode::NOT_FOUND);
+        // A user has no right to a db_update job, which has no owner.
+        let user_db = fx.read("/api/v1/jobs/job-db/log", &fx.owner).await.0;
+        assert_eq!(user_db, StatusCode::NOT_FOUND);
+        let admin_db = fx.read("/api/v1/jobs/job-db/log", &fx.admin).await.0;
+        assert_eq!(admin_db, StatusCode::OK);
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn the_log_route_returns_the_shape_with_steps_and_lines() {
+        let fx = fixture("job-log-shape").await;
+        seed(&fx).await;
+        let (status, body) = fx.read("/api/v1/jobs/job-scan/log", &fx.owner).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["job_id"], "job-scan");
+        assert_eq!(body["kind"], "scan");
+        assert_eq!(body["status"], "done");
+        assert_eq!(body["attempt"], 1);
+        let step = &body["steps"][0];
+        assert_eq!(step["seq"], 0);
+        assert_eq!(step["command"], "trivy scan");
+        assert_eq!(step["outcome"], "failed");
+        assert_eq!(step["exit_code"], 3);
+        assert_eq!(step["truncated"], false);
+        let line = &body["lines"][0];
+        assert_eq!(line["seq"], 0);
+        assert_eq!(line["stream"], "stderr");
+        assert_eq!(line["text"], "first");
+        assert!(line["id"].is_i64());
+        assert!(line["at"].is_string(), "{line}");
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn after_pages_return_only_later_lines_and_a_next_cursor() {
+        let fx = fixture("job-log-paging").await;
+        seed(&fx).await;
+        let (_, first) = fx.read("/api/v1/jobs/job-scan/log", &fx.owner).await;
+        let last_id = first["lines"][1]["id"].as_i64().unwrap_or_default();
+        assert_eq!(first["next_after"], last_id);
+        let uri = format!("/api/v1/jobs/job-scan/log?after={last_id}");
+        let (status, page) = fx.read(&uri, &fx.owner).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["lines"].as_array().map(Vec::len), Some(0));
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_running_job_returns_its_partial_steps_and_a_running_step() {
+        let fx = fixture("job-log-running").await;
+        seed(&fx).await;
+        sqlx::query("UPDATE jobs SET status = 'running' WHERE id = 'job-scan'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO job_log_steps (id, job_id, attempt, seq, command, started_at, timeout_secs, outcome)
+             VALUES ('st-run', 'job-scan', 1, 1, 'trivy scan', 300, 600, 'running')",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        let (status, body) = fx.read("/api/v1/jobs/job-scan/log", &fx.owner).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "running");
+        let outcomes: Vec<&str> = body["steps"]
+            .as_array()
+            .map(|steps| steps.iter().filter_map(|s| s["outcome"].as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(outcomes, vec!["failed", "running"]);
+        assert!(body["steps"][1]["finished_at"].is_null());
+        fx.finish().await;
+    }
+}

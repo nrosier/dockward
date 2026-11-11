@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT analyses_deleted AS \"analyses_deleted!: i64\",\n                    dismissals_carried AS \"dismissals_carried!: i64\"\n             FROM analysis_retirements WHERE github_owner = 'octo'",
+  "describe": {
+    "columns": [
+      {
+        "name": "analyses_deleted!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "analysis_retirements",
+            "name": "analyses_deleted"
+          }
+        }
+      },
+      {
+        "name": "dismissals_carried!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "analysis_retirements",
+            "name": "dismissals_carried"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "31695bd07ce8ad2893c3b434d1f8ca5267ea2ee926751d7c4ca7e4b5acebc6e3"
+}

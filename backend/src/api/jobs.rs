@@ -105,6 +105,32 @@ pub async fn get(
     Ok(Json(jobs::get(&state.pool, &user.id, is_admin, &id).await?))
 }
 
+/// Query for `GET /api/v1/jobs/:id/log`. `attempt` picks an attempt (the latest when absent);
+/// `after` is the id of the last line the caller has.
+#[derive(Debug, Deserialize)]
+pub struct JobLogParams {
+    pub attempt: Option<i64>,
+    pub after: Option<i64>,
+}
+
+/// `GET /api/v1/jobs/:id/log` (#308). An admin reads any job's log; a user reads only a job of
+/// their own source. A `db_update` job is admin only. Another user's or a missing job is `404`.
+pub async fn log(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Query(params): Query<JobLogParams>,
+) -> Result<Json<crate::services::job_log::JobLog>, AppError> {
+    let is_admin = user.role == Role::Admin;
+    let query = crate::services::job_log::LogQuery {
+        attempt: params.attempt,
+        after: params.after,
+    };
+    Ok(Json(
+        crate::services::job_log::get(&state.pool, &user.id, is_admin, &id, &query).await?,
+    ))
+}
+
 /// `POST /api/v1/jobs/:id/retry`. The source owner or an admin. Returns `200`
 /// with the `Job`. Only a `failed` job can be retried (`409` otherwise).
 pub async fn retry(

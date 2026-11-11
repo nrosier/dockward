@@ -31,6 +31,11 @@ describe("catalog", () => {
     expect(missing).toEqual([]);
   });
 
+  it("no catalog value still names the old app", () => {
+    const old = Object.entries(en).filter(([, value]) => value.includes("HarborGate"));
+    expect(old).toEqual([]);
+  });
+
   it("no component has hard-coded JSX text or text attributes", () => {
     expect(tsx.length).toBeGreaterThan(20);
     const offenders = tsx.flatMap(([path, source]) => hardcodedText(source).map((hit) => `${path}: ${hit}`));

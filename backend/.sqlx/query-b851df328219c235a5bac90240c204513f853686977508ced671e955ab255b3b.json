@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT label_result AS \"label_result!\", issues_rekeyed AS \"issues_rekeyed!: i64\"\n           FROM issue_rekeys\n           WHERE github_owner = ? AND github_repo = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "label_result!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue_rekeys",
+            "name": "label_result"
+          }
+        }
+      },
+      {
+        "name": "issues_rekeyed!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "issue_rekeys",
+            "name": "issues_rekeyed"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b851df328219c235a5bac90240c204513f853686977508ced671e955ab255b3b"
+}

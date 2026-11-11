@@ -26,6 +26,10 @@ pub struct JobRunItem {
     pub status: String,
     pub processed_count: i64,
     pub error_summary: Option<String>,
+    /// `trivy` or `grype` for a `db_update` run, otherwise `null`.
+    pub scanner: Option<String>,
+    /// The job the run was recorded for, so the UI can open its log (#308). `null` when none.
+    pub job_id: Option<String>,
 }
 
 /// Query values for `GET /admin/jobs`, already parsed by the handler.
@@ -75,6 +79,8 @@ pub async fn list(pool: &SqlitePool, query: &ListQuery) -> Result<Page<JobRunIte
                 status: row.status,
                 processed_count: row.processed_count,
                 error_summary: row.error_summary,
+                scanner: row.scanner,
+                job_id: row.job_id,
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;

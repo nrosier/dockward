@@ -56,6 +56,51 @@ Column names that changed from HarborGate: `sync_job_id` is `job_id` where it na
 - `cve_acceptances`: at most one active acceptance per source and CVE (partial unique index). `CHECK ((revoked_at IS NULL) = (revoked_by IS NULL))`.
 - `job_runs`: `job_kind` is one of `cleanup`, `retention`, `discover`, `db_update`.
 
+The #311 re-key bookkeeping tables (migration `0002_github_rekey.sql`):
+
+```sql
+-- GitHub re-key bookkeeping (#311, migration 0002_github_rekey.sql). Names and owners are case-insensitive (NOCASE).
+-- One row per repository once its issues have been re-keyed (label renamed, old issues adopted).
+CREATE TABLE IF NOT EXISTS issue_rekeys (
+    github_owner TEXT NOT NULL COLLATE NOCASE,
+    github_repo TEXT NOT NULL COLLATE NOCASE,
+    label_result TEXT NOT NULL CHECK (label_result IN ('renamed', 'absent', 'kept')),
+    issues_rekeyed INTEGER NOT NULL CHECK (issues_rekeyed >= 0),
+    completed_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (github_owner, github_repo)
+);
+-- One row per repository and legacy SARIF category once its old HarborGate analyses have been retired (dismissals carried over, old analyses deleted).
+CREATE TABLE IF NOT EXISTS analysis_retirements (
+    github_owner TEXT NOT NULL COLLATE NOCASE,
+    github_repo TEXT NOT NULL COLLATE NOCASE,
+    legacy_category TEXT NOT NULL,
+    analyses_deleted INTEGER NOT NULL CHECK (analyses_deleted >= 0),
+    dismissals_carried INTEGER NOT NULL CHECK (dismissals_carried >= 0),
+    completed_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (github_owner, github_repo, legacy_category)
+);
+-- The carry-over plan of one repository and legacy category, written before the first delete (#311 slice 6b). One row per rule that is carried; `applied` is set once that dismissal has been written.
+CREATE TABLE IF NOT EXISTS alert_carryovers (
+    github_owner TEXT NOT NULL COLLATE NOCASE,
+    github_repo TEXT NOT NULL COLLATE NOCASE,
+    legacy_category TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    comment TEXT,
+    planned_at INTEGER NOT NULL,
+    applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0, 1)),
+    PRIMARY KEY (github_owner, github_repo, legacy_category, rule_id)
+);
+-- The refs the legacy analyses ran on, recorded with the plan so a retry uses the same set even after the analyses are deleted (#311 slice 6b).
+CREATE TABLE IF NOT EXISTS carryover_refs (
+    github_owner TEXT NOT NULL COLLATE NOCASE,
+    github_repo TEXT NOT NULL COLLATE NOCASE,
+    legacy_category TEXT NOT NULL,
+    git_ref TEXT NOT NULL,
+    PRIMARY KEY (github_owner, github_repo, legacy_category, git_ref)
+);
+```
+
 ## system_config keys
 
 Each key is a row. Values are TEXT. Decided (2026-11-03, delegated) unless noted.
@@ -78,7 +123,10 @@ Source for the OIDC claim model: OpenID Connect Core 1.0.
 - Added (spinoff): `hub.create`, `hub.delete`, `source.create`, `source.update`, `source.delete`, `source.scan`, `image.evict` (actor `system`; details name the hub, repository, and platform digest, never a path with a secret), `settings.change` (scan limits and retention; details hold the old and new values).
 - Removed (spinoff): `mapping.*`, `project_webhook.*`, `artifact.remove`, `key.migrate_labels`. The `key.migrate_labels` action belonged to the label migration that decision 56 removed.
 
-`sync_job.retry` and `sync_job.purge` keep their names (decision 58). Their `target` is `jobs`.
+- `github.rekey_issues` (the one-time re-key of a repository's GitHub issues, decision 60, issue #311; actor `system`; target `<owner>/<repo>`; `details` is `{"issues", "label"}`: `issues` is the count of old issues re-keyed and `label` is `renamed`, `absent`, or `kept`, the same text stored in `issue_rekeys.label_result`. It carries a count and a fixed word, never a token or a name; written once when the re-key completes). Source: `backend/src/services/issue_rekey.rs` (`AUDIT_ACTION`, `json!`). Verified (2026-11-11) by grep of `backend/src/services/audit.rs` ACTIONS.
+- `github.retire_analyses` (the one-time retirement of a legacy `harborgate` SARIF category's analyses, decision 60, issue #311; actor `system`; target `<owner>/<repo>`; `details` is `{"analyses", "dismissals"}`: the counts of analyses deleted and dismissals carried to the new alerts. Count only; written once when the retirement completes). Source: `backend/src/services/legacy_analyses.rs` (`AUDIT_ACTION`, `json!`). Verified (2026-11-11) by grep of `backend/src/services/audit.rs` ACTIONS.
+
+`sync_job.retry` and `sync_job.purge` keep their names (decision 58). Their `target` is the fixed text `sync_jobs`, as written by `backend/src/services/jobs.rs`.
 
 CONFLICT: the code at `origin/main` (`backend/src/services/audit.rs`, `ACTIONS`) still lists the removed actions `mapping.create`, `mapping.update`, `mapping.delete`, `mapping.pull`, `mapping.scan`, `mapping.webhook_token_rotate`, `mapping.auth_secret_rotate`, `project_webhook.*`, `artifact.remove`, and `key.migrate_labels`. It already lists the added `source.*`, `hub.*`, `image.evict`, and `settings.change`. Unresolved until the code is reconciled with the vocabulary above.
 

@@ -2,6 +2,21 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
+## Unreleased
+
+### Changed
+- GitHub identifiers are renamed to dockward. SARIF uploads use the tool and driver name `Dockward` and the category `dockward/<hub host>/<repository>/<tag>/`. New issues carry the label `dockward` and the marker `<!-- dockward:<CVE> -->`. The OCI branch label is `io.github.nrosier.dockward.branch`.
+- One-time issue re-key: on the first publish to each GitHub repository, the `harborgate` label is renamed to `dockward` and the first line of each open old issue is rewritten to the new marker. Closed issues keep their old marker. Old issues stay adoptable under either the old label or the old marker (1-second pacing between writes).
+- Old HarborGate Code Scanning analyses are retired automatically after a successful upload. Dismissals on clear rule groups are carried over to the new open alerts first, then the old analyses of the exact legacy category are deleted on every branch. Mixed groups are not carried over. Deletion cannot be undone, and alert history for those analyses is lost. A token needs the `repo` scope (classic) or "Code scanning alerts" write (fine-grained) for the delete.
+
+### Added
+- The branch label `io.github.nrosier.dockward.branch` is read and wins over the legacy `io.github.nrosier.harborgate.branch`, which is still read with a deprecation warning.
+
+### Upgrade notes
+- Stop any old HarborGate instance before you upgrade. If one is still running, it creates new `harborgate` issues after the re-key.
+- Rename the OCI label `io.github.nrosier.harborgate.branch` to `io.github.nrosier.dockward.branch` in your image builds.
+- Old categories of deleted sources are not removed automatically. Remove them by hand on the tool status page (docs/SETUP.md, section 10).
+
 ## 0.2.0 - 2026-11-11
 
 This release is the first as dockward. HarborGate is renamed, the Harbor integration is removed, and images are scanned locally from any registry.

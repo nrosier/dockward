@@ -129,6 +129,8 @@ pub struct Job {
     /// `discover`, `pull`, `scan`, `publish` or `db_update`. A payload with no known `kind`
     /// is `null`.
     pub kind: Option<String>,
+    /// `trivy` or `grype` for a `db_update` job (the scanner it refreshes), otherwise `null`.
+    pub scanner: Option<String>,
     pub image: JobImage,
     pub report: Option<SyncReport>,
 }
@@ -159,6 +161,7 @@ fn to_job(row: db::JobRow) -> Result<Job, AppError> {
         updated_at: row.updated_at.map(time::rfc3339).transpose()?,
         trigger: row.trigger,
         kind: row.kind.filter(|kind| JOB_KINDS.contains(&kind.as_str())),
+        scanner: row.scanner,
         image: JobImage {
             repo_full_name: row.repo_full_name,
             tag: row.tag,
@@ -716,5 +719,82 @@ mod retry_tests {
         );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod scanner_tests {
+    use super::*;
+    use crate::db;
+
+    /// A migrated database with one `db_update` job for Grype and one `scan` job.
+    async fn seed(name: &str) -> (SqlitePool, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "dockward-jobs-scanner-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = db::open(&dir).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, token_version)
+             VALUES ('owner', 'owner', NULL, 'user', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, source_id, status, attempts, payload, created_at, updated_at) VALUES
+             ('j-db', NULL, 'failed', 8, '{\"kind\":\"db_update\",\"scanner\":\"grype\"}', 1, 1),
+             ('j-scan', NULL, 'done', 1, '{\"kind\":\"scan\",\"scanner\":\"trivy\"}', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        (pool, dir)
+    }
+
+    #[tokio::test]
+    async fn a_db_update_job_shows_its_scanner_and_other_jobs_do_not() {
+        let (pool, dir) = seed("job").await;
+        let query = ListQuery {
+            all_users: true,
+            ..ListQuery::default()
+        };
+        let page = list(&pool, "owner", &query).await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let db_job = page.items.iter().find(|job| job.id == "j-db").unwrap();
+        let scan_job = page.items.iter().find(|job| job.id == "j-scan").unwrap();
+        assert_eq!(db_job.scanner.as_deref(), Some("grype"));
+        assert_eq!(scan_job.scanner, None);
+    }
+
+    #[tokio::test]
+    async fn a_db_update_run_shows_its_scanner_on_the_admin_view() {
+        let (pool, dir) = seed("run").await;
+        db::job_runs::insert(
+            &pool,
+            &db::job_runs::JobRun {
+                id: "run-db".to_owned(),
+                job_kind: "db_update".to_owned(),
+                started_at: 1_000,
+                finished_at: Some(1_010),
+                status: "failed".to_owned(),
+                processed_count: 0,
+                error_summary: Some("scanner failed".to_owned()),
+                scanner: Some("grype".to_owned()),
+            },
+        )
+        .await
+        .unwrap();
+        let query = crate::services::job_runs::ListQuery::default();
+        let page = crate::services::job_runs::list(&pool, &query)
+            .await
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let run = page.items.iter().find(|run| run.id == "run-db").unwrap();
+        assert_eq!(run.scanner.as_deref(), Some("grype"));
     }
 }

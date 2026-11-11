@@ -98,8 +98,9 @@ Read from the image config of the scanned platform image (`extra_attrs`-style co
 
 - Commit SHA: `org.opencontainers.image.revision`. Required. If missing, the publish job fails with a clear error. Never guess the SHA. Verified (2026-11-11, `LABEL_REVISION`).
 - Repository: `org.opencontainers.image.source`. When present, it must match the source's GitHub target, `<github web URL>/<owner>/<repo>`, compared case-insensitively and ignoring a trailing `/` or `.git`. A mismatch fails the publish job with a clear error and uploads nothing. When absent, the publish proceeds (Decided 2026-11-03, delegated; kept).
-- Branch: the label `io.github.nrosier.harborgate.branch` (`LABEL_BRANCH`) if present, otherwise the source's `default_branch` (default `main`). Verified (2026-11-11). `OPEN:` the label name still uses the old project name. Renaming it changes which images are read, so it needs the user's decision. The OCI annotation rule for keys (reverse domain) is met by the name as built.
+- Branch: the label `io.github.nrosier.dockward.branch` (`LABEL_BRANCH`) if present, otherwise the source's `default_branch` (default `main`). The legacy label `io.github.nrosier.harborgate.branch` (`LEGACY_LABEL_BRANCH`) is still read when the new label is absent, and the new label wins when both are set (decision 60, issue #311). Verified (2026-11-11).
 - `org.opencontainers.image.ref.name` is not read for the branch. The OCI spec defines it as the name of a reference, typically a tag.
+- Decided (2026-11-06, user, #132): for a multi-arch index, labels are read from the platform child, the first non-attestation child, as in the existing check. An index has no labels of its own. The field path is `extra_attrs.config.Labels` on the child artifact.
 
 ## GitHub base URL
 
@@ -122,15 +123,15 @@ Read from the image config of the scanned platform image (`extra_attrs`-style co
 
 ### SARIF document
 
-- Verified (2026-11-11, `services/sarif.rs`): the tool driver name is `HarborGate`. `OPEN:` the driver name still uses the old project name. The user decides whether the rename is in 0.2.0.
-- Run `automationDetails.id` is `harborgate/<hub host>/<repository>/<tag value>/` (`automation_id`). The trailing `/` keeps the whole path as the Code Scanning category (see below).
+- Verified (2026-11-11, `services/sarif.rs`): the tool driver name is `Dockward` (`TOOL_NAME`). The legacy name `HarborGate` is kept only as `LEGACY_TOOL_NAME`, to read old analyses (decision 60, issue #311).
+- Run `automationDetails.id` is `dockward/<hub host>/<repository>/<tag value>/` (`automation_id`). The trailing `/` keeps the whole path as the Code Scanning category (see below).
 - Rule and result fields: each rule has `id`, `shortDescription.text`, `fullDescription.text`, `help.text`, and `properties.security-severity`. Each result has `ruleId`, `message.text`, `locations[]`, and `partialFingerprints`.
-- `partialFingerprints["harborgate/v1"]` = SHA-256 of `<vulnerability id>|<package>` (`FINGERPRINT_KEY`). Stable across rebuilds and tags.
+- `partialFingerprints["dockward/v1"]` = SHA-256 of `<vulnerability id>|<package>` (`FINGERPRINT_KEY`). Stable across rebuilds and tags.
 - Location: an image finding has no source file. `artifactLocation.uri` is `<hub host>/<repository>`, and the region is line 1, column 1 to 1.
 - `security-severity`: the CVSS v3 score when present, otherwise `9.5` (CRITICAL), `8.0` (HIGH), `5.5` (MEDIUM), `2.0` (LOW), or `0.0` (UNKNOWN). This is Trivy's own fallback (verified 2026-11-03).
 - One result per (CVE id, package), from the merged view ([cve-lifecycle.md](cve-lifecycle.md), "Merged view"), never one per scanner.
-- Result property bag (verified 2026-11-11): `harborgate/scannerCount` (integer, at least 1), `harborgate/scannerNames` (unique names, merged-view order), and `harborgate/platforms` (`PLATFORMS_KEY`). The bag is an object, which the schema allows.
-- Category: one Code Scanning category per source. The category is `harborgate/<hub host>/<repository>/<tag value>` (decision 46 of the spinoff; `automation_id`). Each source's alerts stay separate. Verified (2026-11-03) in GitHub's SARIF documentation: the category is everything before the last `/` of the run id, and the trailing `/` keeps the whole path.
+- Result property bag (verified 2026-11-11): `dockward/scannerCount` (integer, at least 1), `dockward/scannerNames` (unique names, merged-view order), and `dockward/platforms` (`PLATFORMS_KEY`). The bag is an object, which the schema allows.
+- Category: one Code Scanning category per source. The category is `dockward/<hub host>/<repository>/<tag value>` (decision 46 of the spinoff; `automation_id`). Each source's alerts stay separate. Verified (2026-11-03) in GitHub's SARIF documentation: the category is everything before the last `/` of the run id, and the trailing `/` keeps the whole path.
 
 ## GitHub issues
 
@@ -138,10 +139,10 @@ Read from the image config of the scanned platform image (`extra_attrs`-style co
 - Automatic issues: only CRITICAL and HIGH. MEDIUM, LOW and UNKNOWN never create an issue automatically (Decided 2026-11-05, user, #129).
 - Manual issue creation: `POST /api/v1/cves/:id/issue` ([api.md](api.md)). Any severity is allowed for a manual issue. A manual issue for a CVE whose highest open severity is LOW or UNKNOWN asks the user for confirmation in the UI first; the server does not take a confirm flag (Decided 2026-11-05, user, #129).
 - One issue per CVE per GitHub repository. Manual and automatic creation share the marker, the labels, the re-adoption rule and one process-wide create lock (`services/issue_lifecycle.rs`). A second click or a concurrent publish never creates a duplicate.
-- Labels: every issue carries `harborgate` (`LABEL`, verified) and `areai:security` (`SECURITY_LABEL`). The severity label is plain and lowercase: `critical`, `high`, `medium` or `low` (`severity_label`). A CVE whose severity is `UNKNOWN` gets no severity label. The labels are created in the repository when missing, and an existing label is not duplicated (Decided 2026-11-06, user, #192).
+- Labels: every issue carries `dockward` (`LABEL`, verified) and `areai:security` (`SECURITY_LABEL`). The legacy `harborgate` label (`LEGACY_LABEL`) is still read, so an issue created before the rename is adopted. The severity label is plain and lowercase: `critical`, `high`, `medium` or `low` (`severity_label`). A CVE whose severity is `UNKNOWN` gets no severity label. The labels are created in the repository when missing, and an existing label is not duplicated (Decided 2026-11-06, user, #192).
 - Title: `<CVE id> <package>`, cut at 256 characters, because GitHub rejects longer titles (verified 2026-11-04). The package is the most recent open row's package; a row with no package shows `unknown package`.
-- Body: the first line is the hidden marker `<!-- harborgate:<CVE id> -->`. Then a table (CVE, severity, package, fixed in, source), then `Found by N scanner(s): names` (names as inline code; `Found by 1 scanner: \`Trivy\``), then `Affected tags:` listing every tracked tag that still reports the CVE (Decided 2026-11-07, user, #196 and #224 d2). The package is inline code, so `@scope/pkg` cannot mention a user.
-- Re-adoption: before creating an issue for a CVE with no `github_issues` row, the publish job lists open issues with the `harborgate` label (all pages, not the search API) and adopts one whose first line is the marker for that CVE. Closed issues are not adopted. An adopted issue whose title differs is renamed to the title above (Decided 2026-11-06, user, #192).
+- Body: the first line is the hidden marker `<!-- dockward:<CVE id> -->` (the legacy `<!-- harborgate:<CVE id> -->` is still read). Then a table (CVE, severity, package, fixed in, source), then `Found by N scanner(s): names` (names as inline code; `Found by 1 scanner: \`Trivy\``), then `Affected tags:` listing every tracked tag that still reports the CVE (Decided 2026-11-07, user, #196 and #224 d2). The package is inline code, so `@scope/pkg` cannot mention a user.
+- Re-adoption: before creating an issue for a CVE with no `github_issues` row, the publish job lists open issues with the `dockward` or the legacy `harborgate` label (all pages, not the search API) and adopts one whose first line is the marker for that CVE. Closed issues are not adopted. An adopted issue whose title differs is renamed to the title above (Decided 2026-11-06, user, #192).
 - CVE id rule: an id gets an issue only when it is 1 to 128 ASCII letters, digits, `.`, `_`, `-` or `:` (Decided 2026-11-04, review of #106). Anything else is refused, so an upstream id cannot break the marker.
 - Errors: a GitHub `401` or `403` stops the run at the first refusal and logs the fixed variant name. Another GitHub error on one CVE is logged as fixed text and the next CVE continues. A rate limit during issue updates is logged as fixed text and the publish job still finishes (Decided 2026-11-04, user, #30). No upstream body reaches the log.
 - Issue permission: `Issues: read and write` ([security.md](security.md), GitHub token scope).
@@ -167,7 +168,6 @@ Read from the image config of the scanned platform image (`extra_attrs`-style co
 ## OPEN
 
 - OPEN: the Grype version of the shipped image. The Dockerfile pins `anchore/grype@sha256:13113eec...` with no version comment. Decision 29 verified v0.121.2 at digest `6a36234d...`, and CI pins v0.121.2. The repository does not show which version `13113eec...` is. Decide whether to pin the verified digest, or record the version the digest is confirmed to be.
-- OPEN: names still using the old project name. The driver name `HarborGate` (`services/sarif.rs`), the issue label and marker `harborgate`, the branch label `io.github.nrosier.harborgate.branch`, and the SARIF keys `harborgate/...`. Renaming changes what GitHub shows and how old issues are re-adopted, so the user decides.
 - OPEN: the alert payload key `mapping.harbor` (see [alerts.md](alerts.md)). It holds a hub and repository, not a Harbor value.
 - OPEN: the Rust config reads `DOCKWARD_ALLOW_PRIVATE_HARBOR` (`backend/src/config.rs`) but no service uses it (verified by search of `backend/src`). Remove or keep.
 - UNVERIFIED: a live pull from `ghcr.io` and `docker.io` with a real credential, the anonymous Docker Hub rate-limit answer, and whether `docker.io` returns a `Retry-After` header on `429`. Only a live run can check these.

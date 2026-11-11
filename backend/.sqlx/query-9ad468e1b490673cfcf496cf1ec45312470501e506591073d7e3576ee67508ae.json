@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!\", job_kind AS \"job_kind!\", started_at AS \"started_at!: i64\",\n                  finished_at AS \"finished_at?: i64\", status AS \"status!\",\n                  processed_count AS \"processed_count!: i64\",\n                  substr(CAST(error_summary AS TEXT), 1, ?) AS \"error_summary?: String\"\n           FROM job_runs\n           WHERE (? IS NULL OR job_kind = ?)\n           ORDER BY\n             CASE WHEN ? = 1 THEN started_at END ASC,\n             CASE WHEN ? = -1 THEN started_at END DESC,\n             id ASC\n           LIMIT ? OFFSET ?",
+  "query": "SELECT id AS \"id!\", job_kind AS \"job_kind!\", started_at AS \"started_at!: i64\",\n                  finished_at AS \"finished_at?: i64\", status AS \"status!\",\n                  processed_count AS \"processed_count!: i64\",\n                  substr(CAST(error_summary AS TEXT), 1, ?) AS \"error_summary?: String\",\n                  scanner AS \"scanner?: String\",\n                  job_id AS \"job_id?: String\"\n           FROM job_runs\n           WHERE (? IS NULL OR job_kind = ?)\n           ORDER BY\n             CASE WHEN ? = 1 THEN started_at END ASC,\n             CASE WHEN ? = -1 THEN started_at END DESC,\n             id ASC\n           LIMIT ? OFFSET ?",
   "describe": {
     "columns": [
       {
@@ -74,6 +74,28 @@
         "ordinal": 6,
         "type_info": "Null",
         "origin": "Expression"
+      },
+      {
+        "name": "scanner?: String",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_runs",
+            "name": "scanner"
+          }
+        }
+      },
+      {
+        "name": "job_id?: String",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_runs",
+            "name": "job_id"
+          }
+        }
       }
     ],
     "parameters": {
@@ -86,8 +108,10 @@
       true,
       false,
       false,
-      null
+      null,
+      true,
+      true
     ]
   },
-  "hash": "464109a9715ba3dfe962151a8887277bc85d30d2c3faf6a24ba120924f03c9c7"
+  "hash": "9ad468e1b490673cfcf496cf1ec45312470501e506591073d7e3576ee67508ae"
 }

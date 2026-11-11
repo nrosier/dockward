@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 
 use super::*;
+use crate::error::ScannerFault;
 
 /// A fake database tool. It reports one build time, or fails the update.
 struct FakeTool {
@@ -30,7 +31,7 @@ struct FakeStore {
     stored: Option<i64>,
     digests: Vec<String>,
     commits: Mutex<Vec<(Scanner, i64, Vec<String>)>>,
-    runs: Mutex<Vec<Option<String>>>,
+    runs: Mutex<Vec<(RunTiming, Option<String>)>>,
 }
 
 impl FakeStore {
@@ -50,7 +51,7 @@ impl FakeStore {
         }
     }
 
-    fn runs(&self) -> Vec<Option<String>> {
+    fn runs(&self) -> Vec<(RunTiming, Option<String>)> {
         match self.runs.lock() {
             Ok(guard) => guard.clone(),
             Err(poison) => poison.into_inner().clone(),
@@ -59,12 +60,17 @@ impl FakeStore {
 }
 
 impl RefreshStore for FakeStore {
-    async fn record_run(&self, _scanner: Scanner, error: Option<&str>) -> Result<(), AppError> {
+    async fn record_run(
+        &self,
+        _scanner: Scanner,
+        run: RunTiming,
+        error: Option<&str>,
+    ) -> Result<(), AppError> {
         let mut guard = match self.runs.lock() {
             Ok(guard) => guard,
             Err(poison) => poison.into_inner(),
         };
-        guard.push(error.map(str::to_owned));
+        guard.push((run, error.map(str::to_owned)));
         Ok(())
     }
 
@@ -92,7 +98,7 @@ impl RefreshStore for FakeStore {
 }
 
 async fn run(tool: &FakeTool, store: &FakeStore) -> RefreshOutcome {
-    match refresh(tool, store, Scanner::Trivy).await {
+    match refresh(tool, store, Scanner::Trivy, || 0).await {
         Ok(outcome) => outcome,
         Err(err) => panic!("refresh failed: {err:?}"),
     }
@@ -190,11 +196,15 @@ async fn a_failed_update_leaves_the_old_database_and_queues_nothing() {
         fail_update: true,
     };
     let store = FakeStore::new(Some(1_000), &["sha256:aa"]);
-    let result = refresh(&tool, &store, Scanner::Grype).await;
+    let result = refresh(&tool, &store, Scanner::Grype, || 0).await;
     assert!(result.is_err(), "the failure is returned");
     assert!(store.commits().is_empty(), "nothing is stored on failure");
     assert_eq!(
-        store.runs(),
+        store
+            .runs()
+            .iter()
+            .map(|run| run.1.clone())
+            .collect::<Vec<_>>(),
         vec![Some("scanner database not available".to_owned())],
         "the failed run is recorded with its fixed text"
     );
@@ -208,7 +218,15 @@ async fn every_refresh_records_one_job_run() {
         fail_update: false,
     };
     let _ = run(&tool, &unchanged).await;
-    assert_eq!(unchanged.runs(), vec![None], "a successful run is recorded");
+    assert_eq!(
+        unchanged
+            .runs()
+            .iter()
+            .map(|run| run.1.clone())
+            .collect::<Vec<_>>(),
+        vec![None],
+        "a successful run is recorded"
+    );
 
     let newer = FakeStore::new(Some(1_000), &["sha256:aa"]);
     let tool = FakeTool {
@@ -216,5 +234,64 @@ async fn every_refresh_records_one_job_run() {
         fail_update: false,
     };
     let _ = run(&tool, &newer).await;
-    assert_eq!(newer.runs(), vec![None]);
+    assert_eq!(
+        newer
+            .runs()
+            .iter()
+            .map(|run| run.1.clone())
+            .collect::<Vec<_>>(),
+        vec![None]
+    );
+}
+
+#[tokio::test]
+async fn a_run_records_the_real_start_and_finish_from_the_clock() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    // Each clock read advances by 5 seconds: the first read is the start, the second the finish.
+    let now = AtomicI64::new(1_000);
+    let clock = || now.fetch_add(5, Ordering::Relaxed);
+    let store = FakeStore::new(Some(1_000), &["sha256:aa"]);
+    let tool = FakeTool {
+        built_at: 1_000,
+        fail_update: false,
+    };
+
+    assert!(matches!(
+        refresh(&tool, &store, Scanner::Trivy, clock).await,
+        Ok(RefreshOutcome::Unchanged)
+    ));
+
+    let runs = store.runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].0,
+        RunTiming {
+            started_at: 1_000,
+            finished_at: 1_005
+        }
+    );
+    assert!(runs[0].0.finished_at > runs[0].0.started_at);
+}
+
+#[tokio::test]
+async fn a_scanner_fault_keeps_its_own_text_on_the_run() {
+    let store = FakeStore::new(None, &[]);
+    let tool = FakeTool {
+        built_at: 1_000,
+        fail_update: true,
+    };
+
+    assert!(refresh(&tool, &store, Scanner::Trivy, || 0).await.is_err());
+
+    let runs = store.runs();
+    assert_eq!(runs[0].1.as_deref(), Some("scanner database not available"));
+}
+
+#[test]
+fn a_non_scanner_error_is_one_fixed_text() {
+    assert_eq!(run_error_text(&AppError::InternalError), "scanner failed");
+    assert_eq!(
+        run_error_text(&AppError::Scanner(ScannerFault::TimedOut)),
+        "scanner timed out"
+    );
 }

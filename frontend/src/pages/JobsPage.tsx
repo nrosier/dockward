@@ -14,6 +14,8 @@ import { PurgeFailed } from "../components/jobs/PurgeFailed";
 import { RetryButton } from "../components/jobs/RetryButton";
 import { formatDateTime } from "../components/jobs/dates";
 import { Time } from "../components/jobs/Time";
+import { JobLogDialog } from "../components/jobs/JobLogDialog";
+import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { currentPage, Pagination } from "../components/ui/Pagination";
 import { ScopeToggle } from "../components/ui/ScopeToggle";
@@ -59,6 +61,7 @@ export default function JobsPage() {
   const mappingId = params.get("mapping_id") ?? "";
   const mappings = useMappingLookup(scopeAll);
   const [purged, setPurged] = useState<number | null>(null);
+  const [logJobId, setLogJobId] = useState<string | null>(null);
 
   const list = useQuery({
     queryKey: ["jobs", scopeAll, page, status, mappingId],
@@ -201,7 +204,14 @@ export default function JobsPage() {
                         <td className={`${TD} text-muted`}>
                           <Time iso={job.updated_at} />
                         </td>
-                        <td className={`${TD} text-right`}>{canRetry(job) ? <RetryButton job={job} /> : null}</td>
+                        <td className={`${TD} text-right`}>
+                          <div className="flex items-start justify-end gap-2">
+                            <Button variant="small" onClick={() => setLogJobId(job.id)}>
+                              {t("jobs.log.open")}
+                            </Button>
+                            {canRetry(job) ? <RetryButton job={job} /> : null}
+                          </div>
+                        </td>
                       </tr>
                       {showErrorRow(job) ? (
                         <tr>
@@ -230,6 +240,7 @@ export default function JobsPage() {
         )}
         <Pagination total={list.data.total} pageSize={PAGE_SIZE} />
       </Card>
+      {logJobId === null ? null : <JobLogDialog jobId={logJobId} onClose={() => setLogJobId(null)} />}
     </>
   );
 }

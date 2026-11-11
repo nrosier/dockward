@@ -22,7 +22,7 @@ The [specs/](specs/README.md) describe the v1 behaviour. [CHANGELOG.md](CHANGELO
 - **Secure credential storage:** registry credentials, GitHub tokens, and OIDC client secrets are encrypted at rest with AES-256-GCM.
 - **Setup and login:** a first-run wizard creates the initial admin account, and OIDC sign-in can be configured from the admin UI. A local break-glass login remains available as a fallback.
 - **Role-based access:** admins manage system configuration, hubs, users, and global logs. Regular users manage their own credentials and sources.
-- **GitHub delivery:** SARIF is gzipped, Base64-encoded, and submitted to the GitHub code-scanning API. The commit SHA comes only from the `org.opencontainers.image.revision` OCI label; the publish fails if it is missing. The branch comes from the `io.github.nrosier.harborgate.branch` label if present, otherwise from the source's default branch (default `main`).
+- **GitHub delivery:** SARIF is gzipped, Base64-encoded, and submitted to the GitHub code-scanning API. The commit SHA comes only from the `org.opencontainers.image.revision` OCI label; the publish fails if it is missing. The branch comes from the `io.github.nrosier.dockward.branch` label if present (the legacy `io.github.nrosier.harborgate.branch` label is still read, with a deprecation warning), otherwise from the source's default branch (default `main`).
 - **Optional issue creation:** GitHub Issues are created automatically for CRITICAL and HIGH findings, or triggered manually. `min_issue_severity` defaults to CRITICAL and may be lowered to HIGH.
 - **Web UI:** Dashboard, Sources, CVEs, Jobs, and Account, with admin pages for jobs, failed jobs, audit, health, log, settings, and backup.
 

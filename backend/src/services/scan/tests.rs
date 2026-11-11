@@ -990,3 +990,45 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
         self.clone()
     }
 }
+
+/// A scan's step log (#308): the step is stored with its command and outcome, its stderr is kept
+/// redacted, and the report on stdout is never stored as a log line.
+#[tokio::test]
+async fn a_scan_step_logs_its_stderr_redacted_and_never_stores_the_report() {
+    let (trivy, grype) = ok_scripts("");
+    let fx = Fx::new("scan-log", &trivy, &grype).await;
+    // Replace the trivy stub: it prints a credential on stderr, then cats the report on stdout.
+    fx.script(
+        "trivy",
+        &format!(
+            "echo 'pull https://robot:s3cret@registry.example.com/v2' >&2\ncat '{TRIVY_FIXTURE}'"
+        ),
+    );
+    fx.queue(P_OLD).await;
+    let outcomes = fx.drain().await;
+    assert!(!outcomes.is_empty());
+
+    let lines: Vec<String> = sqlx::query_scalar(
+        "SELECT l.text FROM job_log_lines l JOIN job_log_steps s ON s.id = l.step_id
+         WHERE s.command LIKE 'trivy scan%'",
+    )
+    .fetch_all(&fx.pool)
+    .await
+    .unwrap_or_default();
+    assert!(
+        lines.iter().all(|line| !line.contains("s3cret")),
+        "a credential reached the log: {lines:?}"
+    );
+    // The report is the scan's stdout. None of its JSON reaches a stored line.
+    assert!(
+        lines.iter().all(|line| !line.contains("\"SchemaVersion\"")),
+        "the report reached the log: {lines:?}"
+    );
+    let outcome: String = sqlx::query_scalar(
+        "SELECT outcome FROM job_log_steps WHERE command LIKE 'trivy scan%' LIMIT 1",
+    )
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap_or_default();
+    assert_eq!(outcome, "ok");
+}

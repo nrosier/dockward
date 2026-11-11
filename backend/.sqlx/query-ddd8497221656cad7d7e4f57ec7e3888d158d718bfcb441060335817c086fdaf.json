@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", seq AS \"seq!: i64\", command AS \"command!\",\n                  started_at AS \"started_at!: i64\", finished_at AS \"finished_at?: i64\",\n                  timeout_secs AS \"timeout_secs!: i64\", outcome AS \"outcome!\",\n                  exit_code AS \"exit_code?: i64\", truncated AS \"truncated!: i64\"\n           FROM job_log_steps\n           WHERE job_id = ? AND attempt = ?\n           ORDER BY seq ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_log_steps",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "seq!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "job_log_steps",
+            "name": "seq"
+          }
+        }
+      },
+      {
+        "name": "command!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_log_steps",
+            "name": "command"
+          }
+        }
+      },
+      {
+        "name": "started_at!: i64",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "job_log_steps",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "name": "finished_at?: i64",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "job_log_steps",
+            "name": "finished_at"
+          }
+        }
+      },
+      {
+        "name": "timeout_secs!: i64",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "job_log_steps",
+            "name": "timeout_secs"
+          }
+        }
+      },
+      {
+        "name": "outcome!",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_log_steps",
+            "name": "outcome"
+          }
+        }
+      },
+      {
+        "name": "exit_code?: i64",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "job_log_steps",
+            "name": "exit_code"
+          }
+        }
+      },
+      {
+        "name": "truncated!: i64",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "job_log_steps",
+            "name": "truncated"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "ddd8497221656cad7d7e4f57ec7e3888d158d718bfcb441060335817c086fdaf"
+}

@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(attempt) AS \"attempt?: i64\" FROM job_log_steps WHERE job_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "attempt?: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "7d54ff9db12335234cd62c2f5dc4774288b769f3524210a3475921f8a5b83191"
+}

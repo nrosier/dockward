@@ -13,7 +13,7 @@ use std::io::Write;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use flate2::{Compression, write::GzEncoder};
 use reqwest::Url;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::error::AppError;
 use std::sync::Arc;
@@ -21,6 +21,7 @@ use std::sync::Arc;
 use crate::services::credential_probe::valid_github_name;
 use crate::services::github_url::{GithubTarget, GithubUrls};
 use crate::services::outbound::{self, OutboundClient};
+use crate::services::publish::Clock;
 
 /// Largest gzip-compressed SARIF that GitHub accepts in one upload.
 pub const MAX_COMPRESSED_BYTES: usize = 10 * 1024 * 1024;
@@ -36,7 +37,7 @@ pub const DEFAULT_WAIT_SECS: i64 = 60;
 const MAX_BODY: usize = 8 * 1024 * 1024;
 
 /// The `tool_name` sent with each upload.
-const TOOL_NAME: &str = "HarborGate";
+const TOOL_NAME: &str = "Dockward";
 
 /// Why a GitHub code scanning call failed. The `Display` text never includes the token.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +56,8 @@ pub enum ScanError {
     Rejected(String),
     /// GitHub failed (`5xx`), or the answer could not be used.
     Upstream(String),
+    /// A list ran past its deadline between pages. Only the paged list calls return this.
+    DeadlineExceeded,
 }
 
 impl fmt::Display for ScanError {
@@ -76,6 +79,7 @@ impl fmt::Display for ScanError {
             }
             ScanError::Rejected(message) => write!(f, "GitHub rejected the request: {message}"),
             ScanError::Upstream(message) => write!(f, "GitHub failed: {message}"),
+            ScanError::DeadlineExceeded => f.write_str("the GitHub list ran past its deadline"),
         }
     }
 }
@@ -140,6 +144,12 @@ pub trait ScanHttp {
         path: &str,
         token: &[u8],
     ) -> impl Future<Output = Result<ScanResponse, ScanError>> + Send;
+    /// DELETEs `path`, which is relative to the configured API base URL. No body is sent.
+    fn delete(
+        &self,
+        path: &str,
+        token: &[u8],
+    ) -> impl Future<Output = Result<ScanResponse, ScanError>> + Send;
     /// The GitHub URLs the requests go to. A `Link` next URL is checked against them. Test
     /// fakes keep the default, `https://api.github.com`.
     fn urls(&self) -> Arc<GithubUrls> {
@@ -184,6 +194,13 @@ impl ScanHttp for LiveHttp<'_> {
         let builder = self.client.get(&url).map_err(|_| transport())?;
         let sent = authorized(builder, token)?.send().await;
         logged_response("GET", &url, sent).await
+    }
+
+    async fn delete(&self, path: &str, token: &[u8]) -> Result<ScanResponse, ScanError> {
+        let url = api_url(&self.urls, path)?;
+        let builder = self.client.delete(&url).map_err(|_| transport())?;
+        let sent = authorized(builder, token)?.send().await;
+        logged_response("DELETE", &url, sent).await
     }
 
     fn urls(&self) -> Arc<GithubUrls> {
@@ -429,6 +446,351 @@ pub async fn status_with<H: ScanHttp>(
     }
 }
 
+/// The most pages the analysis and alert lists read (100 items each) before they give up.
+const MAX_LIST_PAGES: usize = 100;
+
+/// The dismissal reasons GitHub accepts for a code scanning alert.
+pub const DISMISSAL_REASONS: &[&str] =
+    &["false positive", "won't fix", "used in tests", "mitigated"];
+
+/// One code scanning analysis, as far as the legacy retirement needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Analysis {
+    /// GitHub's analysis id. Parsed as `u64`, so it is only ever formatted into a path.
+    pub id: u64,
+    pub git_ref: Option<String>,
+    pub category: Option<String>,
+    pub tool_name: Option<String>,
+    pub deletable: bool,
+    /// `created_at` as GitHub sends it (ISO 8601, so text order is time order).
+    pub created_at: Option<String>,
+    /// The API path of the `confirm_delete_url` the answer carried, when it passes
+    /// [`confirm_path`]. A link on any other host is dropped and never fetched.
+    pub confirm_path: Option<String>,
+}
+
+/// One code scanning alert, as far as the carry-over needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alert {
+    /// The alert number. Parsed as `u64`, so it is only ever formatted into a path.
+    pub number: u64,
+    pub rule_id: String,
+    pub state: String,
+    pub dismissed_reason: Option<String>,
+    pub dismissed_comment: Option<String>,
+    /// `most_recent_instance.category`.
+    pub category: Option<String>,
+}
+
+/// The query of an alert list: the tool, the state and the full ref.
+#[derive(Debug, Clone, Copy)]
+pub struct AlertQuery<'a> {
+    pub tool_name: &'a str,
+    pub state: &'a str,
+    pub git_ref: &'a str,
+}
+
+/// The dismissal sent with a PATCH: a reason from [`DISMISSAL_REASONS`] and an optional comment.
+#[derive(Debug, Clone, Copy)]
+pub struct Dismissal<'a> {
+    pub reason: &'a str,
+    pub comment: Option<&'a str>,
+}
+
+fn bad_answer() -> ScanError {
+    ScanError::Upstream("GitHub returned an unexpected answer".to_owned())
+}
+
+/// A query value from our own code (a tool name, a state, a ref). Anything outside a small
+/// set of characters is refused, so no value can add a parameter.
+fn query_value(text: &str) -> Result<&str, ScanError> {
+    if !text.is_empty()
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/'))
+    {
+        Ok(text)
+    } else {
+        Err(ScanError::Rejected("a query value is not valid".to_owned()))
+    }
+}
+
+/// The API path of a `confirm_delete_url`, for the analysis of `owner`/`repo` that is being
+/// deleted. The link must be https on the configured API host, under its base path, and its path
+/// must be exactly `repos/{owner}/{repo}/code-scanning/analyses/{id}` (owner and repo compared
+/// case-insensitively, `id` a `u64`) with the single query `confirm_delete`. This is the shape
+/// GitHub documents for "Delete a code scanning analysis". Any other link gives `None`, and the
+/// caller never fetches it. Only a full URL is accepted here; the relative path it gives is what
+/// is stored and followed.
+pub(crate) fn confirm_path_for(
+    urls: &GithubUrls,
+    owner: &str,
+    repo: &str,
+    link: &str,
+) -> Option<String> {
+    let path = urls.relative_path(link)?;
+    confirm_route_checked(urls, owner, repo, &path).then_some(path)
+}
+
+/// True when `path`, a relative API path, is a confirm route for `owner`/`repo`: the shape
+/// [`confirm_path_for`] documents. The API URL check (host, base path, traversal) runs on it too.
+fn confirm_route_checked(urls: &GithubUrls, owner: &str, repo: &str, path: &str) -> bool {
+    if urls.api_url(path).is_none() {
+        return false;
+    }
+    let Some((route, query)) = path.split_once('?') else {
+        return false;
+    };
+    if query != "confirm_delete" {
+        return false;
+    }
+    let mut parts = route.split('/');
+    let (
+        Some("repos"),
+        Some(link_owner),
+        Some(link_repo),
+        Some("code-scanning"),
+        Some("analyses"),
+        Some(id),
+        None,
+    ) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    )
+    else {
+        return false;
+    };
+    let same_name = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    // `u64::from_str` accepts a leading `+`, so the id must be ASCII digits before it is parsed.
+    let digits_only = !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit());
+    same_name(link_owner, owner)
+        && same_name(link_repo, repo)
+        && digits_only
+        && id.parse::<u64>().is_ok()
+}
+
+/// Reads the `confirm_delete_url` of a delete answer for `owner`/`repo`: none when it is absent
+/// or `null`, the validated path when it passes [`confirm_path_for`], and an error otherwise.
+pub(crate) fn confirm_answer_for(
+    urls: &GithubUrls,
+    owner: &str,
+    repo: &str,
+    body: &Value,
+) -> Result<Option<String>, ScanError> {
+    match body.get("confirm_delete_url") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(link)) => confirm_path_for(urls, owner, repo, link)
+            .map(Some)
+            .ok_or_else(|| {
+                ScanError::Upstream("GitHub sent a confirm link for another analysis".to_owned())
+            }),
+        Some(_) => Err(bad_answer()),
+    }
+}
+
+fn parse_analysis(
+    urls: &GithubUrls,
+    owner: &str,
+    repo: &str,
+    item: &Value,
+) -> Result<Analysis, ScanError> {
+    let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
+    Ok(Analysis {
+        id: item
+            .get("id")
+            .and_then(Value::as_u64)
+            .ok_or_else(bad_answer)?,
+        git_ref: text(item.get("ref")),
+        category: text(item.get("category")),
+        tool_name: text(item.get("tool").and_then(|tool| tool.get("name"))),
+        deletable: item
+            .get("deletable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        created_at: text(item.get("created_at")),
+        confirm_path: text(item.get("confirm_delete_url"))
+            .and_then(|link| confirm_path_for(urls, owner, repo, &link)),
+    })
+}
+
+fn parse_alert(item: &Value) -> Result<Alert, ScanError> {
+    let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
+    Ok(Alert {
+        number: item
+            .get("number")
+            .and_then(Value::as_u64)
+            .ok_or_else(bad_answer)?,
+        rule_id: text(item.get("rule").and_then(|rule| rule.get("id"))).ok_or_else(bad_answer)?,
+        state: text(item.get("state")).ok_or_else(bad_answer)?,
+        dismissed_reason: text(item.get("dismissed_reason")),
+        dismissed_comment: text(item.get("dismissed_comment")),
+        category: text(
+            item.get("most_recent_instance")
+                .and_then(|instance| instance.get("category")),
+        ),
+    })
+}
+
+/// Reads every page of a list, following `link: rel="next"` through the URLs' own check. A next
+/// link to another host is refused and never fetched. The clock is checked before each page
+/// request, so a list that passes `deadline` between pages stops with
+/// [`ScanError::DeadlineExceeded`] and requests no further page.
+async fn list_pages<H: ScanHttp, C: Clock, T>(
+    http: &H,
+    token: &[u8],
+    first: String,
+    clock: &C,
+    deadline: i64,
+    parse: impl Fn(&Value) -> Result<T, ScanError>,
+) -> Result<Vec<T>, ScanError> {
+    let mut path = first;
+    let mut found = Vec::new();
+    for _ in 0..MAX_LIST_PAGES {
+        if clock.now() >= deadline {
+            return Err(ScanError::DeadlineExceeded);
+        }
+        let response = http.get(&path, token).await?;
+        if response.status != 200 {
+            return Err(classify(&response, clock.now()));
+        }
+        let items = response.body.as_array().ok_or_else(bad_answer)?;
+        for item in items {
+            found.push(parse(item)?);
+        }
+        match response.link_next.as_deref() {
+            Some(link) => {
+                path = http.urls().relative_path(link).ok_or_else(|| {
+                    ScanError::Upstream("GitHub sent a next link to another host".to_owned())
+                })?;
+            }
+            None => return Ok(found),
+        }
+    }
+    Err(ScanError::Upstream(
+        "GitHub returned too many pages".to_owned(),
+    ))
+}
+
+/// Lists the code scanning analyses of one tool, all pages. See [`Analysis`]. `deadline` is
+/// Unix seconds; see [`list_pages`].
+pub async fn list_analyses_with<H: ScanHttp, C: Clock>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    tool_name: &str,
+    clock: &C,
+    deadline: i64,
+) -> Result<Vec<Analysis>, ScanError> {
+    check_names(owner, repo)?;
+    let tool = query_value(tool_name)?;
+    let first =
+        format!("repos/{owner}/{repo}/code-scanning/analyses?tool_name={tool}&per_page=100");
+    let urls = http.urls();
+    list_pages(http, token, first, clock, deadline, |item| {
+        parse_analysis(&urls, owner, repo, item)
+    })
+    .await
+}
+
+/// DELETEs one analysis with `confirm_delete=true`. Returns the validated path of the next
+/// confirm-delete link, or `None` when the delete is complete. See [`follow_confirm_with`].
+pub async fn delete_analysis_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    id: u64,
+    now: i64,
+) -> Result<Option<String>, ScanError> {
+    check_names(owner, repo)?;
+    let path = format!("repos/{owner}/{repo}/code-scanning/analyses/{id}?confirm_delete=true");
+    let response = http.delete(&path, token).await?;
+    if response.status != 200 {
+        return Err(classify(&response, now));
+    }
+    confirm_answer_for(&http.urls(), owner, repo, &response.body)
+}
+
+/// DELETEs a confirm-delete path returned by [`delete_analysis_with`] or by an earlier call
+/// here. `path` is the relative path those calls return, never a full URL. It is checked again
+/// before the request. Returns the next path, or `None`.
+pub async fn follow_confirm_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    path: &str,
+    now: i64,
+) -> Result<Option<String>, ScanError> {
+    let urls = http.urls();
+    if !confirm_route_checked(&urls, owner, repo, path) {
+        return Err(ScanError::Upstream(
+            "GitHub sent a confirm link for another analysis".to_owned(),
+        ));
+    }
+    let response = http.delete(path, token).await?;
+    if response.status != 200 {
+        return Err(classify(&response, now));
+    }
+    confirm_answer_for(&urls, owner, repo, &response.body)
+}
+
+/// Lists the code scanning alerts for a tool, state and ref, all pages. See [`Alert`]. `deadline`
+/// is Unix seconds; see [`list_pages`].
+pub async fn list_alerts_with<H: ScanHttp, C: Clock>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    query: AlertQuery<'_>,
+    clock: &C,
+    deadline: i64,
+) -> Result<Vec<Alert>, ScanError> {
+    check_names(owner, repo)?;
+    let tool = query_value(query.tool_name)?;
+    let state = query_value(query.state)?;
+    let git_ref = query_value(query.git_ref)?;
+    let first = format!(
+        "repos/{owner}/{repo}/code-scanning/alerts?tool_name={tool}&state={state}&ref={git_ref}&per_page=100"
+    );
+    list_pages(http, token, first, clock, deadline, parse_alert).await
+}
+
+/// PATCHes one alert to `dismissed`. The reason must be one of [`DISMISSAL_REASONS`].
+pub async fn dismiss_alert_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    number: u64,
+    dismissal: Dismissal<'_>,
+    now: i64,
+) -> Result<(), ScanError> {
+    check_names(owner, repo)?;
+    if !DISMISSAL_REASONS.contains(&dismissal.reason) {
+        return Err(ScanError::Rejected(
+            "the dismissal reason is not allowed".to_owned(),
+        ));
+    }
+    let path = format!("repos/{owner}/{repo}/code-scanning/alerts/{number}");
+    let body = json!({
+        "state": "dismissed",
+        "dismissed_reason": dismissal.reason,
+        "dismissed_comment": dismissal.comment,
+    });
+    let response = http.patch(&path, token, &body).await?;
+    if response.status != 200 {
+        return Err(classify(&response, now));
+    }
+    Ok(())
+}
+
 /// The GitHub code scanning client. Built on the guarded outbound client for the configured
 /// GitHub API base URL.
 pub struct GithubScanning {
@@ -470,6 +832,69 @@ impl GithubScanning {
         now: i64,
     ) -> Result<Processing, ScanError> {
         status_with(&self.http(), token, owner, repo, sarif_id, now).await
+    }
+
+    /// Lists the analyses of one tool, all pages. See [`list_analyses_with`].
+    pub async fn list_analyses<C: Clock>(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        tool_name: &str,
+        clock: &C,
+        deadline: i64,
+    ) -> Result<Vec<Analysis>, ScanError> {
+        list_analyses_with(&self.http(), token, owner, repo, tool_name, clock, deadline).await
+    }
+
+    /// DELETEs one analysis. See [`delete_analysis_with`].
+    pub async fn delete_analysis(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        id: u64,
+        now: i64,
+    ) -> Result<Option<String>, ScanError> {
+        delete_analysis_with(&self.http(), token, owner, repo, id, now).await
+    }
+
+    /// Follows a confirm-delete path of `owner`/`repo`. See [`follow_confirm_with`].
+    pub async fn follow_confirm(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        path: &str,
+        now: i64,
+    ) -> Result<Option<String>, ScanError> {
+        follow_confirm_with(&self.http(), token, owner, repo, path, now).await
+    }
+
+    /// Lists the alerts of one tool, state and ref, all pages. See [`list_alerts_with`].
+    pub async fn list_alerts<C: Clock>(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        query: AlertQuery<'_>,
+        clock: &C,
+        deadline: i64,
+    ) -> Result<Vec<Alert>, ScanError> {
+        list_alerts_with(&self.http(), token, owner, repo, query, clock, deadline).await
+    }
+
+    /// Dismisses one alert. See [`dismiss_alert_with`].
+    pub async fn dismiss_alert(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        dismissal: Dismissal<'_>,
+        now: i64,
+    ) -> Result<(), ScanError> {
+        dismiss_alert_with(&self.http(), token, owner, repo, number, dismissal, now).await
     }
 }
 
@@ -530,6 +955,14 @@ mod tests {
         }
 
         async fn get(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
+            self.sent
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push((path.to_owned(), Value::Null));
+            Ok(self.reply.clone())
+        }
+
+        async fn delete(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
             self.sent
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
@@ -601,7 +1034,7 @@ mod tests {
     fn encode_gzips_then_base64s() {
         let doc = json!({
             "version": "2.1.0",
-            "runs": [{"tool": {"driver": {"name": "HarborGate"}}}]
+            "runs": [{"tool": {"driver": {"name": "Dockward"}}}]
         });
         let encoded = encode_sarif(&doc).unwrap();
         let gzipped = STANDARD.decode(&encoded).unwrap();
@@ -641,7 +1074,7 @@ mod tests {
         assert_eq!(sent[0].1["commit_sha"], "0123abc");
         assert_eq!(sent[0].1["ref"], "refs/heads/main");
         assert_eq!(sent[0].1["sarif"], "payload");
-        assert_eq!(sent[0].1["tool_name"], "HarborGate");
+        assert_eq!(sent[0].1["tool_name"], "Dockward");
     }
 
     #[tokio::test]
@@ -726,5 +1159,162 @@ mod tests {
             status_with(&complete, b"token", "octo", "app", "abc-123", 1000).await,
             Ok(Processing::Complete)
         );
+    }
+
+    /// A clock whose value a test sets. The list reads it before each page, so a value set
+    /// between two page requests lands between pages.
+    struct PagedClock {
+        now: Mutex<i64>,
+    }
+
+    impl PagedClock {
+        fn at(now: i64) -> Self {
+            Self {
+                now: Mutex::new(now),
+            }
+        }
+
+        fn set(&self, now: i64) {
+            *self.now.lock().unwrap_or_else(|p| p.into_inner()) = now;
+        }
+    }
+
+    impl Clock for PagedClock {
+        fn now(&self) -> i64 {
+            *self.now.lock().unwrap_or_else(|p| p.into_inner())
+        }
+
+        async fn sleep(&self, _duration: std::time::Duration) {}
+    }
+
+    /// Serves two pages of analyses. Page 1 links to page 2. Each page request is recorded, and
+    /// `move_clock_after` moves the clock once a page has been served.
+    struct TwoPages<'a> {
+        clock: &'a PagedClock,
+        /// The clock value to set after the page with this index (0 or 1) is served.
+        move_clock_after: Option<(usize, i64)>,
+        requested: Mutex<Vec<String>>,
+    }
+
+    impl TwoPages<'_> {
+        fn requested(&self) -> Vec<String> {
+            self.requested
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        }
+    }
+
+    impl ScanHttp for TwoPages<'_> {
+        async fn post(
+            &self,
+            _path: &str,
+            _token: &[u8],
+            _body: &Value,
+        ) -> Result<ScanResponse, ScanError> {
+            Err(ScanError::Upstream("unused".to_owned()))
+        }
+
+        async fn patch(
+            &self,
+            _path: &str,
+            _token: &[u8],
+            _body: &Value,
+        ) -> Result<ScanResponse, ScanError> {
+            Err(ScanError::Upstream("unused".to_owned()))
+        }
+
+        async fn get(&self, path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
+            let index = {
+                let mut requested = self.requested.lock().unwrap_or_else(|p| p.into_inner());
+                requested.push(path.to_owned());
+                requested.len() - 1
+            };
+            let (body, link_next) = if index == 0 {
+                (
+                    json!([{"id": 1, "ref": "refs/heads/main", "tool": {"name": "harborgate"}}]),
+                    Some("https://api.github.com/repos/octo/app/code-scanning/analyses?page=2"),
+                )
+            } else {
+                (
+                    json!([{"id": 2, "ref": "refs/heads/main", "tool": {"name": "harborgate"}}]),
+                    None,
+                )
+            };
+            if let Some((after, value)) = self.move_clock_after
+                && after == index
+            {
+                self.clock.set(value);
+            }
+            Ok(ScanResponse {
+                status: 200,
+                retry_after: None,
+                ratelimit_remaining: None,
+                ratelimit_reset: None,
+                link_next: link_next.map(str::to_owned),
+                body,
+            })
+        }
+
+        async fn delete(&self, _path: &str, _token: &[u8]) -> Result<ScanResponse, ScanError> {
+            Err(ScanError::Upstream("a list makes no DELETE".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_list_past_its_deadline_between_pages_stops_before_the_next_page() {
+        // The clock reads 1000 before page 1 and passes the deadline of 1500 once page 1 is
+        // served. Page 2 must not be requested.
+        let clock = PagedClock::at(1000);
+        let http = TwoPages {
+            clock: &clock,
+            move_clock_after: Some((0, 1600)),
+            requested: Mutex::new(Vec::new()),
+        };
+        let outcome =
+            list_analyses_with(&http, b"token", "octo", "app", "harborgate", &clock, 1500).await;
+        assert_eq!(outcome, Err(ScanError::DeadlineExceeded));
+        assert_eq!(
+            http.requested().len(),
+            1,
+            "page 2 is never requested once the deadline has passed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_list_that_finishes_inside_its_deadline_completes_every_page() {
+        // The clock stays inside the budget through both pages.
+        let clock = PagedClock::at(1000);
+        let http = TwoPages {
+            clock: &clock,
+            move_clock_after: Some((0, 1400)),
+            requested: Mutex::new(Vec::new()),
+        };
+        let outcome =
+            list_analyses_with(&http, b"token", "octo", "app", "harborgate", &clock, 1500).await;
+        let ids: Vec<u64> = outcome
+            .unwrap_or_else(|err| panic!("list failed: {err}"))
+            .iter()
+            .map(|analysis| analysis.id)
+            .collect();
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(http.requested().len(), 2, "both pages are requested");
+    }
+
+    #[tokio::test]
+    async fn a_follow_up_with_a_signed_analysis_id_is_refused_before_any_request() {
+        // `u64::from_str` accepts a leading `+`, so the id must be checked as ASCII digits first.
+        let fake = Recorded::new(reply(200, json!({ "confirm_delete_url": null })));
+        let outcome = follow_confirm_with(
+            &fake,
+            b"token",
+            "octo",
+            "app",
+            "repos/octo/app/code-scanning/analyses/+42?confirm_delete",
+            0,
+        )
+        .await;
+        assert!(outcome.is_err(), "a signed id is refused");
+        assert!(fake.sent().is_empty(), "no request is sent for a signed id");
     }
 }

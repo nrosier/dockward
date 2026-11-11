@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO issue_rekeys\n            (github_owner, github_repo, label_result, issues_rekeyed, completed_at)\n         VALUES (?, ?, ?, ?, ?)\n         ON CONFLICT (github_owner, github_repo) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "c31d56a28a8b70715ad235685ceef9cf7a007ff38a7faccb79ca460741757e4e"
+}

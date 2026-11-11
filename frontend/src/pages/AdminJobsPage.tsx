@@ -1,13 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { useSearchParams } from "react-router";
-import { Badge, formatDateTime, ROW, Segmented, Tag, TD, TH } from "../components/admin/parts";
+import { Badge, ROW, Segmented, Tag, TD, TH } from "../components/admin/parts";
+import { formatDateTime } from "../components/jobs/dates";
+import { JobLogDialog } from "../components/jobs/JobLogDialog";
+import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { ErrorMessage, LoadingMessage } from "../components/ui/StatusMessage";
 import { t } from "../i18n";
 import { api } from "../lib/api";
 import type { HousekeepingRun, Page } from "../types/api";
 
-const KINDS = ["poll", "cleanup", "retention"];
+const KINDS = ["cleanup", "retention", "discover", "db_update"];
 
 function duration(run: HousekeepingRun): string {
   if (run.finished_at === null) {
@@ -21,6 +25,7 @@ export default function AdminJobsPage() {
   const [params, setParams] = useSearchParams();
   const raw = params.get("kind");
   const kind = raw !== null && KINDS.includes(raw) ? raw : "";
+  const [logJobId, setLogJobId] = useState<string | null>(null);
   const runs = useQuery({
     queryKey: ["admin", "jobs", kind],
     queryFn: () => api<Page<HousekeepingRun>>("GET", `/admin/jobs?page_size=50${kind ? `&kind=${kind}` : ""}`),
@@ -39,9 +44,10 @@ export default function AdminJobsPage() {
           onChange={(value) => setParams(value === "" ? {} : { kind: value })}
           options={[
             { value: "", label: t("admin.jobs.all") },
-            { value: "poll", label: t("admin.jobs.poll") },
             { value: "cleanup", label: t("admin.jobs.cleanup") },
             { value: "retention", label: t("admin.jobs.retention") },
+            { value: "discover", label: t("admin.jobs.discover") },
+            { value: "db_update", label: t("admin.jobs.dbUpdate") },
           ]}
         />
       </div>
@@ -57,6 +63,9 @@ export default function AdminJobsPage() {
                 <th className={TH}>{t("admin.jobs.col.started")}</th>
                 <th className={TH}>{t("admin.jobs.col.duration")}</th>
                 <th className={TH}>{t("admin.jobs.col.result")}</th>
+                <th className={TH}>
+                  <span className="sr-only">{t("jobs.col.actions")}</span>
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -79,12 +88,20 @@ export default function AdminJobsPage() {
                       t("admin.jobs.processed", { n: run.processed_count })
                     )}
                   </td>
+                  <td className={`${TD} text-right`}>
+                    {run.job_id ? (
+                      <Button variant="small" onClick={() => setLogJobId(run.job_id ?? null)}>
+                        {t("admin.jobs.viewLog")}
+                      </Button>
+                    ) : null}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </Card>
       ) : null}
+      {logJobId === null ? null : <JobLogDialog jobId={logJobId} onClose={() => setLogJobId(null)} />}
     </div>
   );
 }

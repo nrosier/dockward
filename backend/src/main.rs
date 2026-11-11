@@ -121,6 +121,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         .route("/api/v1/jobs/failed-count", get(api::jobs::failed_count))
         .route("/api/v1/jobs/purge-failed", post(api::jobs::purge_failed))
         .route("/api/v1/jobs/{id}", get(api::jobs::get))
+        .route("/api/v1/jobs/{id}/log", get(api::jobs::log))
         .route("/api/v1/jobs/{id}/retry", post(api::jobs::retry))
         .route("/api/v1/dashboard/summary", get(api::dashboard::summary))
         .route("/api/v1/cves", get(api::cves::list))
@@ -1740,13 +1741,20 @@ pub(crate) mod tests {
         (versions, description_columns)
     }
 
-    /// A database that is behind its migrations would be changed by `db::open`. The spinoff has
-    /// one migration, so the setup removes it from the history and drops a column. The rotation
-    /// must leave the migrations history and the schema as they were.
+    /// A database that is behind its migrations would be changed by `db::open`. The setup
+    /// removes migration 1 from the history and drops a column, so the database looks one
+    /// migration behind. The rotation must leave the migrations history and the schema as they
+    /// were. The expected history is every applied version except 1, so the test does not
+    /// depend on how many migrations exist.
     #[tokio::test]
     async fn rotate_key_does_not_migrate_the_database() {
         let dir = restore_dir("rotate-schema");
         let pool = db::open(&dir).await.unwrap();
+        let (all_versions, _) = schema_state(&pool).await;
+        assert!(
+            all_versions.contains(&1),
+            "migration 1 is not in the history"
+        );
         sqlx::query("ALTER TABLE cve_findings DROP COLUMN description")
             .execute(&pool)
             .await
@@ -1757,8 +1765,9 @@ pub(crate) mod tests {
             .unwrap();
         let before = schema_state(&pool).await;
         pool.close().await;
+        let expected_versions: Vec<i64> = all_versions.into_iter().filter(|v| *v != 1).collect();
         assert!(
-            before == (Vec::<i64>::new(), 0),
+            before == (expected_versions, 0),
             "the setup did not remove migration 1"
         );
 
@@ -2306,6 +2315,7 @@ pub(crate) mod tests {
                 status: "failed".to_owned(),
                 processed_count: 0,
                 error_summary: Some("x".repeat(2_000)),
+                scanner: None,
             },
         )
         .await
