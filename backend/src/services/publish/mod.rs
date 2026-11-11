@@ -196,13 +196,14 @@ pub trait CodeScanning: Send + Sync + 'static {
         now: i64,
     ) -> impl Future<Output = Result<Option<String>, ScanError>> + Send;
 
-    /// Follows a confirm-delete link of `owner`/`repo`. Returns the next link, or `None` when done.
+    /// Follows a confirm-delete path of `owner`/`repo`, the relative path a delete returned. Returns
+    /// the next path, or `None` when done.
     fn follow_confirm(
         &self,
         token: &[u8],
         owner: &str,
         repo: &str,
-        link: &str,
+        path: &str,
         now: i64,
     ) -> impl Future<Output = Result<Option<String>, ScanError>> + Send;
 
@@ -279,10 +280,10 @@ impl CodeScanning for GithubScanning {
         token: &[u8],
         owner: &str,
         repo: &str,
-        link: &str,
+        path: &str,
         now: i64,
     ) -> Result<Option<String>, ScanError> {
-        GithubScanning::follow_confirm(self, token, owner, repo, link, now).await
+        GithubScanning::follow_confirm(self, token, owner, repo, path, now).await
     }
 
     async fn list_alerts<C: Clock>(

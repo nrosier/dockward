@@ -344,15 +344,16 @@ async fn plan_carryovers<G: CodeScanning, C: Clock>(
     Ok(plan)
 }
 
-/// Dismisses the open new alerts of the rules in `plan` that are not yet applied, then records
-/// each rule as applied. Returns the number of dismissals written.
+/// Dismisses the open new alerts of the rules in `plan` that are not yet applied. Each rule is
+/// recorded as applied as soon as its own dismissals are written, so a later rate limit or
+/// failure does not make a finished rule repeat. Returns the number of dismissals written.
 async fn apply_carryovers<G: CodeScanning, C: Clock>(
     run: &mut Run<'_, G, C>,
     refs: &[String],
     new: &str,
     plan: &[PlannedCarry],
 ) -> Flow<u32> {
-    let mut pending: BTreeMap<&str, &PlannedCarry> = plan
+    let pending: BTreeMap<&str, &PlannedCarry> = plan
         .iter()
         .filter(|carry| !carry.applied)
         .map(|carry| (carry.rule_id.as_str(), carry))
@@ -360,27 +361,33 @@ async fn apply_carryovers<G: CodeScanning, C: Clock>(
     if pending.is_empty() {
         return Ok(0);
     }
-    // Only open new alerts are dismissed, so an already-dismissed one is skipped. An alert that
-    // appears under two refs is dismissed once.
-    let mut done: BTreeSet<u64> = BTreeSet::new();
-    let mut carried = 0u32;
+    // Group the open new alerts of the pending rules by rule, across every ref first. Only open
+    // new alerts are dismissed, so an already-dismissed one is skipped. An alert that appears
+    // under two refs is grouped once.
+    let mut by_rule: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
+    let mut seen: BTreeSet<u64> = BTreeSet::new();
     for git_ref in refs {
         for alert in run.alerts(TOOL_NAME, "open", git_ref).await? {
             if alert.state != "open" || !same_category(alert.category.as_deref(), new) {
                 continue;
             }
-            let Some(carry) = pending.get(alert.rule_id.as_str()).copied() else {
+            let Some((&rule, _)) = pending.get_key_value(alert.rule_id.as_str()) else {
                 continue;
             };
-            if !done.insert(alert.number) {
-                continue;
+            if seen.insert(alert.number) {
+                by_rule.entry(rule).or_default().push(alert.number);
             }
-            run.dismiss(alert.number, &carry.reason, carry.comment.as_deref())
+        }
+    }
+    // Each pending rule is dismissed and then marked applied, in rule order. A rule with no open
+    // alerts is still marked, because its dismissals are complete.
+    let mut carried = 0u32;
+    for (rule, carry) in &pending {
+        for number in by_rule.get(rule).into_iter().flatten() {
+            run.dismiss(*number, &carry.reason, carry.comment.as_deref())
                 .await?;
             carried += 1;
         }
-    }
-    for rule in std::mem::take(&mut pending).into_keys() {
         run.mark_applied(rule).await?;
     }
     Ok(carried)

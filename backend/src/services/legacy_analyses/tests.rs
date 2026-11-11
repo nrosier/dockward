@@ -12,7 +12,8 @@ use crate::db;
 use crate::db::sources::{self as source_db, SourceRow};
 use crate::services::github_scanning::{
     Alert, AlertQuery, Analysis, Dismissal, Processing, ScanError, ScanHttp, ScanResponse, Upload,
-    confirm_answer_for, confirm_path_for, follow_confirm_with,
+    confirm_answer_for, confirm_path_for, delete_analysis_with, dismiss_alert_with,
+    follow_confirm_with, list_alerts_with, list_analyses_with,
 };
 use crate::services::github_url::GithubUrls;
 use crate::services::publish::Clock;
@@ -76,7 +77,8 @@ struct Fake {
     tool: &'static str,
     deletable: bool,
     created_at: &'static str,
-    /// The confirm-delete path GitHub gives when the delete is not yet complete.
+    /// The full `confirm_delete_url` GitHub gives when the delete is not yet complete, as GitHub
+    /// documents it: `https://api.github.com/repos/{o}/{r}/code-scanning/analyses/{id}?confirm_delete`.
     confirm_next: Option<String>,
 }
 
@@ -118,6 +120,8 @@ struct State {
     fail_delete_ids: Vec<u64>,
     /// List every analysis whatever `tool_name` asks for, as a list that ignores the filter would.
     ignore_tool_filter: bool,
+    /// Answer a dismissal of this alert number with this error, and keep the alert as it was.
+    dismiss_error: Option<(u64, ScanError)>,
     /// Answer the analysis list with `DeadlineExceeded` from this list call (1-based) on, as a
     /// paged list does once its deadline has passed between pages.
     fail_list_from: Option<usize>,
@@ -140,6 +144,13 @@ fn remove_analysis(state: &mut State, id: u64) -> Result<Option<String>, ScanErr
             .retain(|alert| !(alert.tool == LEGACY_TOOL_NAME && alert.git_ref == removed.git_ref));
     }
     Ok(removed.confirm_next)
+}
+
+/// The answer GitHub gives to a delete: the full confirm URL, passed through the same production
+/// parsing a live answer goes through.
+fn delete_answer(link: Option<String>) -> Result<Option<String>, ScanError> {
+    let body = serde_json::json!({ "confirm_delete_url": link });
+    confirm_answer_for(&GithubUrls::default(), "octo", "app", &body)
 }
 
 /// The fake GitHub for `octo/app`.
@@ -269,7 +280,7 @@ impl CodeScanning for FakeCode {
             if state.fail_delete_ids.contains(&id) {
                 return Err(ScanError::NotFound);
             }
-            remove_analysis(state, id)
+            delete_answer(remove_analysis(state, id)?)
         })
     }
 
@@ -289,7 +300,7 @@ impl CodeScanning for FakeCode {
                 .and_then(|route| route.rsplit('/').next())
                 .and_then(|segment| segment.parse::<u64>().ok());
             match id {
-                Some(id) => remove_analysis(state, id),
+                Some(id) => delete_answer(remove_analysis(state, id)?),
                 None => Err(ScanError::NotFound),
             }
         })
@@ -339,6 +350,16 @@ impl CodeScanning for FakeCode {
                 reason: dismissal.reason.to_owned(),
                 comment: dismissal.comment.map(str::to_owned),
             });
+            if let Some((_, error)) = state
+                .dismiss_error
+                .as_ref()
+                .filter(|(failing, _)| *failing == number)
+            {
+                return Err(error.clone());
+            }
+            if let Some(alert) = state.alerts.iter_mut().find(|alert| alert.number == number) {
+                alert.state = "dismissed";
+            }
             Ok(())
         })
     }
@@ -701,10 +722,12 @@ async fn a_confirm_delete_url_is_followed_until_null() {
         true,
         "2026-01-01T00:00:00Z",
     );
-    // The delete of 30 answers a confirm link on the API host, which is then followed.
+    // The delete of 30 answers the full confirm URL on the API host, which is then followed.
     fx.gh.with(|state| {
-        state.analyses[0].confirm_next =
-            Some("repos/octo/app/code-scanning/analyses/30?confirm_delete=true&token=x".to_owned());
+        state.analyses[0].confirm_next = Some(
+            "https://api.github.com/repos/octo/app/code-scanning/analyses/30?confirm_delete"
+                .to_owned(),
+        );
     });
 
     let clock = Clock2::new(0);
@@ -1220,13 +1243,34 @@ async fn a_confirm_link_on_another_host_is_never_fetched() {
         "and never fetched"
     );
 
-    // A link on the API host is followed.
-    let followed = follow_confirm_with(
+    // The relative path of a link on the API host is followed. A full URL is refused: only the
+    // path that the delete answer was normalised to is accepted.
+    let full_url_refused = follow_confirm_with(
         &http,
         CANARY_TOKEN.as_bytes(),
         "octo",
         "app",
         "https://api.github.com/repos/octo/app/code-scanning/analyses/1?confirm_delete",
+        NOW,
+    )
+    .await;
+    assert!(
+        full_url_refused.is_err(),
+        "a full URL is not a confirm path"
+    );
+    assert!(
+        http.requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_empty(),
+        "and a full URL is not fetched"
+    );
+    let followed = follow_confirm_with(
+        &http,
+        CANARY_TOKEN.as_bytes(),
+        "octo",
+        "app",
+        "repos/octo/app/code-scanning/analyses/1?confirm_delete",
         NOW,
     )
     .await;
@@ -1648,4 +1692,274 @@ async fn a_list_inside_its_deadline_completes_and_writes_the_row() {
         })
     );
     assert_eq!(fx.row_count().await, 1, "a clean pass writes the row");
+}
+
+// ---- Confirm chain through the production HTTP path ----
+
+/// A scripted GitHub at the HTTP layer, for `octo/app`. Analysis 41 is deleted first; its DELETE
+/// answers the full confirm URL that GitHub documents for 42, and the follow of that URL deletes
+/// 42 and answers `null`. Listing returns what is left. Every DELETE path is recorded in order.
+struct ChainHttp {
+    analyses: Mutex<Vec<(u64, &'static str)>>,
+    deletes: Mutex<Vec<String>>,
+}
+
+impl ChainHttp {
+    fn new() -> Self {
+        Self {
+            analyses: Mutex::new(vec![
+                (41, "2026-02-01T00:00:00Z"),
+                (42, "2026-01-01T00:00:00Z"),
+            ]),
+            deletes: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn remove(&self, id: u64) -> bool {
+        let mut analyses = self.analyses.lock().unwrap_or_else(|p| p.into_inner());
+        let before = analyses.len();
+        analyses.retain(|(kept, _)| *kept != id);
+        before != analyses.len()
+    }
+
+    fn answer(body: Value) -> ScanResponse {
+        ScanResponse {
+            status: 200,
+            retry_after: None,
+            ratelimit_remaining: None,
+            ratelimit_reset: None,
+            link_next: None,
+            body,
+        }
+    }
+}
+
+impl ScanHttp for ChainHttp {
+    async fn post(&self, _: &str, _: &[u8], _: &Value) -> Result<ScanResponse, ScanError> {
+        Err(ScanError::Upstream("unused by the chain".to_owned()))
+    }
+
+    async fn patch(&self, path: &str, _: &[u8], _: &Value) -> Result<ScanResponse, ScanError> {
+        // A dismissal: GitHub answers with the alert; the chain has no alerts to dismiss.
+        Err(ScanError::Upstream(format!("unexpected PATCH {path}")))
+    }
+
+    async fn get(&self, path: &str, _: &[u8]) -> Result<ScanResponse, ScanError> {
+        if path.starts_with("repos/octo/app/code-scanning/alerts") {
+            return Ok(Self::answer(Value::Array(Vec::new())));
+        }
+        let analyses = self.analyses.lock().unwrap_or_else(|p| p.into_inner());
+        let items: Vec<Value> = analyses
+            .iter()
+            .map(|(id, created)| {
+                serde_json::json!({
+                    "id": id,
+                    "ref": REF_MAIN,
+                    "category": LEGACY,
+                    "tool": {"name": LEGACY_TOOL_NAME},
+                    "deletable": true,
+                    "created_at": created,
+                    "confirm_delete_url": null,
+                })
+            })
+            .collect();
+        Ok(Self::answer(Value::Array(items)))
+    }
+
+    async fn delete(&self, path: &str, _: &[u8]) -> Result<ScanResponse, ScanError> {
+        self.deletes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(path.to_owned());
+        match path {
+            "repos/octo/app/code-scanning/analyses/41?confirm_delete=true" => {
+                self.remove(41);
+                Ok(Self::answer(serde_json::json!({
+                    "confirm_delete_url":
+                        "https://api.github.com/repos/octo/app/code-scanning/analyses/42?confirm_delete"
+                })))
+            }
+            "repos/octo/app/code-scanning/analyses/42?confirm_delete" => {
+                self.remove(42);
+                Ok(Self::answer(Value::Null))
+            }
+            _ => Err(ScanError::NotFound),
+        }
+    }
+}
+
+/// The production client for the retirement, over a [`ScanHttp`]: each call goes through the same
+/// `_with` functions that `GithubScanning` uses. Only the methods the retirement calls are wired.
+struct HttpCode(Arc<ChainHttp>);
+
+impl CodeScanning for HttpCode {
+    async fn upload(&self, _: &[u8], _: &Upload<'_>, _: i64) -> Result<String, ScanError> {
+        Err(ScanError::Upstream("unused by the retirement".to_owned()))
+    }
+
+    async fn status(
+        &self,
+        _: &[u8],
+        _: &str,
+        _: &str,
+        _: &str,
+        _: i64,
+    ) -> Result<Processing, ScanError> {
+        Err(ScanError::Upstream("unused by the retirement".to_owned()))
+    }
+
+    async fn list_analyses<C: Clock>(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        tool_name: &str,
+        clock: &C,
+        deadline: i64,
+    ) -> Result<Vec<Analysis>, ScanError> {
+        list_analyses_with(&*self.0, token, owner, repo, tool_name, clock, deadline).await
+    }
+
+    async fn delete_analysis(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        id: u64,
+        now: i64,
+    ) -> Result<Option<String>, ScanError> {
+        delete_analysis_with(&*self.0, token, owner, repo, id, now).await
+    }
+
+    async fn follow_confirm(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        link: &str,
+        now: i64,
+    ) -> Result<Option<String>, ScanError> {
+        follow_confirm_with(&*self.0, token, owner, repo, link, now).await
+    }
+
+    async fn list_alerts<C: Clock>(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        query: AlertQuery<'_>,
+        clock: &C,
+        deadline: i64,
+    ) -> Result<Vec<Alert>, ScanError> {
+        list_alerts_with(&*self.0, token, owner, repo, query, clock, deadline).await
+    }
+
+    async fn dismiss_alert(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        dismissal: Dismissal<'_>,
+        now: i64,
+    ) -> Result<(), ScanError> {
+        dismiss_alert_with(&*self.0, token, owner, repo, number, dismissal, now).await
+    }
+}
+
+#[tokio::test]
+async fn a_confirm_chain_deletes_the_linked_analysis_and_writes_the_row() {
+    // The whole retirement, with the production delete and follow functions under it. The answer
+    // to the DELETE of 41 carries the full confirm URL; the follow sends the path it names, and
+    // that answer is null. The run completes with both analyses removed and the row written.
+    let http = Arc::new(ChainHttp::new());
+    let fx = Fx::new("chain").await;
+    let clock = Clock2::new(0);
+    let outcome = retire(
+        &fx.pool,
+        &HttpCode(Arc::clone(&http)),
+        &clock,
+        CANARY_TOKEN.as_bytes(),
+        &fx.source,
+        REF_MAIN,
+        NOW,
+    )
+    .await;
+    assert_eq!(
+        outcome.map_err(|_| "error"),
+        Ok(RetireOutcome::Completed {
+            deleted: 2,
+            carried: 0
+        }),
+        "both analyses are deleted"
+    );
+    assert_eq!(fx.row_count().await, 1, "the done row is written");
+    assert_eq!(
+        http.deletes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone(),
+        vec![
+            "repos/octo/app/code-scanning/analyses/41?confirm_delete=true".to_owned(),
+            "repos/octo/app/code-scanning/analyses/42?confirm_delete".to_owned(),
+        ],
+        "exactly the first delete and the one confirm follow, in order"
+    );
+}
+
+// ---- Carry-over marking per rule ----
+
+#[tokio::test]
+async fn a_rule_applied_before_a_rate_limit_is_not_dismissed_again() {
+    // Run 1 dismisses rule-q's alert 800, then is rate limited on rule-r's alert 802. Run 2 must
+    // not dismiss 800 again: rule-q was recorded as applied when its dismissal finished.
+    let fx = Fx::new("per-rule").await;
+    fx.alert(old(1, "rule-q", Some("false positive"), None, REF_MAIN));
+    fx.alert(old(2, "rule-r", Some("false positive"), None, REF_MAIN));
+    fx.alert(new_alert(800, "rule-q", "open", None, REF_MAIN));
+    fx.alert(new_alert(802, "rule-r", "open", None, REF_MAIN));
+    fx.gh.with(|state| {
+        state.dismiss_error = Some((802, ScanError::RateLimited { until: 5_000 }));
+    });
+
+    let clock = Clock2::new(0);
+    let first = fx.retire(&clock, REF_MAIN, NOW).await;
+    assert_eq!(
+        first.map_err(|_| "error"),
+        Ok(RetireOutcome::RateLimited { until: 5_000 })
+    );
+    assert_eq!(fx.row_count().await, 0, "the first run writes no row");
+
+    // GitHub reopens 800, and the rate limit is gone.
+    fx.gh.with(|state| {
+        state.dismiss_error = None;
+        for alert in state.alerts.iter_mut().filter(|alert| alert.number == 800) {
+            alert.state = "open";
+        }
+    });
+
+    let second = fx.retire(&clock, REF_MAIN, NOW).await;
+    assert!(
+        matches!(second, Ok(RetireOutcome::Completed { .. })),
+        "the second run completes"
+    );
+    let dismissed_800 = fx
+        .gh
+        .dismissed()
+        .iter()
+        .filter(|(number, _, _)| *number == 800)
+        .count();
+    assert_eq!(
+        dismissed_800, 1,
+        "alert 800 is dismissed once, in run 1 only"
+    );
+    assert_eq!(
+        fx.gh
+            .dismissed()
+            .iter()
+            .filter(|(number, _, _)| *number == 802)
+            .count(),
+        2,
+        "802 was attempted in run 1 and dismissed in run 2"
+    );
 }

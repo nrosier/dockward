@@ -520,7 +520,8 @@ fn query_value(text: &str) -> Result<&str, ScanError> {
 /// must be exactly `repos/{owner}/{repo}/code-scanning/analyses/{id}` (owner and repo compared
 /// case-insensitively, `id` a `u64`) with the single query `confirm_delete`. This is the shape
 /// GitHub documents for "Delete a code scanning analysis". Any other link gives `None`, and the
-/// caller never fetches it.
+/// caller never fetches it. Only a full URL is accepted here; the relative path it gives is what
+/// is stored and followed.
 pub(crate) fn confirm_path_for(
     urls: &GithubUrls,
     owner: &str,
@@ -528,10 +529,20 @@ pub(crate) fn confirm_path_for(
     link: &str,
 ) -> Option<String> {
     let path = urls.relative_path(link)?;
-    urls.api_url(&path)?;
-    let (route, query) = path.split_once('?')?;
+    confirm_route_checked(urls, owner, repo, &path).then_some(path)
+}
+
+/// True when `path`, a relative API path, is a confirm route for `owner`/`repo`: the shape
+/// [`confirm_path_for`] documents. The API URL check (host, base path, traversal) runs on it too.
+fn confirm_route_checked(urls: &GithubUrls, owner: &str, repo: &str, path: &str) -> bool {
+    if urls.api_url(path).is_none() {
+        return false;
+    }
+    let Some((route, query)) = path.split_once('?') else {
+        return false;
+    };
     if query != "confirm_delete" {
-        return None;
+        return false;
     }
     let mut parts = route.split('/');
     let (
@@ -552,13 +563,10 @@ pub(crate) fn confirm_path_for(
         parts.next(),
     )
     else {
-        return None;
+        return false;
     };
     let same_name = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
-    if !same_name(link_owner, owner) || !same_name(link_repo, repo) || id.parse::<u64>().is_err() {
-        return None;
-    }
-    Some(path)
+    same_name(link_owner, owner) && same_name(link_repo, repo) && id.parse::<u64>().is_ok()
 }
 
 /// Reads the `confirm_delete_url` of a delete answer for `owner`/`repo`: none when it is absent
@@ -705,20 +713,23 @@ pub async fn delete_analysis_with<H: ScanHttp>(
 }
 
 /// DELETEs a confirm-delete path returned by [`delete_analysis_with`] or by an earlier call
-/// here. The path is checked again before the request. Returns the next path, or `None`.
+/// here. `path` is the relative path those calls return, never a full URL. It is checked again
+/// before the request. Returns the next path, or `None`.
 pub async fn follow_confirm_with<H: ScanHttp>(
     http: &H,
     token: &[u8],
     owner: &str,
     repo: &str,
-    link: &str,
+    path: &str,
     now: i64,
 ) -> Result<Option<String>, ScanError> {
     let urls = http.urls();
-    let path = confirm_path_for(&urls, owner, repo, link).ok_or_else(|| {
-        ScanError::Upstream("GitHub sent a confirm link for another analysis".to_owned())
-    })?;
-    let response = http.delete(&path, token).await?;
+    if !confirm_route_checked(&urls, owner, repo, path) {
+        return Err(ScanError::Upstream(
+            "GitHub sent a confirm link for another analysis".to_owned(),
+        ));
+    }
+    let response = http.delete(path, token).await?;
     if response.status != 200 {
         return Err(classify(&response, now));
     }
@@ -843,16 +854,16 @@ impl GithubScanning {
         delete_analysis_with(&self.http(), token, owner, repo, id, now).await
     }
 
-    /// Follows a confirm-delete link of `owner`/`repo`. See [`follow_confirm_with`].
+    /// Follows a confirm-delete path of `owner`/`repo`. See [`follow_confirm_with`].
     pub async fn follow_confirm(
         &self,
         token: &[u8],
         owner: &str,
         repo: &str,
-        link: &str,
+        path: &str,
         now: i64,
     ) -> Result<Option<String>, ScanError> {
-        follow_confirm_with(&self.http(), token, owner, repo, link, now).await
+        follow_confirm_with(&self.http(), token, owner, repo, path, now).await
     }
 
     /// Lists the alerts of one tool, state and ref, all pages. See [`list_alerts_with`].
