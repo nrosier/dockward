@@ -29,7 +29,7 @@ The planned v1 functionality, summarized from the specification. Items listed he
 - **Setup and login:** a first-run wizard creates the initial admin account, and OIDC sign-in can be configured from the admin UI. A local break-glass login remains available as a fallback.
 - **Role-based access:** admins manage system configuration, users, and global logs. Regular users manage their own credentials, repository mappings, and Sync jobs.
 - **Scoped webhook relay:** each repository mapping has its own webhook endpoint. On receipt, Dockward fetches the vulnerability report from the Harbor REST API and converts Trivy output to SARIF.
-- **GitHub delivery:** SARIF is gzipped, Base64-encoded, and submitted to the GitHub code-scanning API. The commit SHA comes only from the `org.opencontainers.image.revision` OCI label; the sync fails if it is missing. The branch comes from the `io.github.nrosier.harborgate.branch` label if present, otherwise from the mapping's default branch (default `main`).
+- **GitHub delivery:** SARIF is gzipped, Base64-encoded, and submitted to the GitHub code-scanning API. The commit SHA comes only from the `org.opencontainers.image.revision` OCI label; the sync fails if it is missing. The branch comes from the `io.github.nrosier.dockward.branch` label if present (the legacy `io.github.nrosier.harborgate.branch` label is still read, with a deprecation warning), otherwise from the mapping's default branch (default `main`).
 - **Optional issue creation:** GitHub Issues are created automatically for CRITICAL and HIGH findings, or triggered manually. `min_issue_severity` defaults to CRITICAL and may be lowered to HIGH.
 - **Dashboard and logs:** a web UI covers Dashboard, Mappings, CVEs, Sync jobs, and Account.
 
