@@ -20,6 +20,7 @@ pub mod github_issues;
 pub mod github_rekeys;
 pub mod hubs;
 pub mod image_sources;
+pub mod job_log;
 pub mod job_runs;
 #[allow(dead_code)] // Used by the job worker and the retry route.
 pub mod jobs;
@@ -222,6 +223,8 @@ mod tests {
             "image_sources",
             "images",
             "issue_rekeys",
+            "job_log_lines",
+            "job_log_steps",
             "job_runs",
             "jobs",
             "publish_reports",

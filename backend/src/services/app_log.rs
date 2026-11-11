@@ -204,7 +204,7 @@ impl LogBuffer {
 }
 
 /// Cuts a line longer than [`MAX_LINE_CHARS`] characters and ends it with the marker.
-fn truncate_line(text: String) -> String {
+pub(crate) fn truncate_line(text: String) -> String {
     if text.chars().count() <= MAX_LINE_CHARS {
         return text;
     }

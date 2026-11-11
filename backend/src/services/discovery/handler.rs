@@ -88,7 +88,7 @@ impl JobHandler for SpinoffJobs {
                 .await
             }
             Some("publish") => self.publisher.run(&job).await,
-            Some("db_update") => run_db_update(&self.pool, &self.scan, &job.payload).await,
+            Some("db_update") => run_db_update(&self.pool, &self.scan, &job).await,
             _ => JobOutcome::Permanent(MSG_UNHANDLED.to_owned()),
         }
     }

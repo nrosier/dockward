@@ -17,6 +17,8 @@ pub mod db_refresh;
 pub mod db_update;
 pub mod parse;
 pub mod process;
+pub mod redact;
+pub mod steplog;
 
 /// The two scanners. Their keys are fixed (the `scanner` column of `scan_runs` and
 /// `scanner_databases`, `specs/spinoff-local-scan.md`, section 9).
