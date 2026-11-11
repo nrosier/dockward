@@ -37,7 +37,7 @@ const MAX_RFC3339_SECS: i64 = 253_402_300_799;
 /// What happened. The two events of `specs/alerts.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertEvent {
-    SyncFailed,
+    JobFailed,
     CriticalCve,
 }
 
@@ -45,7 +45,7 @@ impl AlertEvent {
     /// The wire name used in the webhook body and the mail subject.
     pub fn as_str(self) -> &'static str {
         match self {
-            AlertEvent::SyncFailed => "sync_failed",
+            AlertEvent::JobFailed => "job_failed",
             AlertEvent::CriticalCve => "critical_cve",
         }
     }
@@ -74,7 +74,7 @@ impl Alert {
     /// It never includes the `error` field.
     pub fn text(&self) -> String {
         match self.event {
-            AlertEvent::SyncFailed => format!(
+            AlertEvent::JobFailed => format!(
                 "Dockward sync failed for {} to {}.",
                 self.harbor, self.github
             ),
@@ -391,10 +391,10 @@ mod tests {
             })
         );
 
-        let mut failed = alert(AlertEvent::SyncFailed);
+        let mut failed = alert(AlertEvent::JobFailed);
         failed.error = Some("upload failed".to_owned());
         let body = webhook_body(&failed);
-        assert_eq!(body["event"], "sync_failed");
+        assert_eq!(body["event"], "job_failed");
         assert_eq!(body["error"], "upload failed");
         // Unset optional fields are absent, not null.
         for name in ["cve_id", "severity", "image_tag"] {
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn text_is_one_sentence_without_secrets() {
-        let mut failed = alert(AlertEvent::SyncFailed);
+        let mut failed = alert(AlertEvent::JobFailed);
         failed.error = Some("secret-marker-9f3".to_owned());
         let mut cve = alert(AlertEvent::CriticalCve);
         cve.cve_id = Some("CVE-2026-0001".to_owned());
@@ -430,11 +430,11 @@ mod tests {
 
     #[test]
     fn subject_has_no_line_break_even_if_the_repository_name_has_one() {
-        let mut item = alert(AlertEvent::SyncFailed);
+        let mut item = alert(AlertEvent::JobFailed);
         item.harbor = "a\r\nBcc: x".to_owned();
         let subject = item.subject();
         assert!(!subject.contains('\r') && !subject.contains('\n'));
-        assert_eq!(subject, "[Dockward] sync_failed a  Bcc: x");
+        assert_eq!(subject, "[Dockward] job_failed a  Bcc: x");
 
         // In the built message the text stays inside the Subject header: there is no
         // header of its own named Bcc.
@@ -450,21 +450,21 @@ mod tests {
             !headers.lines().any(|line| line.starts_with("Bcc:")),
             "a line break in the name started a new header"
         );
-        assert!(headers.contains("Subject: [Dockward] sync_failed a  Bcc: x"));
+        assert!(headers.contains("Subject: [Dockward] job_failed a  Bcc: x"));
     }
 
     #[test]
     fn subject_has_the_event_and_the_harbor_repository() {
         assert_eq!(
-            alert(AlertEvent::SyncFailed).subject(),
-            "[Dockward] sync_failed proj/repo"
+            alert(AlertEvent::JobFailed).subject(),
+            "[Dockward] job_failed proj/repo"
         );
     }
 
     #[tokio::test]
     async fn webhook_non_2xx_is_an_error() {
         const SERVER_ERROR: &str = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 17\r\nConnection: close\r\n\r\nbody-with-a-token";
-        let channel_alert = alert(AlertEvent::SyncFailed);
+        let channel_alert = alert(AlertEvent::JobFailed);
 
         let (port, root) = loopback_tls_server(SERVER_ERROR).await;
         let client = match outbound::client_trusting(TargetClass::Alerts, true, root) {
@@ -504,7 +504,7 @@ mod tests {
             headers: BTreeMap::new(),
         };
         assert_eq!(
-            send_webhook(&config, &alert(AlertEvent::SyncFailed), false).await,
+            send_webhook(&config, &alert(AlertEvent::JobFailed), false).await,
             Err(SendError::Blocked)
         );
     }
@@ -532,12 +532,12 @@ mod tests {
     #[test]
     fn smtp_message_goes_to_every_recipient_with_the_subject() {
         let config = smtp_config("mail.example.com", TlsMode::Implicit);
-        let message = match smtp_message(&config, &alert(AlertEvent::SyncFailed)) {
+        let message = match smtp_message(&config, &alert(AlertEvent::JobFailed)) {
             Ok(message) => message,
             Err(_) => panic!("message build failed"),
         };
         let raw = String::from_utf8_lossy(&message.formatted()).into_owned();
-        assert!(raw.contains("Subject: [Dockward] sync_failed proj/repo"));
+        assert!(raw.contains("Subject: [Dockward] job_failed proj/repo"));
         assert!(raw.contains("a@example.com"));
         assert!(raw.contains("b@example.com"));
     }
@@ -548,7 +548,7 @@ mod tests {
         // Nothing listens here. The refusal is the address check, not a refused connection.
         config.port = 9;
         assert_eq!(
-            send_smtp(&config, &alert(AlertEvent::SyncFailed), false).await,
+            send_smtp(&config, &alert(AlertEvent::JobFailed), false).await,
             Err(SendError::Blocked)
         );
     }

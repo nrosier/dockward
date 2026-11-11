@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE scan_runs SET status = 'failed', error = 'scan job was removed', finished_at = ?\n         WHERE job_id IS NULL AND status IN ('queued', 'running')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "ae04617c8f52dd85c39eff1bccc105c73b049f0700c556b64c6a42a8c1240691"
+}

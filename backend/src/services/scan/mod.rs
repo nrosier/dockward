@@ -34,10 +34,11 @@ use std::time::Duration;
 
 use sqlx::SqlitePool;
 
+use crate::db::jobs::ClaimedJob;
 use crate::db::scans as db;
-use crate::db::sync_jobs::ClaimedJob;
 use crate::error::{AppError, ScannerFault};
 use crate::services::discovery::{MSG_BAD_PAYLOAD, fixed_text};
+use crate::services::jobs::MAX_ATTEMPTS;
 use crate::services::publish;
 use crate::services::scanner::parse::{self, Report};
 use crate::services::scanner::process::{Invocation, Limits, ScannerRunner};
@@ -48,7 +49,6 @@ use crate::services::storage::limits::parse_positive_u64;
 use crate::services::storage::messages::NO_LONGER_STORED;
 use crate::services::storage::repository::{SqlStoreRepository, StoreRepository};
 use crate::services::storage::{StoreRoot, checked_id};
-use crate::services::sync_jobs::MAX_ATTEMPTS;
 use crate::worker::JobOutcome;
 
 use queue::ScanPayload;

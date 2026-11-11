@@ -6,7 +6,7 @@ import { ErrorMessage, LoadingMessage } from "../components/ui/StatusMessage";
 import { ShaBadge } from "../components/ui/ShaBadge";
 import { t } from "../i18n";
 import { api } from "../lib/api";
-import type { Mapping, Page, SyncJob } from "../types/api";
+import type { Mapping, Page, Job } from "../types/api";
 import type { User } from "../lib/session";
 
 const MAX_ATTEMPTS = 8;
@@ -16,7 +16,7 @@ export default function AdminFailedPage() {
   const queryClient = useQueryClient();
   const jobs = useQuery({
     queryKey: FAILED_KEY,
-    queryFn: () => api<Page<SyncJob>>("GET", "/sync-jobs?status=failed&scope=all"),
+    queryFn: () => api<Page<Job>>("GET", "/jobs?status=failed&scope=all"),
   });
   const mappings = useQuery({
     queryKey: ["admin", "failed", "mappings"],
@@ -27,10 +27,10 @@ export default function AdminFailedPage() {
     queryFn: () => api<User[]>("GET", "/admin/users"),
   });
   const retry = useMutation({
-    mutationFn: (id: string) => api<unknown>("POST", `/sync-jobs/${id}/retry`),
+    mutationFn: (id: string) => api<unknown>("POST", `/jobs/${id}/retry`),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: FAILED_KEY });
-      void queryClient.invalidateQueries({ queryKey: ["sync-jobs"] });
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
 

@@ -77,7 +77,7 @@ pub async fn image_has_pending_pull(
                WHERE p.image_id = ?1
                  AND (p.state IN ('queued', 'pulling')
                       OR EXISTS (
-                          SELECT 1 FROM sync_jobs j
+                          SELECT 1 FROM jobs j
                           WHERE j.status IN ('queued', 'running')
                             AND json_extract(j.payload, '$.kind') = 'pull'
                             AND json_extract(j.payload, '$.platform_id') = p.id))
@@ -98,7 +98,7 @@ pub async fn open_publish_job_exists(
 ) -> Result<bool, AppError> {
     let row = sqlx::query!(
         r#"SELECT EXISTS (
-               SELECT 1 FROM sync_jobs WHERE payload = ? AND status IN ('queued', 'running')
+               SELECT 1 FROM jobs WHERE payload = ? AND status IN ('queued', 'running')
            ) AS "open!: i64""#,
         payload
     )

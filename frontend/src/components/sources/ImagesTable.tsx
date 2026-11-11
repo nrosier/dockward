@@ -6,7 +6,7 @@ import type { Page } from "../../types/api";
 import type { PlatformState, ScanStatus, SourceImage } from "../../types/sources";
 import { TABLE, TD, TH } from "../mappings/styles";
 import { TableScroll } from "../mappings/TableScroll";
-import { Time } from "../syncjobs/Time";
+import { Time } from "../jobs/Time";
 import { Card } from "../ui/Card";
 import { Pill, type PillKind } from "../ui/Pill";
 import { ErrorMessage, LoadingMessage } from "../ui/StatusMessage";

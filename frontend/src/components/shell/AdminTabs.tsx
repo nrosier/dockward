@@ -27,8 +27,8 @@ const SETTINGS: Tab[] = [
 
 function useFailedCount() {
   return useQuery({
-    queryKey: ["sync-jobs", "failed-count"],
-    queryFn: () => api<{ total: number }>("GET", "/sync-jobs?status=failed&scope=all&page_size=1"),
+    queryKey: ["jobs", "failed-count"],
+    queryFn: () => api<{ total: number }>("GET", "/jobs?status=failed&scope=all&page_size=1"),
     select: (data) => data.total,
   });
 }

@@ -15,7 +15,7 @@ use sqlx::SqlitePool;
 use tokio::sync::watch;
 
 use crate::db::discovery as db;
-use crate::db::sync_jobs;
+use crate::db::jobs;
 use crate::error::AppError;
 use crate::services::discovery::DiscoverPayload;
 use crate::services::ids;
@@ -41,7 +41,7 @@ pub async fn schedule_once(pool: &SqlitePool, now: i64) -> Result<usize, AppErro
             continue;
         }
         let id = ids::new_id()?;
-        sync_jobs::enqueue_in(&mut tx, &id, Some(&target.first_source_id), &payload, now).await?;
+        jobs::enqueue_in(&mut tx, &id, Some(&target.first_source_id), &payload, now).await?;
         tx.commit().await.map_err(|_| AppError::InternalError)?;
         queued += 1;
     }

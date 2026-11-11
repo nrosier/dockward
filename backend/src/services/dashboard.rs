@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 
 use crate::db::dashboard as db;
 use crate::error::AppError;
-use crate::services::sync_jobs::{self, SyncJob};
+use crate::services::jobs::{self, Job};
 
 /// Failed syncs are counted over this many seconds, measured back from `now`
 /// (`specs/cve-lifecycle.md`, Dashboard counts: last 90 days).
@@ -48,7 +48,7 @@ pub struct Summary {
     pub accepted_cves: i64,
     pub open_issues: i64,
     pub failed_syncs: i64,
-    pub recent_syncs: Vec<SyncJob>,
+    pub recent_syncs: Vec<Job>,
 }
 
 /// Sums per-source open counts. A CVE in two sources is counted in each, as the spec
@@ -79,7 +79,7 @@ pub async fn summary(
         accepted_cves: db::accepted_cves(pool, user_id, now).await?,
         open_issues: db::open_issues(pool, user_id).await?,
         failed_syncs: db::failed_syncs_since(pool, user_id, now - FAILED_SYNC_WINDOW_SECS).await?,
-        recent_syncs: sync_jobs::recent(pool, user_id).await?,
+        recent_syncs: jobs::recent(pool, user_id).await?,
     })
 }
 
@@ -405,7 +405,7 @@ mod tests {
             ("older", NOW - 365 * 24 * 60 * 60),
         ] {
             sqlx::query(
-                "INSERT INTO sync_jobs (id, source_id, status, attempts, payload, created_at, updated_at)
+                "INSERT INTO jobs (id, source_id, status, attempts, payload, created_at, updated_at)
                  VALUES (?, 'm1', 'failed', 8, '{}', ?, ?)",
             )
             .bind(id)
@@ -417,7 +417,7 @@ mod tests {
         }
         // A done job is never a failed sync, however recent.
         sqlx::query(
-            "INSERT INTO sync_jobs (id, source_id, status, attempts, payload, created_at, updated_at)
+            "INSERT INTO jobs (id, source_id, status, attempts, payload, created_at, updated_at)
              VALUES ('done', 'm1', 'done', 1, '{}', ?, ?)",
         )
         .bind(NOW)

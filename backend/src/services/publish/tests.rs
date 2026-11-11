@@ -356,7 +356,7 @@ impl Fx {
     async fn publish_jobs(&self) -> i64 {
         count(
             &self.pool,
-            "SELECT COUNT(*) FROM sync_jobs WHERE json_extract(payload, '$.kind') = 'publish'",
+            "SELECT COUNT(*) FROM jobs WHERE json_extract(payload, '$.kind') = 'publish'",
             &[],
         )
         .await
@@ -366,14 +366,14 @@ impl Fx {
     async fn drain(&self) -> Vec<(String, JobOutcome)> {
         let mut outcomes = Vec::new();
         loop {
-            let claimed = db::sync_jobs::claim_next(&self.pool, NOW)
+            let claimed = db::jobs::claim_next(&self.pool, NOW)
                 .await
                 .unwrap_or_else(|err| panic!("claim: {err:?}"));
             let Some(job) = claimed else {
                 break;
             };
             let outcome = self.publisher.run(&job).await;
-            if let Err(err) = db::sync_jobs::mark_done(&self.pool, &job.id, NOW).await {
+            if let Err(err) = db::jobs::mark_done(&self.pool, &job.id, NOW).await {
                 panic!("mark: {err:?}");
             }
             outcomes.push((job.source_id.clone().unwrap_or_default(), outcome));
@@ -823,7 +823,7 @@ async fn a_pending_upload_is_polled_again_never_uploaded_twice() {
     fx.recompute(IMG_1).await;
     fx.queue(IMG_1).await;
     lock(&fx.scanning.statuses).extend((0..40).map(|_| Ok(Processing::Pending)));
-    let job = db::sync_jobs::claim_next(&fx.pool, NOW)
+    let job = db::jobs::claim_next(&fx.pool, NOW)
         .await
         .unwrap_or_else(|err| panic!("claim: {err:?}"))
         .unwrap_or_else(|| panic!("a publish job"));
@@ -929,7 +929,7 @@ async fn no_token_or_github_body_reaches_a_log_a_job_row_or_a_report() {
         matches!(step, Ok(crate::worker::Step::Retry { .. })),
         "{step:?}"
     );
-    let last_error: Option<String> = sqlx::query_scalar("SELECT last_error FROM sync_jobs")
+    let last_error: Option<String> = sqlx::query_scalar("SELECT last_error FROM jobs")
         .fetch_one(&fx.pool)
         .await
         .unwrap_or_else(|err| panic!("last_error: {err}"));
@@ -943,7 +943,7 @@ async fn no_token_or_github_body_reaches_a_log_a_job_row_or_a_report() {
     ])));
     exec(
         &fx.pool,
-        "UPDATE sync_jobs SET status = 'queued', next_attempt_at = 0",
+        "UPDATE jobs SET status = 'queued', next_attempt_at = 0",
         &[],
     )
     .await;
@@ -960,7 +960,7 @@ async fn no_token_or_github_body_reaches_a_log_a_job_row_or_a_report() {
     }
 
     let stored: Vec<String> = sqlx::query_scalar(
-        "SELECT payload || ' ' || COALESCE(last_error, '') FROM sync_jobs
+        "SELECT payload || ' ' || COALESCE(last_error, '') FROM jobs
          UNION ALL SELECT COALESCE(error_message, '') || ' ' || vulnerability_summary
                    FROM publish_reports",
     )

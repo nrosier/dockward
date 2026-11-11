@@ -14,7 +14,7 @@
 --   source_credentials   new. One optional credential per source (decision 35).
 --   images, tag_observations, image_platforms, scanner_databases, scan_runs, scanner_findings,
 --   publish_reports      new (section 9). publish_reports replaces sync_reports.
---   sync_jobs            mapping_id becomes nullable source_id (NULL for db_update). Kinds: discover, pull,
+--   jobs                 renamed from sync_jobs (decision 58). mapping_id becomes nullable source_id (NULL for db_update). Kinds: discover, pull,
 --                        scan, publish, db_update.
 --   github_issues        sync_report_id becomes publish_report_id. Unique on (github_owner, github_repo, cve_id).
 --                        closed_manually added (migration 0006 of HarborGate, kept).
@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS scanner_databases (
 
 -- Job queue for discovery, pulls, scans, publishing and database refreshes.
 -- payload must never contain tokens or secrets: ids and the tag only.
-CREATE TABLE IF NOT EXISTS sync_jobs (
+CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
     source_id TEXT REFERENCES image_sources(id) ON DELETE CASCADE, -- NULL for a db_update job
     status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'done', 'failed')),
@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     db_built_at INTEGER,
     trigger TEXT NOT NULL CHECK (trigger IN ('first_pull', 'tag_moved', 'db_update')),
     status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed')),
-    sync_job_id TEXT REFERENCES sync_jobs(id) ON DELETE SET NULL,
+    job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
     started_at INTEGER,
     finished_at INTEGER,
     error TEXT                            -- one fixed string from section 6
@@ -191,7 +191,7 @@ CREATE TABLE IF NOT EXISTS publish_reports (
     id TEXT PRIMARY KEY,
     source_id TEXT NOT NULL REFERENCES image_sources(id) ON DELETE CASCADE,
     image_id TEXT REFERENCES images(id) ON DELETE SET NULL,
-    sync_job_id TEXT REFERENCES sync_jobs(id) ON DELETE SET NULL,
+    job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
     image_tag TEXT NOT NULL,
     image_digest TEXT NOT NULL,
     commit_sha TEXT,
@@ -295,7 +295,7 @@ CREATE TABLE IF NOT EXISTS job_runs (
 CREATE TABLE IF NOT EXISTS alert_deliveries (
     id TEXT PRIMARY KEY,
     channel_id TEXT NOT NULL REFERENCES alert_channels(id) ON DELETE CASCADE,
-    dedupe_key TEXT NOT NULL, -- CVE id for new CRITICAL CVE alerts; sync_failed:<sync_job_id> for sync failures (see alerts.md)
+    dedupe_key TEXT NOT NULL, -- CVE id for new CRITICAL CVE alerts; job_failed:<job_id> for job failures (see alerts.md)
     sent_at INTEGER NOT NULL DEFAULT (unixepoch()),
     UNIQUE (channel_id, dedupe_key)
 );

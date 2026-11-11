@@ -48,7 +48,7 @@ impl ScanPayload {
 /// Queues one scan per enabled scanner for the platform image `platform_id`, if the image is
 /// `stored`. Returns the number of scans queued. A scanner that already has a run for this
 /// platform and trigger is skipped. `source_id` links the jobs to the source whose pull stored
-/// the image, so the Sync jobs list and the sync-failed alert can name it.
+/// the image, so the Jobs list and the job-failed alert can name it.
 pub async fn queue_scans(
     pool: &SqlitePool,
     platform_id: &str,
@@ -104,7 +104,7 @@ pub async fn queue_scans_in(
         let job_id = ids::new_id()?;
         let run_id = ids::new_id()?;
         let payload = ScanPayload::new(&run_id, platform_id, scanner).to_text()?;
-        crate::db::sync_jobs::enqueue_in(conn, &job_id, source_id, &payload, now).await?;
+        crate::db::jobs::enqueue_in(conn, &job_id, source_id, &payload, now).await?;
         db::insert_queued_run(conn, &run_id, platform_id, scanner, trigger, &job_id).await?;
         queued += 1;
     }

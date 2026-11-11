@@ -5,6 +5,8 @@ Purpose: the build specification for a spinoff of HarborGate that drops Harbor e
 The product name is not decided (decision 22). `localscan` is a provisional working name. Where this spec names a new identifier with it (environment variables, a metric, a directory), the identifier is provisional and is renamed together with the product (section 14, rename set).
 
 Branch: `spinoff-local-scan`. It must never be merged to `main`. Every other spec file on this branch still describes HarborGate with Harbor. This file overrides them on this branch; where they disagree, this file wins, and section 1 names what it replaces. The binding source is [spinoff-decisions.md](spinoff-decisions.md) (decisions 1 to 45). Where an older spec file or an earlier draft of this file conflicts with a decision, the decision wins.
+Decision 58 rename (2026-11-11): the table `sync_jobs` is now `jobs`, `/api/v1/sync-jobs` is `/api/v1/jobs`, the column `sync_job_id` is `job_id`, and the sync-failed alert is the job-failed alert (event `job_failed`). Where this file says `sync_jobs` or `sync-jobs` below, read `jobs`. Kinds and behaviour are unchanged; the audit actions `sync_job.retry` and `sync_job.purge` are kept.
+
 
 Marks follow [README.md](README.md). `Decided (spinoff N)` cites a decision. `Decided (spec author, spinoff)` is a gap-filler inside the decisions with its reason; the user can overturn it. `UNVERIFIED:` can only be checked by a test run or a live system. Section 15 lists the open items. Nothing in section 15 is decided.
 

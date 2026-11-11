@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT status AS \"status!\" FROM jobs WHERE payload = ?\n           ORDER BY created_at DESC, rowid DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "status!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4becb18b445f2208614809603eaa271cf6f276feb4a4118b128b0010e4484b9b"
+}

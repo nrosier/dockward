@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM jobs j\n           LEFT JOIN image_sources m ON m.id = j.source_id\n           WHERE (? IS NULL OR m.user_id = ?)\n             AND (? IS NULL OR j.status = ?)\n             AND (? IS NULL OR j.source_id = ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9c86fc507bc98917c1ac8e55cc020025085e5365abaad2c154498dbbd84fdc5b"
+}

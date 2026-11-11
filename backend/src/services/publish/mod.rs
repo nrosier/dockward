@@ -36,10 +36,10 @@ use zeroize::Zeroizing;
 
 use crate::auth::crypto::DerivedKey;
 use crate::db::credentials as credential_db;
+use crate::db::jobs::{self, ClaimedJob};
 use crate::db::publish as publish_db;
 use crate::db::scans as scans_db;
 use crate::db::sources::{self as source_db, SourceRow};
-use crate::db::sync_jobs::{self, ClaimedJob};
 use crate::db::sync_reports::{self as report_db, NewReport};
 use crate::error::AppError;
 use crate::services::credentials::decrypt_token;
@@ -145,7 +145,7 @@ pub async fn queue_publish(pool: &SqlitePool, image_id: &str, now: i64) -> Resul
             continue;
         }
         let job_id = ids::new_id()?;
-        sync_jobs::enqueue_in(&mut tx, &job_id, Some(&source_id), &payload, now).await?;
+        jobs::enqueue_in(&mut tx, &job_id, Some(&source_id), &payload, now).await?;
         queued += 1;
     }
     tx.commit().await.map_err(|_| AppError::InternalError)?;
@@ -508,7 +508,7 @@ impl<G: CodeScanning, I: IssueApi, C: Clock> Publisher<G, I, C> {
                     id: &id,
                     source_id: &source.id,
                     image_id: Some(&context.image_id),
-                    sync_job_id: &context.job_id,
+                    job_id: &context.job_id,
                     image_tag: &context.tag,
                     image_digest: &context.digest,
                     commit_sha: Some(&revision),

@@ -3,7 +3,7 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::db::sync_jobs::ClaimedJob;
+use crate::db::jobs::ClaimedJob;
 use crate::services::discovery::tests::{Env, Reply, env};
 use crate::services::registry::manifest::OCI_MANIFEST;
 use crate::services::registry::transport::sha256_digest_text;
@@ -257,7 +257,7 @@ async fn a_payload_digest_that_differs_from_the_row_is_not_pulled() {
 async fn scan_jobs(env: &Env) -> Vec<(String, String)> {
     match sqlx::query_as::<_, (String, String)>(
         "SELECT r.scanner, r.trigger FROM scan_runs r
-         JOIN sync_jobs j ON j.id = r.sync_job_id
+         JOIN jobs j ON j.id = r.job_id
          WHERE r.status = 'queued' AND json_extract(j.payload, '$.kind') = 'scan'
            AND json_extract(j.payload, '$.run_id') = r.id
          ORDER BY r.scanner",

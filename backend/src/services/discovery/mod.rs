@@ -37,7 +37,7 @@ use sqlx::SqlitePool;
 use crate::auth::crypto::{self, DerivedKey};
 use crate::db::discovery as db;
 use crate::db::job_runs::{self, JobRun};
-use crate::db::sync_jobs;
+use crate::db::jobs;
 use crate::error::AppError;
 use crate::services::ids;
 use crate::services::registry::manifest::{self, Parsed};
@@ -91,7 +91,7 @@ impl DiscoverPayload {
         }
     }
 
-    /// The JSON text stored in `sync_jobs.payload`. The field order is fixed, so equal payloads
+    /// The JSON text stored in `jobs.payload`. The field order is fixed, so equal payloads
     /// compare equal as text.
     pub fn to_text(&self) -> Result<String, AppError> {
         serde_json::to_string(self).map_err(|_| AppError::InternalError)
@@ -616,7 +616,7 @@ impl Discovery {
                 };
                 let text = serde_json::to_string(&job).map_err(|_| AppError::InternalError)?;
                 let job_id = ids::new_id()?;
-                sync_jobs::enqueue_in(&mut tx, &job_id, Some(&item.source_id), &text, now).await?;
+                jobs::enqueue_in(&mut tx, &job_id, Some(&item.source_id), &text, now).await?;
                 queued += 1;
             }
         }

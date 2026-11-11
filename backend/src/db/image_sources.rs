@@ -202,7 +202,7 @@ pub async fn delete(conn: &mut SqliteConnection, id: &str) -> Result<(), AppErro
 /// True while a job of the source is running.
 pub async fn has_running_job(conn: &mut SqliteConnection, id: &str) -> Result<bool, AppError> {
     let row = sqlx::query!(
-        r#"SELECT EXISTS (SELECT 1 FROM sync_jobs WHERE source_id = ? AND status = 'running')
+        r#"SELECT EXISTS (SELECT 1 FROM jobs WHERE source_id = ? AND status = 'running')
                AS "running!: bool""#,
         id
     )

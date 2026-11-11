@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (SELECT 1 FROM jobs WHERE source_id = ? AND status = 'running')\n               AS \"running!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "running!: bool",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6f9b24cfb6525f642f839aea83e368438df51d5c138d96c87811da655ca0ede0"
+}

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT status AS \"status!\", updated_at AS \"updated_at?: i64\"\n           FROM jobs WHERE source_id = ?\n           ORDER BY updated_at DESC, rowid DESC\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "status!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "updated_at?: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "5ba2b69f842ad3de182924a6b121e4905c972be6565d9c8bd52de327afa0eb9c"
+}

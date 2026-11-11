@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (\n               SELECT 1 FROM image_platforms p\n               WHERE p.image_id = ?1\n                 AND (p.state IN ('queued', 'pulling')\n                      OR EXISTS (\n                          SELECT 1 FROM jobs j\n                          WHERE j.status IN ('queued', 'running')\n                            AND json_extract(j.payload, '$.kind') = 'pull'\n                            AND json_extract(j.payload, '$.platform_id') = p.id))\n           ) AS \"pending!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "pending!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "978eef654922a505206e3499b444cc64e22326c9d4e8662d627bb36961d8aa8c"
+}

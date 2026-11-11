@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT m.user_id AS \"user_id?: String\" FROM jobs j\n         LEFT JOIN image_sources m ON m.id = j.source_id\n         WHERE j.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id?: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "ae0202488a99bfe5d2075ba93da5efa8b2998218aeb45d465204a849f63a2cd6"
+}

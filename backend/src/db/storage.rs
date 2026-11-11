@@ -411,7 +411,7 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     db_built_at INTEGER,
     trigger TEXT NOT NULL CHECK (trigger IN ('first_pull', 'tag_moved', 'db_update')),
     status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed')),
-    sync_job_id TEXT,
+    job_id TEXT,
     started_at INTEGER,
     finished_at INTEGER,
     error TEXT

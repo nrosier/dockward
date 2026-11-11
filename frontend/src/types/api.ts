@@ -1,4 +1,4 @@
-// Response types for the routes the Dashboard, Mappings, CVEs and Sync jobs
+// Response types for the routes the Dashboard, Mappings, CVEs and Jobs
 // pages call. Field names are exactly those of specs/api.md.
 
 export interface Page<T> {
@@ -119,7 +119,7 @@ export interface SyncReport {
   new_cve_ids: string[] | null;
 }
 
-export interface SyncJob {
+export interface Job {
   id: string;
   mapping_id: string;
   status: JobStatus;
@@ -144,7 +144,7 @@ export interface DashboardSummary {
   accepted_cves: number;
   open_issues: number;
   failed_syncs: number;
-  recent_syncs: SyncJob[];
+  recent_syncs: Job[];
 }
 
 // One item of GET /mappings/:id/tags: the CVE view's tag set.

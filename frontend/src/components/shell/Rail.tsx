@@ -15,7 +15,7 @@ const TOP: Item[] = [
   { to: "/", label: "nav.dashboard", icon: LayoutDashboard, end: true },
   { to: "/sources", label: "nav.sources", icon: Boxes },
   { to: "/cves", label: "nav.cves", icon: ShieldAlert },
-  { to: "/sync-jobs", label: "nav.syncJobs", icon: RefreshCw },
+  { to: "/jobs", label: "nav.jobs", icon: RefreshCw },
 ];
 
 const ADMIN: Item = { to: "/admin", label: "nav.admin", icon: ShieldCheck };

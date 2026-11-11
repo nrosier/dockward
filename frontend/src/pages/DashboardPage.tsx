@@ -4,11 +4,11 @@ import { PageHeader } from "../components/mappings/PageHeader";
 import { LINK, TABLE, TD, TH } from "../components/mappings/styles";
 import { TableScroll } from "../components/mappings/TableScroll";
 import { useMappingLookup, useScopeAll } from "../components/mappings/useMappings";
-import { ImageCell } from "../components/syncjobs/ImageCell";
-import { JobStatusPill } from "../components/syncjobs/jobPill";
-import { triggerLabel } from "../components/syncjobs/labels";
-import { RetryButton } from "../components/syncjobs/RetryButton";
-import { Time } from "../components/syncjobs/Time";
+import { ImageCell } from "../components/jobs/ImageCell";
+import { JobStatusPill } from "../components/jobs/jobPill";
+import { triggerLabel } from "../components/jobs/labels";
+import { RetryButton } from "../components/jobs/RetryButton";
+import { Time } from "../components/jobs/Time";
 import { Card } from "../components/ui/Card";
 import { Panel } from "../components/mappings/Panel";
 import { Pill, type PillKind } from "../components/ui/Pill";
@@ -148,7 +148,7 @@ export default function DashboardPage() {
           kind="failed"
           count={data.failed_syncs}
           label={t("dashboard.failedSyncs")}
-          to={`/sync-jobs?status=failed${scopeQuery}`}
+          to={`/jobs?status=failed${scopeQuery}`}
           alert
         />
       </div>
@@ -158,8 +158,8 @@ export default function DashboardPage() {
           <h2 id="recent" className="text-[15px] font-semibold">
             {t("dashboard.recentSyncs")}
           </h2>
-          <Link to="/sync-jobs" className={`text-[13px] ${LINK}`}>
-            {t("dashboard.allSyncJobs")}
+          <Link to="/jobs" className={`text-[13px] ${LINK}`}>
+            {t("dashboard.allJobs")}
           </Link>
         </div>
         {data.recent_syncs.length === 0 ? (
@@ -169,13 +169,13 @@ export default function DashboardPage() {
             <table className={TABLE}>
               <thead>
                 <tr>
-                  <th className={TH}>{t("syncJobs.col.image")}</th>
+                  <th className={TH}>{t("jobs.col.image")}</th>
                   <th className={TH}>{t("dashboard.col.target")}</th>
-                  <th className={TH}>{t("syncJobs.col.trigger")}</th>
-                  <th className={TH}>{t("syncJobs.col.status")}</th>
+                  <th className={TH}>{t("jobs.col.trigger")}</th>
+                  <th className={TH}>{t("jobs.col.status")}</th>
                   <th className={TH}>{t("dashboard.col.when")}</th>
                   <th className={TH}>
-                    <span className="sr-only">{t("syncJobs.col.actions")}</span>
+                    <span className="sr-only">{t("jobs.col.actions")}</span>
                   </th>
                 </tr>
               </thead>

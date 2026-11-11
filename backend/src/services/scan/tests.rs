@@ -14,7 +14,7 @@ use sqlx::SqlitePool;
 use super::queue::queue_scans;
 use super::*;
 use crate::db;
-use crate::db::sync_jobs::ClaimedJob;
+use crate::db::jobs::ClaimedJob;
 use crate::services::issue_lifecycle::test_support::{FakeGithub, FakeIssues};
 use crate::services::merged_view;
 use crate::worker::JobOutcome;
@@ -218,7 +218,7 @@ impl Fx {
     async fn drain(&self) -> Vec<(String, JobOutcome)> {
         let mut outcomes = Vec::new();
         loop {
-            let claimed = match crate::db::sync_jobs::claim_next(&self.pool, NOW + 10_000).await {
+            let claimed = match crate::db::jobs::claim_next(&self.pool, NOW + 10_000).await {
                 Ok(job) => job,
                 Err(err) => panic!("claim: {err:?}"),
             };
@@ -228,7 +228,7 @@ impl Fx {
             // The publish hook queues a `publish` job when an image's scans end. It has its own
             // tests (`services::publish`); here it is only marked done.
             if job.payload.contains(r#""kind":"publish""#) {
-                if let Err(err) = crate::db::sync_jobs::mark_done(&self.pool, &job.id, NOW).await {
+                if let Err(err) = crate::db::jobs::mark_done(&self.pool, &job.id, NOW).await {
                     panic!("mark publish: {err:?}");
                 }
                 continue;
@@ -239,14 +239,14 @@ impl Fx {
             let outcome = run_scan(&self.pool, &self.env, &self.store, &job, NOW).await;
             let finished = match &outcome {
                 JobOutcome::Done | JobOutcome::DoneWithNote(_) => {
-                    crate::db::sync_jobs::mark_done(&self.pool, &job.id, NOW).await
+                    crate::db::jobs::mark_done(&self.pool, &job.id, NOW).await
                 }
                 JobOutcome::Failed(text) | JobOutcome::Permanent(text) => {
                     let mut conn = match self.pool.acquire().await {
                         Ok(conn) => conn,
                         Err(err) => panic!("conn: {err}"),
                     };
-                    crate::db::sync_jobs::record_failure(
+                    crate::db::jobs::record_failure(
                         &mut conn,
                         &job.id,
                         job.attempts + 1,
@@ -613,7 +613,7 @@ fn the_scanner_process_gets_the_verified_flags_and_a_cleared_environment() {
             let rows: Vec<String> = match sqlx::query_scalar::<_, String>(
                 "SELECT COALESCE(error, '') || ' ' || COALESCE(scanner_version, '') FROM scan_runs
                  UNION ALL
-                 SELECT payload || ' ' || COALESCE(last_error, '') FROM sync_jobs",
+                 SELECT payload || ' ' || COALESCE(last_error, '') FROM jobs",
             )
             .fetch_all(&fx.pool)
             .await
@@ -793,7 +793,7 @@ async fn a_failed_scanner_never_closes_an_issue() {
     fx.script("grype", &format!("cat '{}'", grype_empty.display()));
     exec(
         &fx.pool,
-        "UPDATE sync_jobs SET status = 'queued', next_attempt_at = 0 WHERE status = 'failed'",
+        "UPDATE jobs SET status = 'queued', next_attempt_at = 0 WHERE status = 'failed'",
         &[],
     )
     .await;
