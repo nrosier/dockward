@@ -9,7 +9,6 @@ import { safeHttpsUrl } from "../components/cves/safeUrl";
 import { ConfirmDialog } from "../components/mappings/ConfirmDialog";
 import { LINK, TABLE, TD, TH } from "../components/mappings/styles";
 import { TableScroll } from "../components/mappings/TableScroll";
-import { mappingName } from "../components/mappings/useMappings";
 import { formatDate } from "../components/jobs/dates";
 import { Time } from "../components/jobs/Time";
 import { Button, buttonClass } from "../components/ui/Button";
@@ -19,7 +18,8 @@ import { ErrorMessage, LoadingMessage, NotFoundMessage } from "../components/ui/
 import { t } from "../i18n";
 import { ApiError, api } from "../lib/api";
 import { useMe } from "../lib/session";
-import type { CveDetail, Mapping } from "../types/api";
+import type { CveDetail } from "../types/api";
+import type { Source } from "../types/sources";
 
 const DT = "text-[11px] leading-none font-semibold tracking-[0.06em] text-muted uppercase";
 
@@ -34,11 +34,11 @@ export default function CveDetailPage() {
     queryKey: ["cve", id],
     queryFn: () => api<CveDetail>("GET", `/cves/${encodeURIComponent(id)}`),
   });
-  const mappingId = cveQuery.data?.mapping_id;
-  const mappingQuery = useQuery({
-    queryKey: ["mappings", "one", mappingId],
-    queryFn: () => api<Mapping>("GET", `/mappings/${encodeURIComponent(mappingId ?? "")}`),
-    enabled: mappingId !== undefined,
+  const sourceId = cveQuery.data?.source_id;
+  const sourceQuery = useQuery({
+    queryKey: ["image-sources", "one", sourceId],
+    queryFn: () => api<Source>("GET", `/image-sources/${encodeURIComponent(sourceId ?? "")}`),
+    enabled: sourceId !== undefined,
   });
 
   const refresh = async () => {
@@ -65,9 +65,9 @@ export default function CveDetailPage() {
     return cveQuery.error instanceof ApiError && cveQuery.error.status === 404 ? <NotFoundMessage /> : <ErrorMessage />;
   }
   const cve = cveQuery.data;
-  const mapping = mappingQuery.data;
-  const owner = mapping !== undefined && me.data?.id === mapping.user_id;
-  const mappingLabel = mapping === undefined ? "" : mappingName(mapping);
+  const source = sourceQuery.data;
+  const owner = source !== undefined && me.data?.id === source.user_id;
+  const sourceLabel = source === undefined ? "" : source.repository;
   const issueUrl = safeHttpsUrl(cve.github_issue_url);
   const openIssue = cve.github_issue_status === "open";
   const conflict = createIssue.error instanceof ApiError && createIssue.error.status === 409;
@@ -153,9 +153,9 @@ export default function CveDetailPage() {
           <div className="flex flex-col gap-1.5">
             <dt className={DT}>{t("cves.detail.mapping")}</dt>
             <dd className="m-0">
-              {mapping === undefined ? null : (
+              {source === undefined ? null : (
                 <>
-                  {mappingLabel} → <span className="font-mono">{mapping.github_owner}/{mapping.github_repo}</span>
+                  {sourceLabel} → <span className="font-mono">{source.github_owner}/{source.github_repo}</span>
                 </>
               )}
             </dd>
@@ -229,7 +229,7 @@ export default function CveDetailPage() {
 
       {owner ? (
         <>
-          <AcceptDialog open={acceptOpen} onOpenChange={setAcceptOpen} cve={cve} mappingLabel={mappingLabel} />
+          <AcceptDialog open={acceptOpen} onOpenChange={setAcceptOpen} cve={cve} mappingLabel={sourceLabel} />
           <ConfirmDialog
             open={revokeOpen}
             onOpenChange={setRevokeOpen}

@@ -3,26 +3,30 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { t } from "../i18n";
 import { json, renderWithRoutes, stubApi, user } from "../test/render";
-import type { CveDetail, Mapping } from "../types/api";
+import type { CveDetail } from "../types/api";
+import type { Source } from "../types/sources";
 import CveDetailPage from "./CveDetailPage";
 
-const mapping: Mapping = {
-  id: "m1",
+const source: Source = {
+  id: "s1",
   user_id: "u1",
+  hub_id: "h1",
+  repository: "ghcr.io/team/app",
+  tag_value: "latest",
   github_cred_id: "c2",
-  harbor_project: "platform",
-  harbor_repository: "api-gateway",
   github_owner: "example-org",
   github_repo: "api-gateway",
   default_branch: "main",
   auto_create_issues: true,
   min_issue_severity: "HIGH",
-  created_at: null,
+  has_credential: true,
+  last_discovery_at: null,
 };
 
 function cve(over: Partial<CveDetail>): CveDetail {
   return {
     id: "m1:CVE-2026-0001",
+    source_id: "s1",
     mapping_id: "m1",
     cve_id: "CVE-2026-0001",
     severity: "CRITICAL",
@@ -50,7 +54,7 @@ function stub(detail: CveDetail, onAccept?: (body: unknown) => void) {
   return stubApi((path, init) => {
     if (path === "/api/v1/account/me") return json({ user: user("user") });
     if (path === "/api/v1/cves/m1%3ACVE-2026-0001" && init?.method === "GET") return json(detail);
-    if (path === "/api/v1/mappings/m1") return json(mapping);
+    if (path === "/api/v1/image-sources/s1") return json(source);
     if (path === "/api/v1/cves/m1%3ACVE-2026-0001/accept" && init?.method === "POST") {
       onAccept?.(JSON.parse(String(init.body)));
       return json({ acceptance: {} }, 201);
@@ -117,6 +121,15 @@ describe("CveDetailPage", () => {
       "href",
       "https://github.com/example-org/api-gateway/issues/214",
     );
+  });
+
+  it("loads the source by source_id and shows its GitHub repository, not a mappings route", async () => {
+    const fetchMock = stub(cve({}));
+    renderWithRoutes(routes, url);
+    expect(await screen.findByText("example-org/api-gateway")).toBeInTheDocument();
+    const paths = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(paths.some((path) => path.startsWith("/api/v1/mappings"))).toBe(false);
+    expect(paths).toContain("/api/v1/image-sources/s1");
   });
 
   it("accept sends the reason and the end of the expiry day in UTC", async () => {

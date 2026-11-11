@@ -62,6 +62,7 @@ export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN";
 
 export interface CveSummary {
   id: string;
+  source_id: string;
   mapping_id: string;
   cve_id: string;
   severity: Severity;
