@@ -88,6 +88,28 @@ describe("JobsPage", () => {
     expect(within(table).getAllByText(t("jobs.noNewVulns"))).toHaveLength(1);
   });
 
+  it("shows a View log button on every row", async () => {
+    stub([failed, neverRun]);
+    renderAt(<JobsPage />);
+    expect(await screen.findAllByRole("button", { name: t("jobs.log.open") })).toHaveLength(2);
+  });
+
+  it("View log opens the log dialog", async () => {
+    const fetchMock = stubApi((path) => {
+      if (path === "/api/v1/account/me") return json({ user: user("user") });
+      if (path.startsWith("/api/v1/jobs/j9/log")) {
+        return json({ job_id: "j9", kind: "scan", scanner: "trivy", status: "done", attempt: 1, steps: [], lines: [], next_after: null });
+      }
+      if (path.startsWith("/api/v1/jobs")) return json({ items: [failed], page: 1, page_size: 50, total: 1 });
+      if (path.startsWith("/api/v1/mappings")) return json({ items: [], page: 1, page_size: 200, total: 0 });
+      return undefined;
+    });
+    renderAt(<JobsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: t("jobs.log.open") }));
+    expect(await screen.findByRole("dialog", { name: t("jobs.log.title") })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).startsWith("/api/v1/jobs/j9/log"))).toBe(true);
+  });
+
   it("a failed job still shows its error", async () => {
     stub([failed]);
     renderAt(<JobsPage />);
