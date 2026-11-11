@@ -16,6 +16,8 @@ pub mod db_refresh;
 pub mod discovery;
 pub mod findings;
 pub mod github_issues;
+#[allow(dead_code)] // Used by the GitHub re-key (#311, slices 5 and 6b).
+pub mod github_rekeys;
 pub mod hubs;
 pub mod image_sources;
 pub mod job_runs;
@@ -208,6 +210,7 @@ mod tests {
         let expected = [
             "alert_channels",
             "alert_deliveries",
+            "analysis_retirements",
             "audit_log",
             "cve_acceptances",
             "cve_findings",
@@ -216,6 +219,7 @@ mod tests {
             "image_platforms",
             "image_sources",
             "images",
+            "issue_rekeys",
             "job_runs",
             "jobs",
             "publish_reports",
