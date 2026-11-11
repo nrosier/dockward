@@ -106,6 +106,12 @@ pub struct PullPayload {
     pub digest: String,
     /// `first_pull` or `tag_moved` (decision 17).
     pub trigger: String,
+    /// The repository of the discovery run, and the tag that matched. Absent on a job queued
+    /// before these fields existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_full_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 /// Maps a client error to the fixed `last_error` text of section 6. No registry text is used.
@@ -614,6 +620,8 @@ impl Discovery {
                     platform_id,
                     digest: digest.clone(),
                     trigger: trigger.to_owned(),
+                    repo_full_name: Some(payload.repository.clone()),
+                    tag: Some(item.tag.clone()),
                 };
                 let text = serde_json::to_string(&job).map_err(|_| AppError::InternalError)?;
                 let job_id = ids::new_id()?;

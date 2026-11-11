@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (\n               SELECT 1 FROM jobs\n               WHERE json_valid(payload)\n                 AND json_extract(payload, '$.kind') = 'publish'\n                 AND json_extract(payload, '$.source_id') = ?\n                 AND json_extract(payload, '$.image_id') = ?\n                 AND status IN ('queued', 'running')\n           ) AS \"open!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "open!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f30e36a183d3e1b6a7f2e7e43f777c37cdfb7bd2a6d927d4105cbc2a655b1e50"
+}

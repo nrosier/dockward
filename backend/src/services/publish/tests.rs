@@ -1180,3 +1180,25 @@ async fn a_bad_payload_is_refused() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_new_publish_job_payload_carries_the_image_and_trigger() {
+    let fx = Fx::new("publish-fields").await;
+    fx.image(IMG_1).await;
+    fx.platform(P_1, IMG_1, "linux/amd64", &labels_ok()).await;
+    fx.observe("s1", "v1", IMG_1, 100).await;
+    fx.run(P_1, "trivy", "done", 10, &[]).await;
+    fx.run(P_1, "grype", "done", 11, &[]).await;
+    assert_eq!(fx.queue(IMG_1).await, 1);
+    let text: String = sqlx::query_scalar(
+        "SELECT payload FROM jobs WHERE json_extract(payload, '$.kind') = 'publish'",
+    )
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap_or_default();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    assert_eq!(value["repo_full_name"], "o/app");
+    assert_eq!(value["tag"], "v1");
+    assert_eq!(value["digest"], format!("sha256:{IMG_1}"));
+    assert_eq!(value["trigger"], "scan");
+}

@@ -3,7 +3,8 @@
 //!
 //! One `scan` job per (platform image, enabled scanner). The job and its `scan_runs` row are
 //! inserted together in one `BEGIN IMMEDIATE` transaction, so a run never exists without a job
-//! and a job never without a run. The payload holds ids and the fixed scanner key only.
+//! and a job never without a run. The payload holds ids, the fixed scanner key, and the image
+//! (repository, digest, tag) with the trigger, so the Jobs list can show them.
 //!
 //! Queueing is idempotent per (platform image, trigger, scanner) for `first_pull` and
 //! `tag_moved`: a repeated pull job adds nothing the second time. A `db_update` rescan is skipped
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::db::scans as db;
+use crate::db::scans::PlatformImage;
 use crate::error::AppError;
 use crate::services::ids;
 use crate::services::issue_lifecycle::enabled_scanner_keys;
@@ -20,23 +22,42 @@ use crate::services::issue_lifecycle::enabled_scanner_keys;
 /// The triggers a scan run records (`scan_runs.trigger`).
 pub const TRIGGERS: [&str; 3] = ["first_pull", "tag_moved", "db_update"];
 
-/// The payload of a `scan` job: ids and the scanner key only (section 9). Never a path, a
-/// registry string or a token.
+/// The payload of a `scan` job: ids, the scanner key, and the image it is about (repository,
+/// digest, tag) with the trigger. The image fields are what the Jobs list shows. They are
+/// `serde(default)` so a job queued before they existed still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanPayload {
     pub kind: String,
     pub run_id: String,
     pub platform_id: String,
     pub scanner: String,
+    #[serde(default)]
+    pub repo_full_name: Option<String>,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub digest: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<String>,
 }
 
 impl ScanPayload {
-    pub fn new(run_id: &str, platform_id: &str, scanner: &str) -> Self {
+    pub fn new(
+        run_id: &str,
+        platform_id: &str,
+        scanner: &str,
+        image: &PlatformImage,
+        trigger: &str,
+    ) -> Self {
         Self {
             kind: "scan".to_owned(),
             run_id: run_id.to_owned(),
             platform_id: platform_id.to_owned(),
             scanner: scanner.to_owned(),
+            repo_full_name: Some(image.repo_full_name.clone()),
+            tag: image.tag.clone(),
+            digest: Some(image.digest.clone()),
+            trigger: Some(trigger.to_owned()),
         }
     }
 
@@ -97,13 +118,21 @@ pub async fn queue_scans_in(
         db::scanners_with_run(conn, platform_id, trigger).await?
     };
     let mut queued = 0usize;
+    let mut image = None;
     for scanner in enabled
         .iter()
         .filter(|key| !known.contains(key) && only.is_none_or(|one| one == key.as_str()))
     {
+        if image.is_none() {
+            image = db::platform_image_in(conn, platform_id, source_id).await?;
+        }
+        // The platform was read as stored above, so its row and image exist.
+        let Some(image) = image.as_ref() else {
+            return Err(AppError::InternalError);
+        };
         let job_id = ids::new_id()?;
         let run_id = ids::new_id()?;
-        let payload = ScanPayload::new(&run_id, platform_id, scanner).to_text()?;
+        let payload = ScanPayload::new(&run_id, platform_id, scanner, image, trigger).to_text()?;
         crate::db::jobs::enqueue_in(conn, &job_id, source_id, &payload, now).await?;
         db::insert_queued_run(conn, &run_id, platform_id, scanner, trigger, &job_id).await?;
         queued += 1;

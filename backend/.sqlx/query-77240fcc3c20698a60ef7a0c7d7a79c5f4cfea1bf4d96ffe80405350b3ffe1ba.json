@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.repository AS \"repository!\", i.digest AS \"digest!\",\n                  (SELECT o.tag FROM tag_observations o\n                    WHERE o.image_id = i.id AND o.source_id = ?\n                    ORDER BY o.first_seen_at DESC, o.rowid DESC LIMIT 1) AS \"tag?\"\n           FROM images i\n           WHERE i.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "repository!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "repository"
+          }
+        }
+      },
+      {
+        "name": "digest!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "digest"
+          }
+        }
+      },
+      {
+        "name": "tag?",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tag_observations",
+            "name": "tag"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "77240fcc3c20698a60ef7a0c7d7a79c5f4cfea1bf4d96ffe80405350b3ffe1ba"
+}

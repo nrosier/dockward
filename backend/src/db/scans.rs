@@ -348,3 +348,58 @@ pub async fn fail_orphan_runs(conn: &mut SqliteConnection, now: i64) -> Result<u
     .map(|done| done.rows_affected())
     .map_err(db_err)
 }
+
+/// The image a platform belongs to, for the payload of a job: the repository, the image digest,
+/// and the tag `source_id` observed for that image (newest observation first). `tag` is `None`
+/// when the source never observed the image, for example a database refresh with no source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformImage {
+    pub repo_full_name: String,
+    pub digest: String,
+    pub tag: Option<String>,
+}
+
+/// The [`PlatformImage`] of a platform, or `None` when the platform row does not exist.
+pub async fn platform_image_in(
+    conn: &mut SqliteConnection,
+    platform_id: &str,
+    source_id: Option<&str>,
+) -> Result<Option<PlatformImage>, AppError> {
+    let image_id = sqlx::query_scalar!(
+        r#"SELECT image_id AS "image_id!" FROM image_platforms WHERE id = ?"#,
+        platform_id
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    match image_id {
+        Some(image_id) => image_in(conn, &image_id, source_id).await,
+        None => Ok(None),
+    }
+}
+
+/// The [`PlatformImage`] of an image, or `None` when the image row does not exist.
+pub async fn image_in(
+    conn: &mut SqliteConnection,
+    image_id: &str,
+    source_id: Option<&str>,
+) -> Result<Option<PlatformImage>, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT i.repository AS "repository!", i.digest AS "digest!",
+                  (SELECT o.tag FROM tag_observations o
+                    WHERE o.image_id = i.id AND o.source_id = ?
+                    ORDER BY o.first_seen_at DESC, o.rowid DESC LIMIT 1) AS "tag?"
+           FROM images i
+           WHERE i.id = ?"#,
+        source_id,
+        image_id
+    )
+    .fetch_optional(conn)
+    .await
+    .map_err(db_err)?;
+    Ok(row.map(|row| PlatformImage {
+        repo_full_name: row.repository,
+        digest: row.digest,
+        tag: row.tag,
+    }))
+}

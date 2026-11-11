@@ -1,7 +1,7 @@
 //! The `scan` job and the convert step (`specs/spinoff-local-scan.md`, section 6 steps 4 and 5,
 //! section 7, section 9; decisions 28, 29 and 19).
 //!
-//! A scan job carries ids only ([`queue::ScanPayload`]). It runs the pinned scanner out of
+//! A scan job carries ids, the scanner key and the image it is about ([`queue::ScanPayload`]). It runs the pinned scanner out of
 //! process through [`ScannerRunner`] (absolute path, argument vector, cleared environment, the
 //! process group killed on timeout, one process at a time), reads the output with the strict
 //! parser, and stores the run in one `BEGIN IMMEDIATE` transaction: the run becomes `done`, its

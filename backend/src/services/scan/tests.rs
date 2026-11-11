@@ -695,7 +695,9 @@ fn the_scanner_process_gets_the_verified_flags_and_a_cleared_environment() {
     );
     for row in &rows {
         assert!(!row.contains(CANARY), "a secret in a row: {row}");
-        assert!(!row.contains('/'), "no path in a row: {row}");
+        // A row may name the repository (`o/app`), but never a filesystem path.
+        assert!(!row.contains(&layout), "no layout path in a row: {row}");
+        assert!(!row.contains(&cache), "no cache path in a row: {row}");
     }
     let logged = logs.text();
     assert!(!logged.contains(CANARY), "a secret in the logs: {logged}");
@@ -1031,4 +1033,47 @@ async fn a_scan_step_logs_its_stderr_redacted_and_never_stores_the_report() {
     .await
     .unwrap_or_default();
     assert_eq!(outcome, "ok");
+}
+
+/// The payload text of the first `scan` job in the table.
+async fn first_scan_payload(pool: &SqlitePool) -> String {
+    sqlx::query_scalar::<_, String>(
+        "SELECT payload FROM jobs WHERE json_extract(payload, '$.kind') = 'scan' ORDER BY rowid LIMIT 1",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_new_scan_job_payload_carries_the_image_and_trigger() {
+    let (_, grype) = ok_scripts("");
+    let fx = Fx::new("payload-fields", "", &grype).await;
+    fx.queue(P_OLD).await;
+    let text = first_scan_payload(&fx.pool).await;
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    assert_eq!(value["repo_full_name"], "o/app");
+    assert_eq!(value["tag"], "v1");
+    assert_eq!(value["digest"], "sha256:old");
+    assert_eq!(value["trigger"], "first_pull");
+}
+
+#[tokio::test]
+async fn the_jobs_list_returns_the_image_of_a_new_scan_job() {
+    let (_, grype) = ok_scripts("");
+    let fx = Fx::new("list-image", "", &grype).await;
+    fx.queue(P_OLD).await;
+    let query = crate::services::jobs::ListQuery::default();
+    let page = crate::services::jobs::list(&fx.pool, "u1", &query)
+        .await
+        .unwrap_or_else(|err| panic!("list: {err:?}"));
+    let job = page
+        .items
+        .iter()
+        .find(|job| job.kind.as_deref() == Some("scan"))
+        .unwrap_or_else(|| panic!("no scan job listed"));
+    assert_eq!(job.image.repo_full_name.as_deref(), Some("o/app"));
+    assert_eq!(job.image.tag.as_deref(), Some("v1"));
+    assert_eq!(job.image.digest.as_deref(), Some("sha256:old"));
+    assert_eq!(job.trigger.as_deref(), Some("first_pull"));
 }

@@ -810,3 +810,22 @@ fn platform_text_refuses_odd_registry_text() {
     assert!(platform_text("linux", "", None).is_err());
     assert!(platform_text("linux", &"a".repeat(80), None).is_err());
 }
+
+#[tokio::test]
+async fn a_new_pull_job_payload_carries_the_repository_and_tag() {
+    let env = env("pull-fields").await;
+    env.add_source("s1", REPO, "latest").await;
+    set_tags(&env.script, REPO, &["latest"]);
+    put_single(&env.script, REPO, "latest", "amd64", "pf");
+    assert_eq!(env.run(REPO, NOW).await.queued, 1);
+    let text: String = sqlx::query_scalar(
+        "SELECT payload FROM jobs WHERE json_extract(payload, '$.kind') = 'pull'",
+    )
+    .fetch_one(&env.pool)
+    .await
+    .unwrap_or_default();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    assert_eq!(value["repo_full_name"], REPO);
+    assert_eq!(value["tag"], "latest");
+    assert_eq!(value["trigger"], "first_pull");
+}
