@@ -64,7 +64,7 @@ VOLUME ["/data"]
 # Same values as docker-compose.yml. Exec form: the image has no shell.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD ["/usr/local/bin/dockward", "healthcheck"]
 LABEL org.opencontainers.image.title="Dockward" \
-      org.opencontainers.image.source="https://github.com/nrosier/harborgate" \
+      org.opencontainers.image.source="https://github.com/nrosier/dockward" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.description="Harbor to GitHub Code Scanning relay" \
       org.opencontainers.image.revision="$REVISION"

@@ -58,14 +58,14 @@ Every published image is signed by the release workflow with keyless cosign. No 
 ```bash
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github.com/nrosier/harborgate/\.github/workflows/docker\.yml@refs/(heads/main|tags/v[0-9].*)$' \
+  --certificate-identity-regexp '^https://github.com/nrosier/dockward/\.github/workflows/docker\.yml@refs/(heads/main|tags/v[0-9].*)$' \
   ghcr.io/nrosier/dockward:<TAG>
 ```
 
 A successful run prints the checks it made and a JSON record for the signature. Look for:
 
 - **Issuer:** `https://token.actions.githubusercontent.com`, the GitHub Actions OIDC issuer.
-- **Subject:** the signing identity, `https://github.com/nrosier/harborgate/.github/workflows/docker.yml@refs/...`. It names the repository, the workflow path, and the ref (`refs/heads/main` or `refs/tags/v<version>`).
+- **Subject:** the signing identity, `https://github.com/nrosier/dockward/.github/workflows/docker.yml@refs/...`. It names the repository, the workflow path, and the ref (`refs/heads/main` or `refs/tags/v<version>`).
 - **Rekor record:** the signature is recorded in the Rekor transparency log, and cosign confirms that record.
 
 If the command fails, do not run the image.

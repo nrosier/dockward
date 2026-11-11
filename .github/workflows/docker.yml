@@ -275,7 +275,7 @@ jobs:
         run: |
           cosign verify \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp '^https://github.com/nrosier/harborgate/\.github/workflows/docker\.yml@refs/(heads/main|tags/v[0-9].*)$' \
+            --certificate-identity-regexp '^https://github.com/nrosier/dockward/\.github/workflows/docker\.yml@refs/(heads/main|tags/v[0-9].*)$' \
             "${IMAGE}@${DIGEST}" > /dev/null
 
       - name: Attest build provenance

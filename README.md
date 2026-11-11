@@ -1,9 +1,9 @@
 # Dockward
 
 <p align="center">
-  <a href="https://github.com/nrosier/harborgate/actions/workflows/docker.yml"><img alt="Docker" src="https://github.com/nrosier/harborgate/actions/workflows/docker.yml/badge.svg"></a>
-  <a href="https://github.com/nrosier/harborgate/releases"><img alt="Version" src="https://img.shields.io/github/v/release/nrosier/harborgate"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/nrosier/harborgate"></a>
+  <a href="https://github.com/nrosier/dockward/actions/workflows/docker.yml"><img alt="Docker" src="https://github.com/nrosier/dockward/actions/workflows/docker.yml/badge.svg"></a>
+  <a href="https://github.com/nrosier/dockward/releases"><img alt="Version" src="https://img.shields.io/github/v/release/nrosier/dockward"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/nrosier/dockward"></a>
 </p>
 
 Dockward is a local-first, multi-tenant security relay. It receives container vulnerability reports from Harbor, primarily through webhooks with polling as a backup, converts them to the SARIF 2.1.0 format, and pushes them to GitHub Code Scanning. It can also open GitHub Issues for high-severity findings. The backend is written in Rust (Axum) and the frontend in React (Vite and TypeScript).
