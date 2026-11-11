@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT l.id AS \"id!\", s.seq AS \"step_seq!: i64\", l.at AS \"at!: i64\",\n                  l.stream AS \"stream!\", l.text AS \"text!\"\n           FROM job_log_lines l\n           JOIN job_log_steps s ON s.id = l.step_id\n           WHERE s.job_id = ? AND s.attempt = ? AND l.id > ?\n           ORDER BY l.id ASC\n           LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "job_log_lines",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "step_seq!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "job_log_steps",
+            "name": "seq"
+          }
+        }
+      },
+      {
+        "name": "at!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "job_log_lines",
+            "name": "at"
+          }
+        }
+      },
+      {
+        "name": "stream!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_log_lines",
+            "name": "stream"
+          }
+        }
+      },
+      {
+        "name": "text!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_log_lines",
+            "name": "text"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "95b1807dc4e6eb73e241a80c115f2855992884d0d05d571d55fad512bb221212"
+}

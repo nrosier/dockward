@@ -42,6 +42,7 @@ use crate::services::jobs::MAX_ATTEMPTS;
 use crate::services::publish;
 use crate::services::scanner::parse::{self, Report};
 use crate::services::scanner::process::{Invocation, Limits, ScannerRunner};
+use crate::services::scanner::steplog::{self, StepSlot};
 use crate::services::scanner::{Scanner, cache_dir, environment, scan_args};
 use crate::services::storage::eviction;
 use crate::services::storage::job::read_limits;
@@ -125,12 +126,16 @@ impl ScanEnv {
 }
 
 /// The timeout and output cap of one scanner process, from the operator settings or the defaults
-/// (section 13). A database refresh uses the same limits as a scan.
+/// (section 13). A database refresh uses the same limits as a scan. A stored timeout is clamped to
+/// the range the settings API enforces, so a bad stored value cannot give a near-zero or an
+/// unbounded run.
 pub(crate) async fn process_limits<R: StoreRepository>(repo: &R) -> Result<Limits, AppError> {
+    let (min, max) = crate::services::scan_settings::TIMEOUT_RANGE;
     let timeout = parse_positive_u64(
         repo.setting(TIMEOUT_KEY).await?.as_deref(),
         crate::services::scanner::process::DEFAULT_TIMEOUT.as_secs(),
-    );
+    )
+    .clamp(min, max);
     let output_max = parse_positive_u64(
         repo.setting(OUTPUT_MAX_KEY).await?.as_deref(),
         crate::services::scanner::process::DEFAULT_OUTPUT_MAX_BYTES,
@@ -170,7 +175,12 @@ pub async fn run_scan(
     if checked_id(&payload.run_id).is_err() || checked_id(&payload.platform_id).is_err() {
         return JobOutcome::Permanent(MSG_BAD_PAYLOAD.to_owned());
     }
-    match scan_once(pool, env, store, &payload, scanner, job.attempts, now).await {
+    let slot = StepSlot {
+        job_id: &job.id,
+        attempt: job.attempts + 1,
+        seq: 0,
+    };
+    match scan_once(pool, env, store, &payload, scanner, &slot, now).await {
         Ok(()) => JobOutcome::Done,
         Err(Stop::AlreadyDone) => JobOutcome::DoneWithNote("already scanned".to_owned()),
         Err(Stop::Permanent(text)) => JobOutcome::Permanent(text),
@@ -228,7 +238,7 @@ async fn scan_once(
     store: &StoreRoot,
     payload: &ScanPayload,
     scanner: Scanner,
-    attempts: i64,
+    slot: &StepSlot<'_>,
     now: i64,
 ) -> Result<(), Stop> {
     let run_id = payload.run_id.as_str();
@@ -276,8 +286,9 @@ async fn scan_once(
         .await);
     }
 
-    let last = attempts + 1 >= MAX_ATTEMPTS;
-    let outcome = scan_and_store(pool, env, &repo, &run, &layout, scanner, (now, last)).await;
+    // `slot.attempt` is this attempt's number (the attempts already made, plus one).
+    let last = slot.attempt >= MAX_ATTEMPTS;
+    let outcome = scan_and_store(pool, env, &repo, &run, &layout, scanner, (now, last, slot)).await;
     // The store may be over its maximum while this run held its image. The check runs again when
     // a scan run ends (section 4), whatever the outcome.
     match eviction::enforce(&repo, store, limits.max_stored, None, now).await {
@@ -306,7 +317,7 @@ async fn scan_and_store(
     run: &db::RunRow,
     layout: &Path,
     scanner: Scanner,
-    (now, last): (i64, bool),
+    (now, last, slot): (i64, bool, &StepSlot<'_>),
 ) -> Result<(), Stop> {
     let run_id = run.id.as_str();
     let fail =
@@ -318,15 +329,29 @@ async fn scan_and_store(
     let process_limits = process_limits(repo).await.map_err(internal)?;
     let args: Vec<OsString> = scan_args(scanner, layout);
     let vars = environment(&env.cache_root, scanner, true);
-    let result = env
+    // The step's log (#308): its stderr tail, redacted. A scan's stdout is the report, so it is
+    // returned to the parser below and never stored as a log line.
+    let started_at = crate::worker::now_secs();
+    let command = format!("{} scan", scanner.key());
+    let step_id = steplog::begin(
+        pool,
+        slot,
+        &command,
+        started_at,
+        process_limits.timeout.as_secs(),
+    )
+    .await;
+    let (result, record) = env
         .runner
-        .run(Invocation {
+        .run_recorded(Invocation {
             program: env.program(scanner),
             args: &args,
             env: &vars,
             limits: process_limits,
+            log_stdout: false,
         })
         .await;
+    steplog::finish(pool, step_id.as_deref(), &record).await;
     let body = match result {
         Ok(body) => body,
         Err(AppError::Scanner(fault)) => return Err(fail(fault).await),

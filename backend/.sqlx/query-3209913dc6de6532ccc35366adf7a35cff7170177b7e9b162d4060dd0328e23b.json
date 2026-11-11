@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT j.id AS \"id!\", j.source_id AS \"source_id?: String\", j.status AS \"status!\",\n                  j.attempts AS \"attempts!: i64\", j.next_attempt_at AS \"next_attempt_at?: i64\",\n                  substr(CAST(j.last_error AS TEXT), 1, ?) AS \"last_error?: String\",\n                  j.created_at AS \"created_at?: i64\", j.updated_at AS \"updated_at?: i64\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.trigger') AS TEXT), 1, ?) END AS \"trigger?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.kind') AS TEXT), 1, ?) END AS \"kind?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.repo_full_name') AS TEXT), 1, ?) END AS \"repo_full_name?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.tag') AS TEXT), 1, ?) END AS \"tag?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.digest') AS TEXT), 1, ?) END AS \"digest?: String\",\n                  substr(CAST(r.image_tag AS TEXT), 1, ?) AS \"report_image_tag?: String\",\n                  substr(CAST(r.image_digest AS TEXT), 1, ?) AS \"report_image_digest?: String\",\n                  substr(CAST(r.commit_sha AS TEXT), 1, ?) AS \"report_commit_sha?: String\",\n                  r.vulnerability_summary AS \"report_summary?\",\n                  r.sarif_status AS \"report_sarif_status?\",\n                  r.synced_at AS \"report_synced_at?: i64\"\n           FROM jobs j\n           LEFT JOIN image_sources m ON m.id = j.source_id\n           LEFT JOIN publish_reports r\n             ON r.rowid = (SELECT MAX(r2.rowid) FROM publish_reports r2 WHERE r2.job_id = j.id)\n           WHERE (? IS NULL OR m.user_id = ?)\n             AND (? IS NULL OR j.id = ?)\n             AND (? IS NULL OR j.status = ?)\n             AND (? IS NULL OR j.source_id = ?)\n           ORDER BY\n             CASE WHEN ? = 'created_at' AND ? = 1 THEN j.created_at END ASC,\n             CASE WHEN ? = 'created_at' AND ? = -1 THEN j.created_at END DESC,\n             CASE WHEN ? = 'updated_at' AND ? = 1 THEN j.updated_at END ASC,\n             CASE WHEN ? = 'updated_at' AND ? = -1 THEN j.updated_at END DESC,\n             j.id ASC\n           LIMIT ? OFFSET ?",
+  "query": "SELECT j.id AS \"id!\", j.source_id AS \"source_id?: String\", j.status AS \"status!\",\n                  j.attempts AS \"attempts!: i64\", j.next_attempt_at AS \"next_attempt_at?: i64\",\n                  substr(CAST(j.last_error AS TEXT), 1, ?) AS \"last_error?: String\",\n                  j.created_at AS \"created_at?: i64\", j.updated_at AS \"updated_at?: i64\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.trigger') AS TEXT), 1, ?) END AS \"trigger?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.kind') AS TEXT), 1, ?) END AS \"kind?: String\",\n                  CASE WHEN json_valid(j.payload) AND json_extract(j.payload, '$.kind') = 'db_update'\n                       THEN substr(CAST(json_extract(j.payload, '$.scanner') AS TEXT), 1, ?) END AS \"scanner?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.repo_full_name') AS TEXT), 1, ?) END AS \"repo_full_name?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.tag') AS TEXT), 1, ?) END AS \"tag?: String\",\n                  CASE WHEN json_valid(j.payload)\n                       THEN substr(CAST(json_extract(j.payload, '$.digest') AS TEXT), 1, ?) END AS \"digest?: String\",\n                  substr(CAST(r.image_tag AS TEXT), 1, ?) AS \"report_image_tag?: String\",\n                  substr(CAST(r.image_digest AS TEXT), 1, ?) AS \"report_image_digest?: String\",\n                  substr(CAST(r.commit_sha AS TEXT), 1, ?) AS \"report_commit_sha?: String\",\n                  r.vulnerability_summary AS \"report_summary?\",\n                  r.sarif_status AS \"report_sarif_status?\",\n                  r.synced_at AS \"report_synced_at?: i64\"\n           FROM jobs j\n           LEFT JOIN image_sources m ON m.id = j.source_id\n           LEFT JOIN publish_reports r\n             ON r.rowid = (SELECT MAX(r2.rowid) FROM publish_reports r2 WHERE r2.job_id = j.id)\n           WHERE (? IS NULL OR m.user_id = ?)\n             AND (? IS NULL OR j.id = ?)\n             AND (? IS NULL OR j.status = ?)\n             AND (? IS NULL OR j.source_id = ?)\n           ORDER BY\n             CASE WHEN ? = 'created_at' AND ? = 1 THEN j.created_at END ASC,\n             CASE WHEN ? = 'created_at' AND ? = -1 THEN j.created_at END DESC,\n             CASE WHEN ? = 'updated_at' AND ? = 1 THEN j.updated_at END ASC,\n             CASE WHEN ? = 'updated_at' AND ? = -1 THEN j.updated_at END DESC,\n             j.id ASC\n           LIMIT ? OFFSET ?",
   "describe": {
     "columns": [
       {
@@ -99,44 +99,50 @@
         "origin": "Expression"
       },
       {
-        "name": "repo_full_name?: String",
+        "name": "scanner?: String",
         "ordinal": 10,
         "type_info": "Null",
         "origin": "Expression"
       },
       {
-        "name": "tag?: String",
+        "name": "repo_full_name?: String",
         "ordinal": 11,
         "type_info": "Null",
         "origin": "Expression"
       },
       {
-        "name": "digest?: String",
+        "name": "tag?: String",
         "ordinal": 12,
         "type_info": "Null",
         "origin": "Expression"
       },
       {
-        "name": "report_image_tag?: String",
+        "name": "digest?: String",
         "ordinal": 13,
         "type_info": "Null",
         "origin": "Expression"
       },
       {
-        "name": "report_image_digest?: String",
+        "name": "report_image_tag?: String",
         "ordinal": 14,
         "type_info": "Null",
         "origin": "Expression"
       },
       {
-        "name": "report_commit_sha?: String",
+        "name": "report_image_digest?: String",
         "ordinal": 15,
         "type_info": "Null",
         "origin": "Expression"
       },
       {
-        "name": "report_summary?",
+        "name": "report_commit_sha?: String",
         "ordinal": 16,
+        "type_info": "Null",
+        "origin": "Expression"
+      },
+      {
+        "name": "report_summary?",
+        "ordinal": 17,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -147,7 +153,7 @@
       },
       {
         "name": "report_sarif_status?",
-        "ordinal": 17,
+        "ordinal": 18,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -158,7 +164,7 @@
       },
       {
         "name": "report_synced_at?: i64",
-        "ordinal": 18,
+        "ordinal": 19,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -169,7 +175,7 @@
       }
     ],
     "parameters": {
-      "Right": 27
+      "Right": 28
     },
     "nullable": [
       true,
@@ -185,13 +191,14 @@
       true,
       true,
       true,
-      null,
-      null,
-      null,
       true,
-      true,
-      true
+      null,
+      null,
+      null,
+      false,
+      false,
+      false
     ]
   },
-  "hash": "1b8c5f4c69bea517d01efb0ca43db405847f05fb54a0e119bccaf99c5d386967"
+  "hash": "3209913dc6de6532ccc35366adf7a35cff7170177b7e9b162d4060dd0328e23b"
 }

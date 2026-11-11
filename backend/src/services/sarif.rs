@@ -15,14 +15,21 @@ use crate::error::AppError;
 pub const SARIF_SCHEMA: &str =
     "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json";
 
+/// The tool driver name written into every SARIF run.
+pub const TOOL_NAME: &str = "Dockward";
+
+/// The tool driver name of SARIF uploaded before the rename. Used only to find the legacy
+/// Code Scanning analyses that the rename replaces (slice 6b).
+pub const LEGACY_TOOL_NAME: &str = "HarborGate";
+
 /// The fingerprint key. The value is stable across image rebuilds and tags.
-pub const FINGERPRINT_KEY: &str = "harborgate/v1";
+pub const FINGERPRINT_KEY: &str = "dockward/v1";
 
 /// The result property keys for the scanner count and names.
-pub const SCANNER_COUNT_KEY: &str = "harborgate/scannerCount";
-pub const SCANNER_NAMES_KEY: &str = "harborgate/scannerNames";
+pub const SCANNER_COUNT_KEY: &str = "dockward/scannerCount";
+pub const SCANNER_NAMES_KEY: &str = "dockward/scannerNames";
 /// The result property key for the platforms (`os/arch[/variant]`) that report the finding.
-pub const PLATFORMS_KEY: &str = "harborgate/platforms";
+pub const PLATFORMS_KEY: &str = "dockward/platforms";
 
 /// Upper-cases a Trivy severity (`Critical` becomes `CRITICAL`). Unknown values map to
 /// `UNKNOWN`, so a new Trivy severity cannot break the converter.
@@ -47,7 +54,7 @@ pub fn fallback_score(severity: &str) -> &'static str {
     }
 }
 
-/// `partialFingerprints["harborgate/v1"]`: SHA-256 of `<vulnerability id>|<package>`.
+/// `partialFingerprints["dockward/v1"]`: SHA-256 of `<vulnerability id>|<package>`.
 pub fn fingerprint(vuln_id: &str, package: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(format!("{vuln_id}|{package}").as_bytes());
@@ -59,17 +66,23 @@ pub fn fingerprint(vuln_id: &str, package: &str) -> String {
 }
 
 /// `automationDetails.id` (SARIF 2.1.0 run property):
-/// `harborgate/<hub host>/<repository>/<tag value>/`. The trailing `/` keeps the whole path as
-/// the category, `harborgate/<hub host>/<repository>/<tag value>` (decision 46;
-/// `specs/integrations.md`). The prefix `harborgate` is kept by decision 27.
+/// `dockward/<hub host>/<repository>/<tag value>/`. The trailing `/` keeps the whole path as
+/// the category, `dockward/<hub host>/<repository>/<tag value>` (decision 46;
+/// `specs/integrations.md`). The prefix `dockward` follows decision 54 (the GitHub rename).
 pub fn automation_id(hub_host: &str, repository: &str, tag_value: &str) -> String {
-    format!("harborgate/{hub_host}/{repository}/{tag_value}/")
+    format!("dockward/{hub_host}/{repository}/{tag_value}/")
 }
 
-/// The result property bag for a merged finding (#224 d6): `harborgate/scannerCount` (an integer,
-/// at least 1) and `harborgate/scannerNames` (unique names, in the merged-view order), and
-/// `harborgate/platforms` (the platforms that report the finding, spinoff section 6 step 6). A
-/// finding with none of these lists has no bag. The keys use the `harborgate/` prefix, like the
+/// The category the rename replaces: `harborgate/<hub host>/<repository>/<tag value>`, with no
+/// trailing `/`. Used only to find the legacy analyses (slice 6b).
+pub fn legacy_category(hub_host: &str, repository: &str, tag_value: &str) -> String {
+    format!("harborgate/{hub_host}/{repository}/{tag_value}")
+}
+
+/// The result property bag for a merged finding (#224 d6): `dockward/scannerCount` (an integer,
+/// at least 1) and `dockward/scannerNames` (unique names, in the merged-view order), and
+/// `dockward/platforms` (the platforms that report the finding, spinoff section 6 step 6). A
+/// finding with none of these lists has no bag. The keys use the `dockward/` prefix, like the
 /// fingerprint key, as SARIF 2.1.0 section 3.8.1 advises for custom properties.
 fn scanner_properties(vuln: &Value) -> Option<Value> {
     let strings = |key: &str| -> Vec<&str> {
@@ -184,7 +197,7 @@ pub fn convert(
         "runs": [{
             "tool": {
                 "driver": {
-                    "name": "HarborGate",
+                    "name": TOOL_NAME,
                     "rules": rules.into_values().collect::<Vec<Value>>()
                 }
             },
@@ -229,7 +242,18 @@ mod tests {
         assert_eq!(doc["version"], "2.1.0");
         assert_eq!(doc["$schema"], SARIF_SCHEMA);
         assert_eq!(doc["runs"].as_array().unwrap().len(), 1);
-        assert_eq!(doc["runs"][0]["tool"]["driver"]["name"], "HarborGate");
+        assert_eq!(doc["runs"][0]["tool"]["driver"]["name"], "Dockward");
+    }
+
+    #[test]
+    fn tool_driver_name_is_dockward_and_legacy_name_is_harborgate() {
+        assert_eq!(TOOL_NAME, "Dockward");
+        assert_eq!(LEGACY_TOOL_NAME, "HarborGate");
+    }
+
+    #[test]
+    fn fingerprint_key_is_dockward_v1() {
+        assert_eq!(FINGERPRINT_KEY, "dockward/v1");
     }
 
     #[test]
@@ -237,11 +261,29 @@ mod tests {
         let doc = convert(&report(), "ghcr.io", "team/app", "v1").unwrap();
         assert_eq!(
             doc["runs"][0]["automationDetails"]["id"],
-            "harborgate/ghcr.io/team/app/v1/"
+            "dockward/ghcr.io/team/app/v1/"
         );
     }
 
-    /// Decision 46: the category is `harborgate/<hub host>/<repository>/<tag value>`, so two
+    #[test]
+    fn category_for_team_app_v1_is_dockward_with_trailing_slash() {
+        let doc = convert(&report(), "ghcr.io", "team/app", "v1").unwrap();
+        assert_eq!(
+            doc["runs"][0]["automationDetails"]["id"],
+            "dockward/ghcr.io/team/app/v1/"
+        );
+    }
+
+    #[test]
+    fn legacy_category_has_the_harborgate_prefix_and_no_trailing_slash() {
+        assert_eq!(
+            legacy_category("ghcr.io", "team/app", "v1"),
+            "harborgate/ghcr.io/team/app/v1"
+        );
+        assert!(!legacy_category("ghcr.io", "team/app", "v1").ends_with('/'));
+    }
+
+    /// Decision 46: the category is `dockward/<hub host>/<repository>/<tag value>`, so two
     /// tags of one repository, and one repository on two hubs, get different categories.
     #[test]
     fn category_includes_the_hub_host_and_the_tag_value() {
@@ -253,10 +295,10 @@ mod tests {
         let v2 = convert(&report(), "ghcr.io", "o/api", "v2").unwrap();
         let glob = convert(&report(), "ghcr.io", "o/api", "1.*").unwrap();
         let hub = convert(&report(), "docker.io", "o/api", "v1").unwrap();
-        assert_eq!(category(&v1), "harborgate/ghcr.io/o/api/v1");
-        assert_eq!(category(&v2), "harborgate/ghcr.io/o/api/v2");
-        assert_eq!(category(&glob), "harborgate/ghcr.io/o/api/1.*");
-        assert_eq!(category(&hub), "harborgate/docker.io/o/api/v1");
+        assert_eq!(category(&v1), "dockward/ghcr.io/o/api/v1");
+        assert_eq!(category(&v2), "dockward/ghcr.io/o/api/v2");
+        assert_eq!(category(&glob), "dockward/ghcr.io/o/api/1.*");
+        assert_eq!(category(&hub), "dockward/docker.io/o/api/v1");
         assert_ne!(category(&v1), category(&v2));
         assert_ne!(category(&v1), category(&hub));
     }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO analysis_retirements\n            (github_owner, github_repo, legacy_category, analyses_deleted, dismissals_carried,\n             completed_at)\n         VALUES (?, ?, ?, ?, ?, ?)\n         ON CONFLICT (github_owner, github_repo, legacy_category) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "c906ed950e3090c2fa70aadef38f1d8fdf145720a611be3c76e4bd003ed1ede0"
+}

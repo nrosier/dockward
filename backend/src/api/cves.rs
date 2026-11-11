@@ -350,9 +350,9 @@ mod tests {
             ]
         );
         let expected = [
-            serde_json::json!(["harborgate", "areai:security", "low"]),
-            serde_json::json!(["harborgate", "areai:security"]),
-            serde_json::json!(["harborgate", "areai:security", "low"]),
+            serde_json::json!(["dockward", "areai:security", "low"]),
+            serde_json::json!(["dockward", "areai:security"]),
+            serde_json::json!(["dockward", "areai:security", "low"]),
         ];
         for (body, labels) in creates.iter().zip(expected) {
             assert_eq!(body["labels"], labels);
@@ -360,7 +360,7 @@ mod tests {
                 body["body"]
                     .as_str()
                     .unwrap()
-                    .starts_with("<!-- harborgate:CVE-2026-00")
+                    .starts_with("<!-- dockward:CVE-2026-00")
             );
         }
         // The second click is 409 with the URL, never a second issue.
@@ -1786,6 +1786,138 @@ mod tests {
         // A bad value is 400.
         let error = all_cves(&state, &me, "fix=maybe").await.unwrap_err();
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #265: the `fix` filter is ANDed with status, GitHub issue, project, repository, tag and
+    /// mapping, as the other control bar filters are.
+    #[tokio::test]
+    async fn fix_filter_combines_with_the_other_filters() {
+        let (state, dir, _, _) = setup("read-fix-combined").await;
+        seed_source(&state.pool, "u1", "m2", "cg", "octo", "second").await;
+        sqlx::query("UPDATE image_sources SET repository = 'team/m2' WHERE id = 'm2'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        // Fixed in is the fix version; None is Unknown, which is No fix.
+        // m1: 1 CRITICAL fixed in 2.0 on v1 and v2, open, open issue; 2 HIGH no fix, closed
+        // issue; 3 MEDIUM fixed in 1.5, accepted; 4 LOW fixed in 3.0, marked fixed; 5 LOW no
+        // fix, no issue. m2 (project `team`): 6 HIGH fixed in 4.1, open, no issue.
+        let rows = [
+            (
+                "m1",
+                "v1",
+                "CVE-2026-0001",
+                "CRITICAL",
+                "glibc",
+                Some("2.0"),
+            ),
+            (
+                "m1",
+                "v2",
+                "CVE-2026-0001",
+                "CRITICAL",
+                "glibc",
+                Some("2.0"),
+            ),
+            ("m1", "v1", "CVE-2026-0002", "HIGH", "zlib", None),
+            ("m1", "v1", "CVE-2026-0003", "MEDIUM", "curl", Some("1.5")),
+            ("m1", "v1", "CVE-2026-0004", "LOW", "zlib", Some("3.0")),
+            ("m1", "v1", "CVE-2026-0005", "LOW", "per%cent_pkg", None),
+            ("m2", "v1", "CVE-2026-0006", "HIGH", "curl", Some("4.1")),
+        ];
+        for (mapping, tag, cve, severity, package, fixed) in rows {
+            store(
+                &state,
+                &db::findings::Finding {
+                    id: &crate::services::ids::new_id().unwrap_or_default(),
+                    source_id: mapping,
+                    image_tag: tag,
+                    cve_id: cve,
+                    package: Some(package),
+                    severity,
+                    fixed_in_version: fixed,
+                    description: None,
+                    now: AT,
+                },
+            )
+            .await;
+        }
+        fix(&state, "m1", "v1", "CVE-2026-0004").await;
+        sqlx::query(
+            "INSERT INTO github_issues (id, github_owner, github_repo, cve_id, github_issue_number, github_issue_url, status)
+             VALUES ('g1', 'octo', 'app', 'CVE-2026-0001', 7, 'https://github.com/octo/app/issues/7', 'open'),
+                    ('g2', 'octo', 'app', 'CVE-2026-0002', 8, 'https://github.com/octo/app/issues/8', 'closed')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username)
+             VALUES ('a1', 'm1', 'CVE-2026-0003', 'accepted for the test', 'u1', 'u1')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let me = user("u1");
+        async fn ids(state: &AppState, me: &AuthUser, q: &str) -> Vec<String> {
+            let (ids, _) = every_page(state, me, q).await;
+            ids.into_iter()
+                .map(|id| id.replace("CVE-2026-000", ""))
+                .collect()
+        }
+        // fix=available is 1, 3, 4 and 6; the other filter is applied on top, by AND.
+        assert_eq!(
+            ids(&state, &me, "fix=available").await,
+            ["m1:1", "m1:3", "m1:4", "m2:6"]
+        );
+        assert_eq!(
+            ids(&state, &me, "fix=available&status=open").await,
+            ["m1:1", "m2:6"]
+        );
+        assert_eq!(
+            ids(&state, &me, "fix=available&status=open&has_issue=true").await,
+            ["m1:1"]
+        );
+        assert_eq!(
+            ids(&state, &me, "fix=available&has_issue=false").await,
+            ["m1:3", "m1:4", "m2:6"]
+        );
+        assert_eq!(
+            ids(&state, &me, "fix=available&status=accepted").await,
+            ["m1:3"]
+        );
+        assert_eq!(
+            ids(&state, &me, "fix=available&status=fixed").await,
+            ["m1:4"]
+        );
+        assert_eq!(
+            ids(
+                &state,
+                &me,
+                "fix=available&namespace=team&repository=ghcr.io/team/m2&tag=v1"
+            )
+            .await,
+            ["m2:6"]
+        );
+        assert_eq!(ids(&state, &me, "fix=available&tag=v2").await, ["m1:1"]);
+        // The path route takes the same combination, and `total` matches.
+        let path = by_mapping(&state, &me, "m1", "fix=available&has_issue=false")
+            .await
+            .unwrap();
+        let mut path_ids: Vec<String> = path.items.iter().map(|item| item.cve_id.clone()).collect();
+        path_ids.sort_unstable();
+        assert_eq!(path_ids, ["CVE-2026-0003", "CVE-2026-0004"]);
+        assert_eq!(path.total, 2);
+        // fix=none is 2 and 5; with has_issue=true only 2 has an issue (closed).
+        assert_eq!(ids(&state, &me, "fix=none").await, ["m1:2", "m1:5"]);
+        assert_eq!(ids(&state, &me, "fix=none&has_issue=true").await, ["m1:2"]);
+        assert_eq!(ids(&state, &me, "fix=none&has_issue=false").await, ["m1:5"]);
+        assert_eq!(
+            ids(&state, &me, "fix=none&status=fixed").await,
+            Vec::<String>::new()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

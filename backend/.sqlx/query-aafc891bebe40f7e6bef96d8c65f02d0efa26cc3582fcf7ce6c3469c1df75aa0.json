@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE job_log_steps\n            SET outcome = ?, exit_code = ?, truncated = ?, finished_at = ?\n          WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "aafc891bebe40f7e6bef96d8c65f02d0efa26cc3582fcf7ce6c3469c1df75aa0"
+}

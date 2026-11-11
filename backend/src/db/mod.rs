@@ -16,8 +16,11 @@ pub mod db_refresh;
 pub mod discovery;
 pub mod findings;
 pub mod github_issues;
+#[allow(dead_code)] // Used by the GitHub re-key (#311, slices 5 and 6b).
+pub mod github_rekeys;
 pub mod hubs;
 pub mod image_sources;
+pub mod job_log;
 pub mod job_runs;
 #[allow(dead_code)] // Used by the job worker and the retry route.
 pub mod jobs;
@@ -206,9 +209,12 @@ mod tests {
         let pool = test_pool().await?;
         let tables = table_names(&pool).await?;
         let expected = [
+            "alert_carryovers",
             "alert_channels",
             "alert_deliveries",
+            "analysis_retirements",
             "audit_log",
+            "carryover_refs",
             "cve_acceptances",
             "cve_findings",
             "github_issues",
@@ -216,6 +222,9 @@ mod tests {
             "image_platforms",
             "image_sources",
             "images",
+            "issue_rekeys",
+            "job_log_lines",
+            "job_log_steps",
             "job_runs",
             "jobs",
             "publish_reports",

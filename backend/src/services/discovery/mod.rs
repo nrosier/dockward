@@ -359,6 +359,7 @@ impl Discovery {
             status: if error.is_some() { "failed" } else { "done" }.to_owned(),
             processed_count: i64::try_from(processed).unwrap_or(i64::MAX),
             error_summary: error,
+            scanner: None,
         };
         if job_runs::insert(&self.pool, &run).await.is_err() {
             tracing::warn!("could not record a discovery run");

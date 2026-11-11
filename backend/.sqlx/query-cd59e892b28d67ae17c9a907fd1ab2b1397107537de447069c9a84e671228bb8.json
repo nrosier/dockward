@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO job_log_lines (step_id, at, stream, text) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "cd59e892b28d67ae17c9a907fd1ab2b1397107537de447069c9a84e671228bb8"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO job_log_steps\n            (id, job_id, attempt, seq, command, started_at, timeout_secs, outcome)\n         VALUES (?, ?, ?, ?, ?, ?, ?, 'running')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "aedf86b7ddd686aad3d6ed880860ed57a7f7f368b7ddf6053af6f253b90de77c"
+}

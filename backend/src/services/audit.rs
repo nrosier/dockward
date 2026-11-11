@@ -49,6 +49,8 @@ pub const ACTIONS: &[&str] = &[
     "log.level_change",
     "artifact.remove",
     "image.evict",
+    "github.rekey_issues",
+    "github.retire_analyses",
 ];
 
 /// Key names (lowercased) that mark a value as a secret. Any key that contains
