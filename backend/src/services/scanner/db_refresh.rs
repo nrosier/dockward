@@ -44,10 +44,12 @@ pub trait DatabaseTool: Send + Sync {
 /// (trigger `db_update`) for each digest it is given. `record_run` writes the `job_runs` row of
 /// the refresh (`job_kind = 'db_update'`, section 8); it holds counts and the fixed error text only.
 pub trait RefreshStore: Send + Sync {
-    /// Writes the `job_runs` row of one refresh. `error` is `None` on success.
+    /// Writes the `job_runs` row of one refresh. `error` is `None` on success. `started_at` and
+    /// `finished_at` are the real Unix seconds of the refresh.
     fn record_run(
         &self,
         scanner: Scanner,
+        run: RunTiming,
         error: Option<&str>,
     ) -> impl Future<Output = Result<(), AppError>> + Send;
 
@@ -71,6 +73,14 @@ pub trait RefreshStore: Send + Sync {
     ) -> impl Future<Output = Result<usize, AppError>> + Send;
 }
 
+/// The start and finish of one refresh, as Unix seconds. `finished_at` is never before
+/// `started_at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunTiming {
+    pub started_at: i64,
+    pub finished_at: i64,
+}
+
 /// Runs one refresh for one scanner.
 ///
 /// Order: update the database, read its build time, compare with the stored value, and commit
@@ -80,21 +90,37 @@ pub async fn refresh<T, S>(
     tool: &T,
     store: &S,
     scanner: Scanner,
+    clock: impl Fn() -> i64,
 ) -> Result<RefreshOutcome, AppError>
 where
     T: DatabaseTool,
     S: RefreshStore,
 {
+    let started_at = clock();
     let outcome = refresh_steps(tool, store, scanner).await;
+    let finished_at = clock().max(started_at);
     // The run is recorded on success and on failure. The stored text is always one of the fixed
     // fault strings, never a tool message.
     let error = match &outcome {
         Ok(_) => None,
-        Err(AppError::Scanner(fault)) => Some(fault.text()),
-        Err(_) => Some(crate::error::ScannerFault::Failed.text()),
+        Err(err) => Some(run_error_text(err)),
     };
-    store.record_run(scanner, error).await?;
+    let timing = RunTiming {
+        started_at,
+        finished_at,
+    };
+    store.record_run(scanner, timing, error).await?;
     outcome
+}
+
+/// The fixed text stored in the run's `error_summary` and, by the caller, the job's `last_error`.
+/// A scanner fault keeps its own text. Any other error gets the one generic scanner text, so a
+/// database or internal message never reaches storage.
+pub fn run_error_text(err: &AppError) -> &'static str {
+    match err {
+        AppError::Scanner(fault) => fault.text(),
+        _ => crate::error::ScannerFault::Failed.text(),
+    }
 }
 
 async fn refresh_steps<T, S>(

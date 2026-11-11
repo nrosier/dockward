@@ -2314,6 +2314,7 @@ pub(crate) mod tests {
                 status: "failed".to_owned(),
                 processed_count: 0,
                 error_summary: Some("x".repeat(2_000)),
+                scanner: None,
             },
         )
         .await

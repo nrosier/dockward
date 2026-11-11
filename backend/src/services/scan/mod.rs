@@ -125,12 +125,16 @@ impl ScanEnv {
 }
 
 /// The timeout and output cap of one scanner process, from the operator settings or the defaults
-/// (section 13). A database refresh uses the same limits as a scan.
+/// (section 13). A database refresh uses the same limits as a scan. A stored timeout is clamped to
+/// the range the settings API enforces, so a bad stored value cannot give a near-zero or an
+/// unbounded run.
 pub(crate) async fn process_limits<R: StoreRepository>(repo: &R) -> Result<Limits, AppError> {
+    let (min, max) = crate::services::scan_settings::TIMEOUT_RANGE;
     let timeout = parse_positive_u64(
         repo.setting(TIMEOUT_KEY).await?.as_deref(),
         crate::services::scanner::process::DEFAULT_TIMEOUT.as_secs(),
-    );
+    )
+    .clamp(min, max);
     let output_max = parse_positive_u64(
         repo.setting(OUTPUT_MAX_KEY).await?.as_deref(),
         crate::services::scanner::process::DEFAULT_OUTPUT_MAX_BYTES,

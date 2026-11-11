@@ -130,6 +130,8 @@ export interface Job {
   updated_at: string | null;
   // The trigger the job was queued by, from its payload. Null when the payload has none.
   trigger: string | null;
+  // The scanner a db_update job refreshes ("trivy" or "grype"). Absent on other jobs.
+  scanner?: string | null;
   image: {
     repo_full_name: string | null;
     tag: string | null;
@@ -175,6 +177,8 @@ export interface HousekeepingRun {
   status: "done" | "failed";
   processed_count: number;
   error_summary: string | null;
+  // The scanner a db_update run refreshed ("trivy" or "grype"). Absent on other runs.
+  scanner?: string | null;
 }
 
 export interface AuditEntry {
