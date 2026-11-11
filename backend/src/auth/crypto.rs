@@ -345,7 +345,6 @@ mod tests {
     const KAT_V1_AAD: &str = "user_credentials:encrypted_token:7";
     const KAT_V1_PLAINTEXT: &[u8] = b"ghp_example_token";
 
-
     #[test]
     fn v1_ciphertext_from_the_old_build_is_bound_to_its_row() {
         let key = cred();
