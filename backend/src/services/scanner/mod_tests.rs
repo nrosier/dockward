@@ -110,7 +110,11 @@ fn scanner_environments_always_set_a_home_inside_the_cache_root() {
                 .iter()
                 .find(|(name, _)| name == "HOME")
                 .map(|(_, value)| value.to_string_lossy().into_owned());
-            assert_eq!(home.as_deref(), Some("/data/scanner-cache"), "{scanner:?} scan={scan}");
+            assert_eq!(
+                home.as_deref(),
+                Some("/data/scanner-cache"),
+                "{scanner:?} scan={scan}"
+            );
         }
     }
 }
