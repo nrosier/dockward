@@ -208,10 +208,12 @@ mod tests {
         let pool = test_pool().await?;
         let tables = table_names(&pool).await?;
         let expected = [
+            "alert_carryovers",
             "alert_channels",
             "alert_deliveries",
             "analysis_retirements",
             "audit_log",
+            "carryover_refs",
             "cve_acceptances",
             "cve_findings",
             "github_issues",

@@ -12,7 +12,7 @@ use crate::db;
 use crate::db::sources::{self as source_db, SourceRow};
 use crate::services::github_scanning::{
     Alert, AlertQuery, Analysis, Dismissal, Processing, ScanError, ScanHttp, ScanResponse, Upload,
-    confirm_answer, confirm_path, follow_confirm_with,
+    confirm_answer_for, confirm_path_for, follow_confirm_with,
 };
 use crate::services::github_url::GithubUrls;
 use crate::services::publish::Clock;
@@ -114,6 +114,29 @@ struct State {
     calls: Vec<Call>,
     /// Answer every delete with this error.
     delete_error: Option<ScanError>,
+    /// Answer a delete of these analysis ids with `NotFound`, and keep them.
+    fail_delete_ids: Vec<u64>,
+    /// List every analysis whatever `tool_name` asks for, as a list that ignores the filter would.
+    ignore_tool_filter: bool,
+}
+
+/// Removes one analysis, as GitHub does, and returns its confirm link. When no analysis of its ref
+/// is left, the legacy alerts of that ref go too.
+fn remove_analysis(state: &mut State, id: u64) -> Result<Option<String>, ScanError> {
+    let Some(position) = state.analyses.iter().position(|analysis| analysis.id == id) else {
+        return Err(ScanError::NotFound);
+    };
+    let removed = state.analyses.remove(position);
+    let ref_left = state
+        .analyses
+        .iter()
+        .any(|analysis| analysis.git_ref == removed.git_ref);
+    if !ref_left {
+        state
+            .alerts
+            .retain(|alert| !(alert.tool == LEGACY_TOOL_NAME && alert.git_ref == removed.git_ref));
+    }
+    Ok(removed.confirm_next)
 }
 
 /// The fake GitHub for `octo/app`.
@@ -139,6 +162,14 @@ impl FakeCode {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Every DELETE request: the first delete of each chain and each confirm-delete follow.
+    fn removals(&self) -> usize {
+        self.calls()
+            .iter()
+            .filter(|call| matches!(call, Call::Delete(_) | Call::Confirm(_)))
+            .count()
     }
 
     fn dismissed(&self) -> Vec<(u64, String, Option<String>)> {
@@ -196,7 +227,7 @@ impl CodeScanning for FakeCode {
             Ok(state
                 .analyses
                 .iter()
-                .filter(|analysis| analysis.tool == tool_name)
+                .filter(|analysis| state.ignore_tool_filter || analysis.tool == tool_name)
                 .map(|analysis| Analysis {
                     id: analysis.id,
                     git_ref: Some(analysis.git_ref.to_owned()),
@@ -223,22 +254,32 @@ impl CodeScanning for FakeCode {
             if let Some(error) = state.delete_error.clone() {
                 return Err(error);
             }
-            let found = state.analyses.iter().find(|analysis| analysis.id == id);
-            let next = found.and_then(|analysis| analysis.confirm_next.clone());
-            state.analyses.retain(|analysis| analysis.id != id);
-            Ok(next)
+            if state.fail_delete_ids.contains(&id) {
+                return Err(ScanError::NotFound);
+            }
+            remove_analysis(state, id)
         })
     }
 
     async fn follow_confirm(
         &self,
         _token: &[u8],
-        path: &str,
+        _owner: &str,
+        _repo: &str,
+        link: &str,
         _now: i64,
     ) -> Result<Option<String>, ScanError> {
         self.with(|state| {
-            state.calls.push(Call::Confirm(path.to_owned()));
-            Ok(None)
+            state.calls.push(Call::Confirm(link.to_owned()));
+            let id = link
+                .split('?')
+                .next()
+                .and_then(|route| route.rsplit('/').next())
+                .and_then(|segment| segment.parse::<u64>().ok());
+            match id {
+                Some(id) => remove_analysis(state, id),
+                None => Err(ScanError::NotFound),
+            }
         })
     }
 
@@ -1045,29 +1086,40 @@ async fn the_canary_token_is_absent_from_logs_audit_rows_and_errors() {
 fn a_confirm_link_on_another_host_is_refused() {
     let urls = GithubUrls::default();
     assert_eq!(
-        confirm_path(
+        confirm_path_for(
             &urls,
-            "https://evil.example/repos/octo/app/code-scanning/analyses/1"
+            "octo",
+            "app",
+            "https://evil.example/repos/octo/app/code-scanning/analyses/1?confirm_delete"
         ),
         None
     );
     assert_eq!(
-        confirm_path(
+        confirm_path_for(
             &urls,
-            "http://api.github.com/repos/octo/app/code-scanning/analyses/1"
+            "octo",
+            "app",
+            "http://api.github.com/repos/octo/app/code-scanning/analyses/1?confirm_delete"
         ),
         None
     );
     assert_eq!(
-        confirm_path(&urls, "https://api.github.com@evil.example/repos/x"),
+        confirm_path_for(
+            &urls,
+            "octo",
+            "app",
+            "https://api.github.com@evil.example/repos/octo/app/code-scanning/analyses/1?confirm_delete"
+        ),
         None
     );
     assert_eq!(
-        confirm_path(
+        confirm_path_for(
             &urls,
-            "https://api.github.com/repos/octo/app/code-scanning/analyses/1?confirm_delete=true"
+            "octo",
+            "app",
+            "https://api.github.com/repos/octo/app/code-scanning/analyses/1?confirm_delete"
         ),
-        Some("repos/octo/app/code-scanning/analyses/1?confirm_delete=true".to_owned())
+        Some("repos/octo/app/code-scanning/analyses/1?confirm_delete".to_owned())
     );
 }
 
@@ -1140,7 +1192,9 @@ async fn a_confirm_link_on_another_host_is_never_fetched() {
     let refused = follow_confirm_with(
         &http,
         CANARY_TOKEN.as_bytes(),
-        "https://evil.example/confirm",
+        "octo",
+        "app",
+        "https://evil.example/repos/octo/app/code-scanning/analyses/1?confirm_delete",
         NOW,
     )
     .await;
@@ -1157,7 +1211,9 @@ async fn a_confirm_link_on_another_host_is_never_fetched() {
     let followed = follow_confirm_with(
         &http,
         CANARY_TOKEN.as_bytes(),
-        "repos/octo/app/code-scanning/analyses/1?confirm_delete=true",
+        "octo",
+        "app",
+        "https://api.github.com/repos/octo/app/code-scanning/analyses/1?confirm_delete",
         NOW,
     )
     .await;
@@ -1178,7 +1234,7 @@ async fn a_delete_answer_with_a_foreign_confirm_link_is_refused() {
     let http = RecordingHttp::default();
     let body = serde_json::json!({"confirm_delete_url": "https://evil.example/confirm"});
     let urls = GithubUrls::default();
-    let found = confirm_answer(&urls, &body);
+    let found = confirm_answer_for(&urls, "octo", "app", &body);
     assert!(
         found.is_err(),
         "a foreign confirm link in an answer is refused"
@@ -1189,4 +1245,328 @@ async fn a_delete_answer_with_a_foreign_confirm_link_is_refused() {
             .unwrap_or_else(|p| p.into_inner())
             .is_empty()
     );
+}
+
+// ---- Review fixes (#311 slice 6b): category echo, chains, retry, tool filter ----
+
+/// The legacy category as GitHub may echo it, with the trailing `/` the legacy upload used.
+const LEGACY_SLASH: &str = "harborgate/ghcr.io/octo/app/v1/";
+/// A child path of the legacy category. It must never match.
+const LEGACY_CHILD: &str = "harborgate/ghcr.io/octo/app/v1/other";
+
+#[tokio::test]
+async fn a_legacy_category_echoed_with_a_trailing_slash_is_deleted() {
+    let fx = Fx::new("echo").await;
+    fx.analysis(
+        60,
+        REF_MAIN,
+        LEGACY_SLASH,
+        LEGACY_TOOL_NAME,
+        true,
+        "2026-01-01T00:00:00Z",
+    );
+    let clock = Clock2::new(0);
+    let outcome = fx.retire(&clock, REF_MAIN, NOW).await;
+    assert_eq!(
+        outcome.map_err(|_| "error"),
+        Ok(RetireOutcome::Completed {
+            deleted: 1,
+            carried: 0
+        })
+    );
+    assert_eq!(fx.gh.deleted(), vec![60], "the echoed category is deleted");
+    assert_eq!(
+        fx.row_count().await,
+        1,
+        "the row is written after the delete"
+    );
+}
+
+#[tokio::test]
+async fn a_child_path_of_the_legacy_category_is_never_deleted() {
+    let fx = Fx::new("child").await;
+    fx.analysis(
+        61,
+        REF_MAIN,
+        LEGACY_SLASH,
+        LEGACY_TOOL_NAME,
+        true,
+        "2026-01-01T00:00:00Z",
+    );
+    fx.analysis(
+        62,
+        REF_MAIN,
+        LEGACY_CHILD,
+        LEGACY_TOOL_NAME,
+        true,
+        "2026-01-02T00:00:00Z",
+    );
+    let clock = Clock2::new(0);
+    fx.retire(&clock, REF_MAIN, NOW)
+        .await
+        .unwrap_or_else(|_| panic!("retire"));
+    assert_eq!(fx.gh.deleted(), vec![61], "only the exact category");
+    let remaining: Vec<u64> = fx
+        .gh
+        .with(|state| state.analyses.iter().map(|a| a.id).collect());
+    assert_eq!(remaining, vec![62], "the child path is untouched");
+}
+
+#[tokio::test]
+async fn a_retry_uses_the_stored_carry_over_plan() {
+    let fx = Fx::new("retry").await;
+    // Rule p is mixed on the first run: open on main, dismissed on dev.
+    fx.alert(old(1, "rule-p", None, None, REF_MAIN));
+    fx.alert(old(2, "rule-p", Some("won't fix"), None, REF_DEV));
+    fx.alert(new_alert(700, "rule-p", "open", None, REF_DEV));
+    // Main's analysis is newer, so it is deleted first. Dev's delete fails in the first run.
+    fx.analysis(
+        70,
+        REF_MAIN,
+        LEGACY,
+        LEGACY_TOOL_NAME,
+        true,
+        "2026-03-01T00:00:00Z",
+    );
+    fx.analysis(
+        71,
+        REF_DEV,
+        LEGACY,
+        LEGACY_TOOL_NAME,
+        true,
+        "2026-01-01T00:00:00Z",
+    );
+    fx.gh.with(|state| state.fail_delete_ids = vec![71]);
+
+    let clock = Clock2::new(0);
+    let first = fx.retire(&clock, REF_DEV, NOW).await;
+    assert_eq!(first.map_err(|_| "error"), Ok(RetireOutcome::Incomplete));
+    assert!(
+        fx.gh.dismissed().is_empty(),
+        "the mixed group is not carried"
+    );
+
+    fx.gh.with(|state| state.fail_delete_ids.clear());
+    let second = fx.retire(&clock, REF_DEV, NOW).await;
+    assert!(matches!(second, Ok(RetireOutcome::Completed { .. })));
+    assert!(
+        fx.gh.dismissed().is_empty(),
+        "the second run reads the stored plan, so the mixed group is still not carried"
+    );
+}
+
+#[tokio::test]
+async fn a_carried_rule_is_not_dismissed_again_on_retry() {
+    let fx = Fx::new("reopen").await;
+    fx.alert(old(1, "rule-q", Some("mitigated"), None, REF_MAIN));
+    fx.alert(new_alert(800, "rule-q", "open", None, REF_MAIN));
+    fx.analysis(
+        90,
+        REF_MAIN,
+        LEGACY,
+        LEGACY_TOOL_NAME,
+        true,
+        "2026-01-01T00:00:00Z",
+    );
+    fx.gh.with(|state| state.fail_delete_ids = vec![90]);
+
+    let clock = Clock2::new(0);
+    let first = fx.retire(&clock, REF_MAIN, NOW).await;
+    assert_eq!(first.map_err(|_| "error"), Ok(RetireOutcome::Incomplete));
+    assert_eq!(fx.gh.dismissed().len(), 1, "run 1 carries the clear group");
+
+    // The alert is reopened between the runs. The retry must not dismiss it again.
+    fx.gh.with(|state| state.fail_delete_ids.clear());
+    let second = fx.retire(&clock, REF_MAIN, NOW).await;
+    assert!(matches!(second, Ok(RetireOutcome::Completed { .. })));
+    assert_eq!(
+        fx.gh.dismissed().len(),
+        1,
+        "a carried rule is not dismissed again"
+    );
+}
+
+#[tokio::test]
+async fn a_twelve_step_chain_completes_in_one_run() {
+    let fx = Fx::new("chain12").await;
+    // Analysis 200 links to 201, 201 to 202, and so on up to 211, which is the last one.
+    for id in 200..212u64 {
+        fx.analysis(
+            id,
+            REF_MAIN,
+            LEGACY,
+            LEGACY_TOOL_NAME,
+            true,
+            "2026-01-01T00:00:00Z",
+        );
+    }
+    // Each analysis but the last links to the next one. The fake removes the analysis a link names.
+    fx.gh.with(|state| {
+        for index in 0..11usize {
+            let next = 201 + index as u64;
+            state.analyses[index].confirm_next = Some(format!(
+                "https://api.github.com/repos/octo/app/code-scanning/analyses/{next}?confirm_delete"
+            ));
+        }
+    });
+
+    let clock = Clock2::new(0);
+    let outcome = fx.retire(&clock, REF_MAIN, NOW).await;
+    assert_eq!(
+        outcome.map_err(|_| "error"),
+        Ok(RetireOutcome::Completed {
+            deleted: 12,
+            carried: 0
+        })
+    );
+    assert_eq!(fx.row_count().await, 1, "the step finished in one run");
+    let remaining: Vec<u64> = fx
+        .gh
+        .with(|state| state.analyses.iter().map(|a| a.id).collect());
+    assert!(remaining.is_empty(), "all twelve are deleted");
+}
+
+#[tokio::test]
+async fn analyses_deleted_counts_every_delete_call() {
+    let fx = Fx::new("count").await;
+    // Analysis 70 is deleted and its confirm link removes 71: two DELETE calls, one candidate.
+    fx.analysis(
+        70,
+        REF_MAIN,
+        LEGACY,
+        LEGACY_TOOL_NAME,
+        true,
+        "2026-03-01T00:00:00Z",
+    );
+    fx.analysis(
+        71,
+        REF_MAIN,
+        LEGACY,
+        LEGACY_TOOL_NAME,
+        true,
+        "2026-01-01T00:00:00Z",
+    );
+    fx.gh.with(|state| {
+        state.analyses[0].confirm_next = Some(
+            "https://api.github.com/repos/octo/app/code-scanning/analyses/71?confirm_delete"
+                .to_owned(),
+        );
+    });
+
+    let clock = Clock2::new(0);
+    let outcome = fx.retire(&clock, REF_MAIN, NOW).await;
+    assert_eq!(
+        outcome.map_err(|_| "error"),
+        Ok(RetireOutcome::Completed {
+            deleted: 2,
+            carried: 0
+        })
+    );
+    assert_eq!(fx.gh.removals(), 2, "two DELETE calls were made");
+    let audit = fx.audit_rows().await;
+    let details: Value = serde_json::from_str(audit[0].2.as_deref().unwrap_or("null"))
+        .unwrap_or_else(|err| panic!("details: {err}"));
+    assert_eq!(details["analyses"], 2);
+}
+
+#[tokio::test]
+async fn a_list_that_ignores_tool_name_never_deletes_another_tool() {
+    let fx = Fx::new("tool").await;
+    fx.analysis(
+        130,
+        REF_MAIN,
+        LEGACY,
+        LEGACY_TOOL_NAME,
+        true,
+        "2026-01-01T00:00:00Z",
+    );
+    fx.analysis(
+        131,
+        REF_MAIN,
+        LEGACY,
+        "other-tool",
+        true,
+        "2026-01-02T00:00:00Z",
+    );
+    fx.gh.with(|state| state.ignore_tool_filter = true);
+
+    let clock = Clock2::new(0);
+    fx.retire(&clock, REF_MAIN, NOW)
+        .await
+        .unwrap_or_else(|_| panic!("retire"));
+    assert_eq!(fx.gh.deleted(), vec![130], "only the HarborGate analysis");
+    let remaining: Vec<u64> = fx
+        .gh
+        .with(|state| state.analyses.iter().map(|a| a.id).collect());
+    assert_eq!(remaining, vec![131]);
+}
+
+// ---- Confirm-link shape (#311 slice 6b, F2) ----
+
+/// The confirm links that name the retired repository and an analysis of its family pass. Every
+/// other shape is refused. The shape is the one GitHub documents: `repos/{owner}/{repo}/
+/// code-scanning/analyses/{id}?confirm_delete`.
+#[test]
+fn a_confirm_link_must_name_the_retired_analysis_exactly() {
+    let urls = GithubUrls::default();
+    let ok = |route: &str| {
+        let link = format!("https://api.github.com/{route}");
+        confirm_path_for(&urls, "octo", "app", &link).is_some()
+    };
+    // Accepted: the documented shape, with owner and repo compared case-insensitively.
+    assert!(ok(
+        "repos/octo/app/code-scanning/analyses/41?confirm_delete"
+    ));
+    assert!(ok(
+        "repos/Octo/App/code-scanning/analyses/41?confirm_delete"
+    ));
+    // Refused: another repository.
+    assert!(!ok(
+        "repos/other/app/code-scanning/analyses/41?confirm_delete"
+    ));
+    assert!(!ok(
+        "repos/octo/other/code-scanning/analyses/41?confirm_delete"
+    ));
+    // Refused: another analysis family, or a sub-path.
+    assert!(!ok("repos/octo/app/code-scanning/alerts/41?confirm_delete"));
+    assert!(!ok(
+        "repos/octo/app/code-scanning/analyses/41/extra?confirm_delete"
+    ));
+    assert!(!ok(
+        "repos/octo/app/code-scanning/analyses/abc?confirm_delete"
+    ));
+    // Refused: an extra query parameter, or none where the confirm flag is required.
+    assert!(!ok(
+        "repos/octo/app/code-scanning/analyses/41?confirm_delete&token=x"
+    ));
+    assert!(!ok(
+        "repos/octo/app/code-scanning/analyses/41?confirm_delete=true&x=1"
+    ));
+    assert!(!ok("repos/octo/app/code-scanning/analyses/41?next=1"));
+    assert!(!ok("repos/octo/app/code-scanning/analyses/41"));
+}
+
+#[tokio::test]
+async fn a_confirm_link_for_another_repo_or_family_sends_no_request() {
+    let urls = GithubUrls::default();
+    for link in [
+        "repos/other/app/code-scanning/analyses/41?confirm_delete",
+        "repos/octo/app/code-scanning/alerts/41?confirm_delete",
+        "repos/octo/app/code-scanning/analyses/41?confirm_delete&token=x",
+    ] {
+        let http = RecordingHttp::default();
+        let body = serde_json::json!({ "confirm_delete_url": link });
+        let answer = confirm_answer_for(&urls, "octo", "app", &body);
+        assert!(answer.is_err(), "{link} is refused");
+        let refused =
+            follow_confirm_with(&http, CANARY_TOKEN.as_bytes(), "octo", "app", link, NOW).await;
+        assert!(refused.is_err(), "{link} is refused by follow");
+        assert!(
+            http.requests
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty(),
+            "{link} sends no request"
+        );
+    }
 }

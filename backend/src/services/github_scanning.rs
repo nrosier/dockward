@@ -511,28 +511,77 @@ fn query_value(text: &str) -> Result<&str, ScanError> {
     }
 }
 
-/// The API path of a `confirm_delete_url`. The link must be https on the configured API host,
-/// under its base path, and its path must pass the same checks as any request path. Any other
-/// link gives `None`, and the caller never fetches it.
-pub(crate) fn confirm_path(urls: &GithubUrls, link: &str) -> Option<String> {
+/// The API path of a `confirm_delete_url`, for the analysis of `owner`/`repo` that is being
+/// deleted. The link must be https on the configured API host, under its base path, and its path
+/// must be exactly `repos/{owner}/{repo}/code-scanning/analyses/{id}` (owner and repo compared
+/// case-insensitively, `id` a `u64`) with the single query `confirm_delete`. This is the shape
+/// GitHub documents for "Delete a code scanning analysis". Any other link gives `None`, and the
+/// caller never fetches it.
+pub(crate) fn confirm_path_for(
+    urls: &GithubUrls,
+    owner: &str,
+    repo: &str,
+    link: &str,
+) -> Option<String> {
     let path = urls.relative_path(link)?;
     urls.api_url(&path)?;
+    let (route, query) = path.split_once('?')?;
+    if query != "confirm_delete" {
+        return None;
+    }
+    let mut parts = route.split('/');
+    let (
+        Some("repos"),
+        Some(link_owner),
+        Some(link_repo),
+        Some("code-scanning"),
+        Some("analyses"),
+        Some(id),
+        None,
+    ) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    )
+    else {
+        return None;
+    };
+    let same_name = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    if !same_name(link_owner, owner) || !same_name(link_repo, repo) || id.parse::<u64>().is_err() {
+        return None;
+    }
     Some(path)
 }
 
-/// Reads the `confirm_delete_url` of a delete answer: none when it is absent or `null`, the
-/// validated path when it is on the API host, and an error for any other host.
-pub(crate) fn confirm_answer(urls: &GithubUrls, body: &Value) -> Result<Option<String>, ScanError> {
+/// Reads the `confirm_delete_url` of a delete answer for `owner`/`repo`: none when it is absent
+/// or `null`, the validated path when it passes [`confirm_path_for`], and an error otherwise.
+pub(crate) fn confirm_answer_for(
+    urls: &GithubUrls,
+    owner: &str,
+    repo: &str,
+    body: &Value,
+) -> Result<Option<String>, ScanError> {
     match body.get("confirm_delete_url") {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(link)) => confirm_path(urls, link).map(Some).ok_or_else(|| {
-            ScanError::Upstream("GitHub sent a confirm link to another host".to_owned())
-        }),
+        Some(Value::String(link)) => confirm_path_for(urls, owner, repo, link)
+            .map(Some)
+            .ok_or_else(|| {
+                ScanError::Upstream("GitHub sent a confirm link for another analysis".to_owned())
+            }),
         Some(_) => Err(bad_answer()),
     }
 }
 
-fn parse_analysis(urls: &GithubUrls, item: &Value) -> Result<Analysis, ScanError> {
+fn parse_analysis(
+    urls: &GithubUrls,
+    owner: &str,
+    repo: &str,
+    item: &Value,
+) -> Result<Analysis, ScanError> {
     let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
     Ok(Analysis {
         id: item
@@ -548,7 +597,7 @@ fn parse_analysis(urls: &GithubUrls, item: &Value) -> Result<Analysis, ScanError
             .unwrap_or(false),
         created_at: text(item.get("created_at")),
         confirm_path: text(item.get("confirm_delete_url"))
-            .and_then(|link| confirm_path(urls, &link)),
+            .and_then(|link| confirm_path_for(urls, owner, repo, &link)),
     })
 }
 
@@ -618,7 +667,10 @@ pub async fn list_analyses_with<H: ScanHttp>(
     let first =
         format!("repos/{owner}/{repo}/code-scanning/analyses?tool_name={tool}&per_page=100");
     let urls = http.urls();
-    list_pages(http, token, first, now, |item| parse_analysis(&urls, item)).await
+    list_pages(http, token, first, now, |item| {
+        parse_analysis(&urls, owner, repo, item)
+    })
+    .await
 }
 
 /// DELETEs one analysis with `confirm_delete=true`. Returns the validated path of the next
@@ -637,7 +689,7 @@ pub async fn delete_analysis_with<H: ScanHttp>(
     if response.status != 200 {
         return Err(classify(&response, now));
     }
-    confirm_answer(&http.urls(), &response.body)
+    confirm_answer_for(&http.urls(), owner, repo, &response.body)
 }
 
 /// DELETEs a confirm-delete path returned by [`delete_analysis_with`] or by an earlier call
@@ -645,20 +697,20 @@ pub async fn delete_analysis_with<H: ScanHttp>(
 pub async fn follow_confirm_with<H: ScanHttp>(
     http: &H,
     token: &[u8],
-    path: &str,
+    owner: &str,
+    repo: &str,
+    link: &str,
     now: i64,
 ) -> Result<Option<String>, ScanError> {
     let urls = http.urls();
-    if urls.api_url(path).is_none() {
-        return Err(ScanError::Upstream(
-            "GitHub sent a confirm link to another host".to_owned(),
-        ));
-    }
-    let response = http.delete(path, token).await?;
+    let path = confirm_path_for(&urls, owner, repo, link).ok_or_else(|| {
+        ScanError::Upstream("GitHub sent a confirm link for another analysis".to_owned())
+    })?;
+    let response = http.delete(&path, token).await?;
     if response.status != 200 {
         return Err(classify(&response, now));
     }
-    confirm_answer(&urls, &response.body)
+    confirm_answer_for(&urls, owner, repo, &response.body)
 }
 
 /// Lists the code scanning alerts for a tool, state and ref, all pages. See [`Alert`].
@@ -776,14 +828,16 @@ impl GithubScanning {
         delete_analysis_with(&self.http(), token, owner, repo, id, now).await
     }
 
-    /// Follows a confirm-delete path. See [`follow_confirm_with`].
+    /// Follows a confirm-delete link of `owner`/`repo`. See [`follow_confirm_with`].
     pub async fn follow_confirm(
         &self,
         token: &[u8],
-        path: &str,
+        owner: &str,
+        repo: &str,
+        link: &str,
         now: i64,
     ) -> Result<Option<String>, ScanError> {
-        follow_confirm_with(&self.http(), token, path, now).await
+        follow_confirm_with(&self.http(), token, owner, repo, link, now).await
     }
 
     /// Lists the alerts of one tool, state and ref, all pages. See [`list_alerts_with`].

@@ -145,7 +145,9 @@ impl CodeScanning for Arc<FakeScanning> {
     async fn follow_confirm(
         &self,
         _token: &[u8],
-        _path: &str,
+        _owner: &str,
+        _repo: &str,
+        _link: &str,
         _now: i64,
     ) -> Result<Option<String>, ScanError> {
         Ok(None)

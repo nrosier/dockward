@@ -112,6 +112,139 @@ pub async fn insert_analyses_done(
     .map_err(|_| AppError::InternalError)
 }
 
+/// One stored carry-over: a rule whose new open alerts are dismissed with this reason and comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedCarry {
+    pub rule_id: String,
+    pub reason: String,
+    pub comment: Option<String>,
+    /// True once the dismissals of this rule have all been written.
+    pub applied: bool,
+}
+
+/// The stored plan for a repository and legacy category, if one was written: the refs the legacy
+/// analyses ran on, and one row per carried rule. `None` when no plan exists yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPlan {
+    pub refs: Vec<String>,
+    pub carries: Vec<PlannedCarry>,
+}
+
+/// The stored carry-over plan, or `None` when no plan has been written for this key.
+pub async fn carryover_plan(
+    pool: &SqlitePool,
+    owner: &str,
+    repo: &str,
+    legacy_category: &str,
+) -> Result<Option<StoredPlan>, AppError> {
+    let refs: Vec<String> = sqlx::query_scalar!(
+        "SELECT git_ref FROM carryover_refs
+         WHERE github_owner = ? AND github_repo = ? AND legacy_category = ?
+         ORDER BY git_ref",
+        owner,
+        repo,
+        legacy_category
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    let rows = sqlx::query!(
+        "SELECT rule_id, reason, comment, applied AS \"applied!: i64\"
+         FROM alert_carryovers
+         WHERE github_owner = ? AND github_repo = ? AND legacy_category = ?
+         ORDER BY rule_id",
+        owner,
+        repo,
+        legacy_category
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    if rows.is_empty() && refs.is_empty() {
+        return Ok(None);
+    }
+    let carries = rows
+        .into_iter()
+        .map(|row| PlannedCarry {
+            rule_id: row.rule_id,
+            reason: row.reason,
+            comment: row.comment,
+            applied: row.applied != 0,
+        })
+        .collect();
+    Ok(Some(StoredPlan { refs, carries }))
+}
+
+/// Stores a carry-over plan before the first delete. Existing rows are kept unchanged
+/// (`ON CONFLICT DO NOTHING`), so a plan is written once.
+pub async fn insert_carryover_plan(
+    pool: &SqlitePool,
+    owner: &str,
+    repo: &str,
+    legacy_category: &str,
+    refs: &[String],
+    carries: &[PlannedCarry],
+    now: i64,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
+    for git_ref in refs {
+        sqlx::query!(
+            "INSERT INTO carryover_refs (github_owner, github_repo, legacy_category, git_ref)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT (github_owner, github_repo, legacy_category, git_ref) DO NOTHING",
+            owner,
+            repo,
+            legacy_category,
+            git_ref
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+    }
+    for carry in carries {
+        sqlx::query!(
+            "INSERT INTO alert_carryovers
+                (github_owner, github_repo, legacy_category, rule_id, reason, comment, planned_at,
+                 applied)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+             ON CONFLICT (github_owner, github_repo, legacy_category, rule_id) DO NOTHING",
+            owner,
+            repo,
+            legacy_category,
+            carry.rule_id,
+            carry.reason,
+            carry.comment,
+            now
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+    }
+    tx.commit().await.map_err(|_| AppError::InternalError)
+}
+
+/// Records that the dismissals of one carried rule have all been written.
+pub async fn mark_carry_applied(
+    pool: &SqlitePool,
+    owner: &str,
+    repo: &str,
+    legacy_category: &str,
+    rule_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "UPDATE alert_carryovers SET applied = 1
+         WHERE github_owner = ? AND github_repo = ? AND legacy_category = ? AND rule_id = ?",
+        owner,
+        repo,
+        legacy_category,
+        rule_id
+    )
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

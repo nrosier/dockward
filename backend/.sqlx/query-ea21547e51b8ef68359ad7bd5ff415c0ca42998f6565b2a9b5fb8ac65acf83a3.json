@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT git_ref FROM carryover_refs\n         WHERE github_owner = ? AND github_repo = ? AND legacy_category = ?\n         ORDER BY git_ref",
+  "describe": {
+    "columns": [
+      {
+        "name": "git_ref",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "carryover_refs",
+            "name": "git_ref"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ea21547e51b8ef68359ad7bd5ff415c0ca42998f6565b2a9b5fb8ac65acf83a3"
+}
