@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
-import { Badge, formatDateTime, ROW, Segmented, Tag, TD, TH } from "../components/admin/parts";
+import { Badge, ROW, Segmented, Tag, TD, TH } from "../components/admin/parts";
+import { formatDateTime } from "../components/jobs/dates";
 import { Card } from "../components/ui/Card";
 import { ErrorMessage, LoadingMessage } from "../components/ui/StatusMessage";
 import { t } from "../i18n";
