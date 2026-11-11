@@ -43,7 +43,7 @@ use crate::services::publish;
 use crate::services::scanner::parse::{self, Report};
 use crate::services::scanner::process::{Invocation, Limits, ScannerRunner};
 use crate::services::scanner::steplog::{self, StepSlot};
-use crate::services::scanner::{Scanner, cache_dir, environment, scan_args};
+use crate::services::scanner::{Scanner, cache_dir, environment, scan_args, temp_dir};
 use crate::services::storage::eviction;
 use crate::services::storage::job::read_limits;
 use crate::services::storage::limits::parse_positive_u64;
@@ -328,6 +328,10 @@ async fn scan_and_store(
     }
     let process_limits = process_limits(repo).await.map_err(internal)?;
     let args: Vec<OsString> = scan_args(scanner, layout);
+    // The child's TMPDIR must exist before it starts. A scan run does not go through the update.
+    if std::fs::create_dir_all(temp_dir(&env.cache_root, scanner)).is_err() {
+        return Err(fail(ScannerFault::Failed).await);
+    }
     let vars = environment(&env.cache_root, scanner, true);
     // The step's log (#308): its stderr tail, redacted. A scan's stdout is the report, so it is
     // returned to the parser below and never stored as a log line.

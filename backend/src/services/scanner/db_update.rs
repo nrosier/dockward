@@ -21,7 +21,7 @@ use tokio::sync::watch;
 use super::db_refresh::{DatabaseTool, RefreshStore, RunTiming, refresh, run_error_text};
 use super::process::{Invocation, Limits};
 use super::steplog::{self, StepSlot};
-use super::{Scanner, cache_dir, environment, update_args};
+use super::{Scanner, cache_dir, environment, temp_dir, update_args};
 use crate::db::job_runs::{self, JobRun};
 use crate::db::jobs::ClaimedJob;
 use crate::db::{db_refresh as db, jobs};
@@ -218,6 +218,8 @@ impl DatabaseTool for ProcessTool {
     async fn update(&self, scanner: Scanner) -> Result<(), AppError> {
         let cache = cache_dir(self.env.cache_root(), scanner);
         std::fs::create_dir_all(&cache).map_err(|_| AppError::Scanner(ScannerFault::Failed))?;
+        let tmp = temp_dir(self.env.cache_root(), scanner);
+        std::fs::create_dir_all(&tmp).map_err(|_| AppError::Scanner(ScannerFault::Failed))?;
         // Trivy needs two downloads (the vulnerability database and the Java database). Both
         // must succeed. The output is discarded: it is never stored or logged.
         for (seq, args) in update_args(scanner).iter().enumerate() {

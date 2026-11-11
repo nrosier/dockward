@@ -51,6 +51,12 @@ pub fn cache_dir(cache_root: &Path, scanner: Scanner) -> PathBuf {
     cache_root.join(scanner.key())
 }
 
+/// The temp directory for a scanner's child process (`TMPDIR`). It sits under the scanner's own
+/// cache, on the data volume, because `/tmp` may be a small tmpfs.
+pub fn temp_dir(cache_root: &Path, scanner: Scanner) -> PathBuf {
+    cache_dir(cache_root, scanner).join("tmp")
+}
+
 /// The argument vector of a scan run for `layout_dir`, the directory generated from an id.
 ///
 /// Trivy: `image --input <dir> --format json --skip-db-update --skip-java-db-update`, the output
@@ -100,9 +106,11 @@ pub fn update_args(scanner: Scanner) -> Vec<Vec<OsString>> {
 pub fn environment(cache_root: &Path, scanner: Scanner, scan: bool) -> Vec<(OsString, OsString)> {
     let cache = cache_dir(cache_root, scanner);
     let home = cache_root.to_owned();
+    let tmp = temp_dir(cache_root, scanner);
     let mut env: Vec<(OsString, OsString)> = vec![
         ("HOME".into(), home.as_os_str().to_owned()),
         ("LC_ALL".into(), "C.UTF-8".into()),
+        ("TMPDIR".into(), tmp.as_os_str().to_owned()),
     ];
     match scanner {
         Scanner::Trivy => {

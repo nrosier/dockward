@@ -118,3 +118,25 @@ fn scanner_environments_always_set_a_home_inside_the_cache_root() {
         }
     }
 }
+
+/// Regression: the scanner child runs with a cleared environment, so without TMPDIR Grype and
+/// Trivy write temp files to `/tmp`, which is a 64 MB tmpfs in the compose file, and the database
+/// download fails with "no space left on device". TMPDIR must point inside the cache root.
+#[test]
+fn scanner_environments_point_tmpdir_inside_the_cache_root() {
+    let root = Path::new("/data/scanner-cache");
+    for scanner in [Scanner::Trivy, Scanner::Grype] {
+        for scan in [true, false] {
+            let env = environment(root, scanner, scan);
+            let tmp = env
+                .iter()
+                .find(|(name, _)| name == "TMPDIR")
+                .map(|(_, value)| std::path::PathBuf::from(value));
+            let tmp = tmp.unwrap_or_else(|| panic!("{scanner:?} scan={scan}: TMPDIR is not set"));
+            assert!(
+                tmp.starts_with(root) && tmp != root,
+                "{scanner:?} scan={scan}: TMPDIR {tmp:?} is not inside {root:?}"
+            );
+        }
+    }
+}
