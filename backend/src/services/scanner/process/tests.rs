@@ -9,6 +9,7 @@ use nix::unistd::Pid;
 
 use super::*;
 use crate::error::{AppError, ScannerFault};
+use crate::services::app_log::{MAX_LINE_CHARS, TRUNCATED_MARKER};
 
 /// Serialises the tests that change this process's environment. In edition 2024 `set_var` is
 /// unsafe, because another thread may read the environment at the same time.
@@ -81,6 +82,7 @@ fn a_successful_run_returns_its_stdout() {
         args: &args,
         env: &env,
         limits: limits(10_000, 1_024),
+        log_stdout: false,
     }));
     let _ = std::fs::remove_dir_all(&dir);
     match result {
@@ -104,6 +106,7 @@ fn a_non_zero_exit_is_scanner_failed_and_stderr_is_not_returned() {
         args: &args,
         env: &env,
         limits: limits(10_000, 1_024),
+        log_stdout: false,
     }));
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(fault_of(result), ScannerFault::Failed);
@@ -118,6 +121,7 @@ fn a_relative_program_path_is_refused_before_any_spawn() {
         args: &args,
         env: &env,
         limits: limits(10_000, 1_024),
+        log_stdout: false,
     }));
     assert_eq!(fault_of(result), ScannerFault::Failed);
 }
@@ -147,6 +151,7 @@ fn the_child_sees_only_the_allow_list_and_not_a_parent_variable() {
         args: &args,
         env: &env,
         limits: limits(10_000, 64 * 1024),
+        log_stdout: false,
     }));
     // SAFETY: as above; the lock is still held.
     unsafe { std::env::remove_var(canary) };
@@ -197,6 +202,7 @@ fn a_timeout_kills_the_whole_process_group() {
         // has forked the grandchild and written its pid first, even on a loaded machine. A short
         // timeout let the kill land before the grandchild existed, and the pid file was missing.
         limits: limits(8_000, 1_024),
+        log_stdout: false,
     }));
     assert!(
         started.elapsed() < Duration::from_secs(30),
@@ -227,6 +233,7 @@ fn a_background_child_left_by_a_successful_run_is_killed() {
         args: &args,
         env: &env,
         limits: limits(10_000, 1_024),
+        log_stdout: false,
     }));
     let orphan = read_pid(&pidfile);
     let gone = wait_until_gone(orphan, Duration::from_secs(5));
@@ -259,6 +266,7 @@ fn an_oversized_output_is_refused_with_the_fixed_failure() {
         args: &args,
         env: &env,
         limits: limits(30_000, 1_000),
+        log_stdout: false,
     }));
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
@@ -279,6 +287,7 @@ fn output_exactly_at_the_cap_is_accepted() {
         args: &args,
         env: &env,
         limits: limits(10_000, 10),
+        log_stdout: false,
     }));
     let _ = std::fs::remove_dir_all(&dir);
     match result {
@@ -327,4 +336,191 @@ fn is_running(pid: i32) -> bool {
         }
         Err(_) => kill(Pid::from_raw(pid), None).is_ok(),
     }
+}
+
+fn recorded_limits(timeout_ms: u64) -> Limits {
+    limits(timeout_ms, 1_024 * 1_024)
+}
+
+#[test]
+fn a_failed_step_stores_its_stderr_tail_and_the_failed_outcome() {
+    let dir = scratch_dir("rec-fail");
+    let script = write_script(
+        &dir,
+        "fail.sh",
+        "echo 'downloading from https://robot:s3cret@registry.example.com' >&2\necho 'boom' >&2\nexit 3",
+    );
+    let args: Vec<OsString> = vec!["image".into(), "--download-db-only".into()];
+    let env: Vec<(OsString, OsString)> = Vec::new();
+    let (result, record) = runtime().block_on(ScannerRunner::new().run_recorded(Invocation {
+        program: &script,
+        args: &args,
+        env: &env,
+        limits: recorded_limits(10_000),
+        log_stdout: true,
+    }));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(fault_of(result), ScannerFault::Failed);
+    assert_eq!(record.outcome, StepOutcome::Failed);
+    assert_eq!(record.exit_code, Some(3));
+    assert!(
+        record.command.ends_with("fail.sh image --download-db-only"),
+        "{}",
+        record.command
+    );
+    let texts: Vec<&str> = record.lines.iter().map(|l| l.text.as_str()).collect();
+    assert!(texts.contains(&"boom"), "{texts:?}");
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("registry.example.com") && !t.contains("s3cret")),
+        "{texts:?}"
+    );
+    assert!(record.lines.iter().all(|l| l.stream == LineStream::Stderr));
+}
+
+#[test]
+fn a_timeout_step_records_timed_out_with_its_timeout() {
+    let dir = scratch_dir("rec-timeout");
+    let script = write_script(&dir, "hang.sh", "echo 'waiting' >&2\n/bin/sleep 60");
+    let args: Vec<OsString> = Vec::new();
+    let env: Vec<(OsString, OsString)> = Vec::new();
+    let (result, record) = runtime().block_on(ScannerRunner::new().run_recorded(Invocation {
+        program: &script,
+        args: &args,
+        env: &env,
+        limits: recorded_limits(2_000),
+        log_stdout: false,
+    }));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(fault_of(result), ScannerFault::TimedOut);
+    assert_eq!(record.outcome, StepOutcome::TimedOut);
+    assert_eq!(record.timeout_secs, 2);
+    assert_eq!(record.exit_code, None);
+}
+
+#[test]
+fn a_run_recorded_ok_step_keeps_no_scan_stdout_when_log_stdout_is_false() {
+    let dir = scratch_dir("rec-scan");
+    let script = write_script(
+        &dir,
+        "scan.sh",
+        "echo 'SECRET-REPORT-BODY'\necho 'progress' >&2",
+    );
+    let args: Vec<OsString> = Vec::new();
+    let env: Vec<(OsString, OsString)> = Vec::new();
+    let (result, record) = runtime().block_on(ScannerRunner::new().run_recorded(Invocation {
+        program: &script,
+        args: &args,
+        env: &env,
+        limits: recorded_limits(10_000),
+        log_stdout: false,
+    }));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(result.is_ok());
+    assert_eq!(record.outcome, StepOutcome::Ok);
+    assert!(
+        record
+            .lines
+            .iter()
+            .all(|l| !l.text.contains("SECRET-REPORT-BODY")),
+        "{:?}",
+        record.lines
+    );
+    assert!(record.lines.iter().all(|l| l.stream == LineStream::Stderr));
+}
+
+#[test]
+fn stdout_is_stored_for_an_update_step_when_log_stdout_is_true() {
+    let dir = scratch_dir("rec-stdout");
+    let script = write_script(&dir, "update.sh", "echo 'downloaded db'");
+    let args: Vec<OsString> = Vec::new();
+    let env: Vec<(OsString, OsString)> = Vec::new();
+    let (result, record) = runtime().block_on(ScannerRunner::new().run_recorded(Invocation {
+        program: &script,
+        args: &args,
+        env: &env,
+        limits: recorded_limits(10_000),
+        log_stdout: true,
+    }));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(result.is_ok());
+    assert!(
+        record
+            .lines
+            .iter()
+            .any(|l| l.stream == LineStream::Stdout && l.text == "downloaded db"),
+        "{:?}",
+        record.lines
+    );
+}
+
+#[test]
+fn the_stderr_tail_keeps_the_newest_500_lines_and_marks_truncation() {
+    let dir = scratch_dir("rec-cap");
+    let script = write_script(
+        &dir,
+        "many.sh",
+        "i=0\nwhile [ $i -lt 620 ]; do echo \"line $i\" >&2; i=$((i+1)); done",
+    );
+    let args: Vec<OsString> = Vec::new();
+    let env: Vec<(OsString, OsString)> = Vec::new();
+    let (result, record) = runtime().block_on(ScannerRunner::new().run_recorded(Invocation {
+        program: &script,
+        args: &args,
+        env: &env,
+        limits: recorded_limits(10_000),
+        log_stdout: false,
+    }));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(result.is_ok());
+    assert!(record.truncated);
+    assert_eq!(record.lines.len(), MAX_STEP_LINES);
+    assert_eq!(
+        record.lines.last().map(|l| l.text.as_str()),
+        Some("line 619")
+    );
+}
+
+#[test]
+fn a_line_over_1000_characters_is_cut_with_the_marker() {
+    let dir = scratch_dir("rec-long");
+    let script = write_script(&dir, "long.sh", "printf '%01200d\\n' 0 >&2");
+    let args: Vec<OsString> = Vec::new();
+    let env: Vec<(OsString, OsString)> = Vec::new();
+    let (result, record) = runtime().block_on(ScannerRunner::new().run_recorded(Invocation {
+        program: &script,
+        args: &args,
+        env: &env,
+        limits: recorded_limits(10_000),
+        log_stdout: false,
+    }));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(result.is_ok());
+    let line = &record.lines[0].text;
+    assert_eq!(line.chars().count(), MAX_LINE_CHARS);
+    assert!(line.ends_with(TRUNCATED_MARKER), "{line}");
+}
+
+#[test]
+fn carriage_return_splits_progress_lines_and_control_characters_are_stripped() {
+    let dir = scratch_dir("rec-cr");
+    let script = write_script(
+        &dir,
+        "cr.sh",
+        "printf 'pct 10\\rpct 20\\n\\033[31mred\\033[0m\\n' >&2",
+    );
+    let args: Vec<OsString> = Vec::new();
+    let env: Vec<(OsString, OsString)> = Vec::new();
+    let (result, record) = runtime().block_on(ScannerRunner::new().run_recorded(Invocation {
+        program: &script,
+        args: &args,
+        env: &env,
+        limits: recorded_limits(10_000),
+        log_stdout: false,
+    }));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(result.is_ok());
+    let texts: Vec<&str> = record.lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(texts, vec!["pct 10", "pct 20", "[31mred[0m"]);
 }

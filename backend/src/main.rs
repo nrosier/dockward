@@ -121,6 +121,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         .route("/api/v1/jobs/failed-count", get(api::jobs::failed_count))
         .route("/api/v1/jobs/purge-failed", post(api::jobs::purge_failed))
         .route("/api/v1/jobs/{id}", get(api::jobs::get))
+        .route("/api/v1/jobs/{id}/log", get(api::jobs::log))
         .route("/api/v1/jobs/{id}/retry", post(api::jobs::retry))
         .route("/api/v1/dashboard/summary", get(api::dashboard::summary))
         .route("/api/v1/cves", get(api::cves::list))

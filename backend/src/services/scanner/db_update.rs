@@ -20,8 +20,10 @@ use tokio::sync::watch;
 
 use super::db_refresh::{DatabaseTool, RefreshStore, RunTiming, refresh, run_error_text};
 use super::process::{Invocation, Limits};
+use super::steplog::{self, StepSlot};
 use super::{Scanner, cache_dir, environment, update_args};
 use crate::db::job_runs::{self, JobRun};
+use crate::db::jobs::ClaimedJob;
 use crate::db::{db_refresh as db, jobs};
 use crate::error::{AppError, ScannerFault};
 use crate::services::discovery::{MSG_BAD_PAYLOAD, fixed_text};
@@ -111,8 +113,8 @@ async fn run_every<F, Fut>(
 
 /// Runs one `db_update` job. The refresh records its own `job_runs` row. A failure is a fixed
 /// text and retries on the backoff, except a timeout or an oversized output, which cannot heal.
-pub async fn run_db_update(pool: &SqlitePool, env: &ScanEnv, job_payload: &str) -> JobOutcome {
-    let Ok(payload) = serde_json::from_str::<DbUpdatePayload>(job_payload) else {
+pub async fn run_db_update(pool: &SqlitePool, env: &ScanEnv, job: &ClaimedJob) -> JobOutcome {
+    let Ok(payload) = serde_json::from_str::<DbUpdatePayload>(&job.payload) else {
         return JobOutcome::Permanent(MSG_BAD_PAYLOAD.to_owned());
     };
     let scanner = match payload.scanner.as_str() {
@@ -125,10 +127,17 @@ pub async fn run_db_update(pool: &SqlitePool, env: &ScanEnv, job_payload: &str) 
         Err(err) => return JobOutcome::Failed(fixed_text(&err)),
     };
     let tool = ProcessTool {
+        pool: pool.clone(),
         env: env.clone(),
         limits,
+        job_id: job.id.clone(),
+        // The attempt this run belongs to: the worker counts the attempt that is running now.
+        attempt: job.attempts + 1,
     };
-    let store = SqlRefreshStore { pool: pool.clone() };
+    let store = SqlRefreshStore {
+        pool: pool.clone(),
+        job_id: job.id.clone(),
+    };
     match refresh(&tool, &store, scanner, now_secs).await {
         Ok(outcome) => {
             tracing::info!(
@@ -146,25 +155,63 @@ pub async fn run_db_update(pool: &SqlitePool, env: &ScanEnv, job_payload: &str) 
     }
 }
 
-/// The scanner's own update command, run through the shared runner.
+/// The scanner's own update command, run through the shared runner. Each step is recorded in
+/// the job's log (#308); a step's stdout is stored, because an update step prints no report.
 struct ProcessTool {
+    pool: SqlitePool,
     env: ScanEnv,
     limits: Limits,
+    job_id: String,
+    attempt: i64,
 }
 
 impl ProcessTool {
-    async fn run_args(&self, scanner: Scanner, args: &[OsString]) -> Result<Vec<u8>, AppError> {
+    /// Runs one step and records it. `seq` is the step's place in the job attempt. The record is
+    /// written whatever the outcome, and the step's own result is returned unchanged.
+    async fn run_args(
+        &self,
+        scanner: Scanner,
+        args: &[OsString],
+        seq: i64,
+    ) -> Result<Vec<u8>, AppError> {
         let vars = environment(self.env.cache_root(), scanner, false);
-        self.env
+        let slot = StepSlot {
+            job_id: &self.job_id,
+            attempt: self.attempt,
+            seq,
+        };
+        let started_at = now_secs();
+        let command = format!("{} {}", scanner.key(), args_text(args));
+        let step_id = steplog::begin(
+            &self.pool,
+            &slot,
+            &command,
+            started_at,
+            self.limits.timeout.as_secs(),
+        )
+        .await;
+        let (result, record) = self
+            .env
             .runner()
-            .run(Invocation {
+            .run_recorded(Invocation {
                 program: self.env.program(scanner),
                 args,
                 env: &vars,
                 limits: self.limits,
+                log_stdout: true,
             })
-            .await
+            .await;
+        steplog::finish(&self.pool, step_id.as_deref(), &record).await;
+        result
     }
+}
+
+/// The argument text of a step, for the log. The arguments are fixed (no secret is in them).
+fn args_text(args: &[OsString]) -> String {
+    args.iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl DatabaseTool for ProcessTool {
@@ -173,8 +220,9 @@ impl DatabaseTool for ProcessTool {
         std::fs::create_dir_all(&cache).map_err(|_| AppError::Scanner(ScannerFault::Failed))?;
         // Trivy needs two downloads (the vulnerability database and the Java database). Both
         // must succeed. The output is discarded: it is never stored or logged.
-        for args in update_args(scanner) {
-            self.run_args(scanner, &args).await?;
+        for (seq, args) in update_args(scanner).iter().enumerate() {
+            let seq = i64::try_from(seq).unwrap_or(i64::MAX);
+            self.run_args(scanner, args, seq).await?;
         }
         Ok(())
     }
@@ -193,7 +241,19 @@ impl DatabaseTool for ProcessTool {
             Scanner::Grype => {
                 let args: Vec<OsString> =
                     vec!["db".into(), "status".into(), "-o".into(), "json".into()];
-                let body = self.run_args(scanner, &args).await?;
+                // A status read, not an update step: it is not logged, and its stdout is the
+                // build time only.
+                let body = self
+                    .env
+                    .runner()
+                    .run(Invocation {
+                        program: self.env.program(scanner),
+                        args: &args,
+                        env: &environment(self.env.cache_root(), scanner, false),
+                        limits: self.limits,
+                        log_stdout: false,
+                    })
+                    .await?;
                 String::from_utf8(body).map_err(|_| unavailable)?
             }
         };
@@ -216,6 +276,7 @@ pub(super) fn parse_built_at(scanner: Scanner, text: &str) -> Option<i64> {
 /// The storage side of a refresh, over the pool.
 struct SqlRefreshStore {
     pool: SqlitePool,
+    job_id: String,
 }
 
 impl RefreshStore for SqlRefreshStore {
@@ -225,7 +286,7 @@ impl RefreshStore for SqlRefreshStore {
         run: RunTiming,
         error: Option<&str>,
     ) -> Result<(), AppError> {
-        job_runs::insert(
+        job_runs::insert_for_job(
             &self.pool,
             &JobRun {
                 id: ids::new_id()?,
@@ -237,6 +298,7 @@ impl RefreshStore for SqlRefreshStore {
                 error_summary: error.map(str::to_owned),
                 scanner: Some(scanner.key().to_owned()),
             },
+            &self.job_id,
         )
         .await
     }

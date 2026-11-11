@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM job_log_lines\n          WHERE step_id = ?\n            AND id <= (SELECT id FROM job_log_lines WHERE step_id = ?\n                        ORDER BY id DESC LIMIT 1 OFFSET ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "9914d4d7472bf56a83df6c8569133d783865bc50ea385f52f5b4c88d75f41163"
+}

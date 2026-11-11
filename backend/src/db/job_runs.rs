@@ -42,6 +42,28 @@ pub async fn insert(pool: &SqlitePool, run: &JobRun) -> Result<(), AppError> {
     .map_err(|_| AppError::InternalError)
 }
 
+/// Stores one run and the job it was recorded for (#308). The job link is set in the same insert.
+pub async fn insert_for_job(pool: &SqlitePool, run: &JobRun, job_id: &str) -> Result<(), AppError> {
+    sqlx::query!(
+        "INSERT INTO job_runs
+            (id, job_kind, started_at, finished_at, status, processed_count, error_summary, scanner, job_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        run.id,
+        run.job_kind,
+        run.started_at,
+        run.finished_at,
+        run.status,
+        run.processed_count,
+        run.error_summary,
+        run.scanner,
+        job_id
+    )
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
 /// How many characters of `error_summary` a read returns. The text is untrusted and may be
 /// long, so the cut is made in SQL and a long text never leaves the database.
 pub const MAX_ERROR_CHARS: i64 = 500;
@@ -57,6 +79,8 @@ pub struct JobRunView {
     pub processed_count: i64,
     pub error_summary: Option<String>,
     pub scanner: Option<String>,
+    /// The job the run was recorded for (#308), or `None` when it has none.
+    pub job_id: Option<String>,
 }
 
 /// One page of runs, newest first (`ascending` flips it). `kind` is `None` for every kind.
@@ -74,7 +98,8 @@ pub async fn list(
                   finished_at AS "finished_at?: i64", status AS "status!",
                   processed_count AS "processed_count!: i64",
                   substr(CAST(error_summary AS TEXT), 1, ?) AS "error_summary?: String",
-                  scanner AS "scanner?: String"
+                  scanner AS "scanner?: String",
+                  job_id AS "job_id?: String"
            FROM job_runs
            WHERE (? IS NULL OR job_kind = ?)
            ORDER BY
@@ -104,6 +129,7 @@ pub async fn list(
             processed_count: row.processed_count,
             error_summary: row.error_summary,
             scanner: row.scanner,
+            job_id: row.job_id,
         })
         .collect())
 }

@@ -11,8 +11,19 @@ use sqlx::SqlitePool;
 
 use super::*;
 use crate::db;
+use crate::db::jobs::ClaimedJob;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A claimed `db_update` job for `payload`, on its first attempt.
+fn test_job(payload: &str) -> ClaimedJob {
+    ClaimedJob {
+        id: "job-db-update".to_owned(),
+        source_id: None,
+        attempts: 0,
+        payload: payload.to_owned(),
+    }
+}
 
 /// 2026-11-10T13:03:09Z and one day later, as the `UpdatedAt` of Trivy's metadata.
 const TRIVY_OLD: &str = "2026-11-10T13:03:09.93195248Z";
@@ -145,7 +156,16 @@ impl Fx {
             Ok(text) => text,
             Err(err) => panic!("payload: {err:?}"),
         };
-        run_db_update(&self.pool, &self.env, &payload).await
+        // The job the run is recorded for. A `job_runs` row links to it (migration 0004).
+        // It is inserted here, so the tests that count jobs see only the rows they make.
+        exec(
+            &self.pool,
+            "INSERT OR IGNORE INTO jobs (id, source_id, status, attempts, payload)
+             VALUES ('job-db-update', NULL, 'running', 0, ?)",
+            &[&payload],
+        )
+        .await;
+        run_db_update(&self.pool, &self.env, &test_job(&payload)).await
     }
 
     fn calls(&self) -> String {
@@ -172,7 +192,16 @@ async fn an_unchanged_database_queues_nothing() {
     assert!(matches!(fx.run(Scanner::Trivy).await, JobOutcome::Done));
 
     assert_eq!(fx.rescans("trivy").await, 0);
-    assert_eq!(count(&fx.pool, "SELECT COUNT(*) FROM jobs", &[]).await, 0);
+    // Only the db_update job the run records for exists; no scan job is queued.
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM jobs WHERE json_extract(payload, '$.kind') = 'scan'",
+            &[]
+        )
+        .await,
+        0
+    );
 }
 
 #[tokio::test]
@@ -487,7 +516,7 @@ async fn a_bad_payload_fails_once_with_the_fixed_text() {
         r#"{"kind":"db_update"}"#,
         r#"{"kind":"db_update","scanner":"../etc"}"#,
     ] {
-        let outcome = run_db_update(&fx.pool, &fx.env, payload).await;
+        let outcome = run_db_update(&fx.pool, &fx.env, &test_job(payload)).await;
         assert!(matches!(outcome, JobOutcome::Permanent(_)), "{payload}");
     }
     assert_eq!(fx.calls(), "", "no process starts for a bad payload");
@@ -573,4 +602,98 @@ fn the_build_time_is_read_from_each_scanners_own_document() {
         parse_built_at(Scanner::Trivy, r#"{"UpdatedAt":"yesterday"}"#),
         None
     );
+}
+
+/// Writes a step log for one scanner step: the steps that ran for the test job, with their
+/// outcome text, read back from `job_log_steps`.
+async fn step_outcomes(pool: &SqlitePool, job_id: &str) -> Vec<(i64, String, String)> {
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT seq, command, outcome FROM job_log_steps WHERE job_id = ? ORDER BY seq",
+    )
+    .bind(job_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    rows
+}
+
+#[tokio::test]
+async fn a_trivy_update_records_one_step_per_download_with_its_command_and_outcome() {
+    let fx = Fx::new("steps-ok", TRIVY_NEW).await;
+    fx.store_built_at("trivy", TRIVY_OLD_SECS).await;
+
+    assert!(matches!(fx.run(Scanner::Trivy).await, JobOutcome::Done));
+
+    let steps = step_outcomes(&fx.pool, "job-db-update").await;
+    assert_eq!(
+        steps,
+        vec![
+            (
+                0,
+                "trivy image --download-db-only".to_owned(),
+                "ok".to_owned()
+            ),
+            (
+                1,
+                "trivy image --download-java-db-only".to_owned(),
+                "ok".to_owned()
+            ),
+        ]
+    );
+    // The job's latest attempt is the one the steps were written under (attempts 0 + 1).
+    let attempts: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT attempt FROM job_log_steps WHERE job_id = 'job-db-update'",
+    )
+    .fetch_all(&fx.pool)
+    .await
+    .unwrap_or_default();
+    assert_eq!(attempts, vec![1]);
+}
+
+#[tokio::test]
+async fn a_failed_update_step_stores_its_stderr_tail_redacted_and_the_run_links_the_job() {
+    let dir_marker = "robot:s3cret@registry.example.com";
+    let fx = Fx::new("steps-fail", TRIVY_NEW).await;
+    // Rewrite the trivy stub so the download fails and prints a credential on stderr.
+    write_script(
+        &fx.dir.join("bin").join("trivy"),
+        &format!("echo 'pull https://{dir_marker}/db' >&2\nexit 1"),
+    );
+
+    let outcome = fx.run(Scanner::Trivy).await;
+    assert!(matches!(outcome, JobOutcome::Failed(_)), "{outcome:?}");
+
+    let outcome_text: String = sqlx::query_scalar(
+        "SELECT outcome FROM job_log_steps WHERE job_id = 'job-db-update' AND seq = 0",
+    )
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap_or_default();
+    assert_eq!(outcome_text, "failed");
+
+    let lines: Vec<String> = sqlx::query_scalar(
+        "SELECT l.text FROM job_log_lines l JOIN job_log_steps s ON s.id = l.step_id
+         WHERE s.job_id = 'job-db-update' AND s.seq = 0",
+    )
+    .fetch_all(&fx.pool)
+    .await
+    .unwrap_or_default();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("registry.example.com")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("s3cret")),
+        "{lines:?}"
+    );
+
+    let linked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM job_runs WHERE job_id = 'job-db-update' AND status = 'failed'",
+    )
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap_or_default();
+    assert_eq!(linked, 1);
 }
