@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::watch;
 
 use crate::db::discovery as db;
@@ -46,6 +46,31 @@ pub async fn schedule_once(pool: &SqlitePool, now: i64) -> Result<usize, AppErro
         queued += 1;
     }
     Ok(queued)
+}
+
+/// Queues a discover job scoped to one source, so its image is discovered (and pulled) now
+/// rather than at the next hourly pass (#331). Called inside the source's create or update
+/// transaction. A job for the same payload that is `queued` or `running` is not duplicated.
+/// Unlike [`schedule_once`], a `failed` job does not block it. Returns whether a job was queued.
+pub async fn queue_source_discovery(
+    conn: &mut SqliteConnection,
+    source_id: &str,
+    hub_id: &str,
+    repository: &str,
+    now: i64,
+) -> Result<bool, AppError> {
+    let payload = DiscoverPayload::new(hub_id, repository, Some(source_id)).to_text()?;
+    if matches!(
+        db::latest_job_status(&mut *conn, &payload)
+            .await?
+            .as_deref(),
+        Some("queued" | "running")
+    ) {
+        return Ok(false);
+    }
+    let id = ids::new_id()?;
+    jobs::enqueue_in(conn, &id, Some(source_id), &payload, now).await?;
+    Ok(true)
 }
 
 /// Runs [`schedule_once`] shortly after start and then every hour, until `stop` turns true.

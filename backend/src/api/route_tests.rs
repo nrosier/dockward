@@ -1220,3 +1220,185 @@ async fn source_display_name_create_update_and_limits() {
     assert_eq!(stored, None);
     fx.finish().await;
 }
+
+/// Queuing a discover job when a source is created or its repository, tag or hub changes (#331).
+mod discovery_on_save {
+    use super::*;
+
+    /// The statuses of the discover jobs scoped to one source, oldest first.
+    async fn scoped_jobs(fx: &Fixture, source_id: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT status FROM jobs
+             WHERE json_extract(payload, '$.kind') = 'discover' AND source_id = ? ORDER BY rowid",
+        )
+        .bind(source_id)
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn all_discover_jobs(fx: &Fixture) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs WHERE json_extract(payload, '$.kind') = 'discover'",
+        )
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap()
+    }
+
+    /// Marks the source's jobs done, as the worker would after a run.
+    async fn settle(fx: &Fixture, source_id: &str) {
+        sqlx::query("UPDATE jobs SET status = 'done' WHERE source_id = ?")
+            .bind(source_id)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+    }
+
+    async fn put(fx: &Fixture, id: &str, body: Value) -> StatusCode {
+        let uri = format!("/api/v1/image-sources/{id}");
+        fx.call("PUT", &uri, &fx.owner, body).await.0
+    }
+
+    #[tokio::test]
+    async fn creating_a_source_queues_one_scoped_discover_job() {
+        let fx = fixture("rt-discover-create").await;
+        let id = make_source(&fx, "1.*").await;
+        assert_eq!(scoped_jobs(&fx, &id).await, vec!["queued".to_owned()]);
+        let payload: String = sqlx::query_scalar("SELECT payload FROM jobs WHERE source_id = ?")
+            .bind(&id)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["kind"], "discover");
+        assert_eq!(value["hub_id"], "hub-fake");
+        assert_eq!(value["repository"], "team/app");
+        assert_eq!(value["source_id"], id.as_str());
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn updating_the_repository_tag_or_hub_queues_one_scoped_job() {
+        let fx = fixture("rt-discover-update").await;
+        let id = make_source(&fx, "1.*").await;
+        settle(&fx, &id).await;
+
+        assert_eq!(
+            put(&fx, &id, source_body("hub-fake", "1.*")).await,
+            StatusCode::OK
+        );
+        // Unchanged save: nothing new.
+        assert_eq!(scoped_jobs(&fx, &id).await, vec!["done".to_owned()]);
+
+        let mut repo = source_body("hub-fake", "1.*");
+        repo["repository"] = json!("team/other");
+        assert_eq!(put(&fx, &id, repo).await, StatusCode::OK);
+        assert_eq!(
+            scoped_jobs(&fx, &id).await,
+            vec!["done".to_owned(), "queued".to_owned()]
+        );
+        settle(&fx, &id).await;
+
+        let mut tag = source_body("hub-fake", "2.*");
+        tag["repository"] = json!("team/other");
+        assert_eq!(put(&fx, &id, tag).await, StatusCode::OK);
+        assert_eq!(scoped_jobs(&fx, &id).await.len(), 3);
+        assert_eq!(scoped_jobs(&fx, &id).await[2], "queued");
+        settle(&fx, &id).await;
+
+        sqlx::query("INSERT INTO hubs (id, host, kind) VALUES ('hub-b', 'b.example', 'custom')")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        let mut hub = source_body("hub-b", "2.*");
+        hub["repository"] = json!("team/other");
+        assert_eq!(put(&fx, &id, hub).await, StatusCode::OK);
+        assert_eq!(scoped_jobs(&fx, &id).await.len(), 4);
+        assert_eq!(scoped_jobs(&fx, &id).await[3], "queued");
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_rename_only_update_queues_no_job() {
+        let fx = fixture("rt-discover-rename").await;
+        let id = make_source(&fx, "1.*").await;
+        settle(&fx, &id).await;
+        let mut renamed = source_body("hub-fake", "1.*");
+        renamed["name"] = json!("Payments");
+        assert_eq!(put(&fx, &id, renamed).await, StatusCode::OK);
+        assert_eq!(scoped_jobs(&fx, &id).await, vec!["done".to_owned()]);
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_repository_job_does_not_block_a_new_source() {
+        let fx = fixture("rt-discover-failed").await;
+        // The hourly scheduler's job for the repository has failed.
+        let repo_payload =
+            crate::services::discovery::DiscoverPayload::new("hub-fake", "team/app", None)
+                .to_text()
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, source_id, status, attempts, payload)
+             VALUES ('failed-repo', NULL, 'failed', 8, ?)",
+        )
+        .bind(&repo_payload)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        let id = make_source(&fx, "1.*").await;
+        assert_eq!(scoped_jobs(&fx, &id).await, vec!["queued".to_owned()]);
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_rejected_create_or_update_queues_nothing() {
+        let fx = fixture("rt-discover-rejected").await;
+        let mut bad = source_body("hub-fake", "1.*");
+        bad["min_issue_severity"] = json!("LOW");
+        let (status, _) = fx
+            .call("POST", "/api/v1/image-sources", &fx.owner, bad)
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let mut unknown = source_body("hub-fake", "1.*");
+        unknown["github_cred_id"] = json!("nope");
+        let (status, _) = fx
+            .call("POST", "/api/v1/image-sources", &fx.owner, unknown)
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(all_discover_jobs(&fx).await, 0);
+
+        let id = make_source(&fx, "1.*").await;
+        settle(&fx, &id).await;
+        let mut bad_update = source_body("hub-fake", "1.*");
+        bad_update["repository"] = json!("team/other");
+        bad_update["min_issue_severity"] = json!("LOW");
+        assert_eq!(
+            put(&fx, &id, bad_update).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let mut unknown_update = source_body("hub-fake", "2.*");
+        unknown_update["github_cred_id"] = json!("nope");
+        assert_eq!(put(&fx, &id, unknown_update).await, StatusCode::NOT_FOUND);
+        assert_eq!(all_discover_jobs(&fx).await, 1);
+        assert_eq!(scoped_jobs(&fx, &id).await, vec!["done".to_owned()]);
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn saving_twice_while_the_job_is_queued_creates_no_second_job() {
+        let fx = fixture("rt-discover-dup").await;
+        let id = make_source(&fx, "1.*").await;
+        assert_eq!(
+            put(&fx, &id, source_body("hub-fake", "1.*")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            put(&fx, &id, source_body("hub-fake", "2.*")).await,
+            StatusCode::OK
+        );
+        assert_eq!(scoped_jobs(&fx, &id).await, vec!["queued".to_owned()]);
+        fx.finish().await;
+    }
+}

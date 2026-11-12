@@ -16,12 +16,14 @@ use crate::models::role::Role;
 use crate::services::audit::{self, Actor};
 use crate::services::credential_probe::valid_github_name;
 use crate::services::discovery::glob::TagPattern;
+use crate::services::discovery::schedule::queue_source_discovery;
 use crate::services::ids;
 use crate::services::pagination::{Page, Pagination};
 use crate::services::registry::grammar::validate_repository;
 use crate::services::sessions::AuthUser;
 use crate::services::storage::{StoreRoot, eviction};
 use crate::services::time;
+use crate::worker::now_secs;
 
 /// Sort keys the list route accepts. The first is the default.
 const SORTS: &[&str] = &["created_at", "repository"];
@@ -284,6 +286,7 @@ pub async fn create(
     let created = db::find(&mut tx, &id)
         .await?
         .ok_or(AppError::InternalError)?;
+    queue_source_discovery(&mut tx, &id, &input.hub_id, &input.repository, now_secs()).await?;
     audit::record(
         &mut tx,
         actor,
@@ -314,7 +317,7 @@ pub async fn update(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|_| AppError::InternalError)?;
-    load(&mut tx, user, id, Need::Write).await?;
+    let before = load(&mut tx, user, id, Need::Write).await?;
     check_references(&mut tx, &user.id, &input).await?;
     let write = SourceWrite {
         hub_id: &input.hub_id,
@@ -332,6 +335,13 @@ pub async fn update(
     let updated = db::find(&mut tx, id)
         .await?
         .ok_or(AppError::InternalError)?;
+    // Only the fields that change discovery queue a run; a rename does not (#331).
+    let discovery_changed = before.hub_id != updated.hub_id
+        || before.repository != updated.repository
+        || before.tag_value != updated.tag_value;
+    if discovery_changed {
+        queue_source_discovery(&mut tx, id, &input.hub_id, &input.repository, now_secs()).await?;
+    }
     audit::record(
         &mut tx,
         actor,
