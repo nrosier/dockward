@@ -386,6 +386,72 @@ async fn a_moved_tag_queues_one_pull_and_keeps_the_old_digest() {
 }
 
 #[tokio::test]
+async fn an_unchanged_tag_queues_no_pull_and_downloads_no_blob() {
+    let env = env("unchanged").await;
+    env.add_source("s1", REPO, "latest").await;
+    set_tags(&env.script, REPO, &["latest"]);
+    put_single(&env.script, REPO, "latest", "amd64", "same");
+    assert_eq!(env.run(REPO, NOW).await.queued, 1);
+    let blobs_after_first = env
+        .script
+        .hits()
+        .iter()
+        .filter(|hit| hit.contains("/blobs/"))
+        .count();
+    assert_eq!(blobs_after_first, 1);
+
+    // The next hourly pass sees the same digest: the tag is recorded, nothing is pulled and no
+    // blob is downloaded.
+    assert_eq!(env.run(REPO, NOW + 3600).await.queued, 0);
+    assert_eq!(env.pulls().await, 1);
+    let blobs_after_second = env
+        .script
+        .hits()
+        .iter()
+        .filter(|hit| hit.contains("/blobs/"))
+        .count();
+    assert_eq!(blobs_after_second, blobs_after_first);
+    assert_eq!(env.count("SELECT COUNT(*) FROM tag_observations").await, 1);
+    let last_seen: i64 =
+        sqlx::query_scalar("SELECT last_seen_at FROM tag_observations WHERE source_id = 's1'")
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+    assert_eq!(last_seen, NOW + 3600);
+}
+
+#[tokio::test]
+async fn a_moved_tag_pulls_the_new_digest() {
+    let env = env("moved-digest").await;
+    env.add_source("s1", REPO, "latest").await;
+    set_tags(&env.script, REPO, &["latest"]);
+    put_single(&env.script, REPO, "latest", "amd64", "old");
+    assert_eq!(env.run(REPO, NOW).await.queued, 1);
+
+    let new = put_single(&env.script, REPO, "latest", "amd64", "new");
+    assert_eq!(env.run(REPO, NOW + 3600).await.queued, 1);
+    let pulled: Vec<String> = sqlx::query_scalar(
+        "SELECT json_extract(payload, '$.digest') FROM jobs
+         WHERE json_extract(payload, '$.kind') = 'pull'
+         ORDER BY created_at, rowid",
+    )
+    .fetch_all(&env.pool)
+    .await
+    .unwrap();
+    assert_eq!(pulled.len(), 2);
+    assert_eq!(pulled[1], new);
+    let trigger: String = sqlx::query_scalar(
+        "SELECT json_extract(payload, '$.trigger') FROM jobs
+         WHERE json_extract(payload, '$.kind') = 'pull'
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .fetch_one(&env.pool)
+    .await
+    .unwrap();
+    assert_eq!(trigger, "tag_moved");
+}
+
+#[tokio::test]
 async fn a_stored_or_evicted_digest_is_never_pulled_again() {
     let env = env("known").await;
     env.add_source("s1", REPO, "stable").await;
@@ -644,7 +710,7 @@ async fn the_schedule_queues_one_job_per_repository_each_hour() {
         2
     );
 
-    // A job that failed after its attempts is not re-queued by the schedule.
+    // A failed latest job is retried by the next hourly pass, once per repository.
     sqlx::query("UPDATE jobs SET status = 'failed' WHERE created_at = ?")
         .bind(NOW + 7200)
         .execute(&env.pool)
@@ -652,6 +718,18 @@ async fn the_schedule_queues_one_job_per_repository_each_hour() {
         .unwrap();
     assert_eq!(
         schedule::schedule_once(&env.pool, NOW + 10_800)
+            .await
+            .unwrap(),
+        2
+    );
+    // A queued or running latest job still blocks the repository.
+    sqlx::query("UPDATE jobs SET status = 'running' WHERE created_at = ?")
+        .bind(NOW + 10_800)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        schedule::schedule_once(&env.pool, NOW + 14_400)
             .await
             .unwrap(),
         0

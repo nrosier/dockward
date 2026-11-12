@@ -5,9 +5,10 @@
 //! `job_runs` row with kind `discover`.
 //!
 //! A repository is skipped while its discover job is still `queued` or `running`, so a slow run
-//! never piles up jobs. It is also skipped while its latest discover job is `failed`: a discover
-//! job that failed after 8 attempts is not retried by discovery, and a manual retry of that job
-//! (or the manual scan route) re-runs it.
+//! never piles up jobs. A repository whose latest discover job is `failed` is queued again: one
+//! failure does not block it indefinitely. Each queued job still gets the job's own 8 attempts,
+//! and the hourly pass queues at most one job per repository per pass, so a repository that
+//! keeps failing is retried once an hour and never runs a second retry loop.
 
 use std::time::Duration;
 
@@ -37,7 +38,7 @@ pub async fn schedule_once(pool: &SqlitePool, now: i64) -> Result<usize, AppErro
             .await
             .map_err(|_| AppError::InternalError)?;
         let latest = db::latest_job_status(&mut tx, &payload).await?;
-        if matches!(latest.as_deref(), Some("queued" | "running" | "failed")) {
+        if matches!(latest.as_deref(), Some("queued" | "running")) {
             continue;
         }
         let id = ids::new_id()?;
@@ -51,7 +52,7 @@ pub async fn schedule_once(pool: &SqlitePool, now: i64) -> Result<usize, AppErro
 /// Queues a discover job scoped to one source, so its image is discovered (and pulled) now
 /// rather than at the next hourly pass (#331). Called inside the source's create or update
 /// transaction. A job for the same payload that is `queued` or `running` is not duplicated.
-/// Unlike [`schedule_once`], a `failed` job does not block it. Returns whether a job was queued.
+/// Like [`schedule_once`], a `failed` job does not block it. Returns whether a job was queued.
 pub async fn queue_source_discovery(
     conn: &mut SqliteConnection,
     source_id: &str,
