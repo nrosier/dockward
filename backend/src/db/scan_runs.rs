@@ -23,6 +23,7 @@ pub struct ScannerFindingRow {
     pub severity: String,
     pub cvss_v3: Option<f64>,
     pub description: Option<String>,
+    pub alias: Option<String>,
 }
 
 /// Every finding of the latest `done` run per (platform image, scanner) of `image_id`. The
@@ -35,7 +36,7 @@ pub async fn latest_done_findings_in(
         ScannerFindingRow,
         r#"SELECT r.scanner AS "scanner!", p.platform AS "platform!", f.cve_id AS "cve_id!",
                   f.package AS "package!", f.version, f.fixed_in_version,
-                  f.severity AS "severity!", f.cvss_v3, f.description
+                  f.severity AS "severity!", f.cvss_v3, f.description, f.alias
            FROM image_platforms p
            JOIN scan_runs r ON r.image_platform_id = p.id AND r.status = 'done'
            JOIN scanner_findings f ON f.run_id = r.id

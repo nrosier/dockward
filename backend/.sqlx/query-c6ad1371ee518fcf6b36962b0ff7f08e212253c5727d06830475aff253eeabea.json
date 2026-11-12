@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT f.image_tag AS \"image_tag!: String\", f.status AS \"status!: String\",\n                  f.fixed_in_version AS \"fixed_in_version?: String\",\n                  f.description AS \"description?: String\",\n                  ts.scan_at AS \"last_scan_at?: i64\",\n                  (nd.image_tag IS NOT NULL) AS \"newest_digest!: bool\"\n           FROM cve_findings f\n           LEFT JOIN newest_digest_tags nd\n                  ON nd.source_id = f.source_id AND nd.image_tag = f.image_tag\n           LEFT JOIN (\n               SELECT image_tag, scan_at, seen_at FROM tag_scan_times WHERE source_id = ?1\n           ) ts ON ts.image_tag = f.image_tag\n           WHERE f.source_id = ?1 AND f.cve_id = ?2\n           ORDER BY COALESCE(ts.scan_at, -1) DESC, COALESCE(ts.seen_at, -1) DESC,\n                    f.last_seen_at DESC, f.id DESC\n           LIMIT 10",
+  "query": "SELECT f.image_tag AS \"image_tag!: String\", f.status AS \"status!: String\",\n                  f.fixed_in_version AS \"fixed_in_version?: String\",\n                  f.description AS \"description?: String\",\n                  f.alias AS \"alias?: String\",\n                  ts.scan_at AS \"last_scan_at?: i64\",\n                  (nd.image_tag IS NOT NULL) AS \"newest_digest!: bool\"\n           FROM cve_findings f\n           LEFT JOIN newest_digest_tags nd\n                  ON nd.source_id = f.source_id AND nd.image_tag = f.image_tag\n           LEFT JOIN (\n               SELECT image_tag, scan_at, seen_at FROM tag_scan_times WHERE source_id = ?1\n           ) ts ON ts.image_tag = f.image_tag\n           WHERE f.source_id = ?1 AND f.cve_id = ?2\n           ORDER BY COALESCE(ts.scan_at, -1) DESC, COALESCE(ts.seen_at, -1) DESC,\n                    f.last_seen_at DESC, f.id DESC\n           LIMIT 10",
   "describe": {
     "columns": [
       {
@@ -48,14 +48,25 @@
         }
       },
       {
-        "name": "last_scan_at?: i64",
+        "name": "alias?: String",
         "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "alias"
+          }
+        }
+      },
+      {
+        "name": "last_scan_at?: i64",
+        "ordinal": 5,
         "type_info": "Null",
         "origin": "Expression"
       },
       {
         "name": "newest_digest!: bool",
-        "ordinal": 5,
+        "ordinal": 6,
         "type_info": "Integer",
         "origin": "Expression"
       }
@@ -69,8 +80,9 @@
       true,
       true,
       true,
+      true,
       false
     ]
   },
-  "hash": "8d70859d6d6288daca9378fdab566150bef4ce0658828bea64766dcc96cb416f"
+  "hash": "c6ad1371ee518fcf6b36962b0ff7f08e212253c5727d06830475aff253eeabea"
 }

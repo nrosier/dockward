@@ -253,6 +253,7 @@ mod tests {
                 severity,
                 fixed_in_version: None,
                 description: None,
+                alias: None,
                 now: 10,
             },
         )
@@ -558,6 +559,7 @@ mod tests {
                 severity,
                 fixed_in_version: None,
                 description: None,
+                alias: None,
                 now: at,
             },
         )
@@ -870,6 +872,7 @@ mod tests {
                     severity: "HIGH",
                     fixed_in_version: fixed_in,
                     description: None,
+                    alias: None,
                     now: at,
                 },
             )
@@ -1375,6 +1378,7 @@ mod tests {
                     severity: "HIGH",
                     fixed_in_version: Some(fixed_in),
                     description: Some(description),
+                    alias: None,
                     now: AT + 120,
                 },
             )
@@ -1511,6 +1515,7 @@ mod tests {
                 severity,
                 fixed_in_version: None,
                 description: None,
+                alias: None,
                 now: AT,
             },
         )
@@ -1665,10 +1670,10 @@ mod tests {
                 vec!["m2:CVE-2026-0007", "m2:CVE-2026-0008"],
             ),
             (
-                "repository=ghcr.io/team/m2",
+                "repository=team/m2",
                 vec!["m2:CVE-2026-0007", "m2:CVE-2026-0008"],
             ),
-            ("namespace=proj&repository=ghcr.io/team/m2", vec![]),
+            ("namespace=proj&repository=team/m2", vec![]),
             ("severity=MEDIUM&namespace=team", vec!["m2:CVE-2026-0007"]),
             (
                 "severity=LOW&tag=v2&package=busybox",
@@ -1752,6 +1757,7 @@ mod tests {
                     severity,
                     fixed_in_version: fixed,
                     description: None,
+                    alias: None,
                     now: AT,
                 },
             )
@@ -1838,6 +1844,7 @@ mod tests {
                     severity,
                     fixed_in_version: fixed,
                     description: None,
+                    alias: None,
                     now: AT,
                 },
             )
@@ -1896,7 +1903,7 @@ mod tests {
             ids(
                 &state,
                 &me,
-                "fix=available&namespace=team&repository=ghcr.io/team/m2&tag=v1"
+                "fix=available&namespace=team&repository=team/m2&tag=v1"
             )
             .await,
             ["m2:6"]
@@ -2026,12 +2033,9 @@ mod tests {
             ["m1:3", "m2:6"]
         );
         // The namespace is the first path segment of the repository (decision 38); the
-        // repository filter is `<hub host>/<repository>`; the removed Harbor names are not read.
+        // repository filter is the source list's `repository` (no hub host); the removed Harbor names are not read.
         assert_eq!(ids(&state, &me, "namespace=team").await, ["m2:6"]);
-        assert_eq!(
-            ids(&state, &me, "repository=ghcr.io/team/m2").await,
-            ["m2:6"]
-        );
+        assert_eq!(ids(&state, &me, "repository=team/m2").await, ["m2:6"]);
         assert_eq!(ids(&state, &me, "source_id=m2").await, ["m2:6"]);
         assert_eq!(
             ids(&state, &me, "namespace=Team").await,
@@ -2121,6 +2125,83 @@ mod tests {
             after.summary.github_issue_url.as_deref(),
             Some(created.github_issue_url.as_str())
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #323 Part A and B: the detail carries the CVE alias and the image reference (the
+    /// newest tag's registry host and repository, with the tag).
+    #[tokio::test]
+    async fn detail_includes_alias_and_image() {
+        let (state, dir, _, _) = setup("read-alias-image").await;
+        report(&state, "m1", "v1", AT, "success").await;
+        let mut conn = state.pool.acquire().await.unwrap();
+        db::findings::upsert(
+            &mut conn,
+            &db::findings::Finding {
+                id: &crate::services::ids::new_id().unwrap_or_default(),
+                source_id: "m1",
+                image_tag: "v1",
+                cve_id: "GHSA-3g3m-2fjr-6pw4",
+                package: Some("glob"),
+                severity: "HIGH",
+                fixed_in_version: None,
+                description: None,
+                alias: Some("CVE-2025-64756"),
+                now: AT,
+            },
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        let detail = one(&state, &user("u1"), "m1:GHSA-3g3m-2fjr-6pw4")
+            .await
+            .unwrap();
+        assert_eq!(detail.summary.alias.as_deref(), Some("CVE-2025-64756"));
+        assert_eq!(detail.image.as_deref(), Some("ghcr.io/m1:v1"));
+        let json = serde_json::to_value(&detail).unwrap();
+        assert_eq!(json["alias"], "CVE-2025-64756");
+        assert_eq!(json["image"], "ghcr.io/m1:v1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #323 C2: `GET /cves?source_id=` returns only that source's CVEs. The frontend used to
+    /// send the mapping filter under `mapping`, which the route ignored.
+    #[tokio::test]
+    async fn source_filter_returns_only_that_sources_cves() {
+        let (state, dir, _, _) = setup("read-source-filter").await;
+        seed_source(&state.pool, "u1", "m2", "cg", "octo", "second").await;
+        seen(&state, "m1", "v1", "CVE-2026-0001", "HIGH", AT).await;
+        seen(&state, "m2", "v1", "CVE-2026-0002", "LOW", AT).await;
+
+        let only_m2 = all_cves(&state, &user("u1"), "source_id=m2").await.unwrap();
+        let ids: Vec<&str> = only_m2.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["m2:CVE-2026-0002"]);
+        assert_eq!(only_m2.total, 1);
+
+        // The removed `mapping` key is not a filter: the page is every CVE the caller reads.
+        let unfiltered = all_cves(&state, &user("u1"), "mapping=m2").await.unwrap();
+        assert_eq!(unfiltered.total, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #323 C3: the repository filter takes the value the source list returns (the bare
+    /// repository, without the hub host), so a filter chosen from the list matches.
+    #[tokio::test]
+    async fn repository_filter_matches_the_source_list_value() {
+        let (state, dir, _, _) = setup("read-repo-filter").await;
+        seen(&state, "m1", "v1", "CVE-2026-0001", "HIGH", AT).await;
+        // The source list's `repository` for m1 is the seeded repository, with no hub host.
+        let repository: String =
+            sqlx::query_scalar("SELECT repository FROM image_sources WHERE id = 'm1'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(repository, "m1");
+        let page = all_cves(&state, &user("u1"), &format!("repository={repository}"))
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1, "the source list's value filters the CVEs");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

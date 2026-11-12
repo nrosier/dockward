@@ -108,6 +108,45 @@ describe("JobsPage", () => {
     expect(within(row).getByText("Billing")).toBeInTheDocument();
   });
 
+  it("a failed job of a source the user owns shows Retry, from the source lookup (#323 follow-up)", async () => {
+    const requested: string[] = [];
+    stubApi((path) => {
+      requested.push(path);
+      if (path === "/api/v1/account/me") return json({ user: user("user") });
+      if (path.startsWith("/api/v1/jobs")) return json({ items: [{ ...failed, source_id: "s1" }], page: 1, page_size: 50, total: 1 });
+      if (path.startsWith("/api/v1/image-sources?")) {
+        return json({ items: [{ id: "s1", user_id: "u1", repository: "platform/billing-worker", name: "Billing" }], page: 1, page_size: 200, total: 1 });
+      }
+      // The mapping lookup is not the owner check any more: no mapping is returned.
+      if (path.startsWith("/api/v1/mappings")) return json({ items: [], page: 1, page_size: 200, total: 0 });
+      return undefined;
+    });
+    renderAt(<JobsPage />, "/jobs");
+    const table = await screen.findByRole("table");
+    expect(within(table).getByRole("button", { name: t("jobs.retry") })).toBeInTheDocument();
+    expect(requested.some((path) => path.startsWith("/api/v1/mappings"))).toBe(false);
+  });
+
+  it("the mapping filter sends source_id, the key the jobs route reads (#323 follow-up)", async () => {
+    const requested: string[] = [];
+    stubApi((path) => {
+      requested.push(path);
+      if (path === "/api/v1/account/me") return json({ user: user("user") });
+      if (path.startsWith("/api/v1/jobs")) return json({ items: [], page: 1, page_size: 50, total: 0 });
+      if (path.startsWith("/api/v1/image-sources?")) return json({ items: [], page: 1, page_size: 200, total: 0 });
+      return undefined;
+    });
+    renderAt(<JobsPage />, "/jobs?source_id=s9");
+    await screen.findByText(t("jobs.empty"));
+    const jobsCalls = requested.filter((path) => path.startsWith("/api/v1/jobs?"));
+    expect(jobsCalls.length).toBeGreaterThan(0);
+    for (const call of jobsCalls) {
+      const query = new URL(call, "http://x").searchParams;
+      expect(query.get("source_id")).toBe("s9");
+      expect(query.has("mapping_id")).toBe(false);
+    }
+  });
+
   it("shows a View log button on every row", async () => {
     stub([failed, neverRun]);
     renderAt(<JobsPage />);

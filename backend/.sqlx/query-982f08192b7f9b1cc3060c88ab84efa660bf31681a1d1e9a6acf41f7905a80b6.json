@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO cve_findings\n            (id, source_id, image_tag, cve_id, package, severity,\n             fixed_in_version, description, alias, first_seen_at, last_seen_at, status)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')\n         ON CONFLICT (source_id, image_tag, cve_id) DO UPDATE SET\n            severity = excluded.severity,\n            package = excluded.package,\n            fixed_in_version = excluded.fixed_in_version,\n            description = excluded.description,\n            alias = excluded.alias,\n            last_seen_at = excluded.last_seen_at,\n            status = 'open'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "982f08192b7f9b1cc3060c88ab84efa660bf31681a1d1e9a6acf41f7905a80b6"
+}

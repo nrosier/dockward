@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT r.scanner AS \"scanner!\", p.platform AS \"platform!\", f.cve_id AS \"cve_id!\",\n                  f.package AS \"package!\", f.version, f.fixed_in_version,\n                  f.severity AS \"severity!\", f.cvss_v3, f.description\n           FROM image_platforms p\n           JOIN scan_runs r ON r.image_platform_id = p.id AND r.status = 'done'\n           JOIN scanner_findings f ON f.run_id = r.id\n           WHERE p.image_id = ?\n             AND NOT EXISTS (\n                 SELECT 1 FROM scan_runs r2\n                 WHERE r2.image_platform_id = r.image_platform_id AND r2.scanner = r.scanner\n                   AND r2.status = 'done'\n                   AND (COALESCE(r2.finished_at, 0) > COALESCE(r.finished_at, 0)\n                        OR (COALESCE(r2.finished_at, 0) = COALESCE(r.finished_at, 0)\n                            AND r2.rowid > r.rowid)))\n           ORDER BY f.cve_id, f.package, r.scanner, p.platform",
+  "query": "SELECT r.scanner AS \"scanner!\", p.platform AS \"platform!\", f.cve_id AS \"cve_id!\",\n                  f.package AS \"package!\", f.version, f.fixed_in_version,\n                  f.severity AS \"severity!\", f.cvss_v3, f.description, f.alias\n           FROM image_platforms p\n           JOIN scan_runs r ON r.image_platform_id = p.id AND r.status = 'done'\n           JOIN scanner_findings f ON f.run_id = r.id\n           WHERE p.image_id = ?\n             AND NOT EXISTS (\n                 SELECT 1 FROM scan_runs r2\n                 WHERE r2.image_platform_id = r.image_platform_id AND r2.scanner = r.scanner\n                   AND r2.status = 'done'\n                   AND (COALESCE(r2.finished_at, 0) > COALESCE(r.finished_at, 0)\n                        OR (COALESCE(r2.finished_at, 0) = COALESCE(r.finished_at, 0)\n                            AND r2.rowid > r.rowid)))\n           ORDER BY f.cve_id, f.package, r.scanner, p.platform",
   "describe": {
     "columns": [
       {
@@ -101,6 +101,17 @@
             "name": "description"
           }
         }
+      },
+      {
+        "name": "alias",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scanner_findings",
+            "name": "alias"
+          }
+        }
       }
     ],
     "parameters": {
@@ -115,8 +126,9 @@
       true,
       false,
       true,
+      true,
       true
     ]
   },
-  "hash": "97cd3a034aafe1eaf18fc9d6f72378c25f4d67093dfeaf4c7fbdca224c2d7411"
+  "hash": "1768f99de1d5ba4ad75c7bd5da1fb5c9ac1bf0c864f23b2583007c918c561494"
 }

@@ -92,10 +92,16 @@ export default function CveDetailPage() {
             <div className="flex flex-wrap items-center gap-3">
               <h1 id="cve-h" className="font-mono text-2xl font-medium tracking-tight">
                 {cve.cve_id}
+                {cve.alias === null ? null : (
+                  <span className="ml-3 text-[15px] font-normal text-muted">{t("cves.detail.alias", { alias: cve.alias })}</span>
+                )}
               </h1>
               <SeverityPill severity={cve.severity} />
               <CveStatusPill cve={cve} />
             </div>
+            {cve.image === null ? null : (
+              <p className="font-mono text-[13px] text-muted">{t("cves.detail.image", { image: cve.image })}</p>
+            )}
             {olderTags.length === 0 ? null : (
               <p className="text-[13px] text-muted">{t("cves.detail.olderTagsOnly", { tags: olderTags.join(", ") })}</p>
             )}

@@ -479,6 +479,7 @@ mod tests {
                     severity: "CRITICAL",
                     fixed_in_version: None,
                     description: None,
+                    alias: None,
                     now: 10,
                 },
             )

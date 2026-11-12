@@ -31,6 +31,8 @@ pub struct Finding {
     pub cvss_v3: Option<f64>,
     /// At most 4,000 characters.
     pub description: Option<String>,
+    /// The first `CVE-` id among the related vulnerabilities, when the scanner names one (#323).
+    pub alias: Option<String>,
 }
 
 /// A parsed scanner report: the scanner's own version (stored with the run, section 7) and the
@@ -167,6 +169,8 @@ fn trivy_finding(vuln: TrivyVuln) -> Result<Finding, AppError> {
         severity: normalize_severity(&vuln.severity),
         cvss_v3,
         description: cut_description(vuln.description.as_deref().unwrap_or_default()),
+        // Trivy names no related CVE id (#323).
+        alias: None,
     })
 }
 
@@ -274,6 +278,13 @@ fn grype_finding(item: GrypeMatch) -> Result<Finding, AppError> {
         .find(|c| c.version.as_deref().is_some_and(|v| v.starts_with('3')))
         .and_then(|c| c.metrics.as_ref())
         .and_then(|m| m.base_score);
+    // The CVE id behind a GHSA id: the first related record whose id is a CVE id (#323).
+    let alias = item
+        .related
+        .iter()
+        .map(|related| related.id.as_str())
+        .find(|id| id.starts_with("CVE-"))
+        .map(str::to_owned);
     let fixed_in_version = vuln
         .fix
         .as_ref()
@@ -287,6 +298,7 @@ fn grype_finding(item: GrypeMatch) -> Result<Finding, AppError> {
         severity: normalize_severity(&vuln.severity),
         cvss_v3,
         description,
+        alias,
     })
 }
 

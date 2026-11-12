@@ -32,6 +32,8 @@ function cve(over: Partial<CveDetail>): CveDetail {
     cve_id: "CVE-2026-0001",
     severity: "CRITICAL",
     open_severity: "CRITICAL",
+    alias: null,
+    image: null,
     status: "open",
     package: "golang.org/x/crypto",
     first_seen_at: "2026-10-14T10:00:00Z",
@@ -174,6 +176,27 @@ describe("CveDetailPage", () => {
     const header = await screen.findByText("Team app", { exact: false });
     expect(header.textContent).toContain("Team app");
     expect(screen.queryByText("ghcr.io/team/app", { exact: false })).not.toBeInTheDocument();
+  });
+
+  it("shows the CVE alias beside the GHSA id, and only the id when there is no alias (#323)", async () => {
+    stub(cve({ cve_id: "GHSA-3g3m-2fjr-6pw4", alias: "CVE-2025-64756" }));
+    renderWithRoutes(routes, url);
+    const heading = await screen.findByRole("heading", { level: 1 });
+    expect(heading.textContent).toContain("GHSA-3g3m-2fjr-6pw4");
+    expect(heading.textContent).toContain(t("cves.detail.alias", { alias: "CVE-2025-64756" }));
+  });
+
+  it("a CVE with no alias shows only its id (#323)", async () => {
+    stub(cve({ cve_id: "CVE-2026-0001", alias: null }));
+    renderWithRoutes(routes, url);
+    const heading = await screen.findByRole("heading", { level: 1 });
+    expect(heading.textContent).toBe("CVE-2026-0001");
+  });
+
+  it("shows the image reference the CVE is for, from the newest tag (#323, Part B)", async () => {
+    stub(cve({ image: "ghcr.io/team/app:latest" }));
+    renderWithRoutes(routes, url);
+    expect(await screen.findByText(t("cves.detail.image", { image: "ghcr.io/team/app:latest" }))).toBeInTheDocument();
   });
 
   it("loads the source by source_id and shows its GitHub repository, not a mappings route", async () => {

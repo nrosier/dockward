@@ -27,7 +27,24 @@ describe("cveFilters", () => {
       tag: "1.42.0",
       mapping: "m1",
     });
-    expect(toApiQuery(state)).toEqual(toUrlParams(state));
+    // The Mapping filter is a source (#323): the API reads it as `source_id`, never `mapping`.
+    expect(toApiQuery(state)).toEqual({
+      q: "glibc",
+      severity: "CRITICAL,LOW",
+      status: "fixed,accepted",
+      has_issue: "false",
+      fix: "available,none",
+      namespace: "platform",
+      repository: "platform/api",
+      tag: "1.42.0",
+      source_id: "m1",
+    });
+  });
+
+  it("sends the Mapping filter to the API as source_id, and never as mapping (#323 follow-up)", () => {
+    const query = toApiQuery(parseFilters(new URLSearchParams("mapping=m1")));
+    expect(query.source_id).toBe("m1");
+    expect(query).not.toHaveProperty("mapping");
   });
 
   it("drops unknown values", () => {
