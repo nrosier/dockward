@@ -7,7 +7,7 @@ import { TotpCard } from "./TotpCard";
 
 // Built at runtime so no fixed secret sits in the source.
 const SECRET = ["JBSW", "Y3DP", "EHPK", "3PXP"].join("");
-const URI = `otpauth://totp/dockward:dev?secret=${SECRET}&issuer=dockward`;
+const QR_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><path d="M0 0h1v1h-1z"/></svg>';
 const RECOVERY = Array.from({ length: 10 }, (_, index) => `RC${index}-TEST`);
 const GOOD = ["12", "34", "56"].join("");
 const BAD = ["65", "43", "21"].join("");
@@ -22,7 +22,7 @@ function stub(options: { enabled: boolean; enrolStatus?: number }) {
     }
     if (path === "/api/v1/account/totp/enrol" && method === "POST") {
       return options.enrolStatus === undefined
-        ? json({ secret: SECRET, otpauth_uri: URI })
+        ? json({ secret: SECRET, qr_svg: QR_SVG })
         : json({ error: { code: "conflict", message: "On." } }, options.enrolStatus);
     }
     if (path === "/api/v1/account/totp/confirm" && method === "POST") {
@@ -78,7 +78,9 @@ describe("TotpCard", () => {
     renderAt(<TotpCard />);
     await userEvent.click(await screen.findByRole("button", { name: t("account.totp.setup") }));
     const dialog = await screen.findByRole("dialog", { name: t("account.totp.setup.title") });
-    expect(await within(dialog).findByRole("img", { name: t("account.totp.setup.qrLabel") })).toBeInTheDocument();
+    const qr = await within(dialog).findByRole("img", { name: t("account.totp.setup.qrLabel") });
+    expect(qr.querySelector("svg path")).not.toBeNull();
+    expect(qr.textContent).not.toContain(SECRET);
     expect(within(dialog).getByLabelText(t("account.totp.setup.manualKey"))).toHaveValue(SECRET);
     const enrols = fetchMock.mock.calls.filter(([path]) => String(path) === "/api/v1/account/totp/enrol");
     expect(enrols).toHaveLength(1);

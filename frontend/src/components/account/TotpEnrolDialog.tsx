@@ -14,7 +14,7 @@ import { digitsOf, isWrongCode, useCodeMutation } from "./totpCodes";
 
 interface Enrolment {
   secret: string;
-  otpauth_uri: string;
+  qr_svg: string;
 }
 
 // Two steps in one dialog. The secret and the recovery codes live only in this
@@ -130,7 +130,7 @@ export function TotpEnrolDialog({ onEnabled, onClose }: { onEnabled: () => void;
       ) : (
         <form onSubmit={submit} className="flex flex-col gap-4">
           <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-start">
-            <QrCode value={enrol.data.otpauth_uri} label={t("account.totp.setup.qrLabel")} />
+            <QrCode svg={enrol.data.qr_svg} label={t("account.totp.setup.qrLabel")} />
             <div className="flex w-full min-w-0 flex-col gap-1.5">
               <label htmlFor="totp-manual-key" className="text-[13px] font-semibold">
                 {t("account.totp.setup.manualKey")}
