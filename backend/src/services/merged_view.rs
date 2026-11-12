@@ -19,6 +19,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use crate::db::scan_runs::{self as runs_db, ScannerFindingRow};
 use crate::error::AppError;
 use crate::services::sarif::normalize_severity;
+use crate::services::scanner::parse::is_cve_id;
 
 /// Highest first, as in `specs/cve-lifecycle.md`.
 const SEVERITY_ORDER: [&str; 5] = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"];
@@ -58,7 +59,8 @@ pub struct MergedFinding {
     pub severity: &'static str,
     pub cvss_v3: Option<f64>,
     pub description: Option<String>,
-    /// The CVE id behind the primary id, when a scanner names one (#323).
+    /// The other id a scanner names for this CVE, such as its GHSA id (#323, #337). Never equal
+    /// to `cve_id`.
     pub alias: Option<String>,
     /// The scanners that report this (CVE id, package), in the merged-view order.
     pub scanners: Vec<ScannerRef>,
@@ -94,7 +96,17 @@ pub fn order_scanners(keys: &[String]) -> Vec<ScannerRef> {
     scanners
 }
 
-/// Merges the findings of every run by (CVE id, package).
+/// The primary id of a stored finding (#337): the CVE id when the row names one as its id or its
+/// alias, else its own id. A row stored before #337 can hold a GHSA id with the CVE id as alias.
+fn canonical_id(row: &ScannerFindingRow) -> &str {
+    match row.alias.as_deref() {
+        Some(alias) if !is_cve_id(&row.cve_id) && is_cve_id(alias) => alias,
+        _ => row.cve_id.as_str(),
+    }
+}
+
+/// Merges the findings of every run by (primary CVE id, package). The alias is the first other
+/// id a member names, never the primary id itself.
 ///
 /// - Severity is the highest of the scanners' severities; the CVSS v3 score is the highest present.
 /// - The installed and fixed-in versions come from the first scanner (in order) that has one.
@@ -111,7 +123,7 @@ pub fn merge(rows: &[ScannerFindingRow], scanners: &[ScannerRef]) -> Vec<MergedF
         // A row from a scanner outside the list has no run in this view and is ignored.
         if position.contains_key(row.scanner.as_str()) {
             groups
-                .entry((row.cve_id.as_str(), row.package.as_str()))
+                .entry((canonical_id(row), row.package.as_str()))
                 .or_default()
                 .push(row);
         }
@@ -159,7 +171,15 @@ pub fn merge(rows: &[ScannerFindingRow], scanners: &[ScannerRef]) -> Vec<MergedF
                         Some(best.map_or(score, |best| best.max(score)))
                     }),
                 description,
-                alias: members.iter().find_map(|row| row.alias.clone()),
+                alias: members
+                    .iter()
+                    .flat_map(|row| {
+                        [row.cve_id.as_str()]
+                            .into_iter()
+                            .chain(row.alias.as_deref())
+                    })
+                    .find(|id| *id != cve_id)
+                    .map(str::to_owned),
                 scanners: scanner_refs,
                 platforms,
             }
@@ -340,6 +360,20 @@ mod tests {
         assert_eq!(names_of(&merged[0].scanners), ["Grype", "Trivy"]);
         assert_eq!(merged[1].scanners.len(), 1);
         assert_eq!(names_of(&merged[1].scanners), ["Trivy"]);
+    }
+
+    #[test]
+    fn same_cve_from_grype_and_trivy_for_one_package_is_one_finding() {
+        let scanners = vec![scanner("grype", "Grype"), scanner("trivy", "Trivy")];
+        // An older Grype row still holds the GHSA id as the id and the CVE id as the alias.
+        let mut legacy = row("grype", "GHSA-aaaa-bbbb-cccc", "glob", "HIGH");
+        legacy.alias = Some("CVE-2025-1".to_owned());
+        let rows = vec![legacy, row("trivy", "CVE-2025-1", "glob", "HIGH")];
+        let merged = merge(&rows, &scanners);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].cve_id, "CVE-2025-1");
+        assert_eq!(merged[0].alias.as_deref(), Some("GHSA-aaaa-bbbb-cccc"));
+        assert_eq!(names_of(&merged[0].scanners), ["Grype", "Trivy"]);
     }
 
     #[test]

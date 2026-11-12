@@ -428,7 +428,8 @@ async fn store_run(
         finished,
     )
     .await?;
-    for finding in &report.findings {
+    let findings = canonical_findings(&mut tx, &report.findings).await?;
+    for finding in &findings {
         db::insert_finding(
             &mut tx,
             &run.id,
@@ -447,6 +448,40 @@ async fn store_run(
     }
     convert::recompute_image(&mut tx, &run.image_id, finished).await?;
     tx.commit().await.map_err(|_| AppError::InternalError)
+}
+
+/// The findings of a run under their primary ids (#337). A finding the parser already gave a CVE
+/// id and an alias records the pair in `vulnerability_aliases`. A non-CVE id with no alias (a
+/// Trivy GHSA id) takes the primary id recorded for it, and keeps its own id as the alias. A
+/// GHSA-only id with no record stays as it is. The result is merged by (id, package) again, as
+/// two ids can now name one CVE.
+async fn canonical_findings(
+    conn: &mut sqlx::SqliteConnection,
+    findings: &[parse::Finding],
+) -> Result<Vec<parse::Finding>, AppError> {
+    let mut out = Vec::with_capacity(findings.len());
+    for finding in findings {
+        let mut finding = finding.clone();
+        if finding.alias.as_deref() == Some(finding.cve_id.as_str()) {
+            finding.alias = None;
+        }
+        match finding.alias.as_deref() {
+            Some(alias) if parse::is_cve_id(&finding.cve_id) => {
+                db::record_alias(conn, alias, &finding.cve_id).await?;
+            }
+            Some(_) => {}
+            None if !parse::is_cve_id(&finding.cve_id) => {
+                if let Some(primary) = db::alias_primary(conn, &finding.cve_id).await?
+                    && primary != finding.cve_id
+                {
+                    finding.alias = Some(std::mem::replace(&mut finding.cve_id, primary));
+                }
+            }
+            None => {}
+        }
+        out.push(finding);
+    }
+    Ok(parse::merge_findings(out))
 }
 
 /// The publish hook. True when no run of any platform of `image_id` is `queued` or `running`

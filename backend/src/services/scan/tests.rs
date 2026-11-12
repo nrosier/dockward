@@ -1077,3 +1077,92 @@ async fn the_jobs_list_returns_the_image_of_a_new_scan_job() {
     assert_eq!(job.image.digest.as_deref(), Some("sha256:old"));
     assert_eq!(job.trigger.as_deref(), Some("first_pull"));
 }
+
+fn trivy_ghsa_report(id: &str) -> String {
+    format!(
+        r#"{{"SchemaVersion":2,"Trivy":{{"Version":"0.76.2"}},"Results":[{{"Vulnerabilities":[{{"VulnerabilityID":"{id}","PkgName":"glob","InstalledVersion":"10.3.0","Severity":"HIGH"}}]}}]}}"#
+    )
+}
+
+const GHSA: &str = "GHSA-3g3m-2fjr-6pw4";
+const GHSA_CVE: &str = "CVE-2025-64756";
+
+fn grype_ghsa_report() -> String {
+    format!(
+        r#"{{"matches":[{{"vulnerability":{{"id":"{GHSA}","severity":"High"}},"artifact":{{"name":"glob","version":"10.3.0"}},"relatedVulnerabilities":[{{"id":"{GHSA}"}},{{"id":"{GHSA_CVE}"}}]}}],"descriptor":{{"version":"1.0.0"}}}}"#
+    )
+}
+
+/// Trivy reports a GHSA id with no alias; the alias table already maps it to a CVE id.
+#[tokio::test]
+async fn trivy_ghsa_already_in_the_alias_table_resolves_to_the_cve() {
+    let trivy = format!("printf '%s' '{}'", trivy_ghsa_report(GHSA));
+    let fx = Fx::new("alias-resolve", &trivy, "echo '{}'").await;
+    exec(
+        &fx.pool,
+        "INSERT INTO vulnerability_aliases (alias, primary_id) VALUES (?, ?)",
+        &[GHSA, GHSA_CVE],
+    )
+    .await;
+    assert_eq!(fx.queue(P_OLD).await, 2);
+    fx.drain().await;
+    let stored = count(
+        &fx.pool,
+        "SELECT COUNT(*) FROM scanner_findings WHERE cve_id = ? AND alias = ?",
+        &[GHSA_CVE, GHSA],
+    )
+    .await;
+    assert_eq!(stored, 1);
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM cve_findings WHERE cve_id = ? AND alias = ?",
+            &[GHSA_CVE, GHSA]
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM cve_findings WHERE cve_id LIKE 'GHSA-%'",
+            &[]
+        )
+        .await,
+        0
+    );
+}
+
+/// A scan that resolves a new alias records it once; a second scan does not add a row, and a
+/// GHSA-only finding records nothing.
+#[tokio::test]
+async fn a_new_alias_is_recorded_once() {
+    let grype = format!("printf '%s' '{}'", grype_ghsa_report());
+    let trivy = trivy_ghsa_report("GHSA-only-0000-0000");
+    let trivy = format!("printf '%s' '{trivy}'");
+    let fx = Fx::new("alias-record", &trivy, &grype).await;
+    assert_eq!(fx.queue(P_OLD).await, 2);
+    fx.drain().await;
+    let again = queue_scans(&fx.pool, P_OLD, Some("s1"), "db_update", NOW).await;
+    assert_eq!(again.ok(), Some(2));
+    fx.drain().await;
+    let rows: Vec<(String, String)> =
+        match sqlx::query_as("SELECT alias, primary_id FROM vulnerability_aliases")
+            .fetch_all(&fx.pool)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(err) => panic!("aliases: {err}"),
+        };
+    assert_eq!(rows, vec![(GHSA.to_owned(), GHSA_CVE.to_owned())]);
+    // The GHSA-only finding keeps its id and has no alias.
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM scanner_findings WHERE cve_id = 'GHSA-only-0000-0000' AND alias IS NULL",
+            &[]
+        )
+        .await,
+        2
+    );
+}

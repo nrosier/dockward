@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO vulnerability_aliases (alias, primary_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b5039b57470b4312186b02a574ff57aa0c5fb6c292d0acd4d800ff050c93ebc2"
+}

@@ -8,7 +8,7 @@
 //!
 //! This module holds no database code and no process code.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -31,7 +31,8 @@ pub struct Finding {
     pub cvss_v3: Option<f64>,
     /// At most 4,000 characters.
     pub description: Option<String>,
-    /// The first `CVE-` id among the related vulnerabilities, when the scanner names one (#323).
+    /// The scanner's own id when it differs from `cve_id`: the GHSA id behind a CVE id (#337).
+    /// Never equal to `cve_id`.
     pub alias: Option<String>,
 }
 
@@ -70,17 +71,33 @@ fn not_recognised() -> AppError {
     AppError::Scanner(ScannerFault::OutputNotRecognised)
 }
 
-/// Merges findings by (CVE id, package), keeping the first occurrence in input order.
+/// Merges findings by (CVE id, package), keeping the first occurrence in input order. A later
+/// duplicate only lends its alias when the kept finding has none.
 pub fn merge_findings(findings: Vec<Finding>) -> Vec<Finding> {
-    let mut seen: HashSet<(String, String)> = HashSet::with_capacity(findings.len());
-    let mut out = Vec::with_capacity(findings.len());
+    let mut seen: HashMap<(String, String), usize> = HashMap::with_capacity(findings.len());
+    let mut out: Vec<Finding> = Vec::with_capacity(findings.len());
     for finding in findings {
         let key = (finding.cve_id.clone(), finding.package.clone());
-        if seen.insert(key) {
-            out.push(finding);
+        match seen.get(&key) {
+            Some(&index) => {
+                if let Some(kept) = out.get_mut(index)
+                    && kept.alias.is_none()
+                {
+                    kept.alias = finding.alias;
+                }
+            }
+            None => {
+                seen.insert(key, out.len());
+                out.push(finding);
+            }
         }
     }
     out
+}
+
+/// True for a CVE id (`CVE-...`).
+pub fn is_cve_id(id: &str) -> bool {
+    id.starts_with("CVE-")
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +186,7 @@ fn trivy_finding(vuln: TrivyVuln) -> Result<Finding, AppError> {
         severity: normalize_severity(&vuln.severity),
         cvss_v3,
         description: cut_description(vuln.description.as_deref().unwrap_or_default()),
-        // Trivy names no related CVE id (#323).
+        // Trivy names no related CVE id (#323); a GHSA id is resolved on store (#337).
         alias: None,
     })
 }
@@ -278,20 +295,29 @@ fn grype_finding(item: GrypeMatch) -> Result<Finding, AppError> {
         .find(|c| c.version.as_deref().is_some_and(|v| v.starts_with('3')))
         .and_then(|c| c.metrics.as_ref())
         .and_then(|m| m.base_score);
-    // The CVE id behind a GHSA id: the first related record whose id is a CVE id (#323).
-    let alias = item
-        .related
-        .iter()
-        .map(|related| related.id.as_str())
-        .find(|id| id.starts_with("CVE-"))
-        .map(str::to_owned);
+    // The CVE id behind a GHSA id is the primary id, and the GHSA id its alias (#323, #337):
+    // the first related record whose id is a CVE id. A CVE id stays as it is, and an id with no
+    // related CVE id (a GHSA-only record) keeps its own id with no alias.
+    let related_cve = if is_cve_id(&vuln.id) {
+        None
+    } else {
+        item.related
+            .iter()
+            .map(|related| related.id.as_str())
+            .find(|id| is_cve_id(id))
+            .map(str::to_owned)
+    };
+    let (cve_id, alias) = match related_cve {
+        Some(cve) => (cve, Some(vuln.id)),
+        None => (vuln.id, None),
+    };
     let fixed_in_version = vuln
         .fix
         .as_ref()
         .and_then(|fix| fix.versions.first().cloned())
         .filter(|v| !v.is_empty());
     Ok(Finding {
-        cve_id: vuln.id,
+        cve_id,
         package: item.artifact.name,
         version: Some(item.artifact.version).filter(|v| !v.is_empty()),
         fixed_in_version,

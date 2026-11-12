@@ -6,6 +6,7 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ### Changed
 - Migration 0007 adds `vulnerability_aliases` and folds each GHSA finding that has a CVE alias into its CVE record, keeping the GHSA id as the alias. Findings, scanner findings, tracked GitHub issues and acceptances are merged or renamed to the CVE id (#337).
+- New scans store the CVE id as the primary id and keep the GHSA id as the alias. A Grype GHSA finding that names a CVE id is stored under the CVE id, a Trivy GHSA id that `vulnerability_aliases` maps to a CVE id is stored under that CVE id, and each new pair is recorded in `vulnerability_aliases`. A Grype and a Trivy finding for one CVE and package merge into one finding. A GHSA id with no CVE id keeps its GHSA id (#337).
 
 ### Upgrade notes
 - Where a GHSA issue and a CVE issue both exist in one repository, only the tracking row of the GHSA issue is removed. That issue stays open on GitHub and is not closed or commented on, so close it by hand if you no longer want it.

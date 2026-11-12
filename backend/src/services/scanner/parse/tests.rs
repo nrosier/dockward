@@ -223,30 +223,49 @@ fn description_is_cut_to_the_stored_length() {
 }
 
 #[test]
-fn grype_related_cve_id_is_stored_as_the_alias() {
+fn grype_ghsa_with_cve_related_is_stored_under_the_cve_id() {
     let body = br#"{"matches":[{"vulnerability":{"id":"GHSA-3g3m-2fjr-6pw4","severity":"High"},
         "artifact":{"name":"glob","version":"10.3.0"},
         "relatedVulnerabilities":[{"id":"GHSA-3g3m-2fjr-6pw4"},{"id":"CVE-2025-64756","description":"d"}]}],
         "descriptor":{"version":"1.0.0"}}"#;
     let report = parse_grype_ok(body);
     assert_eq!(report.findings.len(), 1);
-    assert_eq!(report.findings[0].cve_id, "GHSA-3g3m-2fjr-6pw4");
-    assert_eq!(report.findings[0].alias.as_deref(), Some("CVE-2025-64756"));
+    assert_eq!(report.findings[0].cve_id, "CVE-2025-64756");
+    assert_eq!(
+        report.findings[0].alias.as_deref(),
+        Some("GHSA-3g3m-2fjr-6pw4")
+    );
 }
 
 #[test]
-fn grype_first_cve_id_wins_and_no_cve_gives_no_alias() {
+fn grype_first_cve_id_wins_and_no_cve_keeps_the_ghsa_id() {
     let two = br#"{"matches":[{"vulnerability":{"id":"GHSA-a","severity":"High"},
         "artifact":{"name":"glob","version":"1"},
         "relatedVulnerabilities":[{"id":"CVE-2026-0001"},{"id":"CVE-2026-0002"}]}],
         "descriptor":{"version":"1.0.0"}}"#;
-    assert_eq!(
-        parse_grype_ok(two).findings[0].alias.as_deref(),
-        Some("CVE-2026-0001")
-    );
+    let found = &parse_grype_ok(two).findings[0];
+    assert_eq!(found.cve_id, "CVE-2026-0001");
+    assert_eq!(found.alias.as_deref(), Some("GHSA-a"));
+    // The GHSA-only record: no CVE id anywhere, so the GHSA id stays the id with no alias.
     let none = br#"{"matches":[{"vulnerability":{"id":"GHSA-b","severity":"High"},
         "artifact":{"name":"glob","version":"1"},
         "relatedVulnerabilities":[{"id":"GHSA-b"}]}],
         "descriptor":{"version":"1.0.0"}}"#;
-    assert_eq!(parse_grype_ok(none).findings[0].alias, None);
+    let found = &parse_grype_ok(none).findings[0];
+    assert_eq!(found.cve_id, "GHSA-b");
+    assert_eq!(found.alias, None);
+}
+
+#[test]
+fn alias_equal_to_primary_is_not_stored() {
+    // A CVE id whose related record is the same CVE id: the fixture shape.
+    let report = parse_grype_ok(GRYPE_FIXTURE);
+    assert_eq!(report.findings[0].cve_id, "CVE-2026-4738");
+    assert_eq!(report.findings[0].alias, None);
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|f| f.alias.as_deref() != Some(f.cve_id.as_str()))
+    );
 }

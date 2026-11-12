@@ -139,7 +139,7 @@ Decided (2026-11-08, #243): the purge ignores the page's `status` and `source_id
 | Method | Path | Auth | Built | Notes |
 | --- | --- | --- | --- | --- |
 | GET | `/api/v1/cves` | session | yes | List. Filters below. Admin may add `scope=all`. |
-| GET | `/api/v1/cves/:id` | session | yes | `CveDetail`. `200` for any CVE with a row on a tracked tag, including older tags (`older_tags_only`, `newest_digest` per tag). `image` is the newest tag's `<hub host>/<repository>:<tag>` (#323). `alias` is the CVE id behind a GHSA id, from Grype's related vulnerabilities (migration 0006, #323); `null` when none. |
+| GET | `/api/v1/cves/:id` | session | yes | `CveDetail`. `200` for any CVE with a row on a tracked tag, including older tags (`older_tags_only`, `newest_digest` per tag). `image` is the newest tag's `<hub host>/<repository>:<tag>` (#323). `alias` is the other id of the CVE, its GHSA id, when a scanner reports the CVE under a GHSA id (migrations 0006 and 0007, #323, #337); `null` when none. |
 | POST | `/api/v1/cves/:id/issue` | session (owner) | yes | Creates or reopens the GitHub issue for the CVE. `422` when the CVE is fixed on every tag. `409` when an open issue or an active acceptance exists. |
 | POST | `/api/v1/cves/:id/accept` | session (owner) | yes | `{"reason","expires_at"}`. Applies to the whole source. Does not close an open issue. |
 | POST | `/api/v1/cves/:id/unaccept` | session (owner) | yes | Soft revoke. |
