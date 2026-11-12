@@ -2,6 +2,27 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
+## 0.4.0 - 2026-11-12
+
+### Added
+- A GHSA finding stores the first CVE id that the scanner names among its related vulnerabilities as its alias, and the CVE detail shows it beside the primary id (migration 0006, PR #329, #323).
+- The CVE detail shows the image and the source's display name, and the header has a View issue action when an issue exists or a Create issue action for the source owner (PR #326, PR #327, PR #328, #323).
+- Image sources have an optional display name, set in the source form. It is shown in place of the repository when set (migration 0005, PR #328, #323).
+- Scan, publish and pull jobs store the image and the trigger, and the Jobs page shows them. Jobs queued before this release show a dash (PR #324).
+
+### Changed
+- An accepted CVE whose GitHub issue is closed stays closed when the CVE returns. No reopen call and no comment are made (PR #325, #196).
+- The CVE list and the Jobs page take each row's repository from the source lookup. The Mapping filter sends the source id (PR #327, PR #328, PR #329, #323).
+
+### Fixed
+- The Jobs Mapping filter sends `source_id`, the key the jobs route reads, so the filter applies (PR #328, #323).
+- The CVE detail loads its source instead of the removed mappings route, and the CVE list no longer calls the removed mappings routes (PR #326, PR #328, #323).
+
+### Upgrade notes
+- Migrations 0005 and 0006 only add nullable columns. No existing row is rewritten.
+- An existing CVE gets its alias and image only after it is rescanned. The new scan fields apply to new scans, not to scans already stored (migration 0006 and the new scan fields).
+- Jobs queued before this release keep their payloads and show a dash for image and trigger. There is no backfill.
+
 ## 0.3.1 - 2026-11-11
 
 ### Fixed
