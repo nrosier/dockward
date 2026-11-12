@@ -139,7 +139,7 @@ export default function CveDetailPage() {
             ) : null}
             {owner ? (
               cve.accepted ? (
-                <Button onClick={() => setRevokeOpen(true)}>{t("cves.detail.revoke")}</Button>
+                <Button onClick={() => setRevokeOpen(true)}>{t("cves.detail.unaccept")}</Button>
               ) : (
                 <Button variant="primary" onClick={() => setAcceptOpen(true)}>
                   {t("cves.detail.accept")}
@@ -201,7 +201,12 @@ export default function CveDetailPage() {
               ) : (
                 <div className="flex flex-col gap-1">
                   <span>{t("cves.detail.acceptedBy", { user: acceptance.created_by })}</span>
-                  <span className="text-[12.5px] text-muted">{acceptance.reason}</span>
+                  <span className="text-[12.5px] text-muted">
+                    {t("cves.detail.acceptedAt", { date: formatDate(acceptance.created_at) })}
+                  </span>
+                  <span className={acceptance.reason === "" ? "text-[12.5px] text-muted italic" : "text-[12.5px] break-words whitespace-pre-wrap"}>
+                    {acceptance.reason === "" ? t("cves.detail.noNote") : acceptance.reason}
+                  </span>
                   <span className="text-[12.5px] text-muted">
                     {acceptance.expires_at === null
                       ? t("cves.detail.noExpiry")
@@ -284,9 +289,9 @@ export default function CveDetailPage() {
           <ConfirmDialog
             open={revokeOpen}
             onOpenChange={setRevokeOpen}
-            title={t("cves.revoke.title", { cve: cve.cve_id })}
-            description={t("cves.revoke.body")}
-            confirmLabel={t("cves.detail.revoke")}
+            title={t("cves.unaccept.title", { cve: cve.cve_id })}
+            description={t("cves.unaccept.body")}
+            confirmLabel={t("cves.detail.unaccept")}
             onConfirm={() => revoke.mutate()}
             pending={revoke.isPending}
             error={revoke.isError ? t("errors.generic") : null}
