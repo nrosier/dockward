@@ -80,6 +80,8 @@ export default function CveDetailPage() {
     ? cve.tags.filter((tag) => !tag.newest_digest && tag.status === "open").map((tag) => tag.image_tag)
     : [];
   const acceptanceUrl = safeHttpsUrl(cve.github_issue_url);
+  // The API never returns the primary id as an alias; the UI checks too (#337).
+  const aliases = (cve.aliases ?? []).filter((alias) => alias !== "" && alias !== cve.cve_id);
 
   return (
     <>
@@ -92,13 +94,15 @@ export default function CveDetailPage() {
             <div className="flex flex-wrap items-center gap-3">
               <h1 id="cve-h" className="font-mono text-2xl font-medium tracking-tight">
                 {cve.cve_id}
-                {cve.alias === null ? null : (
-                  <span className="ml-3 text-[15px] font-normal text-muted">{t("cves.detail.alias", { alias: cve.alias })}</span>
-                )}
               </h1>
               <SeverityPill severity={cve.severity} />
               <CveStatusPill cve={cve} />
             </div>
+            {aliases.length === 0 ? null : (
+              <p data-testid="cve-alias-line" className="font-mono text-[12.5px] text-muted">
+                {t("cves.detail.aliasOf", { id: cve.cve_id, alias: aliases.join(", ") })}
+              </p>
+            )}
             {cve.image === null ? null : (
               <p className="font-mono text-[13px] text-muted">{t("cves.detail.image", { image: cve.image })}</p>
             )}

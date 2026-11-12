@@ -220,15 +220,20 @@ export default function CvesPage() {
               <tbody>
                 {list.data.items.map((cve) => {
                   const source = sources.get(cve.source_id);
+                  // One row per source (#337): the display name, else the repository, tells rows apart.
+                  const sourceLabel = source === undefined ? "" : (source.name ?? source.repository);
                   return (
                     <tr key={cve.id}>
                       <td className={`${TD} whitespace-nowrap`}>
                         <Link to={`/cves/${encodeURIComponent(cve.id)}`} className={`font-mono text-[13px] ${LINK}`}>
                           {cve.cve_id}
+                          {sourceLabel === "" ? null : (
+                            <>
+                              {" "}
+                              <span className="sr-only">{t("cves.row.inSource", { source: sourceLabel })}</span>
+                            </>
+                          )}
                         </Link>
-                        {cve.alias === null ? null : (
-                          <div className="font-mono text-[12px] text-muted">{t("cves.detail.alias", { alias: cve.alias })}</div>
-                        )}
                       </td>
                       <td className={TD}>
                         <SeverityPill severity={cve.severity} />
@@ -238,7 +243,7 @@ export default function CvesPage() {
                       </td>
                       <td className={TD}>{cve.package}</td>
                       <td className={`${TD} font-mono text-[12.5px]`}>{cve.fixed_in_version ?? t("cves.unknown")}</td>
-                      <td className={TD}>{source === undefined ? null : source.repository}</td>
+                      <td className={TD}>{sourceLabel}</td>
                       <td className={`${TD} whitespace-nowrap text-muted`}>
                         {t("cves.tags", { open: cve.open_tags, tracked: cve.tracked_tags })}
                       </td>
