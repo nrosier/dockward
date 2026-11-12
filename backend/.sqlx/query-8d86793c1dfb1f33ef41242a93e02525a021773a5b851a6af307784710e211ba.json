@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", code_hash FROM totp_recovery_codes\n           WHERE user_id = ? AND used_at IS NULL ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "totp_recovery_codes",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "code_hash",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "totp_recovery_codes",
+            "name": "code_hash"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "8d86793c1dfb1f33ef41242a93e02525a021773a5b851a6af307784710e211ba"
+}

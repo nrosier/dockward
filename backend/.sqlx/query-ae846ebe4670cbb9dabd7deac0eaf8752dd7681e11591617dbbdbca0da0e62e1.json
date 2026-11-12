@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE totp_secrets SET secret_encrypted = ? WHERE user_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ae846ebe4670cbb9dabd7deac0eaf8752dd7681e11591617dbbdbca0da0e62e1"
+}

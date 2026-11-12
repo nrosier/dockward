@@ -32,6 +32,8 @@ Purpose: schema reference for dockward 0.2.0's SQLite database, and the decision
 | `github_issues` | Tracked GitHub issues, one per (owner, repo, CVE). Shared by every source that targets that GitHub repository. |
 | `cve_findings` | One row per (source, tag, CVE): the merged view of the tag's current image. |
 | `cve_acceptances` | Accepted risk, per source and CVE. |
+| `totp_secrets` | One row per local user who started TOTP enrolment: the sealed secret, `enabled`, `totp_last_step` (replay guard), timestamps. Migration 0009 (#341). |
+| `totp_recovery_codes` | Argon2id hashes of a user's recovery codes and `used_at`. Migration 0009 (#341). |
 | `audit_log` | Admin and security-relevant actions. |
 | `alert_channels` | SMTP and webhook destinations, encrypted. |
 | `alert_deliveries` | The 24-hour alert dedupe log. |
@@ -121,6 +123,7 @@ Source for the OIDC claim model: OpenID Connect Core 1.0.
 `audit_log.action` must be one of these values. Add a value here before writing it. Decided (2026-11-03, delegated), with the spinoff changes of spinoff-local-scan section 9.
 
 - Kept: `user.create`, `user.delete`, `user.role_change`, `oidc.config_change`, `credential.create`, `credential.rotate`, `credential.delete`, `cve.accept`, `cve.unaccept`, `alert.config_change`, `backup.run`, `restore.run`, `key.rotate`, `retention.run`, `log.level_change`, `sync_job.retry`, `sync_job.purge`.
+- Added (#341, TOTP): `user.totp_enable`, `user.totp_disable`, `user.totp_reset` (admin action; target `user:<id>`; no details), `user.totp_lockout` (actor is the locked user; `details` is `{"failures": n}`). None carries a code, a secret or a hash.
 - Added (spinoff): `hub.create`, `hub.delete`, `source.create`, `source.update`, `source.delete`, `source.scan`, `source.tag_pull`, `source.tag_scan` (#335; details hold the source id, the tag and the queued count), `image.evict` (actor `system`; details name the hub, repository, and platform digest, never a path with a secret), `settings.change` (scan limits and retention; details hold the old and new values).
 - Removed (spinoff): `mapping.*`, `project_webhook.*`, `artifact.remove`, `key.migrate_labels`. The `key.migrate_labels` action belonged to the label migration that decision 56 removed.
 

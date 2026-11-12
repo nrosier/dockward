@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO totp_secrets (user_id, secret_encrypted, enabled)\n         VALUES (?, ?, 0)\n         ON CONFLICT(user_id) DO UPDATE SET\n             secret_encrypted = excluded.secret_encrypted,\n             totp_last_step = NULL,\n             created_at = unixepoch(),\n             enabled_at = NULL\n         WHERE totp_secrets.enabled = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "4fe0d83a08c54a5213b51d41a126477bb79498fc901462ed2a7d233a64c30097"
+}

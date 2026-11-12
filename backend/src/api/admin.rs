@@ -597,6 +597,10 @@ pub(crate) mod test_support {
                 60,
                 std::time::Duration::from_secs(60),
             ),
+            totp_limiter: crate::api::hardening::RateLimiter::new(
+                5,
+                std::time::Duration::from_secs(15 * 60),
+            ),
         };
         (state, dir)
     }
@@ -821,6 +825,10 @@ mod tests {
             registry_limiter: crate::api::hardening::RateLimiter::new(
                 60,
                 std::time::Duration::from_secs(60),
+            ),
+            totp_limiter: crate::api::hardening::RateLimiter::new(
+                5,
+                std::time::Duration::from_secs(15 * 60),
             ),
         };
         (crate::app(Vec::new(), state), pool, dir)

@@ -52,4 +52,8 @@ pub struct AppState {
     /// Routes that call a registry for a list or a test, or resolve an entered host: 60 per
     /// minute per user, held in memory (section 10).
     pub registry_limiter: RateLimiter,
+    /// Wrong TOTP codes per account: 5 per 15 minutes, counted on failure only. The sixth
+    /// attempt in the window is refused and the lockout is audited. Held in memory, so a restart
+    /// clears it (`specs/security.md`, "Two-factor sign-in (TOTP)").
+    pub totp_limiter: RateLimiter,
 }

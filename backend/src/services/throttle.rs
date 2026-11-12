@@ -147,6 +147,18 @@ impl LoginThrottle {
         }
     }
 
+    /// Consecutive failures recorded for the pair. Zero for an unknown pair.
+    pub fn failures(&self, username: &str, ip: &str) -> u32 {
+        self.pairs
+            .lock()
+            .ok()
+            .and_then(|map| {
+                map.get(&(username.to_owned(), ip.to_owned()))
+                    .map(|s| s.failures)
+            })
+            .unwrap_or(0)
+    }
+
     /// Clears the pair after a successful login.
     pub fn record_success(&self, username: &str, ip: &str) {
         if let Ok(mut map) = self.pairs.lock() {

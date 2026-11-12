@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE totp_secrets\n         SET enabled = 1, enabled_at = unixepoch(), totp_last_step = ?\n         WHERE user_id = ? AND enabled = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "54d656c454ab48084fa28d86e47799502718edbcb22b94e718f3874786d7b109"
+}

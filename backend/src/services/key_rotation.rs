@@ -24,8 +24,9 @@ pub struct EncryptedColumn {
 /// site is added without a row here (and a matching step in `rotate`).
 ///
 /// The row id in the AAD: `user_credentials` and `alert_channels` use the row id;
-/// `system_config` uses the key name and only rows with `is_encrypted = 1`.
-pub const ENCRYPTED_COLUMNS: [EncryptedColumn; 4] = [
+/// `system_config` uses the key name and only rows with `is_encrypted = 1`;
+/// `totp_secrets` uses the user id.
+pub const ENCRYPTED_COLUMNS: [EncryptedColumn; 5] = [
     EncryptedColumn {
         table: "user_credentials",
         column: "encrypted_token",
@@ -41,6 +42,10 @@ pub const ENCRYPTED_COLUMNS: [EncryptedColumn; 4] = [
     EncryptedColumn {
         table: "source_credentials",
         column: "encrypted_token",
+    },
+    EncryptedColumn {
+        table: "totp_secrets",
+        column: "secret_encrypted",
     },
 ];
 
@@ -63,7 +68,7 @@ pub async fn rotate(
 
     let mut count: u64 = 0;
     // The order follows `ENCRYPTED_COLUMNS`.
-    let [credentials, config, channels, source_tokens] = &ENCRYPTED_COLUMNS;
+    let [credentials, config, channels, source_tokens, totp_secrets] = &ENCRYPTED_COLUMNS;
 
     for row in rows::list_credential_tokens(&mut tx).await? {
         let sealed = reseal(old, new, credentials, &row)?;
@@ -83,6 +88,11 @@ pub async fn rotate(
     for row in rows::list_source_credential_tokens(&mut tx).await? {
         let sealed = reseal(old, new, source_tokens, &row)?;
         expect_one(rows::set_source_credential_token(&mut tx, &row.id, &sealed).await?)?;
+        count += 1;
+    }
+    for row in rows::list_totp_secrets(&mut tx).await? {
+        let sealed = reseal(old, new, totp_secrets, &row)?;
+        expect_one(rows::set_totp_secret(&mut tx, &row.id, &sealed).await?)?;
         count += 1;
     }
 
@@ -143,7 +153,7 @@ mod tests {
 
     const CONFIG_KEY: &str = "oidc.client_secret_encrypted";
     // (table, column, row id, fake plaintext), in `rotate` order.
-    const SEEDS: [(&str, &str, &str, &str); 6] = [
+    const SEEDS: [(&str, &str, &str, &str); 7] = [
         (
             "user_credentials",
             "encrypted_token",
@@ -180,6 +190,12 @@ mod tests {
             "srccred-1",
             "FAKE_REGISTRY_TOKEN_6",
         ),
+        (
+            "totp_secrets",
+            "secret_encrypted",
+            "user-1",
+            "FAKE_TOTP_SECRET_7",
+        ),
     ];
 
     fn derived(b64: &str) -> DerivedKey {
@@ -207,7 +223,7 @@ mod tests {
             .unwrap();
         drop(conn);
         for (table, column, id, plain) in SEEDS {
-            if table == "source_credentials" {
+            if table == "source_credentials" || table == "totp_secrets" {
                 continue;
             }
             let sealed =
@@ -236,12 +252,23 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let (table, column, id, plain) = SEEDS[SEEDS.len() - 1];
+        let (table, column, id, plain) = SEEDS[SEEDS.len() - 2];
         let sealed =
             crypto::encrypt(&key, &crypto::aad(table, column, id), plain.as_bytes()).unwrap();
         sqlx::query(
             "INSERT INTO source_credentials (id, source_id, username, encrypted_token)
              VALUES (?, 'src-1', 'robot', ?)",
+        )
+        .bind(id)
+        .bind(sealed)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (table, column, id, plain) = SEEDS[SEEDS.len() - 1];
+        let sealed =
+            crypto::encrypt(&key, &crypto::aad(table, column, id), plain.as_bytes()).unwrap();
+        sqlx::query(
+            "INSERT INTO totp_secrets (user_id, secret_encrypted, enabled) VALUES (?, ?, 1)",
         )
         .bind(id)
         .bind(sealed)
@@ -276,6 +303,13 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        let sql = "SELECT secret_encrypted FROM totp_secrets ORDER BY user_id";
+        all.extend(
+            sqlx::query_scalar::<_, String>(sql)
+                .fetch_all(pool)
+                .await
+                .unwrap(),
+        );
         let sql = "SELECT config_encrypted FROM alert_channels ORDER BY id";
         all.extend(
             sqlx::query_scalar::<_, String>(sql)
@@ -291,6 +325,7 @@ mod tests {
             "user_credentials" => "SELECT encrypted_token FROM user_credentials WHERE id = ?",
             "system_config" => "SELECT value FROM system_config WHERE key = ?",
             "source_credentials" => "SELECT encrypted_token FROM source_credentials WHERE id = ?",
+            "totp_secrets" => "SELECT secret_encrypted FROM totp_secrets WHERE user_id = ?",
             _ => "SELECT config_encrypted FROM alert_channels WHERE id = ?",
         };
         sqlx::query_scalar(sql)
@@ -314,7 +349,7 @@ mod tests {
         let before = snapshot(&pool).await;
 
         let rows = rotate(&pool, &old, &new).await.unwrap();
-        assert_eq!(rows, 6, "wrong row count");
+        assert_eq!(rows, 7, "wrong row count");
 
         for (table, column, id, plain) in SEEDS {
             let ciphertext = stored(&pool, table, id).await;
@@ -411,7 +446,7 @@ mod tests {
         let details = details.clone().unwrap_or_default();
         let parsed: serde_json::Value = serde_json::from_str(&details).unwrap();
         assert!(
-            parsed == serde_json::json!({ "rows": 6 }),
+            parsed == serde_json::json!({ "rows": 7 }),
             "details hold more than the row count"
         );
 

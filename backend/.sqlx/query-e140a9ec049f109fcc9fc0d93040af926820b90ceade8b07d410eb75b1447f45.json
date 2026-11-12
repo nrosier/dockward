@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE totp_secrets SET totp_last_step = ?\n         WHERE user_id = ? AND enabled = 1\n           AND (totp_last_step IS NULL OR totp_last_step < ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "e140a9ec049f109fcc9fc0d93040af926820b90ceade8b07d410eb75b1447f45"
+}

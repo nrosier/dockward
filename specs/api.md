@@ -39,6 +39,7 @@ Codes: `invalid_request` (400), `password_too_short` (400), `unauthenticated` (4
 
 Every route that calls an outbound service or starts work declares its limit. Over the limit the response is `429` with `Retry-After` (RFC 6585, RFC 9110). Limits are held in memory and cleared by a restart. The values are the spinoff values (spinoff section 10):
 
+- TOTP codes: 5 wrong codes per account per 15 minutes (`api/totp.rs`, `AppState::totp_limiter`). The fifth locks the account's code step until the window ends and writes `user.totp_lockout` once (#341).
 - Login: 10 per minute per client IP (Decided 2026-11-03, delegated, [security.md](security.md)).
 - Routes that call a registry or GitHub for a list or a test: 60 per minute per user.
 - Manual scan of one source: 1 per source per 5 minutes (`POST /api/v1/image-sources/:id/scan`).
@@ -54,13 +55,18 @@ UNVERIFIED in this pass: which of these limiters is implemented on which route. 
 | --- | --- | --- | --- | --- |
 | GET | `/api/v1/auth/setup-status` | public | yes | `{"setup_required", "oidc_enabled"}`. |
 | POST | `/api/v1/auth/setup` | public | yes | Allowed only while `users` is empty. Sets session and CSRF cookies. Closes permanently after the first account. |
-| POST | `/api/v1/auth/login` | public (same-origin check) | yes | `401 invalid_credentials` for every login failure. |
+| POST | `/api/v1/auth/login` | public (same-origin check) | yes | `401 invalid_credentials` for every login failure. For a user with TOTP on, a correct password returns `200 {"totp_required": true}` and the `__Host-dockward_totp` challenge cookie (5 minutes), and no session (#341). |
 | POST | `/api/v1/auth/logout` | session | yes | Clears the cookie. |
 | POST | `/api/v1/auth/logout-all` | session | yes | Increments `users.token_version`. |
 | GET | `/api/v1/auth/oidc/start` | public | yes | `404` while OIDC is not configured. |
 | GET | `/api/v1/auth/oidc/callback` | public | yes | Every outcome is `302` once OIDC is configured (Decided 2026-11-03, delegated, #49). |
 | GET | `/api/v1/account/me` | session | yes | `{"user"}`. |
 | POST | `/api/v1/account/password` | session | yes | Minimum 15 characters, maximum 64 (Decided 2026-11-03). Increments `token_version`. |
+| POST | `/api/v1/auth/totp/verify` | public (same-origin check, challenge cookie) | yes | Body `{"code"}`: a 6-digit TOTP code or a recovery code. Success sets the session and CSRF cookies. Every failure is the `401 invalid_credentials` of a wrong password. `429` with `Retry-After` while the account is locked (#341). |
+| GET | `/api/v1/account/totp` | session | yes | `{"enabled"}` and nothing else (#341). |
+| POST | `/api/v1/account/totp/enrol` | session | yes | `{"secret","otpauth_uri"}`, shown once. Stored sealed and disabled. `403` for an OIDC account, `409` when TOTP is on (#341). |
+| POST | `/api/v1/account/totp/confirm` | session | yes | Body `{"code"}`. A valid code turns TOTP on and returns `{"recovery_codes"}` (10), once. `422 validation_failed` for a wrong code (#341). |
+| POST | `/api/v1/account/totp/disable` | session | yes | Body `{"code"}`: a valid current TOTP code. `204`. `422` for a wrong code (#341). |
 
 ## Credentials (GitHub only)
 
@@ -173,6 +179,7 @@ All routes are `admin`.
 | GET | `/api/v1/admin/alert-channels` | yes | Config never returned. |
 | POST | `/api/v1/admin/alert-channels` | yes | `422` on failure. |
 | PUT | `/api/v1/admin/alert-channels/:id` | yes | |
+| DELETE | `/api/v1/admin/users/:id/totp` | yes | Clears the user's TOTP and recovery codes. `204`, `404` for an unknown user. Audited as `user.totp_reset` with the user's id only (#341). |
 | GET | `/api/v1/admin/audit-log` | yes | Filters `action`, `actor_user_id`. |
 | GET | `/api/v1/admin/jobs` | yes | Housekeeping runs from `job_runs`. Filter `kind`. |
 | GET | `/api/v1/admin/health` | yes | Spinoff target: per-hub reachability, the pinned scanner versions, the database build time per scanner, free disk of the store, and the caller's client IP and its source. The Harbor and robot fields are removed. Field shape UNVERIFIED. |
