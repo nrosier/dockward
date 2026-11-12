@@ -697,3 +697,81 @@ async fn a_failed_update_step_stores_its_stderr_tail_redacted_and_the_run_links_
     .unwrap_or_default();
     assert_eq!(linked, 1);
 }
+
+/// Reads the job's log the way `GET /jobs/:id/log` does, as an admin.
+async fn log_of(pool: &SqlitePool) -> crate::services::job_log::JobLog {
+    let query = crate::services::job_log::LogQuery::default();
+    match crate::services::job_log::get(pool, "admin", true, "job-db-update", &query).await {
+        Ok(log) => log,
+        Err(err) => panic!("job log: {err:?}"),
+    }
+}
+
+#[tokio::test]
+async fn log_lines_carry_a_timestamp_and_the_scanner_name() {
+    for (scanner, name) in [(Scanner::Trivy, "trivy"), (Scanner::Grype, "grype")] {
+        let fx = Fx::new(&format!("log-meta-{name}"), TRIVY_NEW).await;
+        write_script(
+            &fx.dir.join("bin").join(name),
+            &format!(
+                "echo '{name} progress' >&2\necho \"{name} $*\" >> '{}'",
+                fx.dir.join("calls.log").display()
+            ),
+        );
+        // Grype's update is followed by a status read; its output is not JSON here, so the run
+        // may fail after the update step. The step log is what this test reads.
+        let _ = fx.run(scanner).await;
+
+        let log = log_of(&fx.pool).await;
+        assert_eq!(log.scanner.as_deref(), Some(name));
+        assert!(!log.steps.is_empty(), "{name} has a step");
+        assert!(
+            log.steps.iter().all(|s| !s.started_at.is_empty()),
+            "{:?}",
+            log.steps
+        );
+        let progress: Vec<_> = log
+            .lines
+            .iter()
+            .filter(|l| l.text == format!("{name} progress"))
+            .collect();
+        assert!(!progress.is_empty(), "{name} lines: {:?}", log.lines);
+        for line in &log.lines {
+            assert!(
+                line.at.len() >= 20 && line.at.contains('T') && line.at.ends_with('Z'),
+                "an RFC 3339 timestamp, got {:?}",
+                line.at
+            );
+        }
+        let stored_at: Vec<i64> = sqlx::query_scalar("SELECT at FROM job_log_lines")
+            .fetch_all(&fx.pool)
+            .await
+            .unwrap_or_default();
+        assert!(stored_at.iter().all(|at| *at > 0), "{stored_at:?}");
+    }
+}
+
+#[tokio::test]
+async fn log_output_is_capped_at_500_lines() {
+    let fx = Fx::new("log-cap", TRIVY_NEW).await;
+    write_script(
+        &fx.dir.join("bin").join("trivy"),
+        "i=0\nwhile [ $i -lt 650 ]; do echo \"line $i\" >&2; i=$((i+1)); done\nexit 1",
+    );
+
+    let outcome = fx.run(Scanner::Trivy).await;
+    assert!(matches!(outcome, JobOutcome::Failed(_)), "{outcome:?}");
+
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT l.text FROM job_log_lines l JOIN job_log_steps s ON s.id = l.step_id
+         WHERE s.job_id = 'job-db-update' AND s.seq = 0 ORDER BY l.id",
+    )
+    .fetch_all(&fx.pool)
+    .await
+    .unwrap_or_default();
+    assert_eq!(stored.len(), 500, "the stored tail is capped");
+    assert_eq!(stored.last().map(String::as_str), Some("line 649"));
+    assert_eq!(stored.first().map(String::as_str), Some("line 150"));
+    let log = log_of(&fx.pool).await;
+    assert!(log.steps[0].truncated, "the step is flagged truncated");
+}
