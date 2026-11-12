@@ -137,7 +137,7 @@ fn registry_github_webhook_and_session_values_are_redacted() {
         let out = redact_line(line);
         assert!(
             !out.contains(secret),
-            "{secret} leaked from {line:?}: {out}"
+            "a secret value leaked from case {line:?}: masked output is {out:?}"
         );
         assert!(out.contains(REDACTED), "nothing masked in {line:?}: {out}");
     }
