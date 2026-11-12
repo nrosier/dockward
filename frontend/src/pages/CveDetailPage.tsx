@@ -3,8 +3,8 @@ import { ExternalLink } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams } from "react-router";
 import { AcceptDialog } from "../components/cves/AcceptDialog";
+import { CreateIssueDialog } from "../components/cves/CreateIssueDialog";
 import { CveStatusPill, SeverityPill, issueEligible } from "../components/cves/CvePills";
-import { IssueAction } from "../components/cves/IssueAction";
 import { safeHttpsUrl } from "../components/cves/safeUrl";
 import { ConfirmDialog } from "../components/mappings/ConfirmDialog";
 import { LINK, TABLE, TD, TH } from "../components/mappings/styles";
@@ -29,6 +29,7 @@ export default function CveDetailPage() {
   const queryClient = useQueryClient();
   const [acceptOpen, setAcceptOpen] = useState(false);
   const [revokeOpen, setRevokeOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
 
   const cveQuery = useQuery({
     queryKey: ["cve", id],
@@ -68,8 +69,9 @@ export default function CveDetailPage() {
   const source = sourceQuery.data;
   const owner = source !== undefined && me.data?.id === source.user_id;
   const sourceLabel = source === undefined ? "" : source.repository;
+  // The GitHub repository a new issue goes to, as owner/repo (#323).
+  const issueRepository = source === undefined ? "" : `${source.github_owner}/${source.github_repo}`;
   const issueUrl = safeHttpsUrl(cve.github_issue_url);
-  const openIssue = cve.github_issue_status === "open";
   const conflict = createIssue.error instanceof ApiError && createIssue.error.status === 409;
   const acceptance = cve.acceptance;
   // Inline notice with the older tags that report the CVE (#196, decision 24).
@@ -99,21 +101,17 @@ export default function CveDetailPage() {
             {cve.description === null ? null : <p className="max-w-160 text-text/85">{cve.description}</p>}
           </div>
           <div className="flex flex-wrap items-center gap-2.5">
-            {issueUrl === null || cve.github_issue_number === null ? null : (
-              <a href={issueUrl} target="_blank" rel="noopener noreferrer" className={buttonClass("default")}>
-                <ExternalLink aria-hidden="true" size={14} />
-                {t("cves.detail.issueLink", { number: cve.github_issue_number })}
-              </a>
-            )}
-            {owner && issueEligible(cve) ? (
-              <IssueAction
-                cve={cve}
-                label={t("cves.detail.createIssue")}
-                disabled={openIssue}
-                pending={createIssue.isPending}
-                title={openIssue ? t("cves.detail.createIssueDisabled") : undefined}
-                onCreate={() => createIssue.mutate()}
-              />
+            {cve.github_issue_number !== null ? (
+              issueUrl === null ? null : (
+                <a href={issueUrl} target="_blank" rel="noopener noreferrer" className={buttonClass("default")}>
+                  <ExternalLink aria-hidden="true" size={14} />
+                  {t("cves.action.viewIssue")}
+                </a>
+              )
+            ) : owner && issueEligible(cve) ? (
+              <Button disabled={createIssue.isPending} onClick={() => setCreateOpen(true)}>
+                {t("cves.detail.createIssue")}
+              </Button>
             ) : null}
             {owner ? (
               cve.accepted ? (
@@ -230,6 +228,16 @@ export default function CveDetailPage() {
       {owner ? (
         <>
           <AcceptDialog open={acceptOpen} onOpenChange={setAcceptOpen} cve={cve} mappingLabel={sourceLabel} />
+          <CreateIssueDialog
+            cve={createOpen ? cve : null}
+            repository={issueRepository}
+            pending={createIssue.isPending}
+            onCancel={() => setCreateOpen(false)}
+            onConfirm={() => {
+              setCreateOpen(false);
+              createIssue.mutate();
+            }}
+          />
           <ConfirmDialog
             open={revokeOpen}
             onOpenChange={setRevokeOpen}

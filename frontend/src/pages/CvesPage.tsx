@@ -8,7 +8,7 @@ import { safeHttpsUrl } from "../components/cves/safeUrl";
 import { PageHeader } from "../components/mappings/PageHeader";
 import { LINK, TABLE, TD, TH } from "../components/mappings/styles";
 import { TableScroll } from "../components/mappings/TableScroll";
-import { mappingName, useAllMappings } from "../components/mappings/useMappings";
+import { useAllMappings } from "../components/mappings/useMappings";
 import { Button, buttonClass } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { currentPage, Pagination } from "../components/ui/Pagination";
@@ -18,6 +18,7 @@ import { ApiError, api } from "../lib/api";
 import { parseFilters, toApiQuery, toUrlParams } from "../lib/cveFilters";
 import { useMe } from "../lib/session";
 import type { CveSummary, MappingTag, Page } from "../types/api";
+import type { Source } from "../types/sources";
 
 const PAGE_SIZE = 50;
 
@@ -71,8 +72,8 @@ function ActionCell({
   );
 }
 
-function githubRepository(mapping: { github_owner: string; github_repo: string } | undefined): string {
-  return mapping === undefined ? "" : `${mapping.github_owner}/${mapping.github_repo}`;
+function githubRepository(source: { github_owner: string; github_repo: string } | undefined): string {
+  return source === undefined ? "" : `${source.github_owner}/${source.github_repo}`;
 }
 
 export default function CvesPage() {
@@ -87,7 +88,12 @@ export default function CvesPage() {
   const order = params.get("order") === "asc" ? "asc" : "desc";
   const mappingList = useAllMappings(scopeAll);
   const mappingItems = mappingList.data?.items ?? [];
-  const mappings = new Map(mappingItems.map((item) => [item.id, item]));
+  // Each row's repository comes from its source_id (#323); the row has no repository field.
+  const sourceList = useQuery({
+    queryKey: ["image-sources", "list", scopeAll],
+    queryFn: () => api<Page<Source>>("GET", `/image-sources?page_size=200${scopeAll ? "&scope=all" : ""}`),
+  });
+  const sources = new Map((sourceList.data?.items ?? []).map((item) => [item.id, item]));
   const [issueError, setIssueError] = useState<string | null>(null);
   const [creating, setCreating] = useState<CveSummary | null>(null);
   const tags = useQuery({
@@ -215,7 +221,7 @@ export default function CvesPage() {
               </thead>
               <tbody>
                 {list.data.items.map((cve) => {
-                  const mapping = mappings.get(cve.mapping_id);
+                  const source = sources.get(cve.source_id);
                   return (
                     <tr key={cve.id}>
                       <td className={`${TD} whitespace-nowrap`}>
@@ -231,7 +237,7 @@ export default function CvesPage() {
                       </td>
                       <td className={TD}>{cve.package}</td>
                       <td className={`${TD} font-mono text-[12.5px]`}>{cve.fixed_in_version ?? t("cves.unknown")}</td>
-                      <td className={TD}>{mapping === undefined ? null : mappingName(mapping)}</td>
+                      <td className={TD}>{source === undefined ? null : source.repository}</td>
                       <td className={`${TD} whitespace-nowrap text-muted`}>
                         {t("cves.tags", { open: cve.open_tags, tracked: cve.tracked_tags })}
                       </td>
@@ -241,7 +247,7 @@ export default function CvesPage() {
                       <td className={`${TD} whitespace-nowrap`}>
                         <ActionCell
                           cve={cve}
-                          canCreate={mapping !== undefined && me.data?.id === mapping.user_id}
+                          canCreate={source !== undefined && me.data?.id === source.user_id}
                           pending={createIssue.isPending && createIssue.variables === cve.id}
                           onCreate={() => setCreating(cve)}
                         />
@@ -257,7 +263,7 @@ export default function CvesPage() {
       </Card>
       <CreateIssueDialog
         cve={creating}
-        repository={creating === null ? "" : githubRepository(mappings.get(creating.mapping_id))}
+        repository={creating === null ? "" : githubRepository(sources.get(creating.source_id))}
         pending={createIssue.isPending}
         onCancel={() => setCreating(null)}
         onConfirm={(cve) => createIssue.mutate(cve.id)}
