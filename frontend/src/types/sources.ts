@@ -29,7 +29,7 @@ export interface Source {
   last_discovery_at: number | string | null;
 }
 
-export type PlatformState = "stored" | "evicting" | "evicted" | "failed";
+export type PlatformState = "queued" | "pulling" | "stored" | "evicting" | "evicted" | "failed";
 export type ScanStatus = "queued" | "running" | "done" | "failed";
 
 export interface ScannerRun {
