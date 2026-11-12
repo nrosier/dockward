@@ -53,6 +53,7 @@ pub mod source_credentials;
 pub mod sources;
 #[allow(dead_code)] // The pull and eviction jobs call the store (Steps 4 and 5).
 pub mod storage;
+pub mod tag_actions;
 #[allow(dead_code)] // Used by the login service.
 pub mod throttle;
 #[allow(dead_code)] // Used by the user response shape.

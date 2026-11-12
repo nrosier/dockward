@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (\n               SELECT 1 FROM jobs\n               WHERE status IN ('queued', 'running')\n                 AND json_valid(payload)\n                 AND json_extract(payload, '$.kind') = 'pull'\n                 AND json_extract(payload, '$.platform_id') = ?) AS \"open!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "open!: bool",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4c606f992980fc33dd95949fb6ab0d6d96354f28afd86f60d8ff6e08d78c17c1"
+}

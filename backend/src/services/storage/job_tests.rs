@@ -303,3 +303,110 @@ async fn only_the_enabled_scanners_are_queued() {
         vec![("trivy".to_owned(), "first_pull".to_owned())]
     );
 }
+
+/// A `manual` pull job for `PID` (#335).
+fn manual_job(digest: &str) -> ClaimedJob {
+    ClaimedJob {
+        id: "j-manual".to_owned(),
+        source_id: None,
+        attempts: 0,
+        payload: format!(
+            r#"{{"kind":"pull","platform_id":"{PID}","digest":"{digest}","trigger":"manual"}}"#
+        ),
+    }
+}
+
+async fn pulled_at_of(env: &Env) -> Option<i64> {
+    match sqlx::query_scalar("SELECT pulled_at FROM image_platforms WHERE id = ?")
+        .bind(PID)
+        .fetch_one(&env.pool)
+        .await
+    {
+        Ok(value) => value,
+        Err(err) => panic!("pulled_at: {err}"),
+    }
+}
+
+/// Marks `PID` stored at time 5 with a layout holding one marker file, as an earlier pull left it.
+async fn store_with_marker(env: &Env) -> std::path::PathBuf {
+    exec(
+        env,
+        "UPDATE image_platforms SET state = 'stored', size_bytes = 7, pulled_at = 5 WHERE id = ?",
+        &[PID],
+    )
+    .await;
+    let layout = env.dir.join("images").join(PID);
+    if let Err(err) = std::fs::create_dir_all(&layout) {
+        panic!("layout: {err}");
+    }
+    let marker = layout.join("index.json");
+    if let Err(err) = std::fs::write(&marker, b"stored-before") {
+        panic!("marker: {err}");
+    }
+    marker
+}
+
+fn tmp_entries(env: &Env) -> usize {
+    std::fs::read_dir(env.dir.join("images").join(".tmp"))
+        .map(|entries| entries.count())
+        .unwrap_or(0)
+}
+
+/// Q-B (#335): a manual pull of a stored image downloads it again into the temporary folder,
+/// verifies every digest, discards the copy and updates `pulled_at`. The stored files stay.
+#[tokio::test]
+async fn pull_of_stored_image_redownloads_and_keeps_stored_files() {
+    let env = env("pull-job-manual-stored").await;
+    let digest = publish(&env, b"layer", b"layer", 5);
+    seed(&env, &digest).await;
+    let marker = store_with_marker(&env).await;
+    let store = StoreRoot::at(env.dir.join("images"));
+    let outcome = run_pull(&env.pool, &env.discovery, &store, &manual_job(&digest), NOW).await;
+    assert_eq!(outcome, JobOutcome::Done);
+    assert_eq!(
+        blob_requests(&env),
+        2,
+        "the config and the layer were downloaded"
+    );
+    assert_eq!(state_of(&env, PID).await, "stored");
+    assert_eq!(pulled_at_of(&env).await, Some(NOW));
+    assert_eq!(
+        std::fs::read(&marker).ok().as_deref(),
+        Some(&b"stored-before"[..])
+    );
+    assert_eq!(tmp_entries(&env), 0, "the verified copy is discarded");
+}
+
+/// A manual re-download that does not verify fails the job and keeps the stored image as it was.
+#[tokio::test]
+async fn a_manual_redownload_that_does_not_verify_keeps_the_stored_image() {
+    let env = env("pull-job-manual-bad").await;
+    let digest = publish(&env, b"layer", b"LAYER", 5);
+    seed(&env, &digest).await;
+    let marker = store_with_marker(&env).await;
+    let store = StoreRoot::at(env.dir.join("images"));
+    let outcome = run_pull(&env.pool, &env.discovery, &store, &manual_job(&digest), NOW).await;
+    assert_eq!(
+        outcome,
+        JobOutcome::Failed("image content did not match its digest".to_owned())
+    );
+    assert_eq!(state_of(&env, PID).await, "stored");
+    assert_eq!(pulled_at_of(&env).await, Some(5));
+    assert!(marker.is_file());
+    assert_eq!(tmp_entries(&env), 0);
+}
+
+/// A `first_pull` job that finds its image stored still does nothing (unchanged behaviour).
+#[tokio::test]
+async fn a_discovery_pull_of_a_stored_image_still_downloads_nothing() {
+    let env = env("pull-job-auto-stored").await;
+    let digest = publish(&env, b"layer", b"layer", 5);
+    seed(&env, &digest).await;
+    store_with_marker(&env).await;
+    assert_eq!(
+        run(&env, &digest).await,
+        JobOutcome::DoneWithNote("already pulled".to_owned())
+    );
+    assert!(env.script.hits().is_empty());
+    assert_eq!(pulled_at_of(&env).await, Some(5));
+}

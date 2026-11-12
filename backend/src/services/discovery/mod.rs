@@ -104,7 +104,7 @@ pub struct PullPayload {
     pub kind: String,
     pub platform_id: String,
     pub digest: String,
-    /// `first_pull` or `tag_moved` (decision 17).
+    /// `first_pull` or `tag_moved` (decision 17), or `manual` for the manual pull route (#335).
     pub trigger: String,
     /// The repository of the discovery run, and the tag that matched. Absent on a job queued
     /// before these fields existed.

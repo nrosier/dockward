@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE image_platforms SET state = 'queued', evicted_at = NULL\n         WHERE id = ? AND state = 'evicted'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b7b22d921aacedb58e25a386f168bdab5c51c8fedccc0e73cc89a61003a739df"
+}

@@ -117,6 +117,62 @@ pub async fn mark_failed(pool: &SqlitePool, platform_id: &str) -> Result<(), App
     expect_one(done.rows_affected())
 }
 
+/// Moves an `evicted` platform back to `queued` for a manual pull (#335), on the caller's
+/// connection. Returns the rows changed: zero when the row was not `evicted`.
+pub async fn requeue_evicted_in(
+    conn: &mut SqliteConnection,
+    platform_id: &str,
+) -> Result<u64, AppError> {
+    sqlx::query!(
+        "UPDATE image_platforms SET state = 'queued', evicted_at = NULL
+         WHERE id = ? AND state = 'evicted'",
+        platform_id
+    )
+    .execute(conn)
+    .await
+    .map(|done| done.rows_affected())
+    .map_err(db_err)
+}
+
+/// True while a `pull` job for `platform_id` is queued or running, on the caller's connection.
+/// The manual pull route skips such a platform, so it never queues a second pull of it.
+pub async fn has_open_pull_in(
+    conn: &mut SqliteConnection,
+    platform_id: &str,
+) -> Result<bool, AppError> {
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+               SELECT 1 FROM jobs
+               WHERE status IN ('queued', 'running')
+                 AND json_valid(payload)
+                 AND json_extract(payload, '$.kind') = 'pull'
+                 AND json_extract(payload, '$.platform_id') = ?) AS "open!: bool""#,
+        platform_id
+    )
+    .fetch_one(conn)
+    .await
+    .map_err(db_err)
+}
+
+/// Sets the pull time of a `stored` platform after a manual pull re-downloaded and verified it
+/// (#335). The stored files and the size are unchanged. Returns the rows changed: zero when the
+/// row is no longer `stored`.
+pub async fn refresh_pulled_at(
+    pool: &SqlitePool,
+    platform_id: &str,
+    pulled_at: i64,
+) -> Result<u64, AppError> {
+    sqlx::query!(
+        "UPDATE image_platforms SET pulled_at = ? WHERE id = ? AND state = 'stored'",
+        pulled_at,
+        platform_id
+    )
+    .execute(pool)
+    .await
+    .map(|done| done.rows_affected())
+    .map_err(db_err)
+}
+
 /// Marks a `pulling` platform `stored` with its size and pull time, then claims the oldest
 /// eligible images while the stored count is above `max_stored`. All of it is one
 /// `BEGIN IMMEDIATE` transaction, so the count and the claims agree. The platform just stored

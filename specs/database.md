@@ -5,6 +5,7 @@ Purpose: schema reference for dockward 0.2.0's SQLite database, and the decision
 ## Source of truth
 
 - `backend/migrations/0001_init.sql` is the schema. It is the only migration. The tables below describe it; if they disagree, the migration wins and this file is corrected.
+- Migration `0008_manual_trigger.sql` (#335) adds `manual` to the `scan_runs.trigger` CHECK. SQLite cannot alter a CHECK, so it rebuilds `scan_runs` (copying every row with its `rowid`), then recreates `idx_scan_runs_current`, `newest_digest_tags` and `tag_scan_times` as in 0001. It starts with `-- no-transaction`: `PRAGMA foreign_keys` is a no-op inside a transaction, and foreign keys must be OFF while the old table is dropped, or the drop cascades into `scanner_findings`. The rebuild runs in its own `BEGIN`/`COMMIT` and ends with `PRAGMA foreign_key_check`.
 - Fresh install only (decisions 21, 56). There is no import from a HarborGate database and no data migration. A database file that contains the `repo_mappings` table is refused at pool open with the fixed error `this database was created by HarborGate and cannot be used by this version` (`backend/src/db/mod.rs`). The database file is `<data dir>/dockward.db`.
 - SQLx SQLite with WAL mode. Use `SqlitePool`. Every connection sets `PRAGMA foreign_keys = ON`.
 - SQLite does not enforce foreign keys unless the pragma is on. NULL values are distinct for UNIQUE constraints.
@@ -48,7 +49,7 @@ Column names that changed from HarborGate: `sync_job_id` is `job_id` where it na
 - `image_sources`: `UNIQUE (hub_id, repository, tag_value)`. This is the source identity (decisions 33, 37). The same repository on two hubs is two sources. No user is part of the key. `github_cred_id` is `NOT NULL` with `ON DELETE RESTRICT`. `min_issue_severity` is `CRITICAL` or `HIGH`.
 - `source_credentials`: `source_id` UNIQUE. Ciphertext AAD `source_credentials:encrypted_token:<id>` (decision 35).
 - `image_platforms`: `UNIQUE (image_id, platform_digest)`. `pulled_at` is the eviction clock. Index `idx_image_platforms_evict` on `(state, pulled_at, id)`.
-- `scan_runs`: `trigger` is `first_pull`, `tag_moved`, or `db_update`. `job_id` is `ON DELETE SET NULL`.
+- `scan_runs`: `trigger` is `first_pull`, `tag_moved`, `db_update`, or `manual` (a forced scan from the source page, #335; migration `0008_manual_trigger.sql`). `job_id` is `ON DELETE SET NULL`.
 - `scanner_findings`: `package` is `''` when the scanner gives none. `severity` is one of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `UNKNOWN`. `description` is at most 4,000 characters.
 - `publish_reports`: `source_id` cascades. `image_id` and `job_id` are `ON DELETE SET NULL`.
 - `github_issues`: `UNIQUE (github_owner, github_repo, cve_id)`. `closed_manually` is `0` or `1`. Rows are never deleted by retention or by a source delete.
@@ -120,7 +121,7 @@ Source for the OIDC claim model: OpenID Connect Core 1.0.
 `audit_log.action` must be one of these values. Add a value here before writing it. Decided (2026-11-03, delegated), with the spinoff changes of spinoff-local-scan section 9.
 
 - Kept: `user.create`, `user.delete`, `user.role_change`, `oidc.config_change`, `credential.create`, `credential.rotate`, `credential.delete`, `cve.accept`, `cve.unaccept`, `alert.config_change`, `backup.run`, `restore.run`, `key.rotate`, `retention.run`, `log.level_change`, `sync_job.retry`, `sync_job.purge`.
-- Added (spinoff): `hub.create`, `hub.delete`, `source.create`, `source.update`, `source.delete`, `source.scan`, `image.evict` (actor `system`; details name the hub, repository, and platform digest, never a path with a secret), `settings.change` (scan limits and retention; details hold the old and new values).
+- Added (spinoff): `hub.create`, `hub.delete`, `source.create`, `source.update`, `source.delete`, `source.scan`, `source.tag_pull`, `source.tag_scan` (#335; details hold the source id, the tag and the queued count), `image.evict` (actor `system`; details name the hub, repository, and platform digest, never a path with a secret), `settings.change` (scan limits and retention; details hold the old and new values).
 - Removed (spinoff): `mapping.*`, `project_webhook.*`, `artifact.remove`, `key.migrate_labels`. The `key.migrate_labels` action belonged to the label migration that decision 56 removed.
 
 - `github.rekey_issues` (the one-time re-key of a repository's GitHub issues, decision 60, issue #311; actor `system`; target `<owner>/<repo>`; `details` is `{"issues", "label"}`: `issues` is the count of old issues re-keyed and `label` is `renamed`, `absent`, or `kept`, the same text stored in `issue_rekeys.label_result`. It carries a count and a fixed word, never a token or a name; written once when the re-key completes). Source: `backend/src/services/issue_rekey.rs` (`AUDIT_ACTION`, `json!`). Verified (2026-11-11) by grep of `backend/src/services/audit.rs` ACTIONS.
