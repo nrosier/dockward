@@ -2,19 +2,22 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
-## Unreleased
+## 0.5.0 - 2026-11-12
 
 ### Added
-- Optional TOTP (RFC 6238) two-factor sign-in for local accounts, API only (migration 0009, #341). Enrol and confirm under `/api/v1/account/totp`, sign in through `POST /api/v1/auth/totp/verify`, recovery codes work once, an admin can reset a user's TOTP, and wrong codes are rate limited per account and audited. The screens come later. The 15-character password rule is unchanged. Key rotation also re-encrypts the TOTP secrets.
+- Optional TOTP two-factor sign-in for local accounts: enrol with a QR code (returned as SVG), enter a code at sign-in, use single-use recovery codes, and turn TOTP off with a code (migration 0009, PR #343, #344, #346, #341). OIDC sign-in is unchanged.
+- Pull and Scan on each image in the source image table, acting on the image's first tag. A forced scan runs again even when that digest was already scanned (migration 0008 adds the manual trigger, PR #339, PR #347, #335).
+- The CVE detail shows an alias line for a GHSA record that has a CVE id, and the CVE list shows the primary id (PR #345, #337).
 
 ### Changed
-- Migration 0007 adds `vulnerability_aliases` and folds each GHSA finding that has a CVE alias into its CVE record, keeping the GHSA id as the alias. Findings, scanner findings, tracked GitHub issues and acceptances are merged or renamed to the CVE id (#337).
-- New scans store the CVE id as the primary id and keep the GHSA id as the alias. A Grype GHSA finding that names a CVE id is stored under the CVE id, a Trivy GHSA id that `vulnerability_aliases` maps to a CVE id is stored under that CVE id, and each new pair is recorded in `vulnerability_aliases`. A Grype and a Trivy finding for one CVE and package merge into one finding. A GHSA id with no CVE id keeps its GHSA id (#337).
-- The CVE list and detail show the primary id. A row still keyed by a GHSA id resolves through `vulnerability_aliases` to its CVE id, and the detail adds an `aliases` list (never the primary id itself). A request that names a GHSA id for the detail, the manual issue or the accept routes acts on the CVE record. Acceptances and GitHub issues stay per source (#337).
+- CVE records are keyed by the CVE id when there is one, and GHSA ids are kept as aliases. Migration 0007 folds existing GHSA rows that carry a CVE alias into their CVE record. Acceptances and GitHub issues stay per source (PR #338, PR #340, PR #342, #337).
+- The hourly pass checks each tag's digest and pulls only when it has changed. A repository whose latest discovery failed is queued again on the next pass (PR #336, #334).
 
 ### Upgrade notes
-- Where a GHSA issue and a CVE issue both exist in one repository, only the tracking row of the GHSA issue is removed. That issue stays open on GitHub and is not closed or commented on, so close it by hand if you no longer want it.
-- Where a GHSA id and its CVE id were both accepted for one source, the GHSA acceptance is deleted and the CVE acceptance stays.
+- The GHSA GitHub issues merged into a CVE stay open on GitHub. Close them by hand if you no longer want them.
+- Migrations 0007 to 0009 add columns and tables and rewrite existing GHSA rows.
+- An existing CVE gets its alias and image only after it is rescanned.
+- The 0.4.0 and 0.4.1 notes still apply.
 
 ## 0.4.1 - 2026-11-12
 
