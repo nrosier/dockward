@@ -5,6 +5,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePo
 pub mod acceptances;
 pub mod alert_channels;
 pub mod alert_deliveries;
+#[cfg(test)]
+mod alias_migration;
 #[allow(dead_code)] // Used by the audit writer and the admin audit list.
 pub mod audit;
 pub mod backup;
@@ -236,6 +238,7 @@ mod tests {
             "tag_observations",
             "user_credentials",
             "users",
+            "vulnerability_aliases",
         ];
         assert_eq!(tables, expected);
         Ok(())
