@@ -63,6 +63,30 @@ pub async fn upsert(conn: &mut SqliteConnection, finding: &Finding<'_>) -> Resul
     .map_err(|_| AppError::InternalError)
 }
 
+/// The primary id of `id` (#337): the CVE id recorded for a GHSA alias in
+/// `vulnerability_aliases`, or `id` itself when it is not an alias.
+pub async fn primary_id(conn: &mut SqliteConnection, id: &str) -> Result<String, AppError> {
+    let found = sqlx::query_scalar!(
+        "SELECT primary_id FROM vulnerability_aliases WHERE alias = ?",
+        id
+    )
+    .fetch_optional(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(found.unwrap_or_else(|| id.to_owned()))
+}
+
+/// Every alias recorded for the primary id (#337), in id order.
+pub async fn aliases_of(pool: &SqlitePool, primary: &str) -> Result<Vec<String>, AppError> {
+    sqlx::query_scalar!(
+        r#"SELECT alias AS "alias!" FROM vulnerability_aliases WHERE primary_id = ? ORDER BY alias"#,
+        primary
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
 /// One tag of the CVE view's tag set, as `GET /mappings/:id/tags` returns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackedTagRow {
@@ -236,16 +260,18 @@ pub async fn list_cves(
                GROUP BY source_id
            ),
            tag_rows AS (
-               SELECT f.source_id AS source_id, f.cve_id AS cve_id, f.image_tag AS image_tag,
+               SELECT f.source_id AS source_id, COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id) AS cve_id,
+                      f.image_tag AS image_tag,
                       f.package AS package, f.fixed_in_version AS fixed_in_version,
-                      f.alias AS alias,
+                      COALESCE(f.alias, CASE WHEN f.cve_id <> COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id)
+                                             THEN f.cve_id END) AS alias,
                       f.first_seen_at AS first_seen_at, f.last_seen_at AS last_seen_at,
                       f.status AS status,
                       CASE f.severity WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4
                            WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 ELSE 1 END AS sev_rank,
                       (nd.image_tag IS NOT NULL) AS nd,
                       ROW_NUMBER() OVER (
-                          PARTITION BY f.source_id, f.cve_id
+                          PARTITION BY f.source_id, COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id)
                           ORDER BY (nd.image_tag IS NOT NULL) DESC, COALESCE(ts.scan_at, -1) DESC,
                                    COALESCE(ts.seen_at, -1) DESC, f.last_seen_at DESC, f.id DESC
                       ) AS rn
@@ -258,7 +284,7 @@ pub async fn list_cves(
                WHERE (?1 IS NULL OR m.user_id = ?1)
                  AND (?17 = 1 OR nd.image_tag IS NOT NULL)
                  AND (?2 IS NULL OR f.source_id = ?2)
-                 AND (?3 IS NULL OR f.cve_id = ?3)
+                 AND (?3 IS NULL OR COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id) = ?3)
                  AND (?15 IS NULL OR substr(m.repository, 1, instr(m.repository || '/', '/') - 1) = ?15)
                  AND (?16 IS NULL OR m.repository = ?16)
                  AND length(CAST(f.cve_id AS BLOB)) BETWEEN 1 AND 128
@@ -292,7 +318,8 @@ pub async fn list_cves(
                       s.package AS package, s.fixed_in_version AS fixed_in_version,
                       s.alias AS alias,
                       (SELECT MIN(af.first_seen_at) FROM cve_findings af
-                       WHERE af.source_id = s.source_id AND af.cve_id = s.cve_id)
+                       WHERE af.source_id = s.source_id
+                         AND COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = af.cve_id), af.cve_id) = s.cve_id)
                           AS first_seen_at,
                       s.last_seen_at AS last_seen_at,
                       s.open_tags AS open_tags, COALESCE(t.n, 0) AS tracked_tags,
@@ -346,7 +373,8 @@ pub async fn list_cves(
                   SELECT 1 FROM cve_findings tf
                   JOIN newest_digest_tags tn
                        ON tn.source_id = tf.source_id AND tn.image_tag = tf.image_tag
-                  WHERE tf.source_id = items.source_id AND tf.cve_id = items.cve_id
+                  WHERE tf.source_id = items.source_id
+                    AND COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = tf.cve_id), tf.cve_id) = items.cve_id
                     AND tf.image_tag = ?14))
            ORDER BY
              CASE WHEN ?9 = 'severity' AND ?10 = 1 THEN sev_rank END ASC,
@@ -386,13 +414,13 @@ pub async fn list_cves(
         .into_iter()
         .map(|row| CveSummaryRow {
             source_id: row.source_id,
-            cve_id: row.cve_id,
+            cve_id: row.cve_id.clone(),
             severity: row.severity,
             open_severity: row.open_severity,
             status: row.status,
             package: row.package,
             fixed_in_version: row.fixed_in_version,
-            alias: row.alias,
+            alias: row.alias.filter(|alias| *alias != row.cve_id),
             first_seen_at: row.first_seen_at,
             last_seen_at: row.last_seen_at,
             open_tags: row.open_tags,
@@ -414,7 +442,8 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
     let fixes = json_list(filter.fixes)?;
     let row = sqlx::query!(
         r#"WITH tag_rows AS (
-               SELECT f.source_id AS source_id, f.cve_id AS cve_id, f.image_tag AS image_tag,
+               SELECT f.source_id AS source_id, COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id) AS cve_id,
+                      f.image_tag AS image_tag,
                       f.package AS package, f.status AS status,
                       f.fixed_in_version AS fixed_in_version,
                       substr(m.repository, 1, instr(m.repository || '/', '/') - 1) AS namespace,
@@ -422,7 +451,7 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
                       CASE f.severity WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4
                            WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 ELSE 1 END AS sev_rank,
                       ROW_NUMBER() OVER (
-                          PARTITION BY f.source_id, f.cve_id
+                          PARTITION BY f.source_id, COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id)
                           ORDER BY COALESCE((
                               SELECT st.scan_at FROM tag_scan_times st
                               WHERE st.source_id = f.source_id AND st.image_tag = f.image_tag), -1) DESC,
@@ -437,7 +466,7 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
                     ON nd.source_id = f.source_id AND nd.image_tag = f.image_tag
                WHERE (?1 IS NULL OR m.user_id = ?1)
                  AND (?2 IS NULL OR f.source_id = ?2)
-                 AND (?3 IS NULL OR f.cve_id = ?3)
+                 AND (?3 IS NULL OR COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id) = ?3)
                  AND (?11 IS NULL OR substr(m.repository, 1, instr(m.repository || '/', '/') - 1) = ?11)
                  AND (?12 IS NULL OR m.repository = ?12)
                  AND length(CAST(f.cve_id AS BLOB)) BETWEEN 1 AND 128
@@ -491,7 +520,8 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
              AND (?9 IS NULL OR package = ?9)
              AND (?10 IS NULL OR EXISTS (
                   SELECT 1 FROM cve_findings tf
-                  WHERE tf.source_id = items.source_id AND tf.cve_id = items.cve_id
+                  WHERE tf.source_id = items.source_id
+                    AND COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = tf.cve_id), tf.cve_id) = items.cve_id
                     AND tf.image_tag = ?10))"#,
         filter.user_id,
         filter.source_id,
@@ -553,7 +583,8 @@ pub async fn cve_tags(
            LEFT JOIN (
                SELECT image_tag, scan_at, seen_at FROM tag_scan_times WHERE source_id = ?1
            ) ts ON ts.image_tag = f.image_tag
-           WHERE f.source_id = ?1 AND f.cve_id = ?2
+           WHERE f.source_id = ?1
+             AND COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id) = ?2
            ORDER BY COALESCE(ts.scan_at, -1) DESC, COALESCE(ts.seen_at, -1) DESC,
                     f.last_seen_at DESC, f.id DESC
            LIMIT 10"#,

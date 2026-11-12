@@ -171,6 +171,9 @@ pub struct CveDetail {
     /// True when no newest-digest row of the CVE is `open` and a row on an older tag is
     /// (#196). The UI shows the inline older-tags notice.
     pub older_tags_only: bool,
+    /// Every other id of the record (#337): the `vulnerability_aliases` rows naming it and the
+    /// alias columns of its tag rows, never the primary id itself. Empty for a record with none.
+    pub aliases: Vec<String>,
 }
 
 fn valid_cve_id(id: &str) -> bool {
@@ -488,8 +491,14 @@ pub async fn detail(
     id: &str,
     now: i64,
 ) -> Result<CveDetail, AppError> {
-    let (source_id, cve_id) = split_id(id)?;
+    let (source_id, requested) = split_id(id)?;
     check_source(pool, reader, source_id).await?;
+    // #337: an alias in the id opens the record of its primary id.
+    let primary = {
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        db::primary_id(&mut conn, requested).await?
+    };
+    let cve_id = primary.as_str();
     let filter = CveListFilter {
         user_id: None,
         source_id: Some(source_id),
@@ -551,6 +560,10 @@ pub async fn detail(
             expires_at: row.expires_at.map(time::rfc3339).transpose()?,
         }),
     };
+    let mut aliases: std::collections::BTreeSet<String> =
+        db::aliases_of(pool, cve_id).await?.into_iter().collect();
+    aliases.extend(tag_rows.iter().filter_map(|row| row.alias.clone()));
+    aliases.remove(cve_id);
     Ok(CveDetail {
         summary,
         image,
@@ -558,6 +571,7 @@ pub async fn detail(
         acceptance,
         description,
         older_tags_only,
+        aliases: aliases.into_iter().collect(),
     })
 }
 

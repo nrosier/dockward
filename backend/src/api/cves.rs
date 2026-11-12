@@ -2204,4 +2204,163 @@ mod tests {
         assert_eq!(page.total, 1, "the source list's value filters the CVEs");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// #337: stores one tag row with an explicit id and alias column.
+    async fn stored(state: &AppState, tag: &str, cve: &str, alias: Option<&str>, at: i64) {
+        store(
+            state,
+            &db::findings::Finding {
+                id: &crate::services::ids::new_id().unwrap_or_default(),
+                source_id: "m1",
+                image_tag: tag,
+                cve_id: cve,
+                package: Some("glob"),
+                severity: "HIGH",
+                fixed_in_version: None,
+                description: None,
+                alias,
+                now: at,
+            },
+        )
+        .await;
+    }
+
+    async fn alias_of(state: &AppState, alias: &str, primary: &str) {
+        sqlx::query("INSERT INTO vulnerability_aliases (alias, primary_id) VALUES (?, ?)")
+            .bind(alias)
+            .bind(primary)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+    }
+
+    /// #337: an old row keyed by the GHSA id resolves through `vulnerability_aliases`, so the
+    /// list shows the CVE id once, with both tags attached.
+    #[tokio::test]
+    async fn list_shows_the_primary_id_not_the_ghsa() {
+        let (state, dir, _, _) = setup("list-primary").await;
+        alias_of(&state, "GHSA-aaaa-bbbb-cccc", "CVE-2026-0001").await;
+        stored(&state, "v1", "GHSA-aaaa-bbbb-cccc", None, 100).await;
+        stored(
+            &state,
+            "v2",
+            "CVE-2026-0001",
+            Some("GHSA-aaaa-bbbb-cccc"),
+            200,
+        )
+        .await;
+
+        for page in [
+            by_mapping(&state, &user("u1"), "m1", "").await.unwrap(),
+            all_cves(&state, &user("u1"), "").await.unwrap(),
+        ] {
+            let ids: Vec<&str> = page.items.iter().map(|i| i.id.as_str()).collect();
+            assert_eq!(ids, vec!["m1:CVE-2026-0001"]);
+            assert_eq!(page.total, 1);
+            assert_eq!(page.items[0].open_tags, 2);
+            assert_eq!(page.items[0].alias.as_deref(), Some("GHSA-aaaa-bbbb-cccc"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #337: the detail names the primary id, lists every alias, and hides an alias equal to
+    /// the primary id. Asking by the GHSA id opens the same record.
+    #[tokio::test]
+    async fn detail_lists_aliases_and_hides_an_alias_equal_to_the_primary() {
+        let (state, dir, _, _) = setup("detail-aliases").await;
+        alias_of(&state, "GHSA-aaaa-bbbb-cccc", "CVE-2026-0001").await;
+        alias_of(&state, "GHSA-dddd-eeee-ffff", "CVE-2026-0001").await;
+        stored(
+            &state,
+            "v1",
+            "CVE-2026-0001",
+            Some("GHSA-aaaa-bbbb-cccc"),
+            100,
+        )
+        .await;
+        stored(&state, "v2", "CVE-2026-0001", Some("CVE-2026-0001"), 200).await;
+
+        let by_ghsa = one(&state, &user("u1"), "m1:GHSA-aaaa-bbbb-cccc")
+            .await
+            .unwrap();
+        assert_eq!(by_ghsa.summary.cve_id, "CVE-2026-0001");
+        assert_eq!(by_ghsa.summary.id, "m1:CVE-2026-0001");
+        assert_eq!(
+            by_ghsa.aliases,
+            vec!["GHSA-aaaa-bbbb-cccc", "GHSA-dddd-eeee-ffff"]
+        );
+        assert_eq!(by_ghsa.tags.len(), 2);
+
+        // An alias equal to the primary id is never shown.
+        sqlx::query("DELETE FROM vulnerability_aliases")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE cve_findings SET alias = cve_id")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let same = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        assert_eq!(same.summary.alias, None);
+        assert!(same.aliases.is_empty());
+        let json = serde_json::to_value(&same).unwrap();
+        assert_eq!(json["alias"], serde_json::Value::Null);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ghsa_only_record_has_no_cve_alias() {
+        let (state, dir, _, _) = setup("ghsa-only-detail").await;
+        stored(&state, "v1", "GHSA-aaaa-bbbb-cccc", None, 100).await;
+        let detail = one(&state, &user("u1"), "m1:GHSA-aaaa-bbbb-cccc")
+            .await
+            .unwrap();
+        assert_eq!(detail.summary.cve_id, "GHSA-aaaa-bbbb-cccc");
+        assert_eq!(detail.summary.alias, None);
+        assert!(detail.aliases.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_cve_only_record() {
+        let (state, dir, _, _) = setup("cve-only").await;
+        stored(&state, "v1", "CVE-2026-0001", None, 100).await;
+        let page = by_mapping(&state, &user("u1"), "m1", "").await.unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].cve_id, "CVE-2026-0001");
+        assert_eq!(page.items[0].alias, None);
+        let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        assert!(detail.aliases.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_ghsa_only_record() {
+        let (state, dir, _, _) = setup("ghsa-only-list").await;
+        stored(&state, "v1", "GHSA-aaaa-bbbb-cccc", None, 100).await;
+        let page = by_mapping(&state, &user("u1"), "m1", "").await.unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].id, "m1:GHSA-aaaa-bbbb-cccc");
+        assert_eq!(page.items[0].alias, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #337: one CVE on two tags of one source is one record with two tag attachments, also
+    /// when one tag still holds the row under its GHSA id.
+    #[tokio::test]
+    async fn same_cve_on_two_tags_is_one_record_attached_to_both() {
+        let (state, dir, _, _) = setup("two-tags-one-record").await;
+        alias_of(&state, "GHSA-aaaa-bbbb-cccc", "CVE-2026-0001").await;
+        stored(&state, "v1", "CVE-2026-0001", None, 100).await;
+        stored(&state, "v2", "GHSA-aaaa-bbbb-cccc", None, 200).await;
+        let page = by_mapping(&state, &user("u1"), "m1", "").await.unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        let mut tags: Vec<&str> = detail.tags.iter().map(|t| t.image_tag.as_str()).collect();
+        tags.sort_unstable();
+        assert_eq!(tags, vec!["v1", "v2"]);
+        assert_eq!(detail.summary.open_tags, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT cve_id AS \"cve_id!\", image_tag AS \"image_tag!\", package,\n                  severity AS \"severity!\", fixed_in_version, status AS \"status!\", last_seen_at,\n                  description\n           FROM cve_findings WHERE source_id = ? AND cve_id = ?\n           ORDER BY image_tag",
+  "query": "SELECT cve_id AS \"cve_id!\", image_tag AS \"image_tag!\", package,\n                  severity AS \"severity!\", fixed_in_version, status AS \"status!\", last_seen_at,\n                  description\n           FROM cve_findings\n           WHERE source_id = ?1\n             AND (cve_id = ?2\n                  OR cve_id IN (SELECT alias FROM vulnerability_aliases WHERE primary_id = ?2))\n           ORDER BY image_tag",
   "describe": {
     "columns": [
       {
@@ -106,5 +106,5 @@
       true
     ]
   },
-  "hash": "932bb4e0ca55402ef092628de7886def42646014ffc22c4dd6b93e26977e28ad"
+  "hash": "2771c587dedbdf192e0d22efebca2a23de5b87a740eaa79135db8cbf69b60882"
 }

@@ -1255,19 +1255,21 @@ pub async fn create_manual_for_user<G: IssueApi>(
     id: &str,
     now: i64,
 ) -> Result<ManualIssue, AppError> {
-    let (source_id, cve_id) = split_id(id)?;
-    let (source, credential) = {
+    let (source_id, requested) = split_id(id)?;
+    let (source, credential, primary) = {
         let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        // #337: an alias in the id names the record of its primary id.
+        let primary = crate::db::findings::primary_id(&mut conn, requested).await?;
         let source = source_db::find_owned(&mut conn, user_id, source_id)
             .await?
             .ok_or(AppError::NotFound)?;
         let credential = credential_db::find_owned(&mut conn, user_id, &source.github_cred_id)
             .await?
             .ok_or(AppError::NotFound)?;
-        (source, credential)
+        (source, credential, primary)
     };
     let token = decrypt_token(credentials_key, &credential)?;
-    create_manual(pool, gh, &token, &source, cve_id, now).await
+    create_manual(pool, gh, &token, &source, &primary, now).await
 }
 
 #[cfg(test)]
