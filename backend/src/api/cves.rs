@@ -2094,4 +2094,33 @@ mod tests {
         assert_eq!(path.total, 5);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// #323: the detail carries `github_issue_number` and `github_issue_url` (both null
+    /// before an issue exists, both set after). The header reads them for View issue.
+    #[tokio::test]
+    async fn detail_carries_the_issue_number_and_url() {
+        let (state, dir, _github, gh) = setup("detail-issue").await;
+        finding(&state, "v1", "CVE-2026-0001", "HIGH").await;
+        let id = "m1:CVE-2026-0001";
+        let reader = Reader {
+            user_id: "u1",
+            is_admin: false,
+        };
+
+        let before = cves::detail(&state.pool, &reader, id, 10).await.unwrap();
+        assert_eq!(before.summary.github_issue_number, None);
+        assert_eq!(before.summary.github_issue_url, None);
+
+        let (_, Json(created)) = call(&state, "u1", id, &gh).await.unwrap();
+        let after = cves::detail(&state.pool, &reader, id, 10).await.unwrap();
+        assert_eq!(
+            after.summary.github_issue_number,
+            Some(created.github_issue_number)
+        );
+        assert_eq!(
+            after.summary.github_issue_url.as_deref(),
+            Some(created.github_issue_url.as_str())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

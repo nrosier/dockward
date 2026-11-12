@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { t } from "../i18n";
 import { json, renderAt, stubApi, user } from "../test/render";
 import type { CveSummary } from "../types/api";
+import type { Source } from "../types/sources";
 import CvesPage from "./CvesPage";
 
 const medium: CveSummary = {
@@ -42,6 +43,26 @@ function row(over: Partial<CveSummary>): CveSummary {
   return { ...medium, ...over };
 }
 
+// The image sources the list reads for each row's repository, keyed by source_id (#323).
+function imageSource(id: string, repository: string, github_repo: string): Source {
+  return {
+    id,
+    user_id: "u1",
+    hub_id: "h1",
+    repository,
+    tag_value: "latest",
+    github_cred_id: "c1",
+    github_owner: "octo",
+    github_repo,
+    default_branch: "main",
+    auto_create_issues: true,
+    min_issue_severity: "HIGH",
+    has_credential: true,
+    last_discovery_at: null,
+  };
+}
+const sources = [imageSource("m1", "ghcr.io/platform/api", "api-gh"), imageSource("m3", "ghcr.io/data/etl", "etl-gh")];
+
 function stub(items: CveSummary[] = [medium], onIssue?: (path: string) => void) {
   return stubApi((path, init) => {
     if (path === "/api/v1/account/me") return json({ user: user("user") });
@@ -50,6 +71,7 @@ function stub(items: CveSummary[] = [medium], onIssue?: (path: string) => void) 
       return json({ github_issue_url: "https://github.com/o/r/issues/1", github_issue_number: 1 }, 201);
     }
     if (path.startsWith("/api/v1/cves")) return json({ items, page: 1, page_size: 50, total: items.length });
+    if (path.startsWith("/api/v1/image-sources?")) return json({ items: sources, page: 1, page_size: 200, total: sources.length });
     if (/^\/api\/v1\/mappings\/[^/?]+\/tags/.test(path)) {
       return json({ items: [{ image_tag: "1.42.0", last_scan_at: "2026-11-08T10:00:00Z", open_cves: 3 }] });
     }
@@ -282,6 +304,17 @@ describe("CvesPage", () => {
     await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: t("cves.createDialog.confirm") }));
     await vi.waitFor(() => expect(onIssue).toHaveBeenCalledWith("/api/v1/cves/m1%3ACVE-2026-0002/issue"));
     expect(onIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads each row's repository from its source_id, not the removed mapping_id (#323)", async () => {
+    const fetchMock = stub([row({ source_id: "m3", mapping_id: "stale" })]);
+    renderAt(<CvesPage />);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.action.createIssue") }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("octo/etl-gh")).toBeInTheDocument();
+    const paths = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(paths.some((path) => path.startsWith("/api/v1/mappings/stale"))).toBe(false);
+    expect(paths.some((path) => path.startsWith("/api/v1/image-sources?"))).toBe(true);
   });
 
   it("creates nothing when the dialog is closed with Escape", async () => {

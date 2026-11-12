@@ -26,8 +26,3 @@ export function CveStatusPill({ cve }: { cve: Pick<CveSummary, "accepted" | "sta
 export function issueEligible(cve: Pick<CveSummary, "open_severity">): boolean {
   return cve.open_severity !== null;
 }
-
-// CRITICAL, HIGH and MEDIUM create in one click; LOW and UNKNOWN confirm first.
-export function issueNeedsConfirm(severity: Severity | null): boolean {
-  return severity === "LOW" || severity === "UNKNOWN";
-}
