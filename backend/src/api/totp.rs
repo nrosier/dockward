@@ -71,7 +71,7 @@ pub async fn status(State(state): State<AppState>, user: AuthUser) -> Result<Res
     Ok(Json(json!({ "enabled": enabled })).into_response())
 }
 
-/// `POST /api/v1/account/totp/enrol`. Returns the secret and the otpauth URI, once. The secret
+/// `POST /api/v1/account/totp/enrol`. Returns the secret, the otpauth URI and an SVG QR of the URI (`qr_svg`), once. The secret
 /// is stored sealed and disabled until `confirm`. `403` for an OIDC account, `409` when TOTP is
 /// already on.
 pub async fn enrol(State(state): State<AppState>, user: AuthUser) -> Result<Response, AppError> {
@@ -82,6 +82,7 @@ pub async fn enrol(State(state): State<AppState>, user: AuthUser) -> Result<Resp
     Ok(Json(json!({
         "secret": enrolment.secret,
         "otpauth_uri": enrolment.otpauth_uri,
+        "qr_svg": enrolment.qr_svg,
     }))
     .into_response())
 }
@@ -797,6 +798,146 @@ mod tests {
         );
         assert!(audit.iter().any(|a| a.contains("user.totp_enable")));
         assert!(audit.iter().any(|a| a.contains("user.totp_reset user:u1")));
+    }
+
+    /// The SVG the `qrcode` crate draws for `uri` at level M, without the XML prolog. The
+    /// encoder is deterministic, so equality with the response proves the QR is of this URI.
+    fn expected_svg(uri: &str) -> String {
+        use qrcode::{EcLevel, QrCode, render::svg};
+        QrCode::with_error_correction_level(uri.as_bytes(), EcLevel::M)
+            .unwrap()
+            .render::<svg::Color>()
+            .min_dimensions(200, 200)
+            .build()
+            .split_once("?>")
+            .unwrap()
+            .1
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn enrol_response_includes_an_svg_qr_of_the_otpauth_uri() {
+        let fx = fx("totp-qr-svg").await;
+        let (status, body, _) = fx
+            .call(
+                "POST",
+                "/api/v1/account/totp/enrol",
+                &fx.cookie("u1", "user"),
+                Value::Null,
+            )
+            .await;
+        fx.finish().await;
+
+        assert_eq!(status, StatusCode::OK);
+        let secret = body["secret"].as_str().unwrap();
+        let uri = body["otpauth_uri"].as_str().unwrap();
+        let svg = body["qr_svg"].as_str().expect("a qr_svg string");
+        assert!(!secret.is_empty());
+        assert!(uri.starts_with("otpauth://totp/Dockward:test-user?secret="));
+        assert!(svg.starts_with("<svg"), "not an SVG: {svg:.40}");
+        assert!(svg.trim_end().ends_with("</svg>"), "SVG is not closed");
+        assert!(!svg.contains("<script"));
+        assert!(!svg.contains(secret), "the SVG text carries the secret");
+        assert_eq!(svg, expected_svg(uri), "the QR is not of the otpauth URI");
+        let mut keys: Vec<&String> = body.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["otpauth_uri", "qr_svg", "secret"]);
+    }
+
+    #[tokio::test]
+    async fn qr_svg_is_not_returned_after_enrolment() {
+        let fx = fx("totp-qr-once").await;
+        let cookie = fx.cookie("u1", "user");
+        let (_, enrol, _) = fx
+            .call("POST", "/api/v1/account/totp/enrol", &cookie, Value::Null)
+            .await;
+        let secret = enrol["secret"].as_str().unwrap().to_owned();
+        assert!(enrol["qr_svg"].is_string());
+
+        let mut later: Vec<String> = Vec::new();
+        let (status, _, text) = fx
+            .call("GET", "/api/v1/account/totp", &cookie, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        later.push(text);
+        let (status, confirm, text) = fx
+            .call(
+                "POST",
+                "/api/v1/account/totp/confirm",
+                &cookie,
+                json!({"code": code_for(&secret, 0)}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(confirm.get("qr_svg").is_none());
+        later.push(text);
+        // Enrolling again while on is refused and carries no QR.
+        let (status, _, text) = fx
+            .call("POST", "/api/v1/account/totp/enrol", &cookie, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        later.push(text);
+        let login = fx.login(&fx.password).await;
+        let challenge = challenge_cookie(&login);
+        later.push(read(login).await.2);
+        let verified = fx
+            .public(
+                "/api/v1/auth/totp/verify",
+                Some(&challenge),
+                json!({"code": code_for(&secret, 1)}),
+            )
+            .await;
+        later.push(read(verified).await.2);
+        let (status, _, text) = fx
+            .call(
+                "POST",
+                "/api/v1/account/totp/disable",
+                &cookie,
+                json!({"code": code_for(&secret, 0)}),
+            )
+            .await;
+        assert!(status == StatusCode::NO_CONTENT || status == StatusCode::UNPROCESSABLE_ENTITY);
+        later.push(text);
+        fx.finish().await;
+
+        for text in later {
+            assert!(
+                !text.contains("qr_svg"),
+                "a later response has a QR: {text}"
+            );
+            assert!(!text.contains("<svg"), "a later response has an SVG");
+        }
+    }
+
+    #[tokio::test]
+    async fn qr_svg_is_not_logged() {
+        let fx = fx("totp-qr-logs").await;
+        let sink = LogSink::default();
+        let writer = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let (status, body, _) = fx
+            .call(
+                "POST",
+                "/api/v1/account/totp/enrol",
+                &fx.cookie("u1", "user"),
+                Value::Null,
+            )
+            .await;
+        fx.finish().await;
+        assert_eq!(status, StatusCode::OK);
+        let svg = body["qr_svg"].as_str().expect("a qr_svg string");
+        let secret = body["secret"].as_str().unwrap();
+        let logs = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+
+        assert!(!logs.contains(svg), "the SVG appears in the logs");
+        assert!(!logs.contains("<svg"), "an SVG fragment is in the logs");
+        assert!(!logs.contains("qr_svg"));
+        assert!(!logs.contains(secret), "the secret appears in the logs");
     }
 
     /// The test passwords all start with this marker, so one check covers them.
