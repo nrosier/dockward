@@ -329,51 +329,51 @@ pub async fn account_password(
 mod tests {
     use super::*;
 
+    /// A test password built at run time, so no password literal sits in the source.
+    fn runtime_password(label: &str) -> String {
+        format!(
+            "test-pw-{label}-{}",
+            crate::services::ids::new_id().unwrap_or_default()
+        )
+    }
+
     #[test]
     fn setup_body_debug_redacts_password() {
+        let setup_pw = runtime_password("setup");
         let body = SetupBody {
             username: "fake-admin".to_owned(),
             email: Some("fake@example.test".to_owned()),
-            password: "FAKE_PASSWORD_SETUP_1".to_owned(),
+            password: setup_pw.clone(),
         };
         let out = format!("{body:?}");
-        assert!(
-            !out.contains("FAKE_PASSWORD_SETUP_1"),
-            "password leaked: {out}"
-        );
+        assert!(!out.contains(&setup_pw), "password leaked: {out}");
         assert!(out.contains("fake-admin"), "username missing: {out}");
         assert!(out.contains("fake@example.test"), "email missing: {out}");
     }
 
     #[test]
     fn login_body_debug_redacts_password() {
+        let login_pw = runtime_password("login");
         let body = LoginBody {
             username: "fake-user".to_owned(),
-            password: "FAKE_PASSWORD_LOGIN_1".to_owned(),
+            password: login_pw.clone(),
         };
         let out = format!("{body:?}");
-        assert!(
-            !out.contains("FAKE_PASSWORD_LOGIN_1"),
-            "password leaked: {out}"
-        );
+        assert!(!out.contains(&login_pw), "password leaked: {out}");
         assert!(out.contains("fake-user"), "username missing: {out}");
     }
 
     #[test]
     fn password_body_debug_redacts_both_passwords() {
+        let current_pw = runtime_password("current");
+        let new_pw = runtime_password("new");
         let body = PasswordBody {
-            current_password: "FAKE_PASSWORD_CURRENT_1".to_owned(),
-            new_password: "FAKE_PASSWORD_NEW_1".to_owned(),
+            current_password: current_pw.clone(),
+            new_password: new_pw.clone(),
         };
         let out = format!("{body:?}");
-        assert!(
-            !out.contains("FAKE_PASSWORD_CURRENT_1"),
-            "current password leaked: {out}"
-        );
-        assert!(
-            !out.contains("FAKE_PASSWORD_NEW_1"),
-            "new password leaked: {out}"
-        );
+        assert!(!out.contains(&current_pw), "current password leaked: {out}");
+        assert!(!out.contains(&new_pw), "new password leaked: {out}");
         assert!(out.contains("PasswordBody"), "struct name missing: {out}");
         assert!(
             out.contains("<redacted>"),
