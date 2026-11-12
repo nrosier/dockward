@@ -7,11 +7,14 @@ import type { PlatformState, ScanStatus, SourceImage } from "../../types/sources
 import { TABLE, TD, TH } from "../mappings/styles";
 import { TableScroll } from "../mappings/TableScroll";
 import { Time } from "../jobs/Time";
+import { TagActions } from "./TagActions";
 import { Card } from "../ui/Card";
 import { Pill, type PillKind } from "../ui/Pill";
 import { ErrorMessage, LoadingMessage } from "../ui/StatusMessage";
 
 const STATE_PILL: Record<PlatformState, PillKind> = {
+  queued: "queued",
+  pulling: "running",
   stored: "done",
   evicting: "running",
   evicted: "queued",
@@ -37,7 +40,7 @@ export function ImagesTable({ sourceId }: { sourceId: string }) {
     return <ErrorMessage />;
   }
   const items = Array.isArray(images.data) ? images.data : images.data.items;
-  const rows = items.flatMap((image) => image.platforms.map((platform) => ({ image, platform })));
+  const rows = items.flatMap((image) => image.platforms.map((platform, index) => ({ image, platform, first: index === 0 })));
   return (
     <Card aria-labelledby="source-images">
       <h2 id="source-images" className="px-5 pt-5 text-[15px] font-semibold">
@@ -55,10 +58,11 @@ export function ImagesTable({ sourceId }: { sourceId: string }) {
                 <th className={TH}>{t("sources.images.col.state")}</th>
                 <th className={TH}>{t("sources.images.col.pulled")}</th>
                 <th className={TH}>{t("sources.images.col.scans")}</th>
+                <th className={TH}>{t("sources.images.col.actions")}</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map(({ image, platform }) => (
+              {rows.map(({ image, platform, first }) => (
                 <tr key={platform.id}>
                   <td className={TD}>
                     <span className="font-mono text-[12.5px]">{image.tags.join(", ")}</span>
@@ -83,6 +87,9 @@ export function ImagesTable({ sourceId }: { sourceId: string }) {
                         ))}
                       </div>
                     )}
+                  </td>
+                  <td className={TD}>
+                    {first && image.tags.length > 0 ? <TagActions sourceId={sourceId} tag={image.tags[0]} /> : null}
                   </td>
                 </tr>
               ))}
