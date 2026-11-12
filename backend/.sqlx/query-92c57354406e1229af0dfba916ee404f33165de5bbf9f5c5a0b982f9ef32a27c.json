@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", platform AS \"platform!\", platform_digest AS \"platform_digest!\",\n                  state AS \"state!\"\n           FROM image_platforms WHERE image_id = ?\n           ORDER BY platform, id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "platform!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "platform"
+          }
+        }
+      },
+      {
+        "name": "platform_digest!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "platform_digest"
+          }
+        }
+      },
+      {
+        "name": "state!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_platforms",
+            "name": "state"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "92c57354406e1229af0dfba916ee404f33165de5bbf9f5c5a0b982f9ef32a27c"
+}

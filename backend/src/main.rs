@@ -80,6 +80,14 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             get(api::cves::tags_for_source),
         )
         .route("/api/v1/image-sources/{id}/scan", post(api::scan::scan))
+        .route(
+            "/api/v1/image-sources/{id}/tags/{tag}/pull",
+            post(api::tag_actions::pull),
+        )
+        .route(
+            "/api/v1/image-sources/{id}/tags/{tag}/scan",
+            post(api::tag_actions::scan),
+        )
         .route("/api/v1/hubs", get(api::hubs::list).post(api::hubs::create))
         .route(
             "/api/v1/hubs/{id}",
