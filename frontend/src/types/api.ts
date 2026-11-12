@@ -68,6 +68,8 @@ export interface CveSummary {
   severity: Severity;
   // Highest severity across the open tags, or null when every tag is fixed.
   open_severity: Severity | null;
+  // The CVE id behind the primary GHSA id (#323), or null when the scanner names none.
+  alias: string | null;
   status: "open" | "fixed";
   package: string | null;
   first_seen_at: string | null;
@@ -101,6 +103,8 @@ export interface Acceptance {
 }
 
 export interface CveDetail extends CveSummary {
+  // The image the CVE is for: the newest tag's `<hub host>/<repository>:<tag>` (#323).
+  image: string | null;
   tags: CveTag[];
   acceptance: Acceptance | null;
   description: string | null;

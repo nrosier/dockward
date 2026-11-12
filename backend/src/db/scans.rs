@@ -186,6 +186,7 @@ pub struct NewFinding<'a> {
     pub severity: &'a str,
     pub cvss_v3: Option<f64>,
     pub description: Option<&'a str>,
+    pub alias: Option<&'a str>,
 }
 
 /// Stores one finding of a run. The key is `(run_id, cve_id, package)`.
@@ -196,8 +197,8 @@ pub async fn insert_finding(
 ) -> Result<(), AppError> {
     sqlx::query!(
         "INSERT INTO scanner_findings
-            (run_id, cve_id, package, version, fixed_in_version, severity, cvss_v3, description)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (run_id, cve_id, package, version, fixed_in_version, severity, cvss_v3, description, alias)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (run_id, cve_id, package) DO NOTHING",
         run_id,
         finding.cve_id,
@@ -206,7 +207,8 @@ pub async fn insert_finding(
         finding.fixed_in_version,
         finding.severity,
         finding.cvss_v3,
-        finding.description
+        finding.description,
+        finding.alias
     )
     .execute(conn)
     .await

@@ -106,9 +106,15 @@ export function toUrlParams(state: CveFilterState): Record<string, string> {
 }
 
 // The GET /cves filter parameters. Status is always sent, so the server never
-// applies its own default.
+// applies its own default. The Mapping filter is a source, sent as `source_id`
+// (#323): the server does not read a `mapping` key, so the URL name is not sent.
 export function toApiQuery(state: CveFilterState): Record<string, string> {
-  return { ...toUrlParams(state), status: state.statuses.join(",") };
+  const { mapping, ...rest } = toUrlParams(state);
+  const query: Record<string, string> = { ...rest, status: state.statuses.join(",") };
+  if (mapping !== undefined) {
+    query.source_id = mapping;
+  }
+  return query;
 }
 
 // Every URL parameter the filters own, including the names older links used.

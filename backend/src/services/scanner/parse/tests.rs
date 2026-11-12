@@ -221,3 +221,32 @@ fn description_is_cut_to_the_stored_length() {
     let cut = cut_description(&long).unwrap_or_default();
     assert_eq!(cut.chars().count(), MAX_DESCRIPTION_CHARS);
 }
+
+#[test]
+fn grype_related_cve_id_is_stored_as_the_alias() {
+    let body = br#"{"matches":[{"vulnerability":{"id":"GHSA-3g3m-2fjr-6pw4","severity":"High"},
+        "artifact":{"name":"glob","version":"10.3.0"},
+        "relatedVulnerabilities":[{"id":"GHSA-3g3m-2fjr-6pw4"},{"id":"CVE-2025-64756","description":"d"}]}],
+        "descriptor":{"version":"1.0.0"}}"#;
+    let report = parse_grype_ok(body);
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].cve_id, "GHSA-3g3m-2fjr-6pw4");
+    assert_eq!(report.findings[0].alias.as_deref(), Some("CVE-2025-64756"));
+}
+
+#[test]
+fn grype_first_cve_id_wins_and_no_cve_gives_no_alias() {
+    let two = br#"{"matches":[{"vulnerability":{"id":"GHSA-a","severity":"High"},
+        "artifact":{"name":"glob","version":"1"},
+        "relatedVulnerabilities":[{"id":"CVE-2026-0001"},{"id":"CVE-2026-0002"}]}],
+        "descriptor":{"version":"1.0.0"}}"#;
+    assert_eq!(
+        parse_grype_ok(two).findings[0].alias.as_deref(),
+        Some("CVE-2026-0001")
+    );
+    let none = br#"{"matches":[{"vulnerability":{"id":"GHSA-b","severity":"High"},
+        "artifact":{"name":"glob","version":"1"},
+        "relatedVulnerabilities":[{"id":"GHSA-b"}]}],
+        "descriptor":{"version":"1.0.0"}}"#;
+    assert_eq!(parse_grype_ok(none).findings[0].alias, None);
+}

@@ -22,6 +22,8 @@ pub struct Finding<'a> {
     pub fixed_in_version: Option<&'a str>,
     /// At most 4,000 characters; `None` when the report has no text.
     pub description: Option<&'a str>,
+    /// The CVE id behind the primary id (#323); `None` when the scanner names none.
+    pub alias: Option<&'a str>,
     /// Unix seconds of the scan.
     pub now: i64,
 }
@@ -33,13 +35,14 @@ pub async fn upsert(conn: &mut SqliteConnection, finding: &Finding<'_>) -> Resul
     sqlx::query!(
         "INSERT INTO cve_findings
             (id, source_id, image_tag, cve_id, package, severity,
-             fixed_in_version, description, first_seen_at, last_seen_at, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
+             fixed_in_version, description, alias, first_seen_at, last_seen_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
          ON CONFLICT (source_id, image_tag, cve_id) DO UPDATE SET
             severity = excluded.severity,
             package = excluded.package,
             fixed_in_version = excluded.fixed_in_version,
             description = excluded.description,
+            alias = excluded.alias,
             last_seen_at = excluded.last_seen_at,
             status = 'open'",
         finding.id,
@@ -50,6 +53,7 @@ pub async fn upsert(conn: &mut SqliteConnection, finding: &Finding<'_>) -> Resul
         finding.severity,
         finding.fixed_in_version,
         finding.description,
+        finding.alias,
         finding.now,
         finding.now
     )
@@ -145,7 +149,7 @@ pub struct CveListFilter<'a> {
     pub tag: Option<&'a str>,
     /// The first path segment of the source's repository equals this (decision 38).
     pub namespace: Option<&'a str>,
-    /// `<hub host>/<repository>` of the source equals this.
+    /// The source's `repository` (no hub host), the value the source list returns (#323).
     pub repository: Option<&'a str>,
     /// `Some(1)` keeps CVEs with a GitHub issue row, `Some(0)` those without (#257).
     pub has_issue: Option<i64>,
@@ -186,6 +190,8 @@ pub struct CveSummaryRow {
     pub status: String,
     pub package: Option<String>,
     pub fixed_in_version: Option<String>,
+    /// The CVE id behind the primary id, from the same tag row as `package` (#323).
+    pub alias: Option<String>,
     pub first_seen_at: Option<i64>,
     pub last_seen_at: Option<i64>,
     pub open_tags: i64,
@@ -232,6 +238,7 @@ pub async fn list_cves(
            tag_rows AS (
                SELECT f.source_id AS source_id, f.cve_id AS cve_id, f.image_tag AS image_tag,
                       f.package AS package, f.fixed_in_version AS fixed_in_version,
+                      f.alias AS alias,
                       f.first_seen_at AS first_seen_at, f.last_seen_at AS last_seen_at,
                       f.status AS status,
                       CASE f.severity WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4
@@ -253,7 +260,7 @@ pub async fn list_cves(
                  AND (?2 IS NULL OR f.source_id = ?2)
                  AND (?3 IS NULL OR f.cve_id = ?3)
                  AND (?15 IS NULL OR substr(m.repository, 1, instr(m.repository || '/', '/') - 1) = ?15)
-                 AND (?16 IS NULL OR h.host || '/' || m.repository = ?16)
+                 AND (?16 IS NULL OR m.repository = ?16)
                  AND length(CAST(f.cve_id AS BLOB)) BETWEEN 1 AND 128
                  AND f.cve_id NOT GLOB '*[^A-Za-z0-9._:-]*'
                  AND instr(CAST(f.cve_id AS BLOB), x'00') = 0
@@ -269,7 +276,8 @@ pub async fn list_cves(
                           AS open_tags,
                       MAX(nd AND status = 'open') AS any_open,
                       MAX(CASE WHEN rn = 1 THEN package END) AS package,
-                      MAX(CASE WHEN rn = 1 THEN fixed_in_version END) AS fixed_in_version
+                      MAX(CASE WHEN rn = 1 THEN fixed_in_version END) AS fixed_in_version,
+                      MAX(CASE WHEN rn = 1 THEN alias END) AS alias
                FROM tag_rows
                GROUP BY source_id, cve_id
            ),
@@ -282,6 +290,7 @@ pub async fn list_cves(
                            END AS open_severity,
                       CASE WHEN s.any_open = 1 THEN 'open' ELSE 'fixed' END AS status,
                       s.package AS package, s.fixed_in_version AS fixed_in_version,
+                      s.alias AS alias,
                       (SELECT MIN(af.first_seen_at) FROM cve_findings af
                        WHERE af.source_id = s.source_id AND af.cve_id = s.cve_id)
                           AS first_seen_at,
@@ -308,6 +317,7 @@ pub async fn list_cves(
                   severity AS "severity!: String", open_severity AS "open_severity?: String",
                   status AS "status!: String",
                   package AS "package?: String", fixed_in_version AS "fixed_in_version?: String",
+                  alias AS "alias?: String",
                   first_seen_at AS "first_seen_at?: i64", last_seen_at AS "last_seen_at?: i64",
                   open_tags AS "open_tags!: i64", tracked_tags AS "tracked_tags!: i64",
                   github_issue_url AS "github_issue_url?: String",
@@ -382,6 +392,7 @@ pub async fn list_cves(
             status: row.status,
             package: row.package,
             fixed_in_version: row.fixed_in_version,
+            alias: row.alias,
             first_seen_at: row.first_seen_at,
             last_seen_at: row.last_seen_at,
             open_tags: row.open_tags,
@@ -428,7 +439,7 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
                  AND (?2 IS NULL OR f.source_id = ?2)
                  AND (?3 IS NULL OR f.cve_id = ?3)
                  AND (?11 IS NULL OR substr(m.repository, 1, instr(m.repository || '/', '/') - 1) = ?11)
-                 AND (?12 IS NULL OR h.host || '/' || m.repository = ?12)
+                 AND (?12 IS NULL OR m.repository = ?12)
                  AND length(CAST(f.cve_id AS BLOB)) BETWEEN 1 AND 128
                  AND f.cve_id NOT GLOB '*[^A-Za-z0-9._:-]*'
                  AND instr(CAST(f.cve_id AS BLOB), x'00') = 0
@@ -512,6 +523,8 @@ pub struct CveTagRow {
     pub fixed_in_version: Option<String>,
     /// The Harbor vulnerability description on this tag's row.
     pub description: Option<String>,
+    /// The CVE id behind the primary id on this tag's row (#323).
+    pub alias: Option<String>,
     /// The tag's latest `done` scan run (`tag_scan_times.scan_at`).
     pub last_scan_at: Option<i64>,
     /// True for a tag of the mapping's newest scanned digest (#196).
@@ -531,6 +544,7 @@ pub async fn cve_tags(
         r#"SELECT f.image_tag AS "image_tag!: String", f.status AS "status!: String",
                   f.fixed_in_version AS "fixed_in_version?: String",
                   f.description AS "description?: String",
+                  f.alias AS "alias?: String",
                   ts.scan_at AS "last_scan_at?: i64",
                   (nd.image_tag IS NOT NULL) AS "newest_digest!: bool"
            FROM cve_findings f
@@ -549,4 +563,23 @@ pub async fn cve_tags(
     .fetch_all(pool)
     .await
     .map_err(|_| AppError::InternalError)
+}
+
+/// The image reference of a source's tag: `<hub host>/<repository>:<tag>` (#323). The host
+/// and repository are the source's; `None` when the source does not exist.
+pub async fn source_image(
+    conn: &mut SqliteConnection,
+    source_id: &str,
+    image_tag: &str,
+) -> Result<Option<String>, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT h.host AS "host!: String", m.repository AS "repository!: String"
+           FROM image_sources m JOIN hubs h ON h.id = m.hub_id
+           WHERE m.id = ?1"#,
+        source_id
+    )
+    .fetch_optional(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.map(|row| format!("{}/{}:{}", row.host, row.repository, image_tag)))
 }

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT h.host AS \"host!: String\", m.repository AS \"repository!: String\"\n           FROM image_sources m JOIN hubs h ON h.id = m.hub_id\n           WHERE m.id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "host!: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hubs",
+            "name": "host"
+          }
+        }
+      },
+      {
+        "name": "repository!: String",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_sources",
+            "name": "repository"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "30d876efc19ca1406104a4a2253c8e67038a69c1904fd6b4cf6a66d4480acd3d"
+}

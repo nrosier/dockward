@@ -58,6 +58,8 @@ pub struct MergedFinding {
     pub severity: &'static str,
     pub cvss_v3: Option<f64>,
     pub description: Option<String>,
+    /// The CVE id behind the primary id, when a scanner names one (#323).
+    pub alias: Option<String>,
     /// The scanners that report this (CVE id, package), in the merged-view order.
     pub scanners: Vec<ScannerRef>,
     /// The platforms (`os/arch[/variant]`) that report it, sorted and unique.
@@ -157,6 +159,7 @@ pub fn merge(rows: &[ScannerFindingRow], scanners: &[ScannerRef]) -> Vec<MergedF
                         Some(best.map_or(score, |best| best.max(score)))
                     }),
                 description,
+                alias: members.iter().find_map(|row| row.alias.clone()),
                 scanners: scanner_refs,
                 platforms,
             }
@@ -308,6 +311,7 @@ mod tests {
             severity: severity.to_owned(),
             cvss_v3: None,
             description: None,
+            alias: None,
         }
     }
 

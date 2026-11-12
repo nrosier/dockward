@@ -425,6 +425,7 @@ CREATE TABLE IF NOT EXISTS scanner_findings (
     severity TEXT NOT NULL CHECK (severity IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN')),
     cvss_v3 REAL,
     description TEXT,
+    alias TEXT,
     PRIMARY KEY (run_id, cve_id, package)
 );
 "#;

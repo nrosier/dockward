@@ -14,6 +14,7 @@ const medium: CveSummary = {
   cve_id: "CVE-2026-0002",
   severity: "MEDIUM",
   open_severity: "MEDIUM",
+  alias: null,
   status: "open",
   package: "libfoo",
   first_seen_at: null,
@@ -241,7 +242,7 @@ describe("CvesPage", () => {
     await userEvent.click(mappingBox);
     await userEvent.type(mappingBox, "etl");
     await userEvent.keyboard("{ArrowDown}{Enter}");
-    await vi.waitFor(() => expect(lastQuery(fetchMock).get("mapping")).toBe("m3"));
+    await vi.waitFor(() => expect(lastQuery(fetchMock).get("source_id")).toBe("m3"));
     expect(screen.getByRole("combobox", { name: t("cves.filter.mapping") })).toHaveValue("data/etl");
   });
 
@@ -337,6 +338,25 @@ describe("CvesPage", () => {
     stub([row({ accepted: true })]);
     renderAt(<CvesPage />);
     expect(await screen.findByRole("button", { name: t("cves.action.createIssue") })).toBeDisabled();
+  });
+
+  it("shows the alias under the GHSA id in the list row, and nothing when there is none (#323)", async () => {
+    stub([row({ cve_id: "GHSA-3g3m-2fjr-6pw4", alias: "CVE-2025-64756" }), row({ id: "m1:CVE-2026-0009", cve_id: "CVE-2026-0009", alias: null })]);
+    renderAt(<CvesPage />);
+    expect(await screen.findByText(t("cves.detail.alias", { alias: "CVE-2025-64756" }))).toBeInTheDocument();
+    const plain = (await screen.findByRole("link", { name: "CVE-2026-0009" })).closest("td") as HTMLElement;
+    expect(plain.textContent).toBe("CVE-2026-0009");
+  });
+
+  it("sends the Mapping filter as source_id on the list request, not as mapping (#323 follow-up)", async () => {
+    const fetchMock = stub();
+    renderAt(<CvesPage />, "/cves?mapping=m1");
+    await screen.findByText("CVE-2026-0002");
+    await vi.waitFor(() => {
+      const query = lastQuery(fetchMock);
+      expect(query.get("source_id")).toBe("m1");
+      expect(query.has("mapping")).toBe(false);
+    });
   });
 
   it("sends no request to the removed /mappings routes, and reads tags from the source (#323)", async () => {

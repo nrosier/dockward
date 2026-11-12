@@ -139,7 +139,7 @@ Decided (2026-11-08, #243): the purge ignores the page's `status` and `source_id
 | Method | Path | Auth | Built | Notes |
 | --- | --- | --- | --- | --- |
 | GET | `/api/v1/cves` | session | yes | List. Filters below. Admin may add `scope=all`. |
-| GET | `/api/v1/cves/:id` | session | yes | `CveDetail`. `200` for any CVE with a row on a tracked tag, including older tags (`older_tags_only`, `newest_digest` per tag). |
+| GET | `/api/v1/cves/:id` | session | yes | `CveDetail`. `200` for any CVE with a row on a tracked tag, including older tags (`older_tags_only`, `newest_digest` per tag). `image` is the newest tag's `<hub host>/<repository>:<tag>` (#323). `alias` is the CVE id behind a GHSA id, from Grype's related vulnerabilities (migration 0006, #323); `null` when none. |
 | POST | `/api/v1/cves/:id/issue` | session (owner) | yes | Creates or reopens the GitHub issue for the CVE. `422` when the CVE is fixed on every tag. `409` when an open issue or an active acceptance exists. |
 | POST | `/api/v1/cves/:id/accept` | session (owner) | yes | `{"reason","expires_at"}`. Applies to the whole source. Does not close an open issue. |
 | POST | `/api/v1/cves/:id/unaccept` | session (owner) | yes | Soft revoke. |
@@ -147,7 +147,7 @@ Decided (2026-11-08, #243): the purge ignores the page's `status` and `source_id
 CVE list filters (spinoff section 10, decision 38, and [frontend.md](frontend.md), "CVE list control bar"):
 
 - `namespace`: one value, the first segment of the source's repository, read by `services/cves.rs` (`parse_filters`). It replaces the removed Project filter. An empty value means no filter.
-- `repository`: read by `services/cves.rs`. `tag`: exact, newest-digest tags only. `source_id`: the source id, exact, read by the list handler. `q`: case-insensitive substring over the CVE id, the package, and the repository, with `%` and `_` literal. At most 100 characters, no control characters. `package`, `accepted`, `has_issue`, and `fix` are read too (see below). `q`'s searched columns are UNVERIFIED in this pass.
+- `repository`: the source's `repository` with no hub host, the value `GET /api/v1/image-sources` returns (#323). `tag`: exact, newest-digest tags only. `source_id`: the source id, exact, read by the list handler. `q`: case-insensitive substring over the CVE id, the package, and the repository, with `%` and `_` literal. At most 100 characters, no control characters. `package`, `accepted`, `has_issue`, and `fix` are read too (see below). `q`'s searched columns are UNVERIFIED in this pass.
 - `severity`: one or more of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `UNKNOWN` (OR within the parameter).
 - `status`: `open`, `fixed`, `accepted` (OR within). `open` excludes CVEs with an active acceptance, so Open and Accepted are disjoint.
 - `has_issue`: `true` or `false`. Any other value is `400`.

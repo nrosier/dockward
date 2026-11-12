@@ -226,6 +226,9 @@ export default function CvesPage() {
                         <Link to={`/cves/${encodeURIComponent(cve.id)}`} className={`font-mono text-[13px] ${LINK}`}>
                           {cve.cve_id}
                         </Link>
+                        {cve.alias === null ? null : (
+                          <div className="font-mono text-[12px] text-muted">{t("cves.detail.alias", { alias: cve.alias })}</div>
+                        )}
                       </td>
                       <td className={TD}>
                         <SeverityPill severity={cve.severity} />

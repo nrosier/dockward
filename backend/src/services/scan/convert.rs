@@ -44,6 +44,7 @@ pub struct CveRow {
     pub severity: &'static str,
     pub fixed_in_version: Option<String>,
     pub description: Option<String>,
+    pub alias: Option<String>,
 }
 
 /// One row per CVE id from the merged findings, which arrive sorted by (CVE id, package).
@@ -64,6 +65,7 @@ pub fn per_cve(findings: &[MergedFinding]) -> Vec<CveRow> {
             severity: finding.severity,
             fixed_in_version: finding.fixed_in_version.clone(),
             description: finding.description.clone(),
+            alias: finding.alias.clone(),
         });
     }
     rows
@@ -97,6 +99,7 @@ pub async fn recompute_image(
                     severity: row.severity,
                     fixed_in_version: row.fixed_in_version.as_deref(),
                     description: row.description.as_deref(),
+                    alias: row.alias.as_deref(),
                     now,
                 },
             )

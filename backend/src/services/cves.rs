@@ -110,6 +110,8 @@ pub struct CveSummary {
     /// True while an active acceptance exists.
     pub accepted: bool,
     pub fixed_in_version: Option<String>,
+    /// The CVE id behind the primary id (#323), or `null` when the scanner names none.
+    pub alias: Option<String>,
     pub open_tags: i64,
     pub tracked_tags: i64,
     pub github_issue_number: Option<i64>,
@@ -132,6 +134,7 @@ impl CveSummary {
             github_issue_url: row.github_issue_url,
             accepted: row.accepted,
             fixed_in_version: row.fixed_in_version,
+            alias: row.alias,
             open_tags: row.open_tags,
             tracked_tags: row.tracked_tags,
             github_issue_number: row.github_issue_number,
@@ -157,6 +160,9 @@ pub struct CveTag {
 pub struct CveDetail {
     #[serde(flatten)]
     pub summary: CveSummary,
+    /// The image the CVE is for: the newest tag's `<hub host>/<repository>:<tag>` (#323).
+    /// `null` when the source has no tag reporting it.
+    pub image: Option<String>,
     /// At most 10, most recently scanned first.
     pub tags: Vec<CveTag>,
     pub acceptance: Option<Acceptance>,
@@ -520,6 +526,14 @@ pub async fn detail(
             .iter()
             .any(|row| !row.newest_digest && row.status == "open");
     let description = tag_rows.first().and_then(|row| row.description.clone());
+    // The image is the newest tag's (#323, Part B). The newest tag is the first row.
+    let image = match tag_rows.first() {
+        None => None,
+        Some(row) => {
+            let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+            db::source_image(&mut conn, source_id, &row.image_tag).await?
+        }
+    };
     let tags = tag_rows.iter().map(to_tag).collect::<Result<Vec<_>, _>>()?;
     let acceptance = {
         let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
@@ -539,6 +553,7 @@ pub async fn detail(
     };
     Ok(CveDetail {
         summary,
+        image,
         tags,
         acceptance,
         description,

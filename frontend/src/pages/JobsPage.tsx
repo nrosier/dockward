@@ -6,7 +6,7 @@ import { PageHeader } from "../components/mappings/PageHeader";
 import { Segmented } from "../components/mappings/Segmented";
 import { TABLE, TD, TH } from "../components/mappings/styles";
 import { TableScroll } from "../components/mappings/TableScroll";
-import { mappingName, useMappingLookup, useScopeAll } from "../components/mappings/useMappings";
+import { useScopeAll } from "../components/mappings/useMappings";
 import { ImageCell } from "../components/jobs/ImageCell";
 import { JobStatusPill } from "../components/jobs/jobPill";
 import { newVulnsText, noteText, triggerLabel } from "../components/jobs/labels";
@@ -59,26 +59,26 @@ export default function JobsPage() {
   const page = currentPage(params);
   const rawStatus = params.get("status") ?? "";
   const status = (STATUSES as readonly string[]).includes(rawStatus) ? rawStatus : "";
-  const mappingId = params.get("mapping_id") ?? "";
-  const mappings = useMappingLookup(scopeAll);
-  // A job's subject is its source's display name, falling back to the repository (#323).
+  // The Mapping filter is the source (#323): it sends `source_id`, the key the jobs route reads.
+  const sourceId = params.get("source_id") ?? "";
   const sourceList = useQuery({
     queryKey: ["image-sources", "list", scopeAll],
     queryFn: () => api<Page<Source>>("GET", `/image-sources?page_size=200${scopeAll ? "&scope=all" : ""}`),
   });
-  const sources = new Map((sourceList.data?.items ?? []).map((item) => [item.id, item]));
+  const sourceItems = sourceList.data?.items ?? [];
+  const sources = new Map(sourceItems.map((item) => [item.id, item]));
   const [purged, setPurged] = useState<number | null>(null);
   const [logJobId, setLogJobId] = useState<string | null>(null);
 
   const list = useQuery({
-    queryKey: ["jobs", scopeAll, page, status, mappingId],
+    queryKey: ["jobs", scopeAll, page, status, sourceId],
     queryFn: () => {
       const query = new URLSearchParams({ page: String(page), page_size: String(PAGE_SIZE), sort: "created_at", order: "desc" });
       if (status !== "") {
         query.set("status", status);
       }
-      if (mappingId !== "") {
-        query.set("mapping_id", mappingId);
+      if (sourceId !== "") {
+        query.set("source_id", sourceId);
       }
       if (scopeAll) {
         query.set("scope", "all");
@@ -121,9 +121,9 @@ export default function JobsPage() {
       />
       <MappingFilter
         id="sync-mapping"
-        value={mappingId}
-        mappings={Array.from(mappings.values())}
-        onChange={(value) => setParam("mapping_id", value)}
+        value={sourceId}
+        sources={sourceItems}
+        onChange={(value) => setParam("source_id", value)}
       />
     </div>
   );
@@ -149,7 +149,7 @@ export default function JobsPage() {
 
   const canRetry = (job: Job) =>
     job.status === "failed" &&
-    (me.data?.role === "admin" || mappings.get(job.mapping_id)?.user_id === me.data?.id);
+    (me.data?.role === "admin" || (job.source_id != null && sources.get(job.source_id)?.user_id === me.data?.id));
 
   return (
     <>
@@ -181,7 +181,6 @@ export default function JobsPage() {
               </thead>
               <tbody>
                 {list.data.items.map((job) => {
-                  const mapping = mappings.get(job.mapping_id);
                   const source = job.source_id == null ? undefined : sources.get(job.source_id);
                   const newVulns = newVulnsText(job);
                   return (
@@ -192,9 +191,6 @@ export default function JobsPage() {
                           {newVulns === null ? null : <div className="mt-1 text-[12.5px]">{newVulns}</div>}
                           {source === undefined ? null : (
                             <div className="mt-1 text-[12.5px] text-muted">{source.name ?? source.repository}</div>
-                          )}
-                          {mapping === undefined ? null : (
-                            <div className="mt-1 text-[12.5px] text-muted">{mappingName(mapping)}</div>
                           )}
                         </td>
                         <td className={`${TD} text-muted`}>

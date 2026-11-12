@@ -440,6 +440,7 @@ async fn store_run(
                 severity: finding.severity,
                 cvss_v3: finding.cvss_v3,
                 description: finding.description.as_deref(),
+                alias: finding.alias.as_deref(),
             },
         )
         .await?;

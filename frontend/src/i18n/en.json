@@ -146,6 +146,8 @@
   "cves.detail.tagsNote": "Open in {open} of {tracked} tags of the newest image. The issue closes when the newest image no longer reports it.",
   "cves.detail.olderTag": "Older tag, not counted",
   "cves.detail.olderTagsOnly": "Open on older tags only: {tags}",
+  "cves.detail.alias": "Alias {alias}",
+  "cves.detail.image": "Image {image}",
   "cves.detail.col.tag": "Tag",
   "cves.detail.col.lastScan": "Last scan",
   "cves.accept.title": "Accept risk for {cve}",
