@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE image_platforms SET pulled_at = ? WHERE id = ? AND state = 'stored'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "7c11f9a2fe99639495b0d4377cf7e9d766a6ea4decd0c9ed210cf7e99e8af430"
+}

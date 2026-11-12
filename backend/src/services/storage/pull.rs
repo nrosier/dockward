@@ -120,7 +120,44 @@ async fn stage<R: StoreRepository>(
     limits: StoreLimits,
 ) -> Result<Staged, AppError> {
     repo.begin_pull(plan.platform_id).await?;
+    let final_dir = store.layout_dir(plan.platform_id)?;
+    if final_dir.exists() {
+        return Err(AppError::InternalError);
+    }
+    let tmp = store.tmp_dir(plan.platform_id)?;
+    let total = download_verified(store, session, plan, limits).await?;
+    fs::rename(&tmp, &final_dir).map_err(|_| AppError::InternalError)?;
+    Ok(Staged { total })
+}
 
+/// A manual pull of an image that is already stored (#335, decision Q-B): the platform is
+/// downloaded again into `images/.tmp/<id>` under the same guards and digest checks as a pull,
+/// and the copy is then removed, whether it verified or not. The stored layout and the row are
+/// not touched here; the caller updates `pulled_at` when this returns the verified byte count.
+pub async fn verify_stored_platform(
+    store: &StoreRoot,
+    session: &mut PullSession<'_>,
+    plan: &PullPlan<'_>,
+    limits: StoreLimits,
+    free_bytes: u64,
+) -> Result<u64, AppError> {
+    limits::check_free_disk(free_bytes, limits.min_free_bytes)?;
+    let outcome = download_verified(store, session, plan, limits).await;
+    let removed = remove_dir_if_present(store.tmp_dir(plan.platform_id));
+    let total = outcome?;
+    removed?;
+    Ok(total)
+}
+
+/// Fetches the platform manifest and checks its digest and declared size, then streams the
+/// config and every layer into `images/.tmp/<id>`, each verified while it streams. Returns the
+/// bytes written. The temporary directory is left for the caller to rename or remove.
+async fn download_verified(
+    store: &StoreRoot,
+    session: &mut PullSession<'_>,
+    plan: &PullPlan<'_>,
+    limits: StoreLimits,
+) -> Result<u64, AppError> {
     let raw = session.manifest_raw(plan.platform_digest).await?;
     if sha256_digest_text(&Sha256::digest(&raw.bytes)) != plan.platform_digest {
         return Err(AppError::UpstreamContentInvalid);
@@ -136,10 +173,6 @@ async fn stage<R: StoreRepository>(
     limits::check_declared_size(declared, limits.pull_cap_bytes)?;
 
     let tmp = store.tmp_dir(plan.platform_id)?;
-    let final_dir = store.layout_dir(plan.platform_id)?;
-    if final_dir.exists() {
-        return Err(AppError::InternalError);
-    }
     let mut writer = LayoutWriter::create(&tmp)?;
     writer.put_manifest(&raw.bytes, &raw.media_type)?;
 
@@ -152,8 +185,7 @@ async fn stage<R: StoreRepository>(
     }
 
     writer.finish()?;
-    fs::rename(&tmp, &final_dir).map_err(|_| AppError::InternalError)?;
-    Ok(Staged { total })
+    Ok(total)
 }
 
 /// Streams one blob into the layout. Its digest is verified on the bytes written, and its length

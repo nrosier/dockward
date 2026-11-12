@@ -42,6 +42,7 @@ Every route that calls an outbound service or starts work declares its limit. Ov
 - Login: 10 per minute per client IP (Decided 2026-11-03, delegated, [security.md](security.md)).
 - Routes that call a registry or GitHub for a list or a test: 60 per minute per user.
 - Manual scan of one source: 1 per source per 5 minutes (`POST /api/v1/image-sources/:id/scan`).
+- Manual pull or forced scan of one tag: 1 per action, source and tag per 5 minutes (`POST /api/v1/image-sources/:id/tags/:tag/pull` and `.../scan`). It shares the in-memory limiter of "Scan now" under the key `tag:{action}:{source}:{tag}`, so it never uses the source's "Scan now" slot. A request refused with `404` or `409` uses no slot.
 - Job purge: none, on purpose (Decided 2026-11-08, #243). It needs a session and a CSRF token, and deletes only rows the caller may retry.
 - Health (`/healthz`): excluded.
 
@@ -100,6 +101,8 @@ A source is `{"id","hub_id","repository","tag_value","github_owner","github_repo
 | POST | `/api/v1/image-sources/:id/credential/test` | session (owner), limited | yes | `{"repository"}`. Returns `ok` or the failure, never the token. Works anonymously when no credential is set (decision 41). |
 | GET | `/api/v1/image-sources/:id/tag-preview` | session (owner), limited | yes | `{"matches","truncated"}`. Names only; records nothing. |
 | POST | `/api/v1/image-sources/:id/scan` | owner or any admin, limited | yes | Runs discovery for this source now. `{"queued": n}`. |
+| POST | `/api/v1/image-sources/:id/tags/:tag/pull` | owner or any admin, limited | yes | Manual pull (#335) of the image the tag points at now. One `pull` job with trigger `manual` per platform; an `evicted` platform goes back to `queued` first; a platform whose pull job is queued or running is skipped. A stored platform is downloaded again into a temporary folder, every digest is verified, the copy is discarded and `pulled_at` is updated; stored files are not replaced. It forces no scan. `{"queued": n}`. `404` for a missing or foreign source, an invalid tag, or a tag the source has not observed. `409` while a platform is `pulling` or `evicting`. `429` with `Retry-After` for the same tag within 5 minutes. Audit `source.tag_pull`. |
+| POST | `/api/v1/image-sources/:id/tags/:tag/scan` | owner or any admin, limited | yes | Forced scan (#335) of the image the tag points at now. One run with trigger `manual` per `stored` platform and enabled scanner, also for a digest already scanned; nothing is queued for a scanner whose run is queued or running. `{"queued": n}`. Same `404` and `429` rules as the pull route. Audit `source.tag_scan`. |
 | GET | `/api/v1/image-sources/:id/images` | session (owner; admin read) | yes | Images of the source with per-platform state. |
 | GET | `/api/v1/image-sources/:id/tags` | session (owner; admin read) | yes | Tracked tags. |
 | GET | `/api/v1/image-sources/:id/cves` | session (owner; admin read) | yes | CVE list of the source. |
@@ -139,7 +142,7 @@ Decided (2026-11-08, #243): the purge ignores the page's `status` and `source_id
 | Method | Path | Auth | Built | Notes |
 | --- | --- | --- | --- | --- |
 | GET | `/api/v1/cves` | session | yes | List. Filters below. Admin may add `scope=all`. |
-| GET | `/api/v1/cves/:id` | session | yes | `CveDetail`. `200` for any CVE with a row on a tracked tag, including older tags (`older_tags_only`, `newest_digest` per tag). `image` is the newest tag's `<hub host>/<repository>:<tag>` (#323). `alias` is the CVE id behind a GHSA id, from Grype's related vulnerabilities (migration 0006, #323); `null` when none. |
+| GET | `/api/v1/cves/:id` | session | yes | `CveDetail`. `200` for any CVE with a row on a tracked tag, including older tags (`older_tags_only`, `newest_digest` per tag). `image` is the newest tag's `<hub host>/<repository>:<tag>` (#323). `alias` is the other id of the CVE, its GHSA id, when a scanner reports the CVE under a GHSA id (migrations 0006 and 0007, #323, #337); `null` when none. |
 | POST | `/api/v1/cves/:id/issue` | session (owner) | yes | Creates or reopens the GitHub issue for the CVE. `422` when the CVE is fixed on every tag. `409` when an open issue or an active acceptance exists. |
 | POST | `/api/v1/cves/:id/accept` | session (owner) | yes | `{"reason","expires_at"}`. Applies to the whole source. Does not close an open issue. |
 | POST | `/api/v1/cves/:id/unaccept` | session (owner) | yes | Soft revoke. |

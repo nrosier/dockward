@@ -1009,6 +1009,8 @@ async fn every_section_10_route_is_mounted() {
         ("POST", "/api/v1/image-sources/x/credential/test"),
         ("GET", "/api/v1/image-sources/x/tag-preview"),
         ("POST", "/api/v1/image-sources/x/scan"),
+        ("POST", "/api/v1/image-sources/x/tags/1.0/pull"),
+        ("POST", "/api/v1/image-sources/x/tags/1.0/scan"),
         ("GET", "/api/v1/image-sources/x/images"),
         ("GET", "/api/v1/images"),
         ("GET", "/api/v1/admin/scan-settings"),
@@ -1399,6 +1401,322 @@ mod discovery_on_save {
             StatusCode::OK
         );
         assert_eq!(scoped_jobs(&fx, &id).await, vec!["queued".to_owned()]);
+        fx.finish().await;
+    }
+}
+
+/// Manual pull and forced scan of one tag (#335): `POST /api/v1/image-sources/{id}/tags/{tag}/pull`
+/// and `.../scan`.
+mod tag_actions {
+    use super::*;
+
+    const PA: &str = "000000000000000000000000000000c1";
+    const PB: &str = "000000000000000000000000000000c2";
+    const PO: &str = "000000000000000000000000000000c3";
+
+    /// A source of the owner whose tag `1.0` points at `img1` with two platforms (one stored,
+    /// one evicted), and whose tag `1.1` points at `img2` with one stored platform. The stored
+    /// platforms have done runs of both scanners. The source's discover job is settled.
+    async fn seeded(name: &str) -> (Fixture, String) {
+        let fx = fixture(name).await;
+        let id = make_source(&fx, "1.*").await;
+        for sql in [
+            "UPDATE jobs SET status = 'done'",
+            "INSERT INTO images (id, hub_id, repository, digest, is_index)
+             VALUES ('img1', 'hub-fake', 'team/app', 'sha256:aa', 1),
+                    ('img2', 'hub-fake', 'team/app', 'sha256:bb', 0)",
+        ] {
+            sqlx::query(sql).execute(&fx.pool).await.unwrap();
+        }
+        for (pid, image, platform, state) in [
+            (PA, "img1", "linux/amd64", "stored"),
+            (PB, "img1", "linux/arm64", "evicted"),
+            (PO, "img2", "linux/amd64", "stored"),
+        ] {
+            sqlx::query(
+                "INSERT INTO image_platforms (id, image_id, platform, platform_digest, state, pulled_at)
+                 VALUES (?, ?, ?, ?, ?, 5)",
+            )
+            .bind(pid)
+            .bind(image)
+            .bind(platform)
+            .bind(format!("sha256:{pid}"))
+            .bind(state)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        }
+        for (run, pid, scanner) in [
+            ("ra", PA, "grype"),
+            ("rb", PA, "trivy"),
+            ("rc", PO, "grype"),
+            ("rd", PO, "trivy"),
+        ] {
+            sqlx::query(
+                "INSERT INTO scan_runs (id, image_platform_id, scanner, trigger, status, finished_at)
+                 VALUES (?, ?, ?, 'first_pull', 'done', 10)",
+            )
+            .bind(run)
+            .bind(pid)
+            .bind(scanner)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        }
+        for (tag, image) in [("1.0", "img1"), ("1.1", "img2")] {
+            sqlx::query("INSERT INTO tag_observations (source_id, tag, image_id) VALUES (?, ?, ?)")
+                .bind(&id)
+                .bind(tag)
+                .bind(image)
+                .execute(&fx.pool)
+                .await
+                .unwrap();
+        }
+        (fx, id)
+    }
+
+    fn uri(id: &str, tag: &str, action: &str) -> String {
+        format!("/api/v1/image-sources/{id}/tags/{tag}/{action}")
+    }
+
+    /// `(platform_id, trigger)` of every queued pull job, by platform.
+    async fn pull_jobs(fx: &Fixture) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT json_extract(payload, '$.platform_id'), json_extract(payload, '$.trigger')
+             FROM jobs WHERE json_extract(payload, '$.kind') = 'pull' AND status = 'queued'
+             ORDER BY 1",
+        )
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap()
+    }
+
+    /// `(platform_id, scanner)` of every manual scan run, by platform and scanner.
+    async fn manual_runs(fx: &Fixture) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT image_platform_id, scanner FROM scan_runs WHERE trigger = 'manual'
+             ORDER BY 1, 2",
+        )
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn audit_count(fx: &Fixture, action: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = ?")
+            .bind(action)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn tag_action_on_other_users_source_is_404() {
+        let (fx, id) = seeded("rt-tag-other").await;
+        for action in ["pull", "scan"] {
+            let (status, _) = fx
+                .call("POST", &uri(&id, "1.0", action), &fx.other, Value::Null)
+                .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{action}");
+            let (missing, _) = fx
+                .call("POST", &uri("nope", "1.0", action), &fx.owner, Value::Null)
+                .await;
+            assert_eq!(missing, StatusCode::NOT_FOUND, "{action} missing source");
+            let (anon, _) = fx
+                .call("POST", &uri(&id, "1.0", action), &fx.anonymous, Value::Null)
+                .await;
+            assert_eq!(anon, StatusCode::UNAUTHORIZED, "{action} anonymous");
+        }
+        assert!(pull_jobs(&fx).await.is_empty());
+        assert!(manual_runs(&fx).await.is_empty());
+        // The refused calls used no slot: the owner may still act on the tag.
+        let (status, _) = fx
+            .call("POST", &uri(&id, "1.0", "scan"), &fx.owner, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn tag_not_observed_is_404_and_uses_no_limiter_slot() {
+        let (fx, id) = seeded("rt-tag-unobserved").await;
+        for action in ["pull", "scan"] {
+            for _ in 0..2 {
+                let (status, _) = fx
+                    .call("POST", &uri(&id, "2.0", action), &fx.owner, Value::Null)
+                    .await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{action}");
+            }
+        }
+        // A tag outside the grammar is 404 as well, never a registry call.
+        let (bad, _) = fx
+            .call("POST", &uri(&id, "-bad", "pull"), &fx.owner, Value::Null)
+            .await;
+        assert_eq!(bad, StatusCode::NOT_FOUND);
+        // Once discovery observes the tag, the first call of each action is allowed.
+        sqlx::query(
+            "INSERT INTO tag_observations (source_id, tag, image_id) VALUES (?, '2.0', 'img2')",
+        )
+        .bind(&id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        for action in ["pull", "scan"] {
+            let (status, body) = fx
+                .call("POST", &uri(&id, "2.0", action), &fx.owner, Value::Null)
+                .await;
+            assert_eq!(status, StatusCode::OK, "{action}: {body}");
+        }
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn same_tag_twice_is_429_other_tag_ok() {
+        let (fx, id) = seeded("rt-tag-limit").await;
+        for action in ["pull", "scan"] {
+            let (first, _) = fx
+                .call("POST", &uri(&id, "1.0", action), &fx.owner, Value::Null)
+                .await;
+            assert_eq!(first, StatusCode::OK, "{action}");
+            let (second, _) = fx
+                .call("POST", &uri(&id, "1.0", action), &fx.owner, Value::Null)
+                .await;
+            assert_eq!(second, StatusCode::TOO_MANY_REQUESTS, "{action}");
+            let (other_tag, _) = fx
+                .call("POST", &uri(&id, "1.1", action), &fx.owner, Value::Null)
+                .await;
+            assert_eq!(other_tag, StatusCode::OK, "{action} other tag");
+        }
+        // The tag limiter does not use the source-wide "Scan now" slot.
+        let (scan_now, body) = fx
+            .call(
+                "POST",
+                &format!("/api/v1/image-sources/{id}/scan"),
+                &fx.owner,
+                Value::Null,
+            )
+            .await;
+        assert_ne!(scan_now, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn admin_allowed() {
+        let (fx, id) = seeded("rt-tag-admin").await;
+        let (pull, body) = fx
+            .call("POST", &uri(&id, "1.0", "pull"), &fx.admin, Value::Null)
+            .await;
+        assert_eq!(pull, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"queued": 2}));
+        let (scan, body) = fx
+            .call("POST", &uri(&id, "1.0", "scan"), &fx.admin, Value::Null)
+            .await;
+        assert_eq!(scan, StatusCode::OK, "{body}");
+        assert_eq!(audit_count(&fx, "source.tag_pull").await, 1);
+        assert_eq!(audit_count(&fx, "source.tag_scan").await, 1);
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn pull_queues_one_job_per_platform_with_trigger_manual() {
+        let (fx, id) = seeded("rt-tag-pull").await;
+        let (status, body) = fx
+            .call("POST", &uri(&id, "1.0", "pull"), &fx.owner, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"queued": 2}));
+        assert_eq!(
+            pull_jobs(&fx).await,
+            vec![
+                (PA.to_owned(), "manual".to_owned()),
+                (PB.to_owned(), "manual".to_owned()),
+            ]
+        );
+        // The evicted platform waits for its pull again; the stored one is unchanged.
+        let states: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, state FROM image_platforms WHERE image_id = 'img1' ORDER BY id",
+        )
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            states,
+            vec![
+                (PA.to_owned(), "stored".to_owned()),
+                (PB.to_owned(), "queued".to_owned()),
+            ]
+        );
+        // The other tag's image is untouched, and no scan was forced.
+        let other: String = sqlx::query_scalar("SELECT state FROM image_platforms WHERE id = ?")
+            .bind(PO)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+        assert_eq!(other, "stored");
+        assert!(manual_runs(&fx).await.is_empty());
+        let details: String =
+            sqlx::query_scalar("SELECT details FROM audit_log WHERE action = 'source.tag_pull'")
+                .fetch_one(&fx.pool)
+                .await
+                .unwrap();
+        let details: Value = serde_json::from_str(&details).unwrap();
+        assert_eq!(details, json!({"source_id": id, "tag": "1.0", "queued": 2}));
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn pull_is_409_while_a_platform_is_pulling_or_evicting() {
+        let (fx, id) = seeded("rt-tag-busy").await;
+        for state in ["pulling", "evicting"] {
+            sqlx::query("UPDATE image_platforms SET state = ? WHERE id = ?")
+                .bind(state)
+                .bind(PB)
+                .execute(&fx.pool)
+                .await
+                .unwrap();
+            let (status, body) = fx
+                .call("POST", &uri(&id, "1.0", "pull"), &fx.owner, Value::Null)
+                .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{state}: {body}");
+        }
+        assert!(pull_jobs(&fx).await.is_empty());
+        assert_eq!(audit_count(&fx, "source.tag_pull").await, 0);
+        // The refusals used no limiter slot: once the eviction ends, the pull is allowed.
+        sqlx::query("UPDATE image_platforms SET state = 'evicted' WHERE id = ?")
+            .bind(PB)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        let (status, body) = fx
+            .call("POST", &uri(&id, "1.0", "pull"), &fx.owner, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn scan_forces_a_run_of_every_enabled_scanner_on_the_stored_platforms() {
+        let (fx, id) = seeded("rt-tag-scan").await;
+        let (status, body) = fx
+            .call("POST", &uri(&id, "1.0", "scan"), &fx.owner, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // The evicted platform has nothing to scan; the stored one is scanned again by both.
+        assert_eq!(body, json!({"queued": 2}));
+        assert_eq!(
+            manual_runs(&fx).await,
+            vec![
+                (PA.to_owned(), "grype".to_owned()),
+                (PA.to_owned(), "trivy".to_owned()),
+            ]
+        );
+        let details: String =
+            sqlx::query_scalar("SELECT details FROM audit_log WHERE action = 'source.tag_scan'")
+                .fetch_one(&fx.pool)
+                .await
+                .unwrap();
+        let details: Value = serde_json::from_str(&details).unwrap();
+        assert_eq!(details, json!({"source_id": id, "tag": "1.0", "queued": 2}));
         fx.finish().await;
     }
 }

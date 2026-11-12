@@ -216,6 +216,37 @@ pub async fn insert_finding(
     .map_err(db_err)
 }
 
+/// The primary id recorded for `alias` in `vulnerability_aliases` (#337), or `None`.
+pub async fn alias_primary(
+    conn: &mut SqliteConnection,
+    alias: &str,
+) -> Result<Option<String>, AppError> {
+    sqlx::query_scalar!(
+        "SELECT primary_id FROM vulnerability_aliases WHERE alias = ?",
+        alias
+    )
+    .fetch_optional(conn)
+    .await
+    .map_err(db_err)
+}
+
+/// Records that `alias` names `primary_id` (#337). The first record of an alias is kept.
+pub async fn record_alias(
+    conn: &mut SqliteConnection,
+    alias: &str,
+    primary_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "INSERT OR IGNORE INTO vulnerability_aliases (alias, primary_id) VALUES (?, ?)",
+        alias,
+        primary_id
+    )
+    .execute(conn)
+    .await
+    .map(|_| ())
+    .map_err(db_err)
+}
+
 /// The build time stored for a scanner's database, or `None` when none is stored.
 pub async fn database_built_at(
     conn: &mut SqliteConnection,
@@ -349,6 +380,68 @@ pub async fn fail_orphan_runs(conn: &mut SqliteConnection, now: i64) -> Result<u
     .await
     .map(|done| done.rows_affected())
     .map_err(db_err)
+}
+
+/// The current image of one tag of a source, with its platforms (#335).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagImage {
+    pub image_id: String,
+    pub repository: String,
+    pub digest: String,
+    /// Every platform row of the image, by platform then id.
+    pub platforms: Vec<TagPlatform>,
+}
+
+/// One platform row of a [`TagImage`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagPlatform {
+    pub id: String,
+    pub platform: String,
+    pub platform_digest: String,
+    /// `queued`, `pulling`, `stored`, `evicting`, `evicted` or `failed`.
+    pub state: String,
+}
+
+/// The image `tag` points at on `source_id` now, or `None` when the source never observed the
+/// tag. The current image is the latest observation: the newest `first_seen_at`, then the newest
+/// row, the same tie-break as the `newest_digest_tags` view.
+pub async fn current_tag_image(
+    conn: &mut SqliteConnection,
+    source_id: &str,
+    tag: &str,
+) -> Result<Option<TagImage>, AppError> {
+    let head = sqlx::query!(
+        r#"SELECT o.image_id AS "image_id!", i.repository AS "repository!", i.digest AS "digest!"
+           FROM tag_observations o JOIN images i ON i.id = o.image_id
+           WHERE o.source_id = ? AND o.tag = ?
+           ORDER BY o.first_seen_at DESC, o.rowid DESC
+           LIMIT 1"#,
+        source_id,
+        tag
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let Some(head) = head else {
+        return Ok(None);
+    };
+    let platforms = sqlx::query_as!(
+        TagPlatform,
+        r#"SELECT id AS "id!", platform AS "platform!", platform_digest AS "platform_digest!",
+                  state AS "state!"
+           FROM image_platforms WHERE image_id = ?
+           ORDER BY platform, id"#,
+        head.image_id
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(Some(TagImage {
+        image_id: head.image_id,
+        repository: head.repository,
+        digest: head.digest,
+        platforms,
+    }))
 }
 
 /// The image a platform belongs to, for the payload of a job: the repository, the image digest,

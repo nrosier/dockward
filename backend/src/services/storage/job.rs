@@ -10,15 +10,19 @@ use sqlx::SqlitePool;
 
 use crate::db::discovery as db;
 use crate::db::jobs::ClaimedJob;
+use crate::db::storage as storage_db;
 use crate::error::AppError;
 use crate::services::discovery::{Discovery, MSG_BAD_PAYLOAD, PullPayload, failure, fixed_text};
 use crate::services::scan::queue::queue_scans;
 use crate::services::storage::StoreRoot;
 use crate::services::storage::checked_id;
 use crate::services::storage::limits::{self, StoreLimits};
-use crate::services::storage::pull::{PullPlan, pull_platform};
+use crate::services::storage::pull::{PullPlan, pull_platform, verify_stored_platform};
 use crate::services::storage::repository::{SqlStoreRepository, StoreRepository};
 use crate::worker::JobOutcome;
+
+/// The trigger of a pull queued by the manual pull route (#335).
+pub const MANUAL_TRIGGER: &str = "manual";
 
 /// Runs one `pull` job.
 pub async fn run_pull(
@@ -49,6 +53,7 @@ pub async fn run_pull(
 }
 
 enum Pulled {
+    /// The image was stored, or a manual pull verified the stored image again.
     Stored,
     /// The row is not waiting for a pull (stored, evicting or evicted): nothing to do.
     AlreadyDone,
@@ -78,11 +83,13 @@ async fn pull_once(
     if target.platform_digest != payload.digest {
         return Err((AppError::InternalError, false));
     }
-    match target.state.as_str() {
-        "queued" | "failed" => {}
+    // A manual pull of a stored image downloads it again to verify it (#335, decision Q-B).
+    let verify_only = match target.state.as_str() {
+        "queued" | "failed" => false,
+        "stored" if payload.trigger == MANUAL_TRIGGER => true,
         "stored" | "evicting" | "evicted" => return Ok(Pulled::AlreadyDone),
         _ => return Err((AppError::InternalError, false)),
-    }
+    };
 
     let credential = match job.source_id.as_deref() {
         Some(source_id) => discovery
@@ -111,6 +118,16 @@ async fn pull_once(
         platform_id: &payload.platform_id,
         platform_digest: &payload.digest,
     };
+    if verify_only {
+        let bytes = verify_stored_platform(store, &mut session, &plan, store_limits, free_bytes)
+            .await
+            .map_err(fail)?;
+        let refreshed = storage_db::refresh_pulled_at(pool, &payload.platform_id, now)
+            .await
+            .map_err(fail)?;
+        tracing::info!(bytes, refreshed, "stored image verified");
+        return Ok(Pulled::Stored);
+    }
     let outcome = pull_platform(
         &repo,
         store,
@@ -132,7 +149,8 @@ async fn pull_once(
 }
 
 /// Queues the scans of a stored platform (step 4): one `scan` job per enabled scanner. The
-/// trigger is the one discovery recorded on the pull job (decision 17). Called for a fresh pull
+/// trigger is the one discovery recorded on the pull job (decision 17). A `manual` pull maps to
+/// `first_pull`, so it never forces a scan: an image already scanned is not scanned again. Called for a fresh pull
 /// and for a pull job that finds its image already stored, so a crash between the store and the
 /// queueing loses nothing: queueing skips the scanners that already have a run.
 async fn queue_after_pull(

@@ -5,6 +5,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePo
 pub mod acceptances;
 pub mod alert_channels;
 pub mod alert_deliveries;
+#[cfg(test)]
+mod alias_migration;
 #[allow(dead_code)] // Used by the audit writer and the admin audit list.
 pub mod audit;
 pub mod backup;
@@ -236,6 +238,7 @@ mod tests {
             "tag_observations",
             "user_credentials",
             "users",
+            "vulnerability_aliases",
         ];
         assert_eq!(tables, expected);
         Ok(())
@@ -326,6 +329,150 @@ mod tests {
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(mode, "wal");
+        Ok(())
+    }
+
+    /// Seeds one image, one platform and one scan run with `trigger`, plus a tag observation.
+    async fn seed_run(pool: &SqlitePool, trigger: &str) -> Result<(), sqlx::Error> {
+        for sql in [
+            "INSERT INTO images (id, hub_id, repository, digest, is_index)
+             VALUES ('i1', 'hub-default-ghcr', 'o/app', 'sha256:aa', 0)",
+            "INSERT INTO image_platforms (id, image_id, platform, platform_digest, state)
+             VALUES ('p1', 'i1', 'linux/amd64', 'sha256:a1', 'stored')",
+            "INSERT INTO tag_observations (source_id, tag, image_id) VALUES ('src-1', 'v1', 'i1')",
+        ] {
+            sqlx::query(sql).execute(pool).await?;
+        }
+        sqlx::query(
+            "INSERT INTO scan_runs (id, image_platform_id, scanner, trigger, status, finished_at)
+             VALUES ('r1', 'p1', 'grype', ?, 'done', 5)",
+        )
+        .bind(trigger)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn manual_trigger_run_inserts_and_fk_check_clean() -> Result<(), AppError> {
+        let pool = test_pool().await?;
+        seed_source(&pool).await?;
+        seed_run(&pool, "manual")
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        sqlx::query(
+            "INSERT INTO scanner_findings (run_id, cve_id, severity) VALUES ('r1', 'CVE-1', 'HIGH')",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        let violations: Vec<(String,)> =
+            sqlx::query_as(r#"SELECT "table" FROM pragma_foreign_key_check"#)
+                .fetch_all(&pool)
+                .await
+                .map_err(|_| AppError::InternalError)?;
+        assert!(violations.is_empty());
+        let tags: Vec<(String,)> = sqlx::query_as("SELECT image_tag FROM newest_digest_tags")
+            .fetch_all(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        assert_eq!(tags, vec![("v1".to_owned(),)]);
+        let seen: Vec<(String,)> = sqlx::query_as("SELECT image_tag FROM tag_scan_times")
+            .fetch_all(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        assert_eq!(seen, vec![("v1".to_owned(),)]);
+        // A trigger outside the list is still refused.
+        let bad = sqlx::query(
+            "INSERT INTO scan_runs (id, image_platform_id, scanner, trigger, status)
+             VALUES ('r2', 'p1', 'grype', 'bogus', 'queued')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(bad.is_err());
+        Ok(())
+    }
+
+    /// Migration 0008 rebuilds `scan_runs`: runs and their findings written before it survive,
+    /// the index and both views are back, and the foreign keys are still enforced afterwards.
+    #[tokio::test]
+    async fn migration_0008_keeps_runs_findings_index_and_views() -> Result<(), AppError> {
+        let options = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let migrator = sqlx::migrate!("./migrations");
+        migrator
+            .run_to(6, &pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        seed_source(&pool).await?;
+        seed_run(&pool, "first_pull")
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        sqlx::query(
+            "INSERT INTO scanner_findings (run_id, cve_id, severity) VALUES ('r1', 'CVE-1', 'HIGH')",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        migrator
+            .run(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scan_runs")
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let findings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scanner_findings")
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        assert_eq!((runs, findings), (1, 1));
+        // Every migration applied, in order: 0007 (aliases) then 0008 (manual trigger).
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .map_err(|_| AppError::InternalError)?;
+        assert_eq!(versions, (1..=8).collect::<Vec<i64>>());
+        let names: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master
+             WHERE name IN ('idx_scan_runs_current', 'newest_digest_tags', 'tag_scan_times',
+                            'scan_runs_new')
+             ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        let names: Vec<String> = names.into_iter().map(|(name,)| name).collect();
+        assert_eq!(
+            names,
+            [
+                "idx_scan_runs_current",
+                "newest_digest_tags",
+                "tag_scan_times"
+            ]
+        );
+        let enforced: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        assert_eq!(enforced, 1);
+        // Deleting the platform still cascades through the rebuilt table to the findings.
+        sqlx::query("DELETE FROM image_platforms WHERE id = 'p1'")
+            .execute(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scanner_findings")
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        assert_eq!(left, 0);
         Ok(())
     }
 }

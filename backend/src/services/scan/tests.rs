@@ -1077,3 +1077,215 @@ async fn the_jobs_list_returns_the_image_of_a_new_scan_job() {
     assert_eq!(job.image.digest.as_deref(), Some("sha256:old"));
     assert_eq!(job.trigger.as_deref(), Some("first_pull"));
 }
+
+fn trivy_ghsa_report(id: &str) -> String {
+    format!(
+        r#"{{"SchemaVersion":2,"Trivy":{{"Version":"0.76.2"}},"Results":[{{"Vulnerabilities":[{{"VulnerabilityID":"{id}","PkgName":"glob","InstalledVersion":"10.3.0","Severity":"HIGH"}}]}}]}}"#
+    )
+}
+
+const GHSA: &str = "GHSA-3g3m-2fjr-6pw4";
+const GHSA_CVE: &str = "CVE-2025-64756";
+
+fn grype_ghsa_report() -> String {
+    format!(
+        r#"{{"matches":[{{"vulnerability":{{"id":"{GHSA}","severity":"High"}},"artifact":{{"name":"glob","version":"10.3.0"}},"relatedVulnerabilities":[{{"id":"{GHSA}"}},{{"id":"{GHSA_CVE}"}}]}}],"descriptor":{{"version":"1.0.0"}}}}"#
+    )
+}
+
+/// Trivy reports a GHSA id with no alias; the alias table already maps it to a CVE id.
+#[tokio::test]
+async fn trivy_ghsa_already_in_the_alias_table_resolves_to_the_cve() {
+    let trivy = format!("printf '%s' '{}'", trivy_ghsa_report(GHSA));
+    let fx = Fx::new("alias-resolve", &trivy, "echo '{}'").await;
+    exec(
+        &fx.pool,
+        "INSERT INTO vulnerability_aliases (alias, primary_id) VALUES (?, ?)",
+        &[GHSA, GHSA_CVE],
+    )
+    .await;
+    assert_eq!(fx.queue(P_OLD).await, 2);
+    fx.drain().await;
+    let stored = count(
+        &fx.pool,
+        "SELECT COUNT(*) FROM scanner_findings WHERE cve_id = ? AND alias = ?",
+        &[GHSA_CVE, GHSA],
+    )
+    .await;
+    assert_eq!(stored, 1);
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM cve_findings WHERE cve_id = ? AND alias = ?",
+            &[GHSA_CVE, GHSA]
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM cve_findings WHERE cve_id LIKE 'GHSA-%'",
+            &[]
+        )
+        .await,
+        0
+    );
+}
+
+/// A scan that resolves a new alias records it once; a second scan does not add a row, and a
+/// GHSA-only finding records nothing.
+#[tokio::test]
+async fn a_new_alias_is_recorded_once() {
+    let grype = format!("printf '%s' '{}'", grype_ghsa_report());
+    let trivy = trivy_ghsa_report("GHSA-only-0000-0000");
+    let trivy = format!("printf '%s' '{trivy}'");
+    let fx = Fx::new("alias-record", &trivy, &grype).await;
+    assert_eq!(fx.queue(P_OLD).await, 2);
+    fx.drain().await;
+    let again = queue_scans(&fx.pool, P_OLD, Some("s1"), "db_update", NOW).await;
+    assert_eq!(again.ok(), Some(2));
+    fx.drain().await;
+    let rows: Vec<(String, String)> =
+        match sqlx::query_as("SELECT alias, primary_id FROM vulnerability_aliases")
+            .fetch_all(&fx.pool)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(err) => panic!("aliases: {err}"),
+        };
+    assert_eq!(rows, vec![(GHSA.to_owned(), GHSA_CVE.to_owned())]);
+    // The GHSA-only finding keeps its id and has no alias.
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM scanner_findings WHERE cve_id = 'GHSA-only-0000-0000' AND alias IS NULL",
+            &[]
+        )
+        .await,
+        2
+    );
+}
+
+/// `(scanner, trigger)` of every run of `P_OLD`, oldest first.
+async fn run_triggers(pool: &SqlitePool) -> Vec<(String, String)> {
+    sqlx::query_as::<_, (String, String)>(
+        "SELECT scanner, trigger FROM scan_runs WHERE image_platform_id = ? ORDER BY rowid",
+    )
+    .bind(P_OLD)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_else(|err| panic!("runs: {err}"))
+}
+
+/// A forced scan (#335) runs again for a platform every scanner already scanned.
+#[tokio::test]
+async fn manual_requeues_an_already_scanned_platform() {
+    let fx = Fx::new("manual-requeue", "", "").await;
+    for (id, scanner) in [("r-g", "grype"), ("r-t", "trivy")] {
+        exec(
+            &fx.pool,
+            "INSERT INTO scan_runs (id, image_platform_id, scanner, trigger, status, finished_at)
+             VALUES (?, ?, ?, 'first_pull', 'done', 5)",
+            &[id, P_OLD, scanner],
+        )
+        .await;
+    }
+    let queued = queue_scans(&fx.pool, P_OLD, Some("s1"), "manual", NOW).await;
+    assert_eq!(queued.ok(), Some(2));
+    let manual: Vec<_> = run_triggers(&fx.pool)
+        .await
+        .into_iter()
+        .filter(|(_, trigger)| trigger == "manual")
+        .collect();
+    assert_eq!(manual.len(), 2);
+    // Once those runs are done, another forced scan queues again.
+    exec(
+        &fx.pool,
+        "UPDATE scan_runs SET status = 'done' WHERE trigger = 'manual'",
+        &[],
+    )
+    .await;
+    let again = queue_scans(&fx.pool, P_OLD, Some("s1"), "manual", NOW).await;
+    assert_eq!(again.ok(), Some(2));
+}
+
+/// A forced scan is not queued twice while a run of the scanner waits or runs.
+#[tokio::test]
+async fn manual_skips_an_open_run() {
+    let fx = Fx::new("manual-open", "", "").await;
+    // A run with no job is failed as an orphan, so the running run has its job.
+    exec(
+        &fx.pool,
+        "INSERT INTO jobs (id, source_id, status, payload) VALUES ('j-g', 's1', 'running', '{}')",
+        &[],
+    )
+    .await;
+    exec(
+        &fx.pool,
+        "INSERT INTO scan_runs (id, image_platform_id, scanner, trigger, status, job_id)
+         VALUES ('r-g', ?, 'grype', 'first_pull', 'running', 'j-g')",
+        &[P_OLD],
+    )
+    .await;
+    let queued = queue_scans(&fx.pool, P_OLD, Some("s1"), "manual", NOW).await;
+    assert_eq!(queued.ok(), Some(1), "only trivy, grype is running");
+    let twice = queue_scans(&fx.pool, P_OLD, Some("s1"), "manual", NOW).await;
+    assert_eq!(twice.ok(), Some(0), "both scanners have an open run now");
+}
+
+/// The normal dedup is unchanged: a first pull queues once per platform and scanner.
+#[tokio::test]
+async fn first_pull_dedup_unchanged() {
+    let fx = Fx::new("first-pull-dedup", "", "").await;
+    assert_eq!(fx.queue(P_OLD).await, 2);
+    exec(&fx.pool, "UPDATE scan_runs SET status = 'done'", &[]).await;
+    assert_eq!(fx.queue(P_OLD).await, 0);
+    assert_eq!(
+        run_triggers(&fx.pool).await,
+        vec![
+            ("grype".to_owned(), "first_pull".to_owned()),
+            ("trivy".to_owned(), "first_pull".to_owned()),
+        ]
+    );
+}
+
+/// The current image of a tag is its latest observation: the newest `first_seen_at`, then the
+/// newest row on a tie, as in the `newest_digest_tags` view. Its platforms come in order.
+#[tokio::test]
+async fn current_tag_image_uses_latest_observation() {
+    let fx = Fx::new("tag-image", "", "").await;
+    fx.image(IMG_NEW, "sha256:new").await;
+    fx.platform(P_ARM, IMG_NEW, "linux/arm64").await;
+    fx.platform(P_NEW, IMG_NEW, "linux/amd64").await;
+    // `v1` moved from IMG_OLD (seen at 100) to IMG_NEW (seen at 200).
+    fx.observe("v1", IMG_NEW, 200).await;
+    // `v2` was seen on both at the same time: the later row wins.
+    fx.observe("v2", IMG_NEW, 300).await;
+    fx.observe("v2", IMG_OLD, 300).await;
+    let mut conn = fx.pool.acquire().await.unwrap_or_else(|e| panic!("{e}"));
+    let v1 = db::scans::current_tag_image(&mut conn, "s1", "v1")
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"))
+        .unwrap_or_else(|| panic!("v1 has an image"));
+    assert_eq!(v1.image_id, IMG_NEW);
+    assert_eq!(v1.digest, "sha256:new");
+    assert_eq!(v1.repository, "o/app");
+    let platforms: Vec<(&str, &str)> = v1
+        .platforms
+        .iter()
+        .map(|p| (p.id.as_str(), p.state.as_str()))
+        .collect();
+    assert_eq!(platforms, vec![(P_NEW, "stored"), (P_ARM, "stored")]);
+    assert_eq!(v1.platforms[0].platform_digest, format!("sha256:{P_NEW}"));
+    let v2 = db::scans::current_tag_image(&mut conn, "s1", "v2")
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"))
+        .unwrap_or_else(|| panic!("v2 has an image"));
+    assert_eq!(v2.image_id, IMG_OLD);
+    // A tag never observed on the source, and another source, have no image.
+    let none = db::scans::current_tag_image(&mut conn, "s1", "v9").await;
+    assert!(matches!(none, Ok(None)));
+    let other = db::scans::current_tag_image(&mut conn, "s2", "v1").await;
+    assert!(matches!(other, Ok(None)));
+}

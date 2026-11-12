@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT primary_id FROM vulnerability_aliases WHERE alias = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "primary_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "vulnerability_aliases",
+            "name": "primary_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7633c2e9d113312e1d08300af46f1afec58f47ee449eb2492eb910ed84dd7043"
+}

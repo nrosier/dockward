@@ -7,8 +7,9 @@
 //! (repository, digest, tag) with the trigger, so the Jobs list can show them.
 //!
 //! Queueing is idempotent per (platform image, trigger, scanner) for `first_pull` and
-//! `tag_moved`: a repeated pull job adds nothing the second time. A `db_update` rescan is skipped
-//! only while the scanner has a queued or running run for the platform.
+//! `tag_moved`: a repeated pull job adds nothing the second time. A `db_update` rescan and a
+//! `manual` forced scan (#335) are skipped only while the scanner has a queued or running run for
+//! the platform, so a platform already scanned is scanned again.
 
 use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, SqlitePool};
@@ -20,7 +21,7 @@ use crate::services::ids;
 use crate::services::issue_lifecycle::enabled_scanner_keys;
 
 /// The triggers a scan run records (`scan_runs.trigger`).
-pub const TRIGGERS: [&str; 3] = ["first_pull", "tag_moved", "db_update"];
+pub const TRIGGERS: [&str; 4] = ["first_pull", "tag_moved", "db_update", "manual"];
 
 /// The payload of a `scan` job: ids, the scanner key, and the image it is about (repository,
 /// digest, tag) with the trigger. The image fields are what the Jobs list shows. They are
@@ -110,9 +111,9 @@ pub async fn queue_scans_in(
     }
     let enabled = enabled_scanner_keys(conn).await?;
     // A first pull or a moved tag is scanned once per platform and trigger. A database rescan
-    // happens again after every newer database, so it skips only a scanner whose run is still
-    // waiting or running.
-    let known = if trigger == "db_update" {
+    // happens again after every newer database, and a forced scan whenever the user asks, so
+    // both skip only a scanner whose run is still waiting or running.
+    let known = if matches!(trigger, "db_update" | "manual") {
         db::scanners_with_open_run(conn, platform_id).await?
     } else {
         db::scanners_with_run(conn, platform_id, trigger).await?
