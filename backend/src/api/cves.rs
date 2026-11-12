@@ -166,7 +166,7 @@ pub struct Accepted {
 /// `POST /api/v1/cves/:id/accept`. `:id` is `<mapping_id>:<cve_id>`; the body is
 /// `{"reason","expires_at"}`. The caller must own the mapping. Returns `201`; `400` for a body
 /// that is not JSON; `404` for an unknown or foreign mapping or CVE; `409` when the CVE is
-/// already accepted; `422` for an empty reason or a past expiry.
+/// already accepted; `422` for a reason over 1000 characters or a past expiry.
 pub async fn accept(
     State(state): State<AppState>,
     user: AuthUser,
