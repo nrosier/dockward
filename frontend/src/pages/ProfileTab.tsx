@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { PasswordCard } from "../components/account/PasswordCard";
+import { TotpCard } from "../components/account/TotpCard";
 import { CardHeading, ConfirmDialog } from "../components/admin/parts";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
@@ -19,7 +20,8 @@ function ProfileRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-// Profile tab: the profile, the password (local accounts only), and sign out everywhere.
+// Profile tab: the profile, the password and two-factor sign-in (local accounts
+// only), and sign out everywhere.
 export function ProfileTab() {
   const me = useMe();
   const queryClient = useQueryClient();
@@ -55,6 +57,7 @@ export function ProfileTab() {
         </dl>
       </Card>
       {isLocal ? <PasswordCard /> : null}
+      {isLocal ? <TotpCard /> : null}
 
       <Card className="flex flex-wrap items-center justify-between gap-4 p-5" aria-labelledby="account-signout">
         <div className="flex flex-col gap-1">

@@ -7,6 +7,7 @@ import { LoadingMessage } from "../components/ui/StatusMessage";
 import { t } from "../i18n";
 import { ApiError, api } from "../lib/api";
 import { ME_QUERY_KEY, useSetupStatus, type User } from "../lib/session";
+import { TotpStep } from "./TotpStep";
 
 // The input border uses the muted token, not the card border: the card border
 // is about 1.4:1, and WCAG 1.4.11 asks 3:1 for a control's boundary.
@@ -21,6 +22,8 @@ export default function LoginPage() {
   const queryClient = useQueryClient();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  // True after a correct password for an account with TOTP on (`totp_required`).
+  const [codeStep, setCodeStep] = useState(false);
   const [error, setError] = useState<string | null>(() =>
     new URLSearchParams(location.search).has("oidc_error") ? t("login.error.sso") : null,
   );
@@ -33,10 +36,16 @@ export default function LoginPage() {
   }, [location.search, navigate]);
 
   const login = useMutation({
-    mutationFn: () => api<{ user: User }>("POST", "/auth/login", { username, password }),
+    mutationFn: () =>
+      api<{ user: User } | { totp_required: true }>("POST", "/auth/login", { username, password }),
     onSuccess: (body) => {
-      queryClient.setQueryData(ME_QUERY_KEY, body.user);
-      void navigate("/");
+      if ("totp_required" in body) {
+        // The password is not needed again: drop it from state.
+        setPassword("");
+        setCodeStep(true);
+        return;
+      }
+      signedIn(body.user);
     },
     onError: (failure) => {
       setError(
@@ -47,6 +56,11 @@ export default function LoginPage() {
       setPassword("");
     },
   });
+
+  function signedIn(user: User) {
+    queryClient.setQueryData(ME_QUERY_KEY, user);
+    void navigate("/");
+  }
 
   if (status.isPending) {
     return <LoadingMessage />;
@@ -85,63 +99,76 @@ export default function LoginPage() {
       </div>
 
       <main className="flex w-full max-w-[400px] flex-col gap-5 rounded-xl border border-border bg-surface p-7">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-xl font-semibold">{t("page.login")}</h1>
-          <p className="text-[13px] text-muted">{t("login.tagline")}</p>
-        </div>
-
-        {error === null ? null : (
-          <p role="alert" className="text-[13px] text-crit-ink">
-            {error}
-          </p>
-        )}
-
-        {oidc ? (
+        {codeStep ? (
+          <TotpStep
+            input={INPUT}
+            onSignedIn={signedIn}
+            onBack={() => {
+              setCodeStep(false);
+              setError(null);
+            }}
+          />
+        ) : (
           <>
-            <a href="/api/v1/auth/oidc/start" className={`${buttonClass("default")} min-h-11! w-full px-4 text-sm`}>
-              <KeyRound aria-hidden="true" size={18} />
-              {t("login.sso")}
-            </a>
-            <div className="flex items-center gap-3 text-xs text-muted">
-              <span className="h-px flex-1 bg-border" />
-              {t("login.divider")}
-              <span className="h-px flex-1 bg-border" />
+            <div className="flex flex-col gap-1">
+              <h1 className="text-xl font-semibold">{t("page.login")}</h1>
+              <p className="text-[13px] text-muted">{t("login.tagline")}</p>
             </div>
-          </>
-        ) : null}
 
-        <form onSubmit={submit} className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="login-username" className="text-[13px] font-semibold">
-              {t("login.username")}
-            </label>
-            <input
-              id="login-username"
-              className={INPUT}
-              autoComplete="username"
-              required
-              value={username}
-              onChange={(event) => setUsername(event.target.value)}
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="login-password" className="text-[13px] font-semibold">
-              {t("login.password")}
-            </label>
-            <input
-              id="login-password"
-              className={INPUT}
-              type="password"
-              autoComplete="current-password"
-              required
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-            />
-          </div>
-          <Button type="submit" variant="primary" className="min-h-11! w-full px-4 text-sm" disabled={login.isPending}>
-            {login.isPending ? t("login.submitting") : t("login.submit")}
-          </Button>
-        </form>
+            {error === null ? null : (
+              <p role="alert" className="text-[13px] text-crit-ink">
+                {error}
+              </p>
+            )}
+
+            {oidc ? (
+              <>
+                <a href="/api/v1/auth/oidc/start" className={`${buttonClass("default")} min-h-11! w-full px-4 text-sm`}>
+                  <KeyRound aria-hidden="true" size={18} />
+                  {t("login.sso")}
+                </a>
+                <div className="flex items-center gap-3 text-xs text-muted">
+                  <span className="h-px flex-1 bg-border" />
+                  {t("login.divider")}
+                  <span className="h-px flex-1 bg-border" />
+                </div>
+              </>
+            ) : null}
+
+            <form onSubmit={submit} className="flex flex-col gap-4">
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="login-username" className="text-[13px] font-semibold">
+                  {t("login.username")}
+                </label>
+                <input
+                  id="login-username"
+                  className={INPUT}
+                  autoComplete="username"
+                  required
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value)}
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="login-password" className="text-[13px] font-semibold">
+                  {t("login.password")}
+                </label>
+                <input
+                  id="login-password"
+                  className={INPUT}
+                  type="password"
+                  autoComplete="current-password"
+                  required
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                />
+              </div>
+              <Button type="submit" variant="primary" className="min-h-11! w-full px-4 text-sm" disabled={login.isPending}>
+                {login.isPending ? t("login.submitting") : t("login.submit")}
+              </Button>
+            </form>
+          </>
+        )}
       </main>
 
       <p className="max-w-[400px] text-center text-[12.5px] text-muted">{t("login.note")}</p>
