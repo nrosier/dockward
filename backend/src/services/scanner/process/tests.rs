@@ -380,7 +380,7 @@ fn a_failed_step_stores_its_stderr_tail_and_the_failed_outcome() {
 }
 
 #[test]
-fn a_timeout_step_records_timed_out_with_its_timeout() {
+fn a_timeout_step_names_the_step_that_timed_out() {
     let dir = scratch_dir("rec-timeout");
     let script = write_script(&dir, "hang.sh", "echo 'waiting' >&2\n/bin/sleep 60");
     let args: Vec<OsString> = Vec::new();
@@ -397,6 +397,11 @@ fn a_timeout_step_records_timed_out_with_its_timeout() {
     assert_eq!(record.outcome, StepOutcome::TimedOut);
     assert_eq!(record.timeout_secs, 2);
     assert_eq!(record.exit_code, None);
+    assert!(
+        record.command.ends_with("hang.sh"),
+        "the timed-out step is named by its command: {}",
+        record.command
+    );
 }
 
 #[test]

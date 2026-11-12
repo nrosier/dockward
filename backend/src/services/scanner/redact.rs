@@ -10,8 +10,12 @@
 //! 2. URL userinfo (`scheme://user:pass@host`): the userinfo is masked, the host kept.
 //! 3. Token prefixes `ghp_`, `gho_`, `ghs_`, `ghu_`, `github_pat_`, and the V1 ciphertext prefix
 //!    `v1:` and Argon2 hashes `$argon2`: the token is masked.
-//! 4. `key=value`, `key: value` and `"key":"value"` where the key name is a secret name by
-//!    [`audit::is_secret_key_name`](crate::services::audit::is_secret_key_name).
+//! 4. `Bearer <value>` and `Basic <value>` credentials, wherever they appear in the line.
+//! 5. Webhook URL tokens: every path segment after a `services`, `hooks`, `webhook` or
+//!    `webhooks` segment of a URL (Slack, Discord and similar webhook URLs).
+//! 6. `key=value`, `key: value` and `"key":"value"` where the key name is a secret name by
+//!    [`audit::is_secret_key_name`](crate::services::audit::is_secret_key_name), or names a
+//!    session (`session`, `sid`), which covers session cookie values.
 
 use crate::services::audit::is_secret_key_name;
 
@@ -26,6 +30,8 @@ pub fn redact_line(line: &str) -> String {
     let line = mask_authorization(line);
     let line = mask_userinfo(&line);
     let line = mask_tokens(&line);
+    let line = mask_scheme_credentials(&line);
+    let line = mask_webhook_paths(&line);
     mask_key_values(&line)
 }
 
@@ -79,6 +85,56 @@ fn mask_tokens(line: &str) -> String {
     }
     out = mask_prefixed(&out, crate::auth::crypto::V1_PREFIX, is_value_char);
     mask_prefixed(&out, "$argon2", is_value_char)
+}
+
+/// Masks the credential after a `Bearer` or `Basic` word (case-insensitive, whole word).
+fn mask_scheme_credentials(line: &str) -> String {
+    let words: Vec<&str> = line.split(' ').collect();
+    let mut masked: Vec<String> = Vec::with_capacity(words.len());
+    let mut after_scheme = false;
+    for word in words {
+        if after_scheme && !word.is_empty() {
+            masked.push(REDACTED.to_owned());
+            after_scheme = false;
+            continue;
+        }
+        after_scheme = word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("basic");
+        masked.push(word.to_owned());
+    }
+    masked.join(" ")
+}
+
+/// Masks the path segments that follow a webhook marker segment in each URL of the line.
+fn mask_webhook_paths(line: &str) -> String {
+    const MARKERS: &[&str] = &["services", "hooks", "webhook", "webhooks"];
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(scheme_end) = rest.find("://") {
+        let url_start = scheme_end + "://".len();
+        out.push_str(&rest[..url_start]);
+        let tail = &rest[url_start..];
+        let url_end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '?' | '#'))
+            .unwrap_or(tail.len());
+        let url = &tail[..url_end];
+        let mut segments = url.split('/');
+        out.push_str(segments.next().unwrap_or_default());
+        let mut masking = false;
+        for segment in segments {
+            out.push('/');
+            if masking && !segment.is_empty() {
+                out.push_str(REDACTED);
+            } else {
+                out.push_str(segment);
+            }
+            if MARKERS.contains(&segment.to_ascii_lowercase().as_str()) {
+                masking = true;
+            }
+        }
+        rest = &tail[url_end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Replaces each occurrence of `prefix` and the run of `continues` characters after it.
@@ -160,7 +216,13 @@ fn is_secret_key_before(chars: &[char], at: usize) -> bool {
         return false;
     }
     let key: String = chars[start..end].iter().collect();
-    is_secret_key_name(&key)
+    is_secret_key_name(&key) || is_session_key_name(&key)
+}
+
+/// True for a key that names a session: a session cookie value must not be stored.
+fn is_session_key_name(name: &str) -> bool {
+    let lowered = name.to_ascii_lowercase();
+    lowered.contains("session") || lowered == "sid"
 }
 
 fn is_key_char(c: char) -> bool {
