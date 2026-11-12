@@ -182,10 +182,13 @@ pub async fn link_findings(
 ) -> Result<u64, AppError> {
     sqlx::query!(
         "UPDATE cve_findings SET github_issue_id = ?
-         WHERE source_id = ? AND cve_id = ?
+         WHERE source_id = ?
+           AND (cve_id = ?
+                OR cve_id IN (SELECT alias FROM vulnerability_aliases WHERE primary_id = ?))
            AND (github_issue_id IS NULL OR github_issue_id <> ?)",
         issue_id,
         source_id,
+        cve_id,
         cve_id,
         issue_id
     )
@@ -228,7 +231,8 @@ pub async fn findings_for_source(
     .map_err(|_| AppError::InternalError)
 }
 
-/// The findings of one CVE in the source, one row per tag.
+/// The findings of one CVE record in the source, one row per tag. Rows still keyed by an alias
+/// of the id (#337) belong to the record.
 pub async fn findings_for_cve(
     conn: &mut SqliteConnection,
     source_id: &str,
@@ -239,7 +243,10 @@ pub async fn findings_for_cve(
         r#"SELECT cve_id AS "cve_id!", image_tag AS "image_tag!", package,
                   severity AS "severity!", fixed_in_version, status AS "status!", last_seen_at,
                   description
-           FROM cve_findings WHERE source_id = ? AND cve_id = ?
+           FROM cve_findings
+           WHERE source_id = ?1
+             AND (cve_id = ?2
+                  OR cve_id IN (SELECT alias FROM vulnerability_aliases WHERE primary_id = ?2))
            ORDER BY image_tag"#,
         source_id,
         cve_id

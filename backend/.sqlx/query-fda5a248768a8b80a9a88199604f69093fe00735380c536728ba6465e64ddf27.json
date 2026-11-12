@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT alias AS \"alias!\" FROM vulnerability_aliases WHERE primary_id = ? ORDER BY alias",
+  "describe": {
+    "columns": [
+      {
+        "name": "alias!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "vulnerability_aliases",
+            "name": "alias"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "fda5a248768a8b80a9a88199604f69093fe00735380c536728ba6465e64ddf27"
+}

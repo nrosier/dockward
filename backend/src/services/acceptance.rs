@@ -250,8 +250,14 @@ pub async fn accept<G: IssueApi>(
     input: AcceptInput,
     now: i64,
 ) -> Result<Acceptance, AppError> {
-    let (source_id, cve_id) = split_id(id)?;
+    let (source_id, requested) = split_id(id)?;
     let source = owned_source(pool, caller.id, source_id).await?;
+    // #337: an alias in the id names the record of its primary id.
+    let primary = {
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        crate::db::findings::primary_id(&mut conn, requested).await?
+    };
+    let cve_id = primary.as_str();
 
     let reason = input.reason.trim();
     if reason.is_empty() {
@@ -416,8 +422,14 @@ pub async fn unaccept(
     id: &str,
     now: i64,
 ) -> Result<(), AppError> {
-    let (source_id, cve_id) = split_id(id)?;
+    let (source_id, requested) = split_id(id)?;
     let source = owned_source(pool, caller.id, source_id).await?;
+    // #337: an alias in the id names the record of its primary id.
+    let primary = {
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        crate::db::findings::primary_id(&mut conn, requested).await?
+    };
+    let cve_id = primary.as_str();
     let mut tx = begin(pool).await?;
     let active = acceptance_db::active(&mut tx, &source.id, cve_id, now)
         .await?
@@ -576,6 +588,38 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    /// #337: a request that names the GHSA id resolves to the CVE record, so the acceptance
+    /// is stored under the CVE id and the unaccept by either id finds it.
+    #[tokio::test]
+    async fn accepting_by_the_ghsa_id_applies_to_the_cve_record() {
+        let f = Fixture::new("ghsa").await;
+        sqlx::query(
+            "INSERT INTO vulnerability_aliases (alias, primary_id) VALUES ('GHSA-aaaa-bbbb-cccc', ?)",
+        )
+        .bind(CVE)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+
+        let row = f
+            .accept("u1", "m1:GHSA-aaaa-bbbb-cccc", "patched upstream", None)
+            .await
+            .unwrap();
+        assert_eq!(row.cve_id, CVE);
+        assert!(matches!(
+            f.accept("u1", ID, "again", None).await,
+            Err(AppError::Conflict(_))
+        ));
+        f.unaccept("u1", "m1:GHSA-aaaa-bbbb-cccc", NOW + 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM cve_acceptances WHERE revoked_at IS NULL")
+                .await,
+            0
+        );
     }
 
     #[tokio::test]
