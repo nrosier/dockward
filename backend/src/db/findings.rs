@@ -22,7 +22,7 @@ pub struct Finding<'a> {
     pub fixed_in_version: Option<&'a str>,
     /// At most 4,000 characters; `None` when the report has no text.
     pub description: Option<&'a str>,
-    /// The CVE id behind the primary id (#323); `None` when the scanner names none.
+    /// The other id of the CVE, such as its GHSA id (#337); `None` when there is none.
     pub alias: Option<&'a str>,
     /// Unix seconds of the scan.
     pub now: i64,
@@ -190,7 +190,7 @@ pub struct CveSummaryRow {
     pub status: String,
     pub package: Option<String>,
     pub fixed_in_version: Option<String>,
-    /// The CVE id behind the primary id, from the same tag row as `package` (#323).
+    /// The other id of the CVE (its GHSA id, #337), from the same tag row as `package` (#323).
     pub alias: Option<String>,
     pub first_seen_at: Option<i64>,
     pub last_seen_at: Option<i64>,

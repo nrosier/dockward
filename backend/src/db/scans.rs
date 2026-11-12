@@ -216,6 +216,37 @@ pub async fn insert_finding(
     .map_err(db_err)
 }
 
+/// The primary id recorded for `alias` in `vulnerability_aliases` (#337), or `None`.
+pub async fn alias_primary(
+    conn: &mut SqliteConnection,
+    alias: &str,
+) -> Result<Option<String>, AppError> {
+    sqlx::query_scalar!(
+        "SELECT primary_id FROM vulnerability_aliases WHERE alias = ?",
+        alias
+    )
+    .fetch_optional(conn)
+    .await
+    .map_err(db_err)
+}
+
+/// Records that `alias` names `primary_id` (#337). The first record of an alias is kept.
+pub async fn record_alias(
+    conn: &mut SqliteConnection,
+    alias: &str,
+    primary_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "INSERT OR IGNORE INTO vulnerability_aliases (alias, primary_id) VALUES (?, ?)",
+        alias,
+        primary_id
+    )
+    .execute(conn)
+    .await
+    .map(|_| ())
+    .map_err(db_err)
+}
+
 /// The build time stored for a scanner's database, or `None` when none is stored.
 pub async fn database_built_at(
     conn: &mut SqliteConnection,
