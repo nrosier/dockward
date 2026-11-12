@@ -52,7 +52,7 @@ export function AcceptDialog({ open, onOpenChange, cve, mappingLabel }: AcceptDi
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (reason.trim() === "" || accept.isPending) {
+    if (accept.isPending) {
       return;
     }
     setError(null);
@@ -67,10 +67,10 @@ export function AcceptDialog({ open, onOpenChange, cve, mappingLabel }: AcceptDi
       description={`${t("cves.accept.body", { mapping: mappingLabel })}${issueNote}`}
     >
       <form onSubmit={submit} className="flex flex-col gap-4">
-        <Field id="accept-reason" label={t("cves.accept.reason")}>
+        <Field id="accept-reason" label={t("cves.accept.reason")} help={t("cves.accept.reasonHelp")}>
           <textarea
             id="accept-reason"
-            required
+            aria-describedby="accept-reason-help"
             value={reason}
             onChange={(event) => setReason(event.target.value)}
             className={TEXTAREA}
@@ -93,7 +93,7 @@ export function AcceptDialog({ open, onOpenChange, cve, mappingLabel }: AcceptDi
         )}
         <div className="flex flex-wrap justify-end gap-2.5">
           <Button onClick={() => onOpenChange(false)}>{t("mappings.cancel")}</Button>
-          <Button type="submit" variant="primary" disabled={reason.trim() === "" || accept.isPending}>
+          <Button type="submit" variant="primary" disabled={accept.isPending}>
             {t("cves.accept.submit")}
           </Button>
         </div>
