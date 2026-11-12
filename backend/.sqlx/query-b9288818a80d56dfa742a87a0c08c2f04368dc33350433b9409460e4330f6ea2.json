@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT secret_encrypted, enabled AS \"enabled: bool\", totp_last_step\n           FROM totp_secrets WHERE user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "secret_encrypted",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "totp_secrets",
+            "name": "secret_encrypted"
+          }
+        }
+      },
+      {
+        "name": "enabled: bool",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "totp_secrets",
+            "name": "enabled"
+          }
+        }
+      },
+      {
+        "name": "totp_last_step",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "totp_secrets",
+            "name": "totp_last_step"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "b9288818a80d56dfa742a87a0c08c2f04368dc33350433b9409460e4330f6ea2"
+}

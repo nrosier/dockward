@@ -231,6 +231,11 @@ pub async fn login(
             state
                 .login_throttle
                 .record_success(&body.username, &ip_text);
+            // A user with TOTP on gets a challenge and no session. The session is issued by
+            // `POST /api/v1/auth/totp/verify` after a valid code (`api/totp.rs`).
+            if crate::services::totp::is_enabled(&state.pool, &user.id).await? {
+                return totp_challenge(&state, &user);
+            }
             let view = User::try_from(user.clone())?;
             session_response(&state, &user, StatusCode::OK, UserResponse { user: view })
         }
@@ -242,6 +247,26 @@ pub async fn login(
         }
         Err(other) => Err(other),
     }
+}
+
+/// The answer to a correct password for a user with TOTP on: `{"totp_required": true}` and the
+/// short-lived challenge cookie. No session cookie and no CSRF cookie.
+fn totp_challenge(
+    state: &AppState,
+    user: &crate::db::users::UserRow,
+) -> Result<Response, AppError> {
+    let token = crate::auth::totp::issue_challenge(
+        &state.session_key,
+        &user.id,
+        user.token_version,
+        session::now_unix()?,
+    )?;
+    let mut response = Json(serde_json::json!({ "totp_required": true })).into_response();
+    let cookie = crate::auth::totp::challenge_set_cookie(&token)
+        .parse()
+        .map_err(|_| AppError::InternalError)?;
+    response.headers_mut().append(SET_COOKIE, cookie);
+    Ok(response)
 }
 
 #[derive(Deserialize)]

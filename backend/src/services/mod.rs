@@ -58,6 +58,7 @@ pub mod tag_actions;
 pub mod throttle;
 #[allow(dead_code)] // Used by the user response shape.
 pub mod time;
+pub mod totp;
 #[allow(dead_code)] // Used by the admin user routes.
 pub mod users;
 

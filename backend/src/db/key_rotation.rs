@@ -146,3 +146,33 @@ pub async fn set_source_credential_token(
     .map(|done| done.rows_affected())
     .map_err(|_| AppError::InternalError)
 }
+
+/// Every `totp_secrets.secret_encrypted`. The id is the user id.
+pub async fn list_totp_secrets(conn: &mut SqliteConnection) -> Result<Vec<SealedValue>, AppError> {
+    sqlx::query_as!(
+        SealedValue,
+        r#"SELECT user_id AS "id!", secret_encrypted AS "value!"
+           FROM totp_secrets ORDER BY user_id"#
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Replaces one TOTP secret's ciphertext. `totp_last_step` is left alone. Returns the number of
+/// rows changed.
+pub async fn set_totp_secret(
+    conn: &mut SqliteConnection,
+    user_id: &str,
+    value: &str,
+) -> Result<u64, AppError> {
+    sqlx::query!(
+        "UPDATE totp_secrets SET secret_encrypted = ? WHERE user_id = ?",
+        value,
+        user_id
+    )
+    .execute(&mut *conn)
+    .await
+    .map(|done| done.rows_affected())
+    .map_err(|_| AppError::InternalError)
+}

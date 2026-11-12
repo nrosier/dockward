@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM totp_secrets WHERE user_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "46d34b3c1a50a045b7f6689a745717d635cdcd60a3c8cfae8d22ee19627de2b8"
+}

@@ -66,7 +66,7 @@ pub fn presented(headers: &axum::http::HeaderMap) -> Option<String> {
 }
 
 /// Whether `method` and `path` need a CSRF token. Only `POST`, `PUT`, `PATCH`, and
-/// `DELETE` under `/api` do. The webhook, login, and setup are exempt. Login and setup
+/// `DELETE` under `/api` do. The webhook, login, the TOTP code step, and setup are exempt. Login and setup
 /// use the same-origin check instead, and the webhook has no cookie session.
 pub fn requires_token(method: &axum::http::Method, path: &str) -> bool {
     let state_changing = matches!(
@@ -82,6 +82,7 @@ pub fn requires_token(method: &axum::http::Method, path: &str) -> bool {
 /// The exempt paths: the webhook prefix, login, and setup.
 pub fn is_exempt(path: &str) -> bool {
     path == "/api/v1/auth/login"
+        || path == "/api/v1/auth/totp/verify"
         || path == "/api/v1/auth/setup"
         || path.starts_with("/api/v1/webhooks/")
 }
@@ -162,6 +163,7 @@ mod tests {
     fn exempt_routes_need_no_token() {
         assert!(!requires_token(&Method::POST, "/api/v1/auth/login"));
         assert!(!requires_token(&Method::POST, "/api/v1/auth/setup"));
+        assert!(!requires_token(&Method::POST, "/api/v1/auth/totp/verify"));
         assert!(!requires_token(
             &Method::POST,
             "/api/v1/webhooks/harbor/some-token"

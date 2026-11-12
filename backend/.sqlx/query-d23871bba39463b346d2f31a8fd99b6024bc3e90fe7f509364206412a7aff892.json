@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT user_id AS \"id!\", secret_encrypted AS \"value!\"\n           FROM totp_secrets ORDER BY user_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "totp_secrets",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "value!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "totp_secrets",
+            "name": "secret_encrypted"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "d23871bba39463b346d2f31a8fd99b6024bc3e90fe7f509364206412a7aff892"
+}

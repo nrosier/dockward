@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM totp_recovery_codes WHERE user_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b158f2acdb65cea2e5427c79c1b27947b578d31ef2ac89ad54750b009f6f5711"
+}

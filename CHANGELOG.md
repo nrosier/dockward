@@ -4,6 +4,9 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+### Added
+- Optional TOTP (RFC 6238) two-factor sign-in for local accounts, API only (migration 0009, #341). Enrol and confirm under `/api/v1/account/totp`, sign in through `POST /api/v1/auth/totp/verify`, recovery codes work once, an admin can reset a user's TOTP, and wrong codes are rate limited per account and audited. The screens come later. The 15-character password rule is unchanged. Key rotation also re-encrypts the TOTP secrets.
+
 ### Changed
 - Migration 0007 adds `vulnerability_aliases` and folds each GHSA finding that has a CVE alias into its CVE record, keeping the GHSA id as the alias. Findings, scanner findings, tracked GitHub issues and acceptances are merged or renamed to the CVE id (#337).
 - New scans store the CVE id as the primary id and keep the GHSA id as the alias. A Grype GHSA finding that names a CVE id is stored under the CVE id, a Trivy GHSA id that `vulnerability_aliases` maps to a CVE id is stored under that CVE id, and each new pair is recorded in `vulnerability_aliases`. A Grype and a Trivy finding for one CVE and package merge into one finding. A GHSA id with no CVE id keeps its GHSA id (#337).

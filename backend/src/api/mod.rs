@@ -23,3 +23,4 @@ pub mod sources;
 pub mod state;
 pub mod static_files;
 pub mod tag_actions;
+pub mod totp;

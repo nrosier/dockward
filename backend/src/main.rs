@@ -55,6 +55,15 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/account/password",
             post(api::auth::account_password),
         )
+        .route("/api/v1/auth/totp/verify", post(api::totp::verify))
+        .route("/api/v1/account/totp", get(api::totp::status))
+        .route("/api/v1/account/totp/enrol", post(api::totp::enrol))
+        .route("/api/v1/account/totp/confirm", post(api::totp::confirm))
+        .route("/api/v1/account/totp/disable", post(api::totp::disable))
+        .route(
+            "/api/v1/admin/users/{id}/totp",
+            axum::routing::delete(api::totp::admin_reset),
+        )
         .route("/api/v1/auth/oidc/start", get(api::oidc::start))
         .route("/api/v1/auth/oidc/callback", get(api::oidc::callback))
         .route("/api/v1/auth/logout", post(api::auth::logout))
@@ -614,6 +623,10 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         discovery,
         scan_limiter: api::hardening::RateLimiter::new(1, Duration::from_secs(300)),
         registry_limiter: api::hardening::RateLimiter::new(60, std::time::Duration::from_secs(60)),
+        totp_limiter: crate::api::hardening::RateLimiter::new(
+            5,
+            std::time::Duration::from_secs(15 * 60),
+        ),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -905,6 +918,10 @@ pub(crate) mod tests {
                 60,
                 std::time::Duration::from_secs(60),
             ),
+            totp_limiter: crate::api::hardening::RateLimiter::new(
+                5,
+                std::time::Duration::from_secs(15 * 60),
+            ),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -970,6 +987,10 @@ pub(crate) mod tests {
             registry_limiter: crate::api::hardening::RateLimiter::new(
                 60,
                 std::time::Duration::from_secs(60),
+            ),
+            totp_limiter: crate::api::hardening::RateLimiter::new(
+                5,
+                std::time::Duration::from_secs(15 * 60),
             ),
         };
         (app(Vec::new(), state), pool, dir)

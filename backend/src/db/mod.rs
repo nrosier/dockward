@@ -37,6 +37,7 @@ pub mod sources;
 #[allow(dead_code)] // Used by the pull and eviction jobs (Steps 4 and 5).
 pub mod storage;
 pub mod sync_reports;
+pub mod totp;
 #[allow(dead_code)] // Used by the session service and the account and admin routes.
 pub mod users;
 
@@ -236,6 +237,8 @@ mod tests {
             "source_credentials",
             "system_config",
             "tag_observations",
+            "totp_recovery_codes",
+            "totp_secrets",
             "user_credentials",
             "users",
             "vulnerability_aliases",
@@ -433,13 +436,13 @@ mod tests {
             .await
             .map_err(|_| AppError::InternalError)?;
         assert_eq!((runs, findings), (1, 1));
-        // Every migration applied, in order: 0007 (aliases) then 0008 (manual trigger).
+        // Every migration applied, in order: 0007 (aliases), 0008 (manual trigger), 0009 (TOTP).
         let versions: Vec<i64> =
             sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&pool)
                 .await
                 .map_err(|_| AppError::InternalError)?;
-        assert_eq!(versions, (1..=8).collect::<Vec<i64>>());
+        assert_eq!(versions, (1..=9).collect::<Vec<i64>>());
         let names: Vec<(String,)> = sqlx::query_as(
             "SELECT name FROM sqlite_master
              WHERE name IN ('idx_scan_runs_current', 'newest_digest_tags', 'tag_scan_times',
