@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO image_sources\n            (id, user_id, hub_id, repository, name, tag_value, github_cred_id, github_owner,\n             github_repo, default_branch, auto_create_issues, min_issue_severity)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "7dad6ad0a9b4bc8820368f66614982dab66bcdb2278a60fcc4d4b6888af832fe"
+}

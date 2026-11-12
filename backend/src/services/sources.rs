@@ -28,6 +28,8 @@ const SORTS: &[&str] = &["created_at", "repository"];
 /// The most tags a preview returns.
 pub const PREVIEW_LIMIT: usize = 100;
 const MAX_BRANCH_BYTES: usize = 255;
+/// The longest display name, in characters (#323).
+const MAX_NAME_CHARS: usize = 80;
 
 /// What the caller needs from a source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +48,8 @@ pub struct Source {
     pub hub_id: String,
     pub hub_host: String,
     pub repository: String,
+    /// The display name (#323), or `null` until one is set.
+    pub name: Option<String>,
     pub tag_value: String,
     pub github_cred_id: String,
     pub github_owner: String,
@@ -68,6 +72,7 @@ fn view(row: SourceFull) -> Result<Source, AppError> {
         hub_id: row.hub_id,
         hub_host: row.hub_host,
         repository: row.repository,
+        name: row.name,
         tag_value: row.tag_value,
         github_cred_id: row.github_cred_id,
         github_owner: row.github_owner,
@@ -96,6 +101,9 @@ pub struct SourceInput {
     pub auto_create_issues: Option<bool>,
     #[serde(default)]
     pub min_issue_severity: Option<String>,
+    /// The display name (#323). Optional; empty or blank means unset.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Raw list query values.
@@ -123,11 +131,28 @@ fn valid_branch(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
 }
 
+/// The display name: trimmed, `None` when empty. At most 80 characters and no control
+/// characters (#323).
+fn checked_name(name: Option<&str>) -> Result<Option<String>, AppError> {
+    let trimmed = name.unwrap_or("").trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > MAX_NAME_CHARS {
+        return Err(invalid("The name is longer than 80 characters."));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(invalid("The name contains a control character."));
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
 /// The fields checked against their grammars, with the defaults filled in.
 struct Checked {
     default_branch: String,
     auto_create_issues: bool,
     min_issue_severity: String,
+    name: Option<String>,
 }
 
 fn check(input: &SourceInput) -> Result<Checked, AppError> {
@@ -154,6 +179,7 @@ fn check(input: &SourceInput) -> Result<Checked, AppError> {
         default_branch,
         auto_create_issues: input.auto_create_issues.unwrap_or(false),
         min_issue_severity,
+        name: checked_name(input.name.as_deref())?,
     })
 }
 
@@ -252,6 +278,7 @@ pub async fn create(
         default_branch: &checked.default_branch,
         auto_create_issues: checked.auto_create_issues,
         min_issue_severity: &checked.min_issue_severity,
+        name: checked.name.as_deref(),
     };
     db::insert(&mut tx, &id, &user.id, &write).await?;
     let created = db::find(&mut tx, &id)
@@ -299,6 +326,7 @@ pub async fn update(
         default_branch: &checked.default_branch,
         auto_create_issues: checked.auto_create_issues,
         min_issue_severity: &checked.min_issue_severity,
+        name: checked.name.as_deref(),
     };
     db::update(&mut tx, id, &write).await?;
     let updated = db::find(&mut tx, id)

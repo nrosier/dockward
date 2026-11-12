@@ -88,6 +88,26 @@ describe("JobsPage", () => {
     expect(within(table).getAllByText(t("jobs.noNewVulns"))).toHaveLength(1);
   });
 
+  it("shows the source's display name as the job subject, or its repository when unnamed (#323)", async () => {
+    stubApi((path) => {
+      if (path === "/api/v1/account/me") return json({ user: user("user") });
+      if (path.startsWith("/api/v1/jobs")) return json({ items: [{ ...failed, source_id: "s1" }], page: 1, page_size: 50, total: 1 });
+      if (path === "/api/v1/image-sources?page_size=200") {
+        return json({
+          items: [{ id: "s1", repository: "platform/billing-worker", name: "Billing" }],
+          page: 1,
+          page_size: 200,
+          total: 1,
+        });
+      }
+      return undefined;
+    });
+    renderAt(<JobsPage />, "/jobs");
+    // The subject is the display name, shown in the job's row.
+    const row = (await screen.findByText("platform/billing-worker")).closest("tr") as HTMLElement;
+    expect(within(row).getByText("Billing")).toBeInTheDocument();
+  });
+
   it("shows a View log button on every row", async () => {
     stub([failed, neverRun]);
     renderAt(<JobsPage />);

@@ -18,6 +18,7 @@ function source(id: string, repository: string, tag: string, hubId = "h1"): Sour
     user_id: "u1",
     hub_id: hubId,
     repository,
+    name: null,
     tag_value: tag,
     github_cred_id: "c1",
     github_owner: "acme",
@@ -174,6 +175,34 @@ describe("SourceFormPage", () => {
       tag_value: "1.*",
       github_cred_id: "c1",
     });
+  });
+
+  it("sends the display name on create, and an empty one as null (#323)", async () => {
+    const fetchMock = stubCommon((path, init) => {
+      if (path === "/api/v1/image-sources" && init?.method === "POST") return json({ ...source("s9", "nrosier/walley", "1.*"), name: "Walley" }, 201);
+      if (path === "/api/v1/image-sources/s9") return json(source("s9", "nrosier/walley", "1.*"));
+      if (path === "/api/v1/image-sources/s9/images") return json(page([]));
+      return undefined;
+    });
+    renderWithRoutes(routes, "/sources/new");
+    await fillValid();
+    fireEvent.change(screen.getByLabelText(t("sources.form.repository")), { target: { value: "nrosier/walley" } });
+    fireEvent.change(screen.getByLabelText(t("sources.form.tag")), { target: { value: "1.*" } });
+    fireEvent.change(screen.getByLabelText(t("sources.form.name")), { target: { value: "Walley" } });
+    await userEvent.click(screen.getByRole("button", { name: t("sources.form.save") }));
+    await screen.findByRole("button", { name: t("sources.scan.button") });
+    const post = fetchMock.mock.calls.find((call) => (call[1] as RequestInit).method === "POST");
+    expect(JSON.parse(String(((post ?? [])[1] as RequestInit).body))).toMatchObject({ name: "Walley" });
+  });
+
+  it("shows the saved name in the Name field when editing (#323)", async () => {
+    stubCommon((path) => {
+      if (path === "/api/v1/image-sources/s1") return json({ ...source("s1", "nrosier/walley", "1.*"), name: "Walley" });
+      if (path === "/api/v1/image-sources/s1/images") return json(page([]));
+      return undefined;
+    });
+    renderWithRoutes(routes, "/sources/s1");
+    expect(await screen.findByLabelText(t("sources.form.name"))).toHaveValue("Walley");
   });
 
   it("notes that Docker Hub works without a credential", async () => {

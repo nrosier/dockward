@@ -27,18 +27,6 @@ const medium: CveSummary = {
   github_issue_status: null,
 };
 
-function mapping(id: string, project: string, repository: string) {
-  return {
-    id,
-    user_id: "u1",
-    harbor_project: project,
-    harbor_repository: repository,
-    github_owner: "octo",
-    github_repo: `${repository}-gh`,
-  };
-}
-const mappings = [mapping("m1", "platform", "api"), mapping("m2", "platform", "web"), mapping("m3", "data", "etl")];
-
 function row(over: Partial<CveSummary>): CveSummary {
   return { ...medium, ...over };
 }
@@ -50,6 +38,7 @@ function imageSource(id: string, repository: string, github_repo: string): Sourc
     user_id: "u1",
     hub_id: "h1",
     repository,
+    name: null,
     tag_value: "latest",
     github_cred_id: "c1",
     github_owner: "octo",
@@ -61,7 +50,11 @@ function imageSource(id: string, repository: string, github_repo: string): Sourc
     last_discovery_at: null,
   };
 }
-const sources = [imageSource("m1", "ghcr.io/platform/api", "api-gh"), imageSource("m3", "ghcr.io/data/etl", "etl-gh")];
+const sources = [
+  imageSource("m1", "platform/api", "api-gh"),
+  imageSource("m2", "platform/web", "web-gh"),
+  imageSource("m3", "data/etl", "etl-gh"),
+];
 
 function stub(items: CveSummary[] = [medium], onIssue?: (path: string) => void) {
   return stubApi((path, init) => {
@@ -72,10 +65,9 @@ function stub(items: CveSummary[] = [medium], onIssue?: (path: string) => void) 
     }
     if (path.startsWith("/api/v1/cves")) return json({ items, page: 1, page_size: 50, total: items.length });
     if (path.startsWith("/api/v1/image-sources?")) return json({ items: sources, page: 1, page_size: 200, total: sources.length });
-    if (/^\/api\/v1\/mappings\/[^/?]+\/tags/.test(path)) {
+    if (/^\/api\/v1\/image-sources\/[^/?]+\/tags/.test(path)) {
       return json({ items: [{ image_tag: "1.42.0", last_scan_at: "2026-11-08T10:00:00Z", open_cves: 3 }] });
     }
-    if (path.startsWith("/api/v1/mappings")) return json({ items: mappings, page: 1, page_size: 200, total: 3 });
     return undefined;
   });
 }
@@ -345,6 +337,18 @@ describe("CvesPage", () => {
     stub([row({ accepted: true })]);
     renderAt(<CvesPage />);
     expect(await screen.findByRole("button", { name: t("cves.action.createIssue") })).toBeDisabled();
+  });
+
+  it("sends no request to the removed /mappings routes, and reads tags from the source (#323)", async () => {
+    const fetchMock = stub();
+    renderAt(<CvesPage />, "/cves?mapping=m1");
+    await screen.findByText("CVE-2026-0002");
+    await userEvent.click(screen.getByRole("combobox", { name: t("cves.filter.tag") }));
+    await userEvent.click(await screen.findByRole("option", { name: "1.42.0" }));
+    await vi.waitFor(() => expect(lastQuery(fetchMock).get("tag")).toBe("1.42.0"));
+    const paths = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(paths.some((path) => path.startsWith("/api/v1/mappings"))).toBe(false);
+    expect(paths.some((path) => path.startsWith("/api/v1/image-sources/m1/tags"))).toBe(true);
   });
 
   it("offers no Create issue for a CVE fixed on every tag", async () => {

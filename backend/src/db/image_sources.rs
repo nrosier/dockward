@@ -19,6 +19,7 @@ pub struct SourceFull {
     pub hub_id: String,
     pub hub_host: String,
     pub repository: String,
+    pub name: Option<String>,
     pub tag_value: String,
     pub github_cred_id: String,
     pub github_owner: String,
@@ -35,6 +36,7 @@ pub struct SourceFull {
 pub struct SourceWrite<'a> {
     pub hub_id: &'a str,
     pub repository: &'a str,
+    pub name: Option<&'a str>,
     pub tag_value: &'a str,
     pub github_cred_id: &'a str,
     pub github_owner: &'a str,
@@ -65,7 +67,7 @@ pub async fn list(
     sqlx::query_as!(
         SourceFull,
         r#"SELECT s.id AS "id!", s.user_id AS "user_id!", s.hub_id AS "hub_id!", h.host AS "hub_host!",
-                  s.repository AS "repository!", s.tag_value AS "tag_value!",
+                  s.repository AS "repository!", s.name, s.tag_value AS "tag_value!",
                   s.github_cred_id AS "github_cred_id!", s.github_owner AS "github_owner!",
                   s.github_repo AS "github_repo!", s.default_branch AS "default_branch!",
                   s.auto_create_issues AS "auto_create_issues!: bool",
@@ -116,7 +118,7 @@ pub async fn find(conn: &mut SqliteConnection, id: &str) -> Result<Option<Source
     sqlx::query_as!(
         SourceFull,
         r#"SELECT s.id AS "id!", s.user_id AS "user_id!", s.hub_id AS "hub_id!", h.host AS "hub_host!",
-                  s.repository AS "repository!", s.tag_value AS "tag_value!",
+                  s.repository AS "repository!", s.name, s.tag_value AS "tag_value!",
                   s.github_cred_id AS "github_cred_id!", s.github_owner AS "github_owner!",
                   s.github_repo AS "github_repo!", s.default_branch AS "default_branch!",
                   s.auto_create_issues AS "auto_create_issues!: bool",
@@ -140,13 +142,14 @@ pub async fn insert(
 ) -> Result<(), AppError> {
     sqlx::query!(
         "INSERT INTO image_sources
-            (id, user_id, hub_id, repository, tag_value, github_cred_id, github_owner,
+            (id, user_id, hub_id, repository, name, tag_value, github_cred_id, github_owner,
              github_repo, default_branch, auto_create_issues, min_issue_severity)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         id,
         user_id,
         write.hub_id,
         write.repository,
+        write.name,
         write.tag_value,
         write.github_cred_id,
         write.github_owner,
@@ -168,12 +171,13 @@ pub async fn update(
     write: &SourceWrite<'_>,
 ) -> Result<(), AppError> {
     sqlx::query!(
-        "UPDATE image_sources SET hub_id = ?, repository = ?, tag_value = ?, github_cred_id = ?,
+        "UPDATE image_sources SET hub_id = ?, repository = ?, name = ?, tag_value = ?, github_cred_id = ?,
                 github_owner = ?, github_repo = ?, default_branch = ?, auto_create_issues = ?,
                 min_issue_severity = ?
          WHERE id = ?",
         write.hub_id,
         write.repository,
+        write.name,
         write.tag_value,
         write.github_cred_id,
         write.github_owner,

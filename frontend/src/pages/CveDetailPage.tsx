@@ -68,7 +68,8 @@ export default function CveDetailPage() {
   const cve = cveQuery.data;
   const source = sourceQuery.data;
   const owner = source !== undefined && me.data?.id === source.user_id;
-  const sourceLabel = source === undefined ? "" : source.repository;
+  // The display name, falling back to the repository when none is set (#323).
+  const sourceLabel = source === undefined ? "" : (source.name ?? source.repository);
   // The GitHub repository a new issue goes to, as owner/repo (#323).
   const issueRepository = source === undefined ? "" : `${source.github_owner}/${source.github_repo}`;
   const issueUrl = safeHttpsUrl(cve.github_issue_url);

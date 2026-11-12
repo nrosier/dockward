@@ -1160,3 +1160,63 @@ mod job_log {
         fx.finish().await;
     }
 }
+
+/// The display name of a source (#323): create returns it, update changes it, a name over 80
+/// characters or with a control character is `422`, and an empty name is stored as null.
+#[tokio::test]
+async fn source_display_name_create_update_and_limits() {
+    let fx = fixture("rt-source-name").await;
+    let uri = "/api/v1/image-sources";
+
+    // Create with a name returns it, trimmed.
+    let mut named = source_body("hub-fake", "3.0");
+    named["name"] = json!("  Team app  ");
+    let (status, created) = fx.call("POST", uri, &fx.owner, named).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["name"], "Team app");
+    let id = created["id"].as_str().unwrap().to_owned();
+
+    // Update changes it.
+    let one = format!("/api/v1/image-sources/{id}");
+    let mut renamed = source_body("hub-fake", "3.0");
+    renamed["name"] = json!("Payments");
+    let (status, updated) = fx.call("PUT", &one, &fx.owner, renamed).await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["name"], "Payments");
+    let (_, read) = fx.read(&one, &fx.owner).await;
+    assert_eq!(read["name"], "Payments");
+
+    // 80 characters is allowed; 81 is rejected.
+    let mut long_ok = source_body("hub-fake", "4.0");
+    long_ok["name"] = json!("a".repeat(80));
+    assert_eq!(
+        fx.call("POST", uri, &fx.owner, long_ok).await.0,
+        StatusCode::CREATED
+    );
+    let mut too_long = source_body("hub-fake", "5.0");
+    too_long["name"] = json!("a".repeat(81));
+    assert_eq!(
+        fx.call("POST", uri, &fx.owner, too_long).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let mut control = source_body("hub-fake", "6.0");
+    control["name"] = json!("bad\u{7}name");
+    assert_eq!(
+        fx.call("POST", uri, &fx.owner, control).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    // Empty (or blank) is unset: stored as null and returned as null.
+    let mut empty = source_body("hub-fake", "7.0");
+    empty["name"] = json!("   ");
+    let (status, blank) = fx.call("POST", uri, &fx.owner, empty).await;
+    assert_eq!(status, StatusCode::CREATED, "{blank}");
+    assert!(blank["name"].is_null());
+    let stored: Option<String> = sqlx::query_scalar("SELECT name FROM image_sources WHERE id = ?")
+        .bind(blank["id"].as_str().unwrap())
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, None);
+    fx.finish().await;
+}
