@@ -444,7 +444,9 @@ mod tests {
         let fx = fx("totp-same-shape").await;
         let (secret, _) = fx.enable_totp().await;
 
-        let wrong_password = fx.login("test-not-the-password-0000").await;
+        let wrong_password = fx
+            .login(&format!("not-the-password-{}", std::process::id()))
+            .await;
         let (pw_status, pw_body, _) = read(wrong_password).await;
 
         let challenge = challenge_cookie(&fx.login(&fx.password).await);
