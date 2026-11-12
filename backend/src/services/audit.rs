@@ -28,6 +28,8 @@ pub const ACTIONS: &[&str] = &[
     "mapping.pull",
     "mapping.scan",
     "source.scan",
+    "source.tag_pull",
+    "source.tag_scan",
     "source.create",
     "source.update",
     "source.delete",
