@@ -49,6 +49,7 @@ function cve(over: Partial<CveDetail>): CveDetail {
     acceptance: null,
     description: "Misuse may cause an authorization bypass.",
     older_tags_only: false,
+    aliases: [],
     ...over,
   };
 }
@@ -178,19 +179,47 @@ describe("CveDetailPage", () => {
     expect(screen.queryByText("ghcr.io/team/app", { exact: false })).not.toBeInTheDocument();
   });
 
-  it("shows the CVE alias beside the GHSA id, and only the id when there is no alias (#323)", async () => {
-    stub(cve({ cve_id: "GHSA-3g3m-2fjr-6pw4", alias: "CVE-2025-64756" }));
+  it("shows the primary id as the heading and an alias line under it (#337)", async () => {
+    stub(cve({ cve_id: "CVE-2025-64756", aliases: ["GHSA-3g3m-2fjr-6pw4"] }));
     renderWithRoutes(routes, url);
     const heading = await screen.findByRole("heading", { level: 1 });
-    expect(heading.textContent).toContain("GHSA-3g3m-2fjr-6pw4");
-    expect(heading.textContent).toContain(t("cves.detail.alias", { alias: "CVE-2025-64756" }));
+    expect(heading.textContent).toBe("CVE-2025-64756");
+    const line = screen.getByTestId("cve-alias-line");
+    expect(line.textContent).toBe(t("cves.detail.aliasOf", { id: "CVE-2025-64756", alias: "GHSA-3g3m-2fjr-6pw4" }));
+    // The alias line sits after the title row and before the image line.
+    expect(heading.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("a CVE with no alias shows only its id (#323)", async () => {
-    stub(cve({ cve_id: "CVE-2026-0001", alias: null }));
+  it("a GHSA-only record shows its id and no alias line (#337)", async () => {
+    stub(cve({ cve_id: "GHSA-8rvm-662m-jvqv", aliases: [] }));
     renderWithRoutes(routes, url);
     const heading = await screen.findByRole("heading", { level: 1 });
-    expect(heading.textContent).toBe("CVE-2026-0001");
+    expect(heading.textContent).toBe("GHSA-8rvm-662m-jvqv");
+    expect(document.querySelector("[data-testid='cve-alias-line']")).toBeNull();
+  });
+
+  it("never shows an alias equal to the primary id (#337)", async () => {
+    stub(cve({ cve_id: "CVE-2026-84243", aliases: ["CVE-2026-84243"] }));
+    renderWithRoutes(routes, url);
+    const heading = await screen.findByRole("heading", { level: 1 });
+    expect(heading.textContent).toBe("CVE-2026-84243");
+    expect(document.querySelector("[data-testid='cve-alias-line']")).toBeNull();
+  });
+
+  it("lists several aliases on one line (#337)", async () => {
+    stub(cve({ cve_id: "CVE-2025-64756", aliases: ["GHSA-aaaa-bbbb-cccc", "GHSA-dddd-eeee-ffff"] }));
+    renderWithRoutes(routes, url);
+    expect(
+      await screen.findByText(t("cves.detail.aliasOf", { id: "CVE-2025-64756", alias: "GHSA-aaaa-bbbb-cccc, GHSA-dddd-eeee-ffff" })),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps View issue in the action group beside Accept risk (#337)", async () => {
+    stub(cve({ github_issue_number: 7, github_issue_url: "https://github.com/example-org/api-gateway/issues/7" }));
+    renderWithRoutes(routes, url);
+    const view = await screen.findByRole("link", { name: t("cves.action.viewIssue") });
+    const accept = await screen.findByRole("button", { name: t("cves.detail.accept") });
+    expect(view.parentElement).toBe(accept.parentElement);
   });
 
   it("shows the image reference the CVE is for, from the newest tag (#323, Part B)", async () => {

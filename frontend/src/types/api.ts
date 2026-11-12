@@ -68,7 +68,7 @@ export interface CveSummary {
   severity: Severity;
   // Highest severity across the open tags, or null when every tag is fixed.
   open_severity: Severity | null;
-  // The CVE id behind the primary GHSA id (#323), or null when the scanner names none.
+  // Another id of the record, or null (#337). The list does not show it; the detail uses `aliases`.
   alias: string | null;
   status: "open" | "fixed";
   package: string | null;
@@ -110,6 +110,8 @@ export interface CveDetail extends CveSummary {
   description: string | null;
   // No newest-digest row is open, but a row on an older tag is (#196).
   older_tags_only: boolean;
+  // Every other id of the record (#337), never the primary id. Empty when there is none.
+  aliases: string[];
 }
 
 export interface SyncReport {

@@ -57,7 +57,7 @@ const sources = [
   imageSource("m3", "data/etl", "etl-gh"),
 ];
 
-function stub(items: CveSummary[] = [medium], onIssue?: (path: string) => void) {
+function stub(items: CveSummary[] = [medium], onIssue?: (path: string) => void, sourceItems: Source[] = sources) {
   return stubApi((path, init) => {
     if (path === "/api/v1/account/me") return json({ user: user("user") });
     if (path.endsWith("/issue") && init?.method === "POST") {
@@ -65,7 +65,7 @@ function stub(items: CveSummary[] = [medium], onIssue?: (path: string) => void) 
       return json({ github_issue_url: "https://github.com/o/r/issues/1", github_issue_number: 1 }, 201);
     }
     if (path.startsWith("/api/v1/cves")) return json({ items, page: 1, page_size: 50, total: items.length });
-    if (path.startsWith("/api/v1/image-sources?")) return json({ items: sources, page: 1, page_size: 200, total: sources.length });
+    if (path.startsWith("/api/v1/image-sources?")) return json({ items: sourceItems, page: 1, page_size: 200, total: sourceItems.length });
     if (/^\/api\/v1\/image-sources\/[^/?]+\/tags/.test(path)) {
       return json({ items: [{ image_tag: "1.42.0", last_scan_at: "2026-11-08T10:00:00Z", open_cves: 3 }] });
     }
@@ -340,12 +340,42 @@ describe("CvesPage", () => {
     expect(await screen.findByRole("button", { name: t("cves.action.createIssue") })).toBeDisabled();
   });
 
-  it("shows the alias under the GHSA id in the list row, and nothing when there is none (#323)", async () => {
-    stub([row({ cve_id: "GHSA-3g3m-2fjr-6pw4", alias: "CVE-2025-64756" }), row({ id: "m1:CVE-2026-0009", cve_id: "CVE-2026-0009", alias: null })]);
+  it("shows only the primary id in the id cell, with no alias line (#337)", async () => {
+    stub([row({ cve_id: "CVE-2025-64756", alias: "GHSA-3g3m-2fjr-6pw4", id: "m1:CVE-2025-64756" })]);
     renderAt(<CvesPage />);
-    expect(await screen.findByText(t("cves.detail.alias", { alias: "CVE-2025-64756" }))).toBeInTheDocument();
-    const plain = (await screen.findByRole("link", { name: "CVE-2026-0009" })).closest("td") as HTMLElement;
-    expect(plain.textContent).toBe("CVE-2026-0009");
+    const link = await screen.findByRole("link", { name: `CVE-2025-64756 ${t("cves.row.inSource", { source: "platform/api" })}` });
+    expect((link.closest("td") as HTMLElement).textContent).toContain("CVE-2025-64756");
+    expect(screen.queryByText("GHSA-3g3m-2fjr-6pw4", { exact: false })).not.toBeInTheDocument();
+  });
+
+  it("shows one row per source for the same CVE, told apart by the Mapping column (#337)", async () => {
+    stub([
+      row({ id: "m1:CVE-2026-0100", source_id: "m1", cve_id: "CVE-2026-0100" }),
+      row({ id: "m2:CVE-2026-0100", source_id: "m2", cve_id: "CVE-2026-0100" }),
+    ]);
+    renderAt(<CvesPage />);
+    const rows = (await screen.findAllByText("CVE-2026-0100", { exact: false })).map((node) => node.closest("tr") as HTMLElement);
+    expect(rows).toHaveLength(2);
+    expect(within(rows[0]).getByText("platform/api")).toBeInTheDocument();
+    expect(within(rows[1]).getByText("platform/web")).toBeInTheDocument();
+  });
+
+  it("shows the source display name in the Mapping column when one is set (#337)", async () => {
+    stub([row({})], undefined, [{ ...imageSource("m1", "platform/api", "api-gh"), name: "Production API" }]);
+    renderAt(<CvesPage />);
+    const tr = (await screen.findByText("CVE-2026-0002", { exact: false })).closest("tr") as HTMLElement;
+    expect(within(tr).getByText("Production API")).toBeInTheDocument();
+    expect(within(tr).queryByText("platform/api")).not.toBeInTheDocument();
+  });
+
+  it("gives each id link a hidden suffix naming its source (#337)", async () => {
+    stub([row({})]);
+    renderAt(<CvesPage />);
+    const link = await screen.findByRole("link", { name: `CVE-2026-0002 ${t("cves.row.inSource", { source: "platform/api" })}` });
+    expect(link).toHaveAttribute("href", "/cves/m1%3ACVE-2026-0002");
+    // The suffix is visually hidden: the visible text is the id plus a screen-reader-only span.
+    expect(link.firstChild?.textContent).toBe("CVE-2026-0002");
+    expect(within(link).getByText(t("cves.row.inSource", { source: "platform/api" }))).toHaveClass("sr-only");
   });
 
   it("sends the Mapping filter as source_id on the list request, not as mapping (#323 follow-up)", async () => {
