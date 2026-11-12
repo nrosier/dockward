@@ -428,6 +428,10 @@ CREATE TABLE IF NOT EXISTS scanner_findings (
     alias TEXT,
     PRIMARY KEY (run_id, cve_id, package)
 );
+CREATE TABLE IF NOT EXISTS vulnerability_aliases (
+    alias TEXT PRIMARY KEY,
+    primary_id TEXT NOT NULL
+);
 "#;
 
     fn fail<E>(_: E) -> AppError {
