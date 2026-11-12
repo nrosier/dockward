@@ -164,16 +164,16 @@ describe("CveDetailPage", () => {
   it("shows the source's display name on the header, and the repository when it has none (#323)", async () => {
     stub(cve({}));
     renderWithRoutes(routes, url);
-    const header = await screen.findByText(/ghcr\.io\/team\/app/);
+    const header = await screen.findByText("ghcr.io/team/app", { exact: false });
     expect(header.textContent).toContain("ghcr.io/team/app");
   });
 
   it("shows the display name on the header when one is set (#323)", async () => {
     stub(cve({}), undefined, undefined, { ...source, name: "Team app" });
     renderWithRoutes(routes, url);
-    const header = await screen.findByText(/Team app/);
+    const header = await screen.findByText("Team app", { exact: false });
     expect(header.textContent).toContain("Team app");
-    expect(screen.queryByText(/ghcr\.io\/team\/app/)).not.toBeInTheDocument();
+    expect(screen.queryByText("ghcr.io/team/app", { exact: false })).not.toBeInTheDocument();
   });
 
   it("loads the source by source_id and shows its GitHub repository, not a mappings route", async () => {
