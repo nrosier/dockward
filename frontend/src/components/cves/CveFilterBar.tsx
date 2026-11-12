@@ -11,10 +11,10 @@ import {
   type SeverityValue,
   type StatusValue,
 } from "../../lib/cveFilters";
-import type { MappingListItem, MappingTag } from "../../types/api";
+import type { MappingTag } from "../../types/api";
+import type { Source } from "../../types/sources";
 import { Combobox } from "../ui/Combobox";
 import { INPUT } from "../mappings/styles";
-import { mappingName } from "../mappings/useMappings";
 
 const DEBOUNCE_MS = 300;
 const GROUP_LABEL = "mr-0.5 text-[11px] font-semibold tracking-[0.06em] text-muted uppercase";
@@ -101,8 +101,9 @@ function SearchField({ value, onCommit }: { value: string; onCommit: (value: str
 
 interface CveFilterBarProps {
   state: CveFilterState;
-  mappings: MappingListItem[];
-  // Tracked tags of the chosen mapping, when one is chosen.
+  // The image sources in scope. Each one is an option of the Mapping filter (#323).
+  sources: Source[];
+  // Tracked tags of the chosen source, when one is chosen.
   tags: MappingTag[];
   // Sets or clears (value "") the URL parameters named in the patch.
   onChange: (patch: Record<string, string>) => void;
@@ -113,8 +114,8 @@ function toggle<T extends string>(selected: T[], value: T, all: readonly T[]): T
   return all.filter((item) => next.includes(item));
 }
 
-export function CveFilterBar({ state, mappings, tags, onChange }: CveFilterBarProps) {
-  const paths = mappings.map(mappingName);
+export function CveFilterBar({ state, sources, tags, onChange }: CveFilterBarProps) {
+  const paths = sources.map((source) => source.repository);
   const namespaces = Array.from(new Set(paths.map(namespaceOf))).sort();
   const repositories = Array.from(
     new Set(paths.filter((path) => state.namespace === "" || namespaceOf(path) === state.namespace)),
@@ -227,7 +228,7 @@ export function CveFilterBar({ state, mappings, tags, onChange }: CveFilterBarPr
           id="cve-mapping"
           label={t("cves.filter.mapping")}
           value={state.mapping}
-          options={mappings.map((mapping) => ({ value: mapping.id, label: mappingName(mapping) }))}
+          options={sources.map((source) => ({ value: source.id, label: source.repository }))}
           allLabel={t("cves.filter.allMappings")}
           allAsValue
           onChange={(mapping) => onChange({ mapping })}

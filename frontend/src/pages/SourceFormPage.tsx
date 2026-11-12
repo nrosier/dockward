@@ -47,6 +47,7 @@ function SourceForm({ id, loaded }: { id: string | undefined; loaded: Source | n
 
   const [hubId, setHubId] = useState(loaded?.hub_id ?? "");
   const [repository, setRepository] = useState(loaded?.repository ?? "");
+  const [name, setName] = useState(loaded?.name ?? "");
   const [tagValue, setTagValue] = useState(loaded?.tag_value ?? "");
   const [githubCredId, setGithubCredId] = useState(loaded?.github_cred_id ?? "");
   const [owner, setOwner] = useState(loaded?.github_owner ?? "");
@@ -65,11 +66,13 @@ function SourceForm({ id, loaded }: { id: string | undefined; loaded: Source | n
   const hubHost = hubList.find((hub) => hub.id === hubId)?.host ?? "";
   const kind = tagValueKind(tagValue);
   const repositoryOk = isValidRepository(repository);
+  const nameOk = name.trim().length <= 80 && ![...name.trim()].some((char) => char.charCodeAt(0) < 0x20 || char.charCodeAt(0) === 0x7f);
   const tagOk = kind === "exact" || kind === "pattern";
   const credentialOk = registryToken === "" || registryUser.trim() !== "";
   const valid =
     hubId !== "" &&
     repositoryOk &&
+    nameOk &&
     tagOk &&
     githubCredId !== "" &&
     owner.trim() !== "" &&
@@ -82,6 +85,7 @@ function SourceForm({ id, loaded }: { id: string | undefined; loaded: Source | n
       const body = {
         hub_id: hubId,
         repository,
+        name: name.trim() === "" ? null : name.trim(),
         tag_value: tagValue,
         github_cred_id: githubCredId,
         github_owner: owner.trim(),
@@ -133,6 +137,7 @@ function SourceForm({ id, loaded }: { id: string | undefined; loaded: Source | n
 
   const repositoryError = touched && !repositoryOk ? t("sources.form.repositoryInvalid") : undefined;
   const tagError = touched && !tagOk ? t("sources.form.tagInvalid") : undefined;
+  const nameError = touched && !nameOk ? t("sources.form.nameInvalid") : undefined;
   const tagHint =
     kind === "exact"
       ? t("sources.form.tagHintExact")
@@ -183,6 +188,15 @@ function SourceForm({ id, loaded }: { id: string | undefined; loaded: Source | n
               value={repository}
               aria-invalid={repositoryError !== undefined}
               onChange={(event) => setRepository(event.target.value)}
+            />
+          </Field>
+          <Field id="source-name" label={t("sources.form.name")} help={t("sources.form.nameHelp")} error={nameError}>
+            <input
+              id="source-name"
+              className={INPUT}
+              value={name}
+              aria-invalid={nameError !== undefined}
+              onChange={(event) => setName(event.target.value)}
             />
           </Field>
           <Field id="source-tag" label={t("sources.form.tag")} error={tagError}>

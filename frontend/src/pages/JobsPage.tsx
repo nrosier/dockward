@@ -24,6 +24,7 @@ import { t } from "../i18n";
 import { api } from "../lib/api";
 import { useMe } from "../lib/session";
 import type { Page, Job } from "../types/api";
+import type { Source } from "../types/sources";
 
 const PAGE_SIZE = 50;
 const MAX_ATTEMPTS = 8;
@@ -60,6 +61,12 @@ export default function JobsPage() {
   const status = (STATUSES as readonly string[]).includes(rawStatus) ? rawStatus : "";
   const mappingId = params.get("mapping_id") ?? "";
   const mappings = useMappingLookup(scopeAll);
+  // A job's subject is its source's display name, falling back to the repository (#323).
+  const sourceList = useQuery({
+    queryKey: ["image-sources", "list", scopeAll],
+    queryFn: () => api<Page<Source>>("GET", `/image-sources?page_size=200${scopeAll ? "&scope=all" : ""}`),
+  });
+  const sources = new Map((sourceList.data?.items ?? []).map((item) => [item.id, item]));
   const [purged, setPurged] = useState<number | null>(null);
   const [logJobId, setLogJobId] = useState<string | null>(null);
 
@@ -175,6 +182,7 @@ export default function JobsPage() {
               <tbody>
                 {list.data.items.map((job) => {
                   const mapping = mappings.get(job.mapping_id);
+                  const source = job.source_id == null ? undefined : sources.get(job.source_id);
                   const newVulns = newVulnsText(job);
                   return (
                     <Fragment key={job.id}>
@@ -182,6 +190,9 @@ export default function JobsPage() {
                         <td className={TD}>
                           <ImageCell job={job} />
                           {newVulns === null ? null : <div className="mt-1 text-[12.5px]">{newVulns}</div>}
+                          {source === undefined ? null : (
+                            <div className="mt-1 text-[12.5px] text-muted">{source.name ?? source.repository}</div>
+                          )}
                           {mapping === undefined ? null : (
                             <div className="mt-1 text-[12.5px] text-muted">{mappingName(mapping)}</div>
                           )}

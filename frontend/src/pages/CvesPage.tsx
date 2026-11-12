@@ -8,7 +8,6 @@ import { safeHttpsUrl } from "../components/cves/safeUrl";
 import { PageHeader } from "../components/mappings/PageHeader";
 import { LINK, TABLE, TD, TH } from "../components/mappings/styles";
 import { TableScroll } from "../components/mappings/TableScroll";
-import { useAllMappings } from "../components/mappings/useMappings";
 import { Button, buttonClass } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { currentPage, Pagination } from "../components/ui/Pagination";
@@ -86,19 +85,18 @@ export default function CvesPage() {
   const page = currentPage(params);
   const filters = parseFilters(params);
   const order = params.get("order") === "asc" ? "asc" : "desc";
-  const mappingList = useAllMappings(scopeAll);
-  const mappingItems = mappingList.data?.items ?? [];
   // Each row's repository comes from its source_id (#323); the row has no repository field.
   const sourceList = useQuery({
     queryKey: ["image-sources", "list", scopeAll],
     queryFn: () => api<Page<Source>>("GET", `/image-sources?page_size=200${scopeAll ? "&scope=all" : ""}`),
   });
-  const sources = new Map((sourceList.data?.items ?? []).map((item) => [item.id, item]));
+  const sourceItems = sourceList.data?.items ?? [];
+  const sources = new Map(sourceItems.map((item) => [item.id, item]));
   const [issueError, setIssueError] = useState<string | null>(null);
   const [creating, setCreating] = useState<CveSummary | null>(null);
   const tags = useQuery({
-    queryKey: ["mappings", "tags", filters.mapping],
-    queryFn: () => api<{ items: MappingTag[] }>("GET", `/mappings/${encodeURIComponent(filters.mapping)}/tags`),
+    queryKey: ["image-sources", filters.mapping, "tags"],
+    queryFn: () => api<{ items: MappingTag[] }>("GET", `/image-sources/${encodeURIComponent(filters.mapping)}/tags`),
     enabled: filters.mapping !== "",
   });
 
@@ -162,7 +160,7 @@ export default function CvesPage() {
 
   const header = <PageHeader title={t("page.cves")} subtitle={t("cves.subtitle")} />;
 
-  const filterBar = <CveFilterBar state={filters} mappings={mappingItems} tags={tags.data?.items ?? []} onChange={setParamsPatch} />;
+  const filterBar = <CveFilterBar state={filters} sources={sourceItems} tags={tags.data?.items ?? []} onChange={setParamsPatch} />;
 
   if (list.isPending) {
     return (

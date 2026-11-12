@@ -123,6 +123,8 @@ export interface SyncReport {
 export interface Job {
   id: string;
   mapping_id: string;
+  // The image source of the job, or null for a database refresh job (#323).
+  source_id?: string | null;
   status: JobStatus;
   attempts: number;
   next_attempt_at: string | null;

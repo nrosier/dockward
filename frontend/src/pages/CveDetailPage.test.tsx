@@ -12,6 +12,7 @@ const source: Source = {
   user_id: "u1",
   hub_id: "h1",
   repository: "ghcr.io/team/app",
+  name: null,
   tag_value: "latest",
   github_cred_id: "c2",
   github_owner: "example-org",
@@ -50,7 +51,7 @@ function cve(over: Partial<CveDetail>): CveDetail {
   };
 }
 
-function stub(detail: CveDetail, onAccept?: (body: unknown) => void, onIssue?: (path: string) => void) {
+function stub(detail: CveDetail, onAccept?: (body: unknown) => void, onIssue?: (path: string) => void, sourceOverride: Source = source) {
   return stubApi((path, init) => {
     if (path === "/api/v1/account/me") return json({ user: user("user") });
     if (path === "/api/v1/cves/m1%3ACVE-2026-0001" && init?.method === "GET") return json(detail);
@@ -58,7 +59,7 @@ function stub(detail: CveDetail, onAccept?: (body: unknown) => void, onIssue?: (
       onIssue?.(path);
       return json({ github_issue_url: "https://github.com/example-org/api-gateway/issues/9", github_issue_number: 9 }, 201);
     }
-    if (path === "/api/v1/image-sources/s1") return json(source);
+    if (path === "/api/v1/image-sources/s1") return json(sourceOverride);
     if (path === "/api/v1/cves/m1%3ACVE-2026-0001/accept" && init?.method === "POST") {
       onAccept?.(JSON.parse(String(init.body)));
       return json({ acceptance: {} }, 201);
@@ -158,6 +159,21 @@ describe("CveDetailPage", () => {
     await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: t("cves.createDialog.confirm") }));
     await vi.waitFor(() => expect(onIssue).toHaveBeenCalledWith("/api/v1/cves/m1%3ACVE-2026-0001/issue"));
     expect(onIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the source's display name on the header, and the repository when it has none (#323)", async () => {
+    stub(cve({}));
+    renderWithRoutes(routes, url);
+    const header = await screen.findByText(/ghcr\.io\/team\/app/);
+    expect(header.textContent).toContain("ghcr.io/team/app");
+  });
+
+  it("shows the display name on the header when one is set (#323)", async () => {
+    stub(cve({}), undefined, undefined, { ...source, name: "Team app" });
+    renderWithRoutes(routes, url);
+    const header = await screen.findByText(/Team app/);
+    expect(header.textContent).toContain("Team app");
+    expect(screen.queryByText(/ghcr\.io\/team\/app/)).not.toBeInTheDocument();
   });
 
   it("loads the source by source_id and shows its GitHub repository, not a mappings route", async () => {

@@ -15,6 +15,8 @@ export interface Source {
   user_id: string;
   hub_id: string;
   repository: string;
+  // The display name (#323). Null until one is set; the UI then shows the repository.
+  name: string | null;
   tag_value: string;
   github_cred_id: string;
   github_owner: string;
