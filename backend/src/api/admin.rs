@@ -316,6 +316,30 @@ pub async fn delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `DELETE /api/v1/admin/image-sources/:source_id/cves/:cve_id`. Deletes one CVE record of one
+/// source (#349). Returns `204`; `404` for a record the source does not hold; `409` while the
+/// record has an active acceptance.
+pub async fn delete_cve(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    path: Result<Path<(String, String)>, axum::extract::rejection::PathRejection>,
+) -> Result<StatusCode, AppError> {
+    let Path((source_id, cve_id)) = path.map_err(|_| AppError::NotFound)?;
+    let actor = audit::Actor {
+        user_id: Some(admin.id),
+        username: admin.username,
+    };
+    crate::services::cves::delete_record(
+        &state.pool,
+        &actor,
+        &source_id,
+        &cve_id,
+        crate::worker::now_secs(),
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `PUT /api/v1/admin/users/:id/role`. Returns the updated `User`.
 pub async fn set_role(
     State(state): State<AppState>,

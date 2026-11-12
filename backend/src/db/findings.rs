@@ -614,3 +614,66 @@ pub async fn source_image(
     .map_err(|_| AppError::InternalError)?;
     Ok(row.map(|row| format!("{}/{}:{}", row.host, row.repository, image_tag)))
 }
+
+/// True when the source has at least one `cve_findings` row for the CVE.
+pub async fn record_exists(
+    conn: &mut SqliteConnection,
+    source_id: &str,
+    cve_id: &str,
+) -> Result<bool, AppError> {
+    let found = sqlx::query_scalar!(
+        r#"SELECT 1 AS "one!: i64" FROM cve_findings WHERE source_id = ? AND cve_id = ? LIMIT 1"#,
+        source_id,
+        cve_id
+    )
+    .fetch_optional(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(found.is_some())
+}
+
+/// Removes every `cve_findings` row of the CVE in the source. Returns the row count. It never
+/// touches `github_issues`.
+pub async fn delete_for_source(
+    conn: &mut SqliteConnection,
+    source_id: &str,
+    cve_id: &str,
+) -> Result<u64, AppError> {
+    sqlx::query!(
+        "DELETE FROM cve_findings WHERE source_id = ? AND cve_id = ?",
+        source_id,
+        cve_id
+    )
+    .execute(conn)
+    .await
+    .map(|done| done.rows_affected())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Removes the `scanner_findings` of the CVE whose run scanned an image that the source
+/// observes and that no other source observes. A run of an image shared with another source
+/// still serves that source, so it is kept.
+pub async fn delete_scanner_findings_for_source(
+    conn: &mut SqliteConnection,
+    source_id: &str,
+    cve_id: &str,
+) -> Result<u64, AppError> {
+    sqlx::query!(
+        "DELETE FROM scanner_findings
+         WHERE cve_id = ?
+           AND run_id IN (
+               SELECT r.id FROM scan_runs r
+               JOIN image_platforms p ON p.id = r.image_platform_id
+               WHERE EXISTS (SELECT 1 FROM tag_observations o
+                             WHERE o.image_id = p.image_id AND o.source_id = ?)
+                 AND NOT EXISTS (SELECT 1 FROM tag_observations o
+                                 WHERE o.image_id = p.image_id AND o.source_id <> ?))",
+        cve_id,
+        source_id,
+        source_id
+    )
+    .execute(conn)
+    .await
+    .map(|done| done.rows_affected())
+    .map_err(|_| AppError::InternalError)
+}

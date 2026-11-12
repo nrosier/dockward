@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM cve_findings WHERE source_id = ? AND cve_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a52ab9dfda9c58718b176b36298ffc1bc56a7bb9cbac7550481cdd3e1de43724"
+}

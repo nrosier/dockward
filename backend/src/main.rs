@@ -172,6 +172,10 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             get(api::github_url::get_settings).put(api::github_url::put_settings),
         )
         .route(
+            "/api/v1/admin/image-sources/{source_id}/cves/{cve_id}",
+            axum::routing::delete(api::admin::delete_cve),
+        )
+        .route(
             "/api/v1/admin/users",
             get(api::admin::list_users).post(api::admin::create_user),
         )

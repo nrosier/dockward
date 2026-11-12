@@ -249,3 +249,65 @@ describe("CveDetailPage", () => {
     expect(accepted).toHaveBeenCalledWith({ reason: "Not reachable in this service", expires_at: "2027-01-31T23:59:59Z" });
   });
 });
+
+describe("CveDetailPage delete (#349)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const deletePath = "/api/v1/admin/image-sources/s1/cves/CVE-2026-0001";
+
+  function stubAs(role: "admin" | "user", onDelete: (path: string) => void, deleteStatus = 204) {
+    return stubApi((path, init) => {
+      if (path === "/api/v1/account/me") return json({ user: user(role) });
+      if (path === "/api/v1/cves/m1%3ACVE-2026-0001" && init?.method === "GET") return json(cve({}));
+      if (path === "/api/v1/image-sources/s1") return json(source);
+      if (path === deletePath && init?.method === "DELETE") {
+        onDelete(path);
+        return deleteStatus === 204
+          ? new Response(null, { status: 204 })
+          : json({ error: { code: "conflict", message: "Revoke the acceptance before deleting this CVE record." } }, deleteStatus);
+      }
+      return undefined;
+    });
+  }
+
+  it("delete_sends_nothing_until_confirmed", async () => {
+    const onDelete = vi.fn();
+    stubAs("admin", onDelete);
+    renderWithRoutes(routes, url);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.delete") }));
+    const dialog = await screen.findByRole("dialog", { name: t("cves.delete.title", { cve: "CVE-2026-0001" }) });
+    expect(within(dialog).getByText(t("cves.delete.body", { cve: "CVE-2026-0001", source: "ghcr.io/team/app" }))).toBeInTheDocument();
+    expect(onDelete).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole("button", { name: t("mappings.cancel") }));
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("confirm_sends_one_delete", async () => {
+    const onDelete = vi.fn();
+    stubAs("admin", onDelete);
+    renderWithRoutes(routes, url);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.delete") }));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: t("cves.delete.confirm") }));
+    await vi.waitFor(() => expect(onDelete).toHaveBeenCalledTimes(1));
+    expect(onDelete).toHaveBeenCalledWith(deletePath);
+  });
+
+  it("shows the server message when the delete is refused", async () => {
+    stubAs("admin", vi.fn(), 409);
+    renderWithRoutes(routes, url);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.delete") }));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: t("cves.delete.confirm") }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Revoke the acceptance before deleting this CVE record.");
+  });
+
+  it("offers no delete to a non-admin", async () => {
+    stubAs("user", vi.fn());
+    renderWithRoutes(routes, url);
+    await screen.findByRole("button", { name: t("cves.detail.accept") });
+    expect(screen.queryByRole("button", { name: t("cves.detail.delete") })).not.toBeInTheDocument();
+  });
+});
+

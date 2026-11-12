@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink } from "lucide-react";
 import { useState } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 import { AcceptDialog } from "../components/cves/AcceptDialog";
 import { CreateIssueDialog } from "../components/cves/CreateIssueDialog";
 import { CveStatusPill, SeverityPill, issueEligible } from "../components/cves/CvePills";
@@ -30,6 +30,8 @@ export default function CveDetailPage() {
   const [acceptOpen, setAcceptOpen] = useState(false);
   const [revokeOpen, setRevokeOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const navigate = useNavigate();
 
   const cveQuery = useQuery({
     queryKey: ["cve", id],
@@ -59,6 +61,16 @@ export default function CveDetailPage() {
     },
   });
 
+  const remove = useMutation({
+    mutationFn: () =>
+      api("DELETE", `/admin/image-sources/${encodeURIComponent(sourceId ?? "")}/cves/${encodeURIComponent(cveQuery.data?.cve_id ?? "")}`),
+    onSuccess: async () => {
+      setDeleteOpen(false);
+      await queryClient.invalidateQueries({ queryKey: ["cves"] });
+      await navigate("/cves");
+    },
+  });
+
   if (cveQuery.isPending) {
     return <LoadingMessage />;
   }
@@ -67,6 +79,7 @@ export default function CveDetailPage() {
   }
   const cve = cveQuery.data;
   const source = sourceQuery.data;
+  const admin = me.data?.role === "admin" && source !== undefined;
   const owner = source !== undefined && me.data?.id === source.user_id;
   // The display name, falling back to the repository when none is set (#323).
   const sourceLabel = source === undefined ? "" : (source.name ?? source.repository);
@@ -132,6 +145,11 @@ export default function CveDetailPage() {
                   {t("cves.detail.accept")}
                 </Button>
               )
+            ) : null}
+            {admin ? (
+              <Button variant="danger" onClick={() => setDeleteOpen(true)}>
+                {t("cves.detail.delete")}
+              </Button>
             ) : null}
           </div>
         </div>
@@ -235,6 +253,20 @@ export default function CveDetailPage() {
           </table>
         </TableScroll>
       </Panel>
+
+      {admin ? (
+        <ConfirmDialog
+          open={deleteOpen}
+          onOpenChange={setDeleteOpen}
+          title={t("cves.delete.title", { cve: cve.cve_id })}
+          description={t("cves.delete.body", { cve: cve.cve_id, source: sourceLabel })}
+          confirmLabel={t("cves.delete.confirm")}
+          onConfirm={() => remove.mutate()}
+          pending={remove.isPending}
+          danger
+          error={remove.isError ? (remove.error instanceof ApiError ? remove.error.message : t("errors.generic")) : null}
+        />
+      ) : null}
 
       {owner ? (
         <>

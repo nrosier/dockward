@@ -1720,3 +1720,301 @@ mod tag_actions {
         fx.finish().await;
     }
 }
+
+/// `DELETE /api/v1/admin/image-sources/{source_id}/cves/{cve_id}` (#349).
+mod cve_delete {
+    use super::*;
+
+    const GHSA: &str = "GHSA-8rvm-662m-jvqv";
+
+    fn uri(source: &str, cve: &str) -> String {
+        format!("/api/v1/admin/image-sources/{source}/cves/{cve}")
+    }
+
+    async fn exec(fx: &Fixture, sql: &'static str, binds: &[&str]) {
+        let mut query = sqlx::query(sql);
+        for bind in binds {
+            query = query.bind((*bind).to_owned());
+        }
+        query.execute(&fx.pool).await.unwrap();
+    }
+
+    async fn count(fx: &Fixture, sql: &'static str, binds: &[&str]) -> i64 {
+        let mut query = sqlx::query_scalar(sql);
+        for bind in binds {
+            query = query.bind((*bind).to_owned());
+        }
+        query.fetch_one(&fx.pool).await.unwrap()
+    }
+
+    /// Source A (tag 1.0, image img1, run ra) and source B (tag 2.0, image img2, run rb), both
+    /// holding `cve_findings` and `scanner_findings` for GHSA-... and for CVE-2026-0002. A
+    /// `github_issues` row for the GHSA is pointed at by both sources' findings.
+    async fn seeded(name: &str) -> (Fixture, String, String) {
+        let fx = fixture(name).await;
+        let a = make_source(&fx, "1.*").await;
+        let b = make_source(&fx, "2.*").await;
+        exec(
+            &fx,
+            "INSERT INTO images (id, hub_id, repository, digest, is_index)
+             VALUES ('img1', 'hub-fake', 'team/app', 'sha256:aa', 0),
+                    ('img2', 'hub-fake', 'team/app', 'sha256:bb', 0)",
+            &[],
+        )
+        .await;
+        for (pid, image) in [("pa", "img1"), ("pb", "img2")] {
+            exec(
+                &fx,
+                "INSERT INTO image_platforms (id, image_id, platform, platform_digest, state)
+                 VALUES (?, ?, 'linux/amd64', ?, 'stored')",
+                &[pid, image, pid],
+            )
+            .await;
+        }
+        for (run, pid) in [("ra", "pa"), ("rb", "pb")] {
+            exec(
+                &fx,
+                "INSERT INTO scan_runs (id, image_platform_id, scanner, trigger, status, finished_at)
+                 VALUES (?, ?, 'grype', 'first_pull', 'done', 10)",
+                &[run, pid],
+            )
+            .await;
+            for cve in [GHSA, "CVE-2026-0002"] {
+                exec(
+                    &fx,
+                    "INSERT INTO scanner_findings (run_id, cve_id, package, severity)
+                     VALUES (?, ?, 'pkg', 'HIGH')",
+                    &[run, cve],
+                )
+                .await;
+            }
+        }
+        for (source, tag, image) in [(&a, "1.0", "img1"), (&b, "2.0", "img2")] {
+            exec(
+                &fx,
+                "INSERT INTO tag_observations (source_id, tag, image_id) VALUES (?, ?, ?)",
+                &[source, tag, image],
+            )
+            .await;
+        }
+        exec(
+            &fx,
+            "INSERT INTO github_issues (id, github_owner, github_repo, cve_id, github_issue_number, github_issue_url)
+             VALUES ('gi1', 'octo', 'app', ?, 7, 'https://github.com/octo/app/issues/7')",
+            &[GHSA],
+        )
+        .await;
+        for (source, tag) in [(&a, "1.0"), (&a, "1.1"), (&b, "2.0")] {
+            for cve in [GHSA, "CVE-2026-0002"] {
+                let id = format!("f-{source}-{tag}-{cve}");
+                let issue = if cve == GHSA { "gi1" } else { "" };
+                exec(
+                    &fx,
+                    "INSERT INTO cve_findings (id, source_id, image_tag, cve_id, severity, github_issue_id)
+                     VALUES (?, ?, ?, ?, 'HIGH', NULLIF(?, ''))",
+                    &[&id, source, tag, cve, issue],
+                )
+                .await;
+            }
+        }
+        (fx, a, b)
+    }
+
+    #[tokio::test]
+    async fn admin_deletes_one_cve_record_for_one_source() {
+        let (fx, a, _b) = seeded("cvedel-ok").await;
+        let (status, _) = fx
+            .call("DELETE", &uri(&a, GHSA), &fx.admin, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let sql = "SELECT COUNT(*) FROM cve_findings WHERE source_id = ? AND cve_id = ?";
+        assert_eq!(count(&fx, sql, &[&a, GHSA]).await, 0);
+        // The same source's other CVE stays.
+        assert_eq!(count(&fx, sql, &[&a, "CVE-2026-0002"]).await, 2);
+        let runs = "SELECT COUNT(*) FROM scanner_findings WHERE run_id = 'ra' AND cve_id = ?";
+        assert_eq!(count(&fx, runs, &[GHSA]).await, 0);
+        assert_eq!(count(&fx, runs, &["CVE-2026-0002"]).await, 1);
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn non_admin_is_refused() {
+        let (fx, a, _b) = seeded("cvedel-user").await;
+        for who in [&fx.owner, &fx.other] {
+            let (status, _) = fx.call("DELETE", &uri(&a, GHSA), who, Value::Null).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+        let (status, _) = fx
+            .call("DELETE", &uri(&a, GHSA), &fx.anonymous, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let sql = "SELECT COUNT(*) FROM cve_findings WHERE source_id = ? AND cve_id = ?";
+        assert_eq!(count(&fx, sql, &[&a, GHSA]).await, 2);
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM audit_log WHERE action = 'cve.delete'",
+                &[]
+            )
+            .await,
+            0
+        );
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn foreign_or_missing_source_is_404() {
+        let (fx, a, b) = seeded("cvedel-404").await;
+        for (source, cve) in [
+            ("no-such-source", GHSA),
+            (a.as_str(), "CVE-9999-0000"),
+            (a.as_str(), "bad%20id"),
+        ] {
+            let (status, _) = fx
+                .call("DELETE", &uri(source, cve), &fx.admin, Value::Null)
+                .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{source} {cve}");
+        }
+        // A record that exists only on source B is not found through a source with none.
+        exec(
+            &fx,
+            "DELETE FROM cve_findings WHERE source_id = ? AND cve_id = 'CVE-2026-0002'",
+            &[&a],
+        )
+        .await;
+        let (status, _) = fx
+            .call("DELETE", &uri(&a, "CVE-2026-0002"), &fx.admin, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let sql =
+            "SELECT COUNT(*) FROM cve_findings WHERE source_id = ? AND cve_id = 'CVE-2026-0002'";
+        assert_eq!(count(&fx, sql, &[&b]).await, 1);
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM audit_log WHERE action = 'cve.delete'",
+                &[]
+            )
+            .await,
+            0
+        );
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn active_acceptance_blocks_the_delete_with_409() {
+        let (fx, a, _b) = seeded("cvedel-409").await;
+        exec(
+            &fx,
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by_username)
+             VALUES ('acc1', ?, ?, 'risk', 'o1')",
+            &[&a, GHSA],
+        )
+        .await;
+        let (status, _) = fx
+            .call("DELETE", &uri(&a, GHSA), &fx.admin, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let sql = "SELECT COUNT(*) FROM cve_findings WHERE source_id = ? AND cve_id = ?";
+        assert_eq!(count(&fx, sql, &[&a, GHSA]).await, 2);
+        // Once revoked, the delete goes through.
+        exec(
+            &fx,
+            "UPDATE cve_acceptances SET revoked_at = 5, revoked_by = 'a3' WHERE id = 'acc1'",
+            &[],
+        )
+        .await;
+        let (status, _) = fx
+            .call("DELETE", &uri(&a, GHSA), &fx.admin, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn delete_leaves_other_sources_and_github_issues_untouched() {
+        let (fx, a, b) = seeded("cvedel-scope").await;
+        let (status, _) = fx
+            .call("DELETE", &uri(&a, GHSA), &fx.admin, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let sql = "SELECT COUNT(*) FROM cve_findings WHERE source_id = ? AND cve_id = ?";
+        assert_eq!(count(&fx, sql, &[&b, GHSA]).await, 1);
+        assert_eq!(count(&fx, sql, &[&b, "CVE-2026-0002"]).await, 1);
+        let runs = "SELECT COUNT(*) FROM scanner_findings WHERE run_id = 'rb'";
+        assert_eq!(count(&fx, runs, &[]).await, 2);
+        assert_eq!(
+            count(&fx, "SELECT COUNT(*) FROM github_issues", &[]).await,
+            1
+        );
+        let issue = "SELECT status FROM github_issues WHERE id = 'gi1'";
+        assert_eq!(
+            count(
+                &fx,
+                "SELECT COUNT(*) FROM cve_findings WHERE github_issue_id = 'gi1'",
+                &[]
+            )
+            .await,
+            1
+        );
+        let status: String = sqlx::query_scalar(issue).fetch_one(&fx.pool).await.unwrap();
+        assert_eq!(status, "open");
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_scan_run_of_an_image_another_source_also_tracks_is_kept() {
+        let (fx, a, b) = seeded("cvedel-shared").await;
+        exec(
+            &fx,
+            "INSERT INTO tag_observations (source_id, tag, image_id) VALUES (?, '2.1', 'img1')",
+            &[&b],
+        )
+        .await;
+        let (status, _) = fx
+            .call("DELETE", &uri(&a, GHSA), &fx.admin, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let runs = "SELECT COUNT(*) FROM scanner_findings WHERE run_id = 'ra' AND cve_id = ?";
+        assert_eq!(count(&fx, runs, &[GHSA]).await, 1);
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn delete_writes_one_audit_row_with_ids_only() {
+        let (fx, a, _b) = seeded("cvedel-audit").await;
+        let (status, _) = fx
+            .call("DELETE", &uri(&a, GHSA), &fx.admin, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT actor_username, target, details FROM audit_log WHERE action = 'cve.delete'",
+        )
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "a3");
+        let details: Value = serde_json::from_str(rows[0].2.as_deref().unwrap()).unwrap();
+        assert_eq!(details, json!({"source_id": a, "cve_id": GHSA}));
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn delete_without_csrf_is_refused() {
+        let (fx, a, _b) = seeded("cvedel-csrf").await;
+        let (status, _) = send_json(
+            &fx.router,
+            "DELETE",
+            &uri(&a, GHSA),
+            Some(&fx.admin),
+            None,
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let sql = "SELECT COUNT(*) FROM cve_findings WHERE source_id = ? AND cve_id = ?";
+        assert_eq!(count(&fx, sql, &[&a, GHSA]).await, 2);
+        fx.finish().await;
+    }
+}
