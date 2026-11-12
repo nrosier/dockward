@@ -148,6 +148,8 @@ impl CveSummary {
 /// One tag that reports the CVE.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CveTag {
+    /// The image repository, `<hub host>/<repository>` (#350).
+    pub image: String,
     pub image_tag: String,
     pub status: String,
     /// The tag's latest successful sync, or `null` when it has none.
@@ -165,8 +167,11 @@ pub struct CveDetail {
     /// The image the CVE is for: the newest tag's `<hub host>/<repository>:<tag>` (#323).
     /// `null` when the source has no tag reporting it.
     pub image: Option<String>,
-    /// At most 10, most recently scanned first.
+    /// Every tag of the source that carries the CVE, on every image, newest scan first, at most
+    /// [`db::findings::CVE_TAGS_CAP`] (#350).
     pub tags: Vec<CveTag>,
+    /// How many tags carry the CVE in all, so the UI can say "showing N of M".
+    pub tags_total: i64,
     pub acceptance: Option<Acceptance>,
     /// The scanner description from the most recently scanned tag's row, or `null`.
     pub description: Option<String>,
@@ -446,10 +451,17 @@ pub async fn list(
     })
 }
 
-fn to_tag(row: &CveTagRow) -> Result<CveTag, AppError> {
+fn to_tag(row: &CveTagRow, accepted: bool) -> Result<CveTag, AppError> {
+    // `accepted` is derived from the source's active acceptance, as on the list (#350).
+    let status = if accepted && row.status == "open" {
+        "accepted".to_owned()
+    } else {
+        row.status.clone()
+    };
     Ok(CveTag {
+        image: row.image.clone(),
         image_tag: row.image_tag.clone(),
-        status: row.status.clone(),
+        status,
         last_scan_at: row.last_scan_at.map(time::rfc3339).transpose()?,
         fixed_in_version: row.fixed_in_version.clone(),
         newest_digest: row.newest_digest,
@@ -545,7 +557,7 @@ pub async fn detail(
             db::source_image(&mut conn, source_id, &row.image_tag).await?
         }
     };
-    let tags = tag_rows.iter().map(to_tag).collect::<Result<Vec<_>, _>>()?;
+    let tags_total = db::cve_tags_total(pool, source_id, cve_id).await?;
     let acceptance = {
         let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
         acceptance_db::active(&mut conn, source_id, cve_id, now).await?
@@ -562,6 +574,10 @@ pub async fn detail(
             expires_at: row.expires_at.map(time::rfc3339).transpose()?,
         }),
     };
+    let tags = tag_rows
+        .iter()
+        .map(|row| to_tag(row, acceptance.is_some()))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut aliases: std::collections::BTreeSet<String> =
         db::aliases_of(pool, cve_id).await?.into_iter().collect();
     aliases.extend(tag_rows.iter().filter_map(|row| row.alias.clone()));
@@ -570,6 +586,7 @@ pub async fn detail(
         summary,
         image,
         tags,
+        tags_total,
         acceptance,
         description,
         older_tags_only,

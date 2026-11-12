@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM cve_findings f\n           WHERE f.source_id = ?1\n             AND COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id) = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2bb4a332e6338f33586ae34de105e7318e45378dc148d776c87c02f98a28ec70"
+}

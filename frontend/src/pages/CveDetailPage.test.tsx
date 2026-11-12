@@ -45,7 +45,8 @@ function cve(over: Partial<CveDetail>): CveDetail {
     tracked_tags: 10,
     github_issue_number: null,
     github_issue_status: null,
-    tags: [{ image_tag: "1.42.0", status: "open", last_scan_at: "2026-11-03T14:58:00Z", fixed_in_version: "v0.31.0", newest_digest: true }],
+    tags_total: 1,
+    tags: [{ image: "ghcr.io/team/app", image_tag: "1.42.0", status: "open", last_scan_at: "2026-11-03T14:58:00Z", fixed_in_version: "v0.31.0", newest_digest: true }],
     acceptance: null,
     description: "Misuse may cause an authorization bypass.",
     older_tags_only: false,
@@ -86,15 +87,53 @@ describe("CveDetailPage", () => {
         open_tags: 0,
         older_tags_only: true,
         tags: [
-          { image_tag: "0.4", status: "open", last_scan_at: null, fixed_in_version: null, newest_digest: false },
-          { image_tag: "0.4.2", status: "open", last_scan_at: null, fixed_in_version: null, newest_digest: false },
-          { image_tag: "latest", status: "fixed", last_scan_at: null, fixed_in_version: null, newest_digest: true },
+          { image: "ghcr.io/team/app", image_tag: "0.4", status: "open", last_scan_at: null, fixed_in_version: null, newest_digest: false },
+          { image: "ghcr.io/team/app", image_tag: "0.4.2", status: "open", last_scan_at: null, fixed_in_version: null, newest_digest: false },
+          { image: "ghcr.io/team/app", image_tag: "latest", status: "fixed", last_scan_at: null, fixed_in_version: null, newest_digest: true },
         ],
       }),
     );
     renderWithRoutes(routes, url);
     expect(await screen.findByText(t("cves.detail.olderTagsOnly", { tags: "0.4, 0.4.2" }))).toBeInTheDocument();
     expect(screen.getAllByText(t("cves.detail.olderTag"))).toHaveLength(2);
+  });
+
+  it("tag_table_shows_image_tag_status_last_scan_fixed_in", async () => {
+    stub(
+      cve({
+        tags_total: 120,
+        tags: [
+          { image: "ghcr.io/team/app", image_tag: "1.42.0", status: "open", last_scan_at: "2026-11-03T14:58:00Z", fixed_in_version: "v0.31.0", newest_digest: true },
+          { image: "ghcr.io/team/worker", image_tag: "2.0", status: "fixed", last_scan_at: "2026-11-01T10:00:00Z", fixed_in_version: null, newest_digest: false },
+          { image: "ghcr.io/team/api", image_tag: "3.1", status: "accepted", last_scan_at: null, fixed_in_version: null, newest_digest: false },
+        ],
+      }),
+    );
+    renderWithRoutes(routes, url);
+    const table = await screen.findByRole("table");
+    const headers = within(table).getAllByRole("columnheader").map((h) => h.textContent);
+    expect(headers).toEqual([
+      t("cves.detail.col.image"),
+      t("cves.detail.col.tag"),
+      t("cves.col.status"),
+      t("cves.detail.col.lastScan"),
+      t("cves.col.fixedIn"),
+    ]);
+    const rows = within(table).getAllByRole("row");
+    expect(within(rows[1]).getByText("ghcr.io/team/app")).toBeInTheDocument();
+    expect(within(rows[1]).getByText("1.42.0")).toBeInTheDocument();
+    expect(within(rows[1]).getByText("v0.31.0")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("ghcr.io/team/worker")).toBeInTheDocument();
+    expect(within(rows[3]).getByText("ghcr.io/team/api")).toBeInTheDocument();
+    expect(screen.getByText(t("cves.detail.tagsShowing", { shown: 3, total: 120 }))).toBeInTheDocument();
+  });
+
+  it("empty_state_when_no_tags", async () => {
+    stub(cve({ tags: [], tags_total: 0 }));
+    renderWithRoutes(routes, url);
+    expect(await screen.findByText(t("cves.detail.tagsEmpty"))).toBeInTheDocument();
+    expect(screen.queryByRole("table")).toBeNull();
+    expect(screen.queryByText(/^Showing /)).toBeNull();
   });
 
   it("shows no older-tags line when the newest digest reports the CVE", async () => {
@@ -176,7 +215,9 @@ describe("CveDetailPage", () => {
     renderWithRoutes(routes, url);
     const header = await screen.findByText("Team app", { exact: false });
     expect(header.textContent).toContain("Team app");
-    expect(screen.queryByText("ghcr.io/team/app", { exact: false })).not.toBeInTheDocument();
+    // The tag table now names the image repository (#350); the header does not.
+    expect(header.closest("table")).toBeNull();
+    expect(header.textContent).not.toContain("ghcr.io/team/app");
   });
 
   it("shows the primary id as the heading and an alias line under it (#337)", async () => {
