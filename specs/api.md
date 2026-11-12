@@ -64,7 +64,7 @@ UNVERIFIED in this pass: which of these limiters is implemented on which route. 
 | POST | `/api/v1/account/password` | session | yes | Minimum 15 characters, maximum 64 (Decided 2026-11-03). Increments `token_version`. |
 | POST | `/api/v1/auth/totp/verify` | public (same-origin check, challenge cookie) | yes | Body `{"code"}`: a 6-digit TOTP code or a recovery code. Success sets the session and CSRF cookies. Every failure is the `401 invalid_credentials` of a wrong password. `429` with `Retry-After` while the account is locked (#341). |
 | GET | `/api/v1/account/totp` | session | yes | `{"enabled"}` and nothing else (#341). |
-| POST | `/api/v1/account/totp/enrol` | session | yes | `{"secret","otpauth_uri"}`, shown once. Stored sealed and disabled. `403` for an OIDC account, `409` when TOTP is on (#341). |
+| POST | `/api/v1/account/totp/enrol` | session | yes | `{"secret","otpauth_uri","qr_svg"}`, shown once; `qr_svg` is an SVG document of the URI. Stored sealed and disabled. `403` for an OIDC account, `409` when TOTP is on (#341). |
 | POST | `/api/v1/account/totp/confirm` | session | yes | Body `{"code"}`. A valid code turns TOTP on and returns `{"recovery_codes"}` (10), once. `422 validation_failed` for a wrong code (#341). |
 | POST | `/api/v1/account/totp/disable` | session | yes | Body `{"code"}`: a valid current TOTP code. `204`. `422` for a wrong code (#341). |
 

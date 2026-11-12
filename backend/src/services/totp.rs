@@ -31,6 +31,20 @@ pub const LOCKOUT_FAILURES: u32 = 5;
 pub struct Enrolment {
     pub secret: String,
     pub otpauth_uri: String,
+    /// An SVG drawing of `otpauth_uri`, for the enrolment screen. It encodes nothing the URI
+    /// does not, and is returned only by the enrol response.
+    pub qr_svg: String,
+}
+
+/// Draws `uri` as a QR code (error correction level M) and returns the `<svg>` element.
+pub fn qr_svg(uri: &str) -> Result<String, AppError> {
+    use qrcode::{EcLevel, QrCode, render::svg};
+    let code = QrCode::with_error_correction_level(uri.as_bytes(), EcLevel::M)
+        .map_err(|_| AppError::InternalError)?;
+    let document = code.render::<svg::Color>().min_dimensions(200, 200).build();
+    // Drop the `<?xml ...?>` prolog so the value is an `<svg>` element, ready to embed.
+    let start = document.find("<svg").ok_or(AppError::InternalError)?;
+    Ok(document[start..].to_owned())
 }
 
 impl std::fmt::Debug for Enrolment {
@@ -38,6 +52,7 @@ impl std::fmt::Debug for Enrolment {
         f.debug_struct("Enrolment")
             .field("secret", &"<redacted>")
             .field("otpauth_uri", &"<redacted>")
+            .field("qr_svg", &"<redacted>")
             .finish()
     }
 }
@@ -101,9 +116,11 @@ pub async fn enrol(
     }
     let secret_text = totp::base32(secret.as_slice());
     let otpauth_uri = totp::otpauth_uri(ISSUER, &user.username, &secret_text);
+    let qr_svg = qr_svg(&otpauth_uri)?;
     Ok(Enrolment {
         secret: secret_text,
         otpauth_uri,
+        qr_svg,
     })
 }
 
