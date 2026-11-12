@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM scanner_findings\n         WHERE cve_id = ?\n           AND run_id IN (\n               SELECT r.id FROM scan_runs r\n               JOIN image_platforms p ON p.id = r.image_platform_id\n               WHERE EXISTS (SELECT 1 FROM tag_observations o\n                             WHERE o.image_id = p.image_id AND o.source_id = ?)\n                 AND NOT EXISTS (SELECT 1 FROM tag_observations o\n                                 WHERE o.image_id = p.image_id AND o.source_id <> ?))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "2ddce21f25af4de0b59d0c645eeb993c07e9fb057e28fc69f1a468ac07610fa1"
+}

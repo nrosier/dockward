@@ -15,6 +15,8 @@
 use serde::Serialize;
 use sqlx::SqlitePool;
 
+use crate::services::audit::{self, Actor};
+
 use crate::db::acceptances as acceptance_db;
 use crate::db::findings::{self as db, CveListFilter, CveSummaryRow, CveTagRow};
 use crate::error::AppError;
@@ -573,6 +575,50 @@ pub async fn detail(
         older_tags_only,
         aliases: aliases.into_iter().collect(),
     })
+}
+
+/// Deletes one CVE record of one source (#349): its `cve_findings` and the `scanner_findings`
+/// of its own images, in one transaction with one `cve.delete` audit row that holds the two ids
+/// only. `404` when the source has no such record (a missing, foreign or unknown source gives
+/// the same answer); `409` while the record has an active acceptance. `github_issues` and
+/// every other source are untouched.
+pub async fn delete_record(
+    pool: &SqlitePool,
+    actor: &Actor,
+    source_id: &str,
+    cve_id: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    if source_id.is_empty()
+        || cve_id.is_empty()
+        || source_id.len() > MAX_ID_BYTES
+        || cve_id.len() > MAX_ID_BYTES
+    {
+        return Err(AppError::NotFound);
+    }
+    let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
+    if !db::record_exists(&mut tx, source_id, cve_id).await? {
+        return Err(AppError::NotFound);
+    }
+    if acceptance_db::active(&mut tx, source_id, cve_id, now)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict(
+            "Revoke the acceptance before deleting this CVE record.".to_owned(),
+        ));
+    }
+    db::delete_for_source(&mut tx, source_id, cve_id).await?;
+    db::delete_scanner_findings_for_source(&mut tx, source_id, cve_id).await?;
+    audit::record(
+        &mut tx,
+        actor,
+        "cve.delete",
+        &format!("source:{source_id}"),
+        Some(&serde_json::json!({"source_id": source_id, "cve_id": cve_id})),
+    )
+    .await?;
+    tx.commit().await.map_err(|_| AppError::InternalError)
 }
 
 #[cfg(test)]
