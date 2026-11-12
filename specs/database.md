@@ -5,7 +5,7 @@ Purpose: schema reference for dockward 0.2.0's SQLite database, and the decision
 ## Source of truth
 
 - `backend/migrations/0001_init.sql` is the schema. It is the only migration. The tables below describe it; if they disagree, the migration wins and this file is corrected.
-- Migration `0007_manual_trigger.sql` (#335) adds `manual` to the `scan_runs.trigger` CHECK. SQLite cannot alter a CHECK, so it rebuilds `scan_runs` (copying every row with its `rowid`), then recreates `idx_scan_runs_current`, `newest_digest_tags` and `tag_scan_times` as in 0001. It starts with `-- no-transaction`: `PRAGMA foreign_keys` is a no-op inside a transaction, and foreign keys must be OFF while the old table is dropped, or the drop cascades into `scanner_findings`. The rebuild runs in its own `BEGIN`/`COMMIT` and ends with `PRAGMA foreign_key_check`.
+- Migration `0008_manual_trigger.sql` (#335) adds `manual` to the `scan_runs.trigger` CHECK. SQLite cannot alter a CHECK, so it rebuilds `scan_runs` (copying every row with its `rowid`), then recreates `idx_scan_runs_current`, `newest_digest_tags` and `tag_scan_times` as in 0001. It starts with `-- no-transaction`: `PRAGMA foreign_keys` is a no-op inside a transaction, and foreign keys must be OFF while the old table is dropped, or the drop cascades into `scanner_findings`. The rebuild runs in its own `BEGIN`/`COMMIT` and ends with `PRAGMA foreign_key_check`.
 - Fresh install only (decisions 21, 56). There is no import from a HarborGate database and no data migration. A database file that contains the `repo_mappings` table is refused at pool open with the fixed error `this database was created by HarborGate and cannot be used by this version` (`backend/src/db/mod.rs`). The database file is `<data dir>/dockward.db`.
 - SQLx SQLite with WAL mode. Use `SqlitePool`. Every connection sets `PRAGMA foreign_keys = ON`.
 - SQLite does not enforce foreign keys unless the pragma is on. NULL values are distinct for UNIQUE constraints.
@@ -49,7 +49,7 @@ Column names that changed from HarborGate: `sync_job_id` is `job_id` where it na
 - `image_sources`: `UNIQUE (hub_id, repository, tag_value)`. This is the source identity (decisions 33, 37). The same repository on two hubs is two sources. No user is part of the key. `github_cred_id` is `NOT NULL` with `ON DELETE RESTRICT`. `min_issue_severity` is `CRITICAL` or `HIGH`.
 - `source_credentials`: `source_id` UNIQUE. Ciphertext AAD `source_credentials:encrypted_token:<id>` (decision 35).
 - `image_platforms`: `UNIQUE (image_id, platform_digest)`. `pulled_at` is the eviction clock. Index `idx_image_platforms_evict` on `(state, pulled_at, id)`.
-- `scan_runs`: `trigger` is `first_pull`, `tag_moved`, `db_update`, or `manual` (a forced scan from the source page, #335; migration `0007_manual_trigger.sql`). `job_id` is `ON DELETE SET NULL`.
+- `scan_runs`: `trigger` is `first_pull`, `tag_moved`, `db_update`, or `manual` (a forced scan from the source page, #335; migration `0008_manual_trigger.sql`). `job_id` is `ON DELETE SET NULL`.
 - `scanner_findings`: `package` is `''` when the scanner gives none. `severity` is one of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `UNKNOWN`. `description` is at most 4,000 characters.
 - `publish_reports`: `source_id` cascades. `image_id` and `job_id` are `ON DELETE SET NULL`.
 - `github_issues`: `UNIQUE (github_owner, github_repo, cve_id)`. `closed_manually` is `0` or `1`. Rows are never deleted by retention or by a source delete.

@@ -393,10 +393,10 @@ mod tests {
         Ok(())
     }
 
-    /// Migration 0007 rebuilds `scan_runs`: runs and their findings written before it survive,
+    /// Migration 0008 rebuilds `scan_runs`: runs and their findings written before it survive,
     /// the index and both views are back, and the foreign keys are still enforced afterwards.
     #[tokio::test]
-    async fn migration_0007_keeps_runs_findings_index_and_views() -> Result<(), AppError> {
+    async fn migration_0008_keeps_runs_findings_index_and_views() -> Result<(), AppError> {
         let options = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -433,6 +433,13 @@ mod tests {
             .await
             .map_err(|_| AppError::InternalError)?;
         assert_eq!((runs, findings), (1, 1));
+        // Every migration applied, in order: 0007 (aliases) then 0008 (manual trigger).
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .map_err(|_| AppError::InternalError)?;
+        assert_eq!(versions, (1..=8).collect::<Vec<i64>>());
         let names: Vec<(String,)> = sqlx::query_as(
             "SELECT name FROM sqlite_master
              WHERE name IN ('idx_scan_runs_current', 'newest_digest_tags', 'tag_scan_times',
