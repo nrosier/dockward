@@ -12,7 +12,7 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ### Changed
 - An accepted CVE whose GitHub issue is closed stays closed when the CVE returns. No reopen call and no comment are made (PR #325, #196).
-- The CVE list and the Jobs page take each row's repository from the source lookup, and the Mapping filter is a source by display name (PR #327, PR #328, #323).
+- The CVE list and the Jobs page take each row's repository from the source lookup. The Mapping filter sends the source id (PR #327, PR #328, PR #329, #323).
 
 ### Fixed
 - The Jobs Mapping filter sends `source_id`, the key the jobs route reads, so the filter applies (PR #328, #323).
