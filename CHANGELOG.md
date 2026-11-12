@@ -2,6 +2,14 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
+## 0.4.1 - 2026-11-12
+
+### Changed
+- Creating a source, or changing its repository, tag pattern or hub, queues discovery for it at once, instead of waiting for the next hourly pass. A rename on its own queues nothing, and a failed earlier discovery of the same repository no longer blocks a new source (PR #332, #331).
+
+### Upgrade notes
+- Sources already added keep showing "last discovery: not yet" until they are saved again or the hourly pass runs. Saving a source queues discovery only if its repository, tag pattern or hub changed.
+
 ## 0.4.0 - 2026-11-12
 
 ### Added
