@@ -852,6 +852,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #350: the detail lists every tag of the source that carries the CVE, on every image,
+    /// not only the tags of the newest scanned digest.
+    #[tokio::test]
+    async fn detail_lists_every_image_and_tag_where_the_cve_was_found() {
+        let (state, dir, _, _) = setup("detail-every-image").await;
+        report_on(&state, "m1", "0.4", "sha256:old", 1000).await;
+        report_on(&state, "m1", "latest", "sha256:new", 2000).await;
+        seen(&state, "m1", "0.4", "CVE-2026-0001", "HIGH", 1000).await;
+        seen(&state, "m1", "latest", "CVE-2026-0001", "HIGH", 2000).await;
+
+        let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        let rows: Vec<(&str, &str, &str)> = detail
+            .tags
+            .iter()
+            .map(|t| (t.image.as_str(), t.image_tag.as_str(), t.status.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("ghcr.io/m1", "latest", "open"),
+                ("ghcr.io/m1", "0.4", "open")
+            ]
+        );
+        assert_eq!(detail.tags_total, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #350: a tag whose scan no longer reports the CVE keeps its row, shown as fixed.
+    #[tokio::test]
+    async fn a_tag_that_stopped_reporting_the_cve_shows_as_fixed() {
+        let (state, dir, _, _) = setup("detail-stopped").await;
+        report_on(&state, "m1", "0.4", "sha256:old", 1000).await;
+        report_on(&state, "m1", "latest", "sha256:new", 2000).await;
+        seen(&state, "m1", "0.4", "CVE-2026-0001", "HIGH", 1000).await;
+        seen(&state, "m1", "latest", "CVE-2026-0001", "HIGH", 2000).await;
+        fix(&state, "m1", "0.4", "CVE-2026-0001").await;
+
+        let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        let rows: Vec<(&str, &str)> = detail
+            .tags
+            .iter()
+            .map(|t| (t.image_tag.as_str(), t.status.as_str()))
+            .collect();
+        assert_eq!(rows, [("latest", "open"), ("0.4", "fixed")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #350: newest scan first, at most 100 rows, and the total of all rows.
+    #[tokio::test]
+    async fn tags_are_newest_first_and_capped_with_a_total() {
+        let (state, dir, _, _) = setup("detail-capped").await;
+        for n in 0..105_i64 {
+            let tag = format!("t{n:03}");
+            report_on(&state, "m1", &tag, &format!("sha256:{n}"), 1000 + n).await;
+            seen(&state, "m1", &tag, "CVE-2026-0001", "HIGH", 1000 + n).await;
+        }
+        let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        assert_eq!(detail.tags.len(), 100);
+        assert_eq!(detail.tags_total, 105);
+        assert_eq!(detail.tags[0].image_tag, "t104");
+        assert_eq!(detail.tags[99].image_tag, "t005");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #350: `open_tags` counts open tags of the newest digest, as before; the table lists more.
+    /// The difference is stated in `specs/cve-lifecycle.md` ("CVE detail tag table"). The
+    /// newest-digest rows of the table match the counts.
+    #[tokio::test]
+    async fn counts_match_the_listed_rows_or_the_spec_says_why() {
+        let (state, dir, _, _) = setup("detail-counts").await;
+        report_on(&state, "m1", "0.4", "sha256:old", 1000).await;
+        report_on(&state, "m1", "latest", "sha256:new", 2000).await;
+        report_on(&state, "m1", "0.5", "sha256:new", 2000).await;
+        for (tag, at) in [("0.4", 1000), ("latest", 2000), ("0.5", 2000)] {
+            seen(&state, "m1", tag, "CVE-2026-0001", "HIGH", at).await;
+        }
+        let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        let newest_open = detail
+            .tags
+            .iter()
+            .filter(|t| t.newest_digest && t.status == "open")
+            .count() as i64;
+        assert_eq!(detail.summary.open_tags, newest_open);
+        assert_eq!(detail.summary.open_tags, 2);
+        assert_eq!(detail.tags_total, 3, "the table also lists the older tag");
+        let spec = include_str!("../../../specs/cve-lifecycle.md");
+        assert!(spec.contains("CVE detail tag table"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn detail_lists_tags_and_acceptance() {
         let (state, dir, _, _) = setup("read-detail").await;
@@ -946,7 +1036,7 @@ mod tests {
         assert!(detail.acceptance.is_none());
         assert!(!detail.summary.accepted);
 
-        // At most 10 tags.
+        // Every tag is listed (#350; the cap is 100).
         for n in 4..=12 {
             seen(
                 &state,
@@ -959,7 +1049,8 @@ mod tests {
             .await;
         }
         let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
-        assert_eq!(detail.tags.len(), 10);
+        assert_eq!(detail.tags.len(), 12);
+        assert_eq!(detail.tags_total, 12);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -547,6 +547,8 @@ pub async fn count_cves(pool: &SqlitePool, filter: &CveListFilter<'_>) -> Result
 /// One tag that reports a CVE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CveTagRow {
+    /// `<hub host>/<repository>` of the source (#350).
+    pub image: String,
     pub image_tag: String,
     /// `open` or `fixed`.
     pub status: String,
@@ -561,9 +563,30 @@ pub struct CveTagRow {
     pub newest_digest: bool,
 }
 
-/// The mapping's tags that report the CVE, most recently scanned first, at most 10. The
-/// order matches [`list_cves`], so the first row is the tag the summary takes its
-/// `package` and `fixed_in_version` from.
+/// The most tag rows the CVE detail returns (#350).
+pub const CVE_TAGS_CAP: i64 = 100;
+
+/// How many tags of the source carry a row for the CVE: the total behind [`cve_tags`] (#350).
+pub async fn cve_tags_total(
+    pool: &SqlitePool,
+    source_id: &str,
+    cve_id: &str,
+) -> Result<i64, AppError> {
+    sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM cve_findings f
+           WHERE f.source_id = ?1
+             AND COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id) = ?2"#,
+        source_id,
+        cve_id
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Every tag of the source that has a row for the CVE, on any image, `fixed` ones included,
+/// most recently scanned first, at most [`CVE_TAGS_CAP`] (#350). The order matches [`list_cves`],
+/// so the first row is the tag the summary takes its `package` and `fixed_in_version` from.
 pub async fn cve_tags(
     pool: &SqlitePool,
     source_id: &str,
@@ -571,13 +594,16 @@ pub async fn cve_tags(
 ) -> Result<Vec<CveTagRow>, AppError> {
     sqlx::query_as!(
         CveTagRow,
-        r#"SELECT f.image_tag AS "image_tag!: String", f.status AS "status!: String",
+        r#"SELECT h.host || '/' || m.repository AS "image!: String",
+                  f.image_tag AS "image_tag!: String", f.status AS "status!: String",
                   f.fixed_in_version AS "fixed_in_version?: String",
                   f.description AS "description?: String",
                   f.alias AS "alias?: String",
                   ts.scan_at AS "last_scan_at?: i64",
                   (nd.image_tag IS NOT NULL) AS "newest_digest!: bool"
            FROM cve_findings f
+           JOIN image_sources m ON m.id = f.source_id
+           JOIN hubs h ON h.id = m.hub_id
            LEFT JOIN newest_digest_tags nd
                   ON nd.source_id = f.source_id AND nd.image_tag = f.image_tag
            LEFT JOIN (
@@ -587,9 +613,10 @@ pub async fn cve_tags(
              AND COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id) = ?2
            ORDER BY COALESCE(ts.scan_at, -1) DESC, COALESCE(ts.seen_at, -1) DESC,
                     f.last_seen_at DESC, f.id DESC
-           LIMIT 10"#,
+           LIMIT ?3"#,
         source_id,
-        cve_id
+        cve_id,
+        CVE_TAGS_CAP
     )
     .fetch_all(pool)
     .await

@@ -84,8 +84,10 @@ export interface CveSummary {
 }
 
 export interface CveTag {
+  // The image repository, `<hub host>/<repository>` (#350).
+  image: string;
   image_tag: string;
-  status: "open" | "fixed";
+  status: "open" | "fixed" | "accepted";
   last_scan_at: string | null;
   fixed_in_version: string | null;
   // True for a tag of the mapping's newest scanned digest (#196).
@@ -105,7 +107,10 @@ export interface Acceptance {
 export interface CveDetail extends CveSummary {
   // The image the CVE is for: the newest tag's `<hub host>/<repository>:<tag>` (#323).
   image: string | null;
+  // Every tag with a row for the CVE, newest scan first, at most 100 (#350).
   tags: CveTag[];
+  // How many tags carry the CVE before the cap.
+  tags_total: number;
   acceptance: Acceptance | null;
   description: string | null;
   // No newest-digest row is open, but a row on an older tag is (#196).

@@ -228,35 +228,48 @@ export default function CveDetailPage() {
             {t("cves.detail.tagsNote", { open: cve.open_tags, tracked: cve.tracked_tags })}
           </span>
         </div>
-        <TableScroll label={t("cves.detail.tags")}>
-          <table className={TABLE}>
-            <thead>
-              <tr>
-                <th className={TH}>{t("cves.detail.col.tag")}</th>
-                <th className={TH}>{t("cves.col.status")}</th>
-                <th className={TH}>{t("cves.detail.col.lastScan")}</th>
-                <th className={TH}>{t("cves.col.fixedIn")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {cve.tags.map((tag) => (
-                <tr key={tag.image_tag}>
-                  <td className={`${TD} font-mono text-[13px]`}>
-                    {tag.image_tag}
-                    {tag.newest_digest ? null : <span className="ml-2 font-sans text-muted">{t("cves.detail.olderTag")}</span>}
-                  </td>
-                  <td className={TD}>
-                    <Pill kind={tag.status === "fixed" ? "fixed" : "open"} />
-                  </td>
-                  <td className={`${TD} text-muted`}>
-                    <Time iso={tag.last_scan_at} />
-                  </td>
-                  <td className={`${TD} font-mono text-[12.5px]`}>{tag.fixed_in_version ?? t("cves.unknown")}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </TableScroll>
+        {cve.tags.length === 0 ? (
+          <p className="px-[18px] pb-4 text-[13px] text-muted">{t("cves.detail.tagsEmpty")}</p>
+        ) : (
+          <>
+            <TableScroll label={t("cves.detail.tags")}>
+              <table className={TABLE}>
+                <thead>
+                  <tr>
+                    <th className={TH}>{t("cves.detail.col.image")}</th>
+                    <th className={TH}>{t("cves.detail.col.tag")}</th>
+                    <th className={TH}>{t("cves.col.status")}</th>
+                    <th className={TH}>{t("cves.detail.col.lastScan")}</th>
+                    <th className={TH}>{t("cves.col.fixedIn")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cve.tags.map((tag) => (
+                    <tr key={`${tag.image}:${tag.image_tag}`}>
+                      <td className={`${TD} font-mono text-[12.5px]`}>{tag.image}</td>
+                      <td className={`${TD} font-mono text-[13px]`}>
+                        {tag.image_tag}
+                        {tag.newest_digest ? null : <span className="ml-2 font-sans text-muted">{t("cves.detail.olderTag")}</span>}
+                      </td>
+                      <td className={TD}>
+                        <Pill kind={tag.status} />
+                      </td>
+                      <td className={`${TD} text-muted`}>
+                        <Time iso={tag.last_scan_at} />
+                      </td>
+                      <td className={`${TD} font-mono text-[12.5px]`}>{tag.fixed_in_version ?? t("cves.unknown")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </TableScroll>
+            {cve.tags_total > cve.tags.length ? (
+              <p className="px-[18px] py-3 text-[12.5px] text-muted">
+                {t("cves.detail.tagsShowing", { shown: cve.tags.length, total: cve.tags_total })}
+              </p>
+            ) : null}
+          </>
+        )}
       </Panel>
 
       {admin ? (
