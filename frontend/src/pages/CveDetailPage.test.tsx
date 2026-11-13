@@ -2,6 +2,7 @@ import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { t } from "../i18n";
+import { formatDate } from "../components/jobs/dates";
 import { json, renderWithRoutes, stubApi, user } from "../test/render";
 import type { CveDetail } from "../types/api";
 import type { Source } from "../types/sources";
@@ -55,8 +56,18 @@ function cve(over: Partial<CveDetail>): CveDetail {
   };
 }
 
-function stub(detail: CveDetail, onAccept?: (body: unknown) => void, onIssue?: (path: string) => void, sourceOverride: Source = source) {
+function stub(
+  detail: CveDetail,
+  onAccept?: (body: unknown) => void,
+  onIssue?: (path: string) => void,
+  sourceOverride: Source = source,
+  onUnaccept?: () => void,
+) {
   return stubApi((path, init) => {
+    if (path === "/api/v1/cves/m1%3ACVE-2026-0001/unaccept" && init?.method === "POST") {
+      onUnaccept?.();
+      return json({}, 200);
+    }
     if (path === "/api/v1/account/me") return json({ user: user("user") });
     if (path === "/api/v1/cves/m1%3ACVE-2026-0001" && init?.method === "GET") return json(detail);
     if (path === "/api/v1/cves/m1%3ACVE-2026-0001/issue" && init?.method === "POST") {
@@ -352,3 +363,81 @@ describe("CveDetailPage delete (#349)", () => {
   });
 });
 
+describe("CveDetailPage acceptance note (#351)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("accept_submits_with_an_empty_note", async () => {
+    const accepted = vi.fn();
+    stub(cve({}), accepted);
+    renderWithRoutes(routes, url);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.accept") }));
+    await screen.findByLabelText(t("cves.accept.reason"));
+    await userEvent.click(screen.getByRole("button", { name: t("cves.accept.submit") }));
+    await vi.waitFor(() => expect(accepted).toHaveBeenCalledTimes(1));
+    expect(accepted).toHaveBeenCalledWith({ reason: "", expires_at: null });
+  });
+
+  it("accept_sends_the_note_as_entered", async () => {
+    const accepted = vi.fn();
+    stub(cve({}), accepted);
+    renderWithRoutes(routes, url);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.accept") }));
+    await userEvent.type(await screen.findByLabelText(t("cves.accept.reason")), "Vendor patch next sprint");
+    await userEvent.click(screen.getByRole("button", { name: t("cves.accept.submit") }));
+    await vi.waitFor(() => expect(accepted).toHaveBeenCalledTimes(1));
+    expect(accepted).toHaveBeenCalledWith({ reason: "Vendor patch next sprint", expires_at: null });
+  });
+
+  it("detail_shows_the_note_and_who_and_when", async () => {
+    stub(
+      cve({
+        accepted: true,
+        acceptance: {
+          id: "a1",
+          mapping_id: "m1",
+          cve_id: "CVE-2026-0001",
+          reason: "Not reachable in this service",
+          created_by: "alice",
+          created_at: "2026-11-05T10:00:00Z",
+          expires_at: null,
+        },
+      }),
+    );
+    renderWithRoutes(routes, url);
+    expect(await screen.findByText("Not reachable in this service")).toBeInTheDocument();
+    expect(screen.getByText(t("cves.detail.acceptedBy", { user: "alice" }))).toBeInTheDocument();
+    expect(screen.getByText(t("cves.detail.acceptedAt", { date: formatDate("2026-11-05T10:00:00Z") }))).toBeInTheDocument();
+  });
+
+  it("detail_shows_a_placeholder_for_an_empty_note", async () => {
+    stub(
+      cve({
+        accepted: true,
+        acceptance: {
+          id: "a1",
+          mapping_id: "m1",
+          cve_id: "CVE-2026-0001",
+          reason: "",
+          created_by: "alice",
+          created_at: "2026-11-05T10:00:00Z",
+          expires_at: null,
+        },
+      }),
+    );
+    renderWithRoutes(routes, url);
+    expect(await screen.findByText(t("cves.detail.noNote"))).toBeInTheDocument();
+  });
+
+  it("un_accept_sends_nothing_until_confirmed", async () => {
+    const unaccepted = vi.fn();
+    stub(cve({ accepted: true }), undefined, undefined, source, unaccepted);
+    renderWithRoutes(routes, url);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.unaccept") }));
+    const dialog = await screen.findByRole("dialog");
+    expect(unaccepted).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole("button", { name: t("cves.detail.unaccept") }));
+    await vi.waitFor(() => expect(unaccepted).toHaveBeenCalledTimes(1));
+  });
+});

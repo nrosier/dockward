@@ -166,7 +166,7 @@ pub struct Accepted {
 /// `POST /api/v1/cves/:id/accept`. `:id` is `<mapping_id>:<cve_id>`; the body is
 /// `{"reason","expires_at"}`. The caller must own the mapping. Returns `201`; `400` for a body
 /// that is not JSON; `404` for an unknown or foreign mapping or CVE; `409` when the CVE is
-/// already accepted; `422` for an empty reason or a past expiry.
+/// already accepted; `422` for a reason over 1000 characters or a past expiry.
 pub async fn accept(
     State(state): State<AppState>,
     user: AuthUser,
@@ -2452,6 +2452,73 @@ mod tests {
         tags.sort_unstable();
         assert_eq!(tags, vec!["v1", "v2"]);
         assert_eq!(detail.summary.open_tags, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #337: one CVE found on two images of one source is one record, with one tag row per
+    /// tag, attached to both images.
+    #[tokio::test]
+    async fn one_cve_on_two_images_of_a_source_is_one_record_attached_to_both() {
+        let (state, dir, _, _) = setup("two-images-one-record").await;
+        observe(&state, "m1", "v1", "sha256:aa", 100, 100, "done").await;
+        observe(&state, "m1", "v2", "sha256:bb", 200, 200, "done").await;
+        stored(&state, "v1", "CVE-2026-0001", None, 100).await;
+        stored(&state, "v2", "CVE-2026-0001", None, 200).await;
+        let images: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT image_id) FROM tag_observations WHERE source_id = 'm1'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(images, 2, "the tags sit on two different images");
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cve_findings WHERE source_id = 'm1' AND cve_id = 'CVE-2026-0001'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 2, "one identity per tag, no duplicate per tag");
+        let page = by_mapping(&state, &user("u1"), "m1", "").await.unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        let mut tags: Vec<&str> = detail.tags.iter().map(|t| t.image_tag.as_str()).collect();
+        tags.sort_unstable();
+        assert_eq!(tags, vec!["v1", "v2"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #337: an acceptance on source A does not hide the same CVE on source B.
+    #[tokio::test]
+    async fn one_sources_acceptance_does_not_hide_another_sources_findings() {
+        let (state, dir, _, _) = setup("acceptance-per-source").await;
+        seed_source(&state.pool, "u1", "m2", "cg", "octo", "second").await;
+        seen_pkg(&state, "m1", "v1", "CVE-2026-0001", "HIGH", "openssl").await;
+        seen_pkg(&state, "m2", "v1", "CVE-2026-0001", "HIGH", "openssl").await;
+        sqlx::query(
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username)
+             VALUES ('a1', 'm1', 'CVE-2026-0001', 'accepted on m1 only', 'u1', 'u1')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let me = user("u1");
+        let a = one(&state, &me, "m1:CVE-2026-0001").await.unwrap();
+        let b = one(&state, &me, "m2:CVE-2026-0001").await.unwrap();
+        assert!(a.summary.accepted && a.acceptance.is_some());
+        assert!(!b.summary.accepted, "source B is not accepted");
+        assert!(b.acceptance.is_none());
+        let open_b = by_mapping(&state, &me, "m2", "accepted=false")
+            .await
+            .unwrap();
+        assert_eq!(
+            open_b.total, 1,
+            "source B still lists the CVE as not accepted"
+        );
+        let accepted_b = by_mapping(&state, &me, "m2", "accepted=true")
+            .await
+            .unwrap();
+        assert_eq!(accepted_b.total, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

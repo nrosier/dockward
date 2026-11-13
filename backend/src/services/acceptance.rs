@@ -22,7 +22,7 @@ use crate::services::credentials::decrypt_token;
 use crate::services::issue_lifecycle::IssueApi;
 use crate::services::{ids, time};
 
-/// The longest reason, in characters (`specs/api.md`, accept).
+/// The longest reason, in characters (`specs/api.md`, accept). The reason may be empty (#351).
 const MAX_REASON_CHARS: usize = 1000;
 
 /// `9999-12-31T23:59:59Z`, the last instant [`time::rfc3339`] can format.
@@ -202,7 +202,12 @@ pub(crate) fn parse_rfc3339(text: &str) -> Option<i64> {
 /// The text of the comment on an open issue. `@` is followed by a zero-width space, so the
 /// reason cannot mention a GitHub user or team.
 fn comment_text(username: &str, reason: &str) -> String {
-    format!("Risk accepted by {username}: {reason}").replace('@', "@\u{200b}")
+    let text = if reason.is_empty() {
+        format!("Risk accepted by {username}.")
+    } else {
+        format!("Risk accepted by {username}: {reason}")
+    };
+    text.replace('@', "@\u{200b}")
 }
 
 /// The audit target for a CVE on a source: the route id.
@@ -233,7 +238,7 @@ async fn begin(pool: &SqlitePool) -> Result<sqlx::Transaction<'static, sqlx::Sql
 ///
 /// - `404` for a malformed id, a source the caller does not own, or a CVE the source has
 ///   no finding for.
-/// - `422` for an empty reason, a reason over 1000 characters, an `expires_at` that is not an
+/// - `422` for a reason over 1000 characters, an `expires_at` that is not an
 ///   RFC 3339 time, or one that is not in the future.
 /// - One transaction: an expired but unrevoked acceptance of the CVE is revoked first, with
 ///   `revoked_by` the caller, and audited as `cve.unaccept` (`{"reason":"expired",
@@ -260,11 +265,6 @@ pub async fn accept<G: IssueApi>(
     let cve_id = primary.as_str();
 
     let reason = input.reason.trim();
-    if reason.is_empty() {
-        return Err(AppError::ValidationFailed(
-            "A reason is required.".to_owned(),
-        ));
-    }
     if reason.chars().count() > MAX_REASON_CHARS {
         return Err(AppError::ValidationFailed(format!(
             "The reason can have at most {MAX_REASON_CHARS} characters."
@@ -723,26 +723,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_reason_and_past_expiry_are_422() {
+    async fn empty_reason_is_allowed_and_a_past_expiry_is_422() {
         let f = Fixture::new("validation").await;
-        let too_long = "x".repeat(1001);
         let exactly = "x".repeat(1000);
-        let cases: [(&str, Option<&str>); 7] = [
-            ("", None),
-            ("   ", None),
-            (too_long.as_str(), None),
-            ("reason", Some("1970-01-01T00:00:00Z")),
-            ("reason", Some("1970-01-12T13:46:40Z")), // exactly NOW: not in the future
-            ("reason", Some("not a date")),
-            ("reason", Some("2026-02-30T00:00:00Z")),
+        let cases: [Option<&str>; 4] = [
+            Some("1970-01-01T00:00:00Z"),
+            Some("1970-01-12T13:46:40Z"), // exactly NOW: not in the future
+            Some("not a date"),
+            Some("2026-02-30T00:00:00Z"),
         ];
-        for (reason, expires_at) in cases {
-            let error = f.accept("u1", ID, reason, expires_at).await.unwrap_err();
+        for expires_at in cases {
+            let error = f.accept("u1", ID, "reason", expires_at).await.unwrap_err();
             assert_eq!(
                 error.status(),
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "reason of {} chars, expires_at {expires_at:?}",
-                reason.len()
+                "expires_at {expires_at:?}"
             );
         }
         assert_eq!(f.count("SELECT COUNT(*) FROM cve_acceptances").await, 0);
@@ -757,6 +752,80 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored, Some(NOW + 1));
+    }
+
+    #[tokio::test]
+    async fn accept_with_an_empty_note_succeeds() {
+        let f = Fixture::new("empty-note").await;
+        for note in ["", "   "] {
+            let accepted = f.accept("u1", ID, note, None).await.unwrap();
+            assert_eq!(accepted.reason, "");
+            f.unaccept("u1", ID, NOW + 1).await.unwrap();
+        }
+        let stored: String = sqlx::query_scalar("SELECT reason FROM cve_acceptances LIMIT 1")
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, "");
+    }
+
+    #[tokio::test]
+    async fn a_note_over_1000_characters_is_refused() {
+        let f = Fixture::new("long-note").await;
+        let error = f
+            .accept("u1", ID, &"x".repeat(1001), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(f.count("SELECT COUNT(*) FROM cve_acceptances").await, 0);
+    }
+
+    #[tokio::test]
+    async fn detail_shows_the_active_acceptance_note_and_who_and_when() {
+        let f = Fixture::new("detail-note").await;
+        f.accept("u1", ID, "vendor patch is scheduled", None)
+            .await
+            .unwrap();
+        let reader = crate::services::cves::Reader {
+            user_id: "u1",
+            is_admin: false,
+        };
+        let detail = crate::services::cves::detail(&f.state.pool, &reader, ID, NOW + 1)
+            .await
+            .unwrap();
+        let acceptance = detail.acceptance.unwrap();
+        assert_eq!(acceptance.reason, "vendor patch is scheduled");
+        assert_eq!(acceptance.created_by, "u1");
+        assert_eq!(
+            acceptance.created_at.as_deref(),
+            Some(time::rfc3339(NOW).unwrap().as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn un_accept_makes_the_cve_active_again_and_audits_it() {
+        let f = Fixture::new("unaccept-active").await;
+        f.accept("u1", ID, "", None).await.unwrap();
+        let reader = crate::services::cves::Reader {
+            user_id: "u1",
+            is_admin: false,
+        };
+        let before = crate::services::cves::detail(&f.state.pool, &reader, ID, NOW + 1)
+            .await
+            .unwrap();
+        assert!(before.summary.accepted);
+
+        f.unaccept("u1", ID, NOW + 2).await.unwrap();
+
+        let after = crate::services::cves::detail(&f.state.pool, &reader, ID, NOW + 3)
+            .await
+            .unwrap();
+        assert!(!after.summary.accepted);
+        assert!(after.acceptance.is_none());
+        let audited = f
+            .count("SELECT COUNT(*) FROM audit_log WHERE action = 'cve.unaccept' AND actor_username = 'u1'")
+            .await;
+        assert_eq!(audited, 1);
     }
 
     #[tokio::test]
