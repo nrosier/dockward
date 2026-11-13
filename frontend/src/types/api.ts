@@ -146,6 +146,8 @@ export interface Job {
   trigger: string;
   // True when the finished job produced nothing new, for example an unchanged pull.
   empty?: boolean;
+  // The kind of work the job does (discover, pull, scan, publish, db_update, cleanup, retention).
+  kind?: string | null;
   // The scanner a db_update job refreshes ("trivy" or "grype"). Absent on other jobs.
   scanner?: string | null;
   image: {

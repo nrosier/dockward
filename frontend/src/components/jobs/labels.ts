@@ -1,14 +1,15 @@
 import { t, type MessageKey } from "../../i18n";
 import type { Job } from "../../types/api";
+import { shortDigest } from "../ui/ShaBadge";
 
 // The label for a job's trigger, from the payload. A trigger the client does not know shows as
 // its raw value, never as a made-up label: an unknown trigger is shown, not hidden as Webhook.
 export function triggerLabel(trigger: Job["trigger"] | null | undefined): string {
   const keys: Record<string, MessageKey> = {
     discovery: "jobs.trigger.discovery",
-    first_pull: "jobs.trigger.firstPull",
-    tag_moved: "jobs.trigger.tagMoved",
-    db_update: "jobs.trigger.dbUpdate",
+    first_pull: "jobs.trigger.onPull",
+    tag_moved: "jobs.trigger.onTag",
+    db_update: "jobs.trigger.scheduledDbUpdate",
     manual: "jobs.trigger.manual",
     scheduled: "jobs.trigger.scheduled",
   };
@@ -18,6 +19,46 @@ export function triggerLabel(trigger: Job["trigger"] | null | undefined): string
   }
   const key = keys[trigger];
   return key === undefined ? trigger : t(key);
+}
+
+function imageName(job: Job): string | null {
+  const { repo_full_name: repo, tag } = job.image;
+  if (repo === null) {
+    return null;
+  }
+  return tag === null ? repo : `${repo}:${tag}`;
+}
+
+// What a job did, named by its kind. Never empty: a missing detail drops to the plain phrase.
+export function jobSubject(job: Job): string {
+  const image = imageName(job);
+  switch (job.kind) {
+    case "db_update": {
+      const scanner = scannerLabel(job.scanner);
+      return scanner === null ? t("jobs.subject.dbUpdate") : t("jobs.subject.dbUpdateScanner", { scanner });
+    }
+    case "pull": {
+      if (image !== null) {
+        return t("jobs.subject.pulled", { image });
+      }
+      const digest = job.image.digest;
+      return digest === null ? t("jobs.subject.pulledPlain") : t("jobs.subject.pulled", { image: shortDigest(digest) });
+    }
+    case "scan":
+      return image === null ? t("jobs.subject.scannedPlain") : t("jobs.subject.scanned", { image });
+    case "discover": {
+      const repo = job.image.repo_full_name;
+      return repo === null ? t("jobs.subject.discoveryPlain") : t("jobs.subject.discovery", { repo });
+    }
+    case "publish":
+      return image === null ? t("jobs.subject.publishedPlain") : t("jobs.subject.published", { image });
+    case "cleanup":
+      return t("jobs.subject.cleanup");
+    case "retention":
+      return t("jobs.subject.retention");
+    default:
+      return t("jobs.subject.unknown");
+  }
 }
 
 // Fixed notes and messages the server keeps in last_error, shown as catalog text. Any other

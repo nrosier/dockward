@@ -77,7 +77,7 @@ describe("JobsPage", () => {
     });
     renderAt(<JobsPage />);
     expect(await screen.findByRole("checkbox", { name: t("jobs.filter.hideEmpty") })).not.toBeChecked();
-    expect(await screen.findByText(t("jobs.trigger.firstPull"))).toBeInTheDocument();
+    expect(await screen.findByText(t("jobs.trigger.onPull"))).toBeInTheDocument();
     const jobCalls = fetchMock.mock.calls.map(([path]) => String(path)).filter((path) => path.includes("/jobs?"));
     expect(jobCalls.length).toBeGreaterThan(0);
     expect(jobCalls.some((path) => path.includes("hide_empty"))).toBe(false);
@@ -95,9 +95,9 @@ describe("JobsPage", () => {
       return undefined;
     });
     renderAt(<JobsPage />);
-    expect(await screen.findByText(t("jobs.trigger.firstPull"))).toBeInTheDocument();
+    expect(await screen.findByText(t("jobs.trigger.onPull"))).toBeInTheDocument();
     await userEvent.click(screen.getByRole("checkbox", { name: t("jobs.filter.hideEmpty") }));
-    await waitFor(() => expect(screen.queryByText(t("jobs.trigger.firstPull"))).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText(t("jobs.trigger.onPull"))).not.toBeInTheDocument());
     expect(screen.getByText(t("jobs.trigger.discovery"))).toBeInTheDocument();
   });
 
@@ -125,7 +125,7 @@ describe("JobsPage", () => {
     ]);
     renderAt(<JobsPage />);
     const table = await screen.findByRole("table");
-    expect(await within(table).findAllByText(t("jobs.trigger.dbUpdate"))).toHaveLength(2);
+    expect(await within(table).findAllByText(t("jobs.trigger.scheduledDbUpdate"))).toHaveLength(2);
     expect(within(table).getByText(t("jobs.newVulns", { ids: "CVE-2026-0003, CVE-2026-0004" }))).toBeInTheDocument();
     expect(within(table).getAllByText(t("jobs.noNewVulns"))).toHaveLength(1);
   });
@@ -222,7 +222,7 @@ describe("JobsPage", () => {
   it("a queued job with attempts 6 shows its retry state and its error", async () => {
     stub([retrying]);
     renderAt(<JobsPage />);
-    expect(await screen.findByText(t("jobs.trigger.firstPull"))).toBeInTheDocument();
+    expect(await screen.findByText(t("jobs.trigger.onPull"))).toBeInTheDocument();
     const table = screen.getByRole("table");
     expect(within(table).getByText(t("jobs.retrying", { attempts: 6, max: 8 }))).toBeInTheDocument();
     expect(within(table).queryByText(t("pill.queued"))).not.toBeInTheDocument();
@@ -238,7 +238,7 @@ describe("JobsPage", () => {
     expect(Array.from(full)).toHaveLength(400);
     stub([{ ...retrying, next_attempt_at: null, last_error: full }]);
     renderAt(<JobsPage />);
-    expect(await screen.findByText(t("jobs.trigger.firstPull"))).toBeInTheDocument();
+    expect(await screen.findByText(t("jobs.trigger.onPull"))).toBeInTheDocument();
     const table = screen.getByRole("table");
     expect(within(table).getByText(`${kept}…`)).toBeInTheDocument();
     expect(within(table).queryByText(full)).not.toBeInTheDocument();
@@ -247,7 +247,7 @@ describe("JobsPage", () => {
   it("a queued job with attempts 0 shows Queued and no error", async () => {
     stub([neverRun]);
     renderAt(<JobsPage />);
-    expect(await screen.findByText(t("jobs.trigger.firstPull"))).toBeInTheDocument();
+    expect(await screen.findByText(t("jobs.trigger.onPull"))).toBeInTheDocument();
     const table = screen.getByRole("table");
     expect(within(table).getByText(t("pill.queued"))).toBeInTheDocument();
     expect(within(table).queryByText(t("jobs.retrying", { attempts: 0, max: 8 }))).not.toBeInTheDocument();
