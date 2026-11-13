@@ -4,8 +4,22 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.6.0 - 2026-11-13
+
+### Added
+- Jobs carry a Subject and a real trigger, and each recent job shows what it did. Empty-output jobs can be hidden on the Jobs dashboard (migration 0010, #360).
+- Each CVE records which scanners reported it, per tag (migration 0012, #366).
+- A GHSA or GO vulnerability is linked to its CVE id, and the CVE detail shows the reason when no CVE id exists (migration 0013, #367).
+- The bundled Trivy and Grype releases are recorded and checked on each release (#368).
+
 ### Changed
 - Bundled scanners: Trivy v0.76.2, Grype v0.121.3 (pinned by digest in the Dockerfile, checked by `scripts/check-scanner-versions.sh`, #368).
+- The CVE filter is kept when you open a CVE and go back, and a Clear filter button resets it (#363).
+- When an accepted CVE returns, its issue is reopened. A changed acceptance is flagged for re-review, the flag can be cleared, and un-accepting a CVE reopens its issue (migration 0011, #196).
+- Small items: catalog keys were tidied, and the stored empty flag on jobs is kept (#371, #360, #363, #368).
+
+### Upgrade notes
+- New migrations 0010 to 0013 run on first start. They add the job empty flag, the acceptance changed flag, the per-CVE scanner record, and the id reason field.
 
 ## 0.5.1 - 2026-11-13
 
