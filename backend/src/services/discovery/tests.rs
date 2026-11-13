@@ -907,3 +907,35 @@ async fn a_new_pull_job_payload_carries_the_repository_and_tag() {
     assert_eq!(value["tag"], "latest");
     assert_eq!(value["trigger"], "first_pull");
 }
+
+#[tokio::test]
+async fn scheduled_discover_job_carries_trigger_scheduled() {
+    let env = env("schedule-trigger").await;
+    env.add_source("s1", REPO, "latest").await;
+    assert_eq!(schedule::schedule_once(&env.pool, NOW).await.unwrap(), 1);
+    let text: String = sqlx::query_scalar("SELECT payload FROM jobs")
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["trigger"], "scheduled");
+}
+
+#[tokio::test]
+async fn a_discovery_with_no_new_tags_is_recorded_as_empty() {
+    let env = env("discover-empty").await;
+    env.add_source("s1", REPO, "latest").await;
+    set_tags(&env.script, REPO, &["latest"]);
+    put_single(&env.script, REPO, "latest", "amd64", "same");
+    let text = env.payload(REPO).to_text().unwrap();
+    // The first run finds a new tag: it has output.
+    assert_eq!(
+        env.discovery.run_discover(&text, NOW).await,
+        JobOutcome::Done
+    );
+    // The second run records no new tag: it is empty.
+    assert_eq!(
+        env.discovery.run_discover(&text, NOW + 3600).await,
+        JobOutcome::DoneEmpty(None)
+    );
+}

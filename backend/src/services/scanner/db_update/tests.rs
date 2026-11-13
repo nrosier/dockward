@@ -846,3 +846,15 @@ async fn a_timed_out_step_records_its_command_and_the_timeout_that_applied() {
     assert_eq!(log.steps[1].exit_code, None);
     assert_eq!(log.steps[1].timeout_secs, 10);
 }
+
+#[test]
+fn scheduled_db_update_job_carries_trigger_scheduled() {
+    let text = DbUpdatePayload::new(Scanner::Trivy).to_text().unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["trigger"], "scheduled");
+    // A payload queued before the trigger existed still reads.
+    assert!(
+        serde_json::from_str::<DbUpdatePayload>(r#"{"kind":"db_update","scanner":"trivy"}"#)
+            .is_ok()
+    );
+}

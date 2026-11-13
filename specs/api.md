@@ -127,7 +127,7 @@ A job is `{"id","source_id","kind","status","attempts","next_attempt_at","last_e
 
 | Method | Path | Auth | Built | Notes |
 | --- | --- | --- | --- | --- |
-| GET | `/api/v1/jobs` | session | yes | List. Filters `status`, `source_id`. Admin may add `scope=all`. |
+| GET | `/api/v1/jobs` | session | yes | List. Filters `status`, `source_id`, `hide_empty` (default off; leaves out jobs that produced nothing new, #360). Admin may add `scope=all`. Every job has a `trigger`; one with none in its payload is `scheduled`. |
 | GET | `/api/v1/jobs/failed-count` | session | yes | `{"count"}` for the purge confirmation. `scope=all` for admins only. |
 | POST | `/api/v1/jobs/purge-failed` | session (owner) or admin | yes | Deletes `failed` rows in scope. `{"deleted"}`. `scope=all` for admins only; a regular user who sends it gets `403`. One `sync_job.purge` audit row when at least one row is deleted. |
 | GET | `/api/v1/jobs/:id` | session | yes | |

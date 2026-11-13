@@ -88,6 +88,9 @@ const JOB_KINDS: &[&str] = &["discover", "pull", "scan", "publish", "db_update"]
 /// Sort keys `GET /jobs` accepts. The first is the default (`specs/api.md`, Jobs).
 const SORTS: &[&str] = &["created_at", "updated_at"];
 
+/// The trigger of a job that no caller asked for (#360).
+pub const SCHEDULED_TRIGGER: &str = "scheduled";
+
 /// Most jobs in the dashboard's `recent_syncs` (`specs/api.md`, Dashboard).
 pub const RECENT_SYNCS: i64 = 10;
 
@@ -124,8 +127,11 @@ pub struct Job {
     pub last_error: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
-    /// The payload `trigger`, or `null` when the payload has none.
-    pub trigger: Option<String>,
+    /// The payload `trigger`. A job whose payload has none (a scheduled pass, or a row from
+    /// before triggers were recorded) is `scheduled`, never `null` (#360).
+    pub trigger: String,
+    /// True when the finished job produced nothing new, for example an unchanged pull.
+    pub empty: bool,
     /// `discover`, `pull`, `scan`, `publish` or `db_update`. A payload with no known `kind`
     /// is `null`.
     pub kind: Option<String>,
@@ -159,7 +165,11 @@ fn to_job(row: db::JobRow) -> Result<Job, AppError> {
         last_error: row.last_error,
         created_at: row.created_at.map(time::rfc3339).transpose()?,
         updated_at: row.updated_at.map(time::rfc3339).transpose()?,
-        trigger: row.trigger,
+        trigger: row
+            .trigger
+            .filter(|trigger| !trigger.is_empty())
+            .unwrap_or_else(|| SCHEDULED_TRIGGER.to_owned()),
+        empty: row.empty,
         kind: row.kind.filter(|kind| JOB_KINDS.contains(&kind.as_str())),
         scanner: row.scanner,
         image: JobImage {
@@ -174,6 +184,8 @@ fn to_job(row: db::JobRow) -> Result<Job, AppError> {
 /// Filters for `GET /jobs`, already parsed by the handler.
 #[derive(Debug, Default)]
 pub struct ListQuery {
+    /// Leaves out jobs that produced nothing new (#360).
+    pub hide_empty: bool,
     pub page: Option<i64>,
     pub page_size: Option<i64>,
     pub sort: Option<String>,
@@ -218,6 +230,7 @@ pub async fn list(
         id: None,
         status: query.status.as_deref(),
         source_id: query.source_id.as_deref(),
+        hide_empty: query.hide_empty,
         sort: &paging.sort,
         sort_sign: if paging.ascending { 1 } else { -1 },
         limit: paging.page_size,
@@ -229,6 +242,7 @@ pub async fn list(
         scope,
         query.status.as_deref(),
         query.source_id.as_deref(),
+        query.hide_empty,
     )
     .await?;
     let items = rows
@@ -274,6 +288,7 @@ pub async fn recent(pool: &SqlitePool, user_id: Option<&str>) -> Result<Vec<Job>
         id: None,
         status: None,
         source_id: None,
+        hide_empty: false,
         sort: "updated_at",
         sort_sign: -1,
         limit: RECENT_SYNCS,

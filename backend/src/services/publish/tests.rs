@@ -1155,6 +1155,7 @@ fn scan_text(error: ScanError) -> String {
         JobOutcome::Deferred { reason, .. } => reason,
         JobOutcome::Done => String::new(),
         JobOutcome::DoneWithNote(text) => text,
+        JobOutcome::DoneEmpty(note) => note.unwrap_or_default(),
     }
 }
 
