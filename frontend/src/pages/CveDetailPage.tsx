@@ -81,6 +81,8 @@ export default function CveDetailPage() {
   const source = sourceQuery.data;
   const admin = me.data?.role === "admin" && source !== undefined;
   const owner = source !== undefined && me.data?.id === source.user_id;
+  // The owner and any admin can un-accept (#351).
+  const canUnaccept = owner || admin;
   // The display name, falling back to the repository when none is set (#323).
   const sourceLabel = source === undefined ? "" : (source.name ?? source.repository);
   // The GitHub repository a new issue goes to, as owner/repo (#323).
@@ -137,14 +139,12 @@ export default function CveDetailPage() {
                 {t("cves.detail.createIssue")}
               </Button>
             ) : null}
-            {owner ? (
-              cve.accepted ? (
-                <Button onClick={() => setRevokeOpen(true)}>{t("cves.detail.unaccept")}</Button>
-              ) : (
-                <Button variant="primary" onClick={() => setAcceptOpen(true)}>
-                  {t("cves.detail.accept")}
-                </Button>
-              )
+            {cve.accepted && canUnaccept ? (
+              <Button onClick={() => setRevokeOpen(true)}>{t("cves.detail.unaccept")}</Button>
+            ) : owner && !cve.accepted ? (
+              <Button variant="primary" onClick={() => setAcceptOpen(true)}>
+                {t("cves.detail.accept")}
+              </Button>
             ) : null}
             {admin ? (
               <Button variant="danger" onClick={() => setDeleteOpen(true)}>
@@ -299,17 +299,19 @@ export default function CveDetailPage() {
               createIssue.mutate();
             }}
           />
-          <ConfirmDialog
-            open={revokeOpen}
-            onOpenChange={setRevokeOpen}
-            title={t("cves.unaccept.title", { cve: cve.cve_id })}
-            description={t("cves.unaccept.body")}
-            confirmLabel={t("cves.detail.unaccept")}
-            onConfirm={() => revoke.mutate()}
-            pending={revoke.isPending}
-            error={revoke.isError ? t("errors.generic") : null}
-          />
         </>
+      ) : null}
+      {canUnaccept ? (
+        <ConfirmDialog
+          open={revokeOpen}
+          onOpenChange={setRevokeOpen}
+          title={t("cves.unaccept.title", { cve: cve.cve_id })}
+          description={t("cves.unaccept.body")}
+          confirmLabel={t("cves.detail.unaccept")}
+          onConfirm={() => revoke.mutate()}
+          pending={revoke.isPending}
+          error={revoke.isError ? t("errors.generic") : null}
+        />
       ) : null}
     </>
   );
