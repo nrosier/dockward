@@ -93,6 +93,12 @@ jobs:
       - name: Test the pin check
         run: bash scripts/test-check-scanner-pins.sh
 
+      - name: Check the bundled scanner versions
+        run: bash scripts/check-scanner-versions.sh Dockerfile CHANGELOG.md
+
+      - name: Test the version check
+        run: bash scripts/test-check-scanner-versions.sh
+
   frontend:
     name: Frontend (audit, lint, build)
     runs-on: ubuntu-latest
