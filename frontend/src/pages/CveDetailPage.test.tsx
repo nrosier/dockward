@@ -440,4 +440,36 @@ describe("CveDetailPage acceptance note (#351)", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: t("cves.detail.unaccept") }));
     await vi.waitFor(() => expect(unaccepted).toHaveBeenCalledTimes(1));
   });
+
+  function stubUnaccept(role: "admin" | "user", onUnaccept: () => void) {
+    const foreign: Source = { ...source, user_id: "someone-else" };
+    return stubApi((path, init) => {
+      if (path === "/api/v1/account/me") return json({ user: user(role) });
+      if (path === "/api/v1/cves/m1%3ACVE-2026-0001" && init?.method === "GET") return json(cve({ accepted: true }));
+      if (path === "/api/v1/image-sources/s1") return json(foreign);
+      if (path === "/api/v1/cves/m1%3ACVE-2026-0001/unaccept" && init?.method === "POST") {
+        onUnaccept();
+        return json({}, 200);
+      }
+      return undefined;
+    });
+  }
+
+  it("un_accept_shows_for_an_admin_who_is_not_the_owner", async () => {
+    const unaccepted = vi.fn();
+    stubUnaccept("admin", unaccepted);
+    renderWithRoutes(routes, url);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.unaccept") }));
+    const dialog = await screen.findByRole("dialog");
+    expect(unaccepted).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole("button", { name: t("cves.detail.unaccept") }));
+    await vi.waitFor(() => expect(unaccepted).toHaveBeenCalledTimes(1));
+  });
+
+  it("un_accept_hidden_for_a_non_admin_non_owner", async () => {
+    stubUnaccept("user", vi.fn());
+    renderWithRoutes(routes, url);
+    await screen.findByRole("heading", { level: 1 });
+    expect(screen.queryByRole("button", { name: t("cves.detail.unaccept") })).not.toBeInTheDocument();
+  });
 });

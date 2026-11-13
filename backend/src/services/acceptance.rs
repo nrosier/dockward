@@ -413,17 +413,26 @@ async fn comment_on_open_issue<G: IssueApi>(
     }
 }
 
-/// `POST /api/v1/cves/:id/unaccept` for the owner of the source. `404` when the id is
-/// malformed, the source is not the caller's, or no acceptance is active. Soft revoke with
+/// `POST /api/v1/cves/:id/unaccept` for the owner of the source, or for any admin. `404`
+/// when the id is malformed, the source is not the caller's (and the caller is not an
+/// admin), or no acceptance is active. Soft revoke with
 /// `revoked_by` the caller, audited as `cve.unaccept` (`{"reason":"manual"}`). No GitHub call.
 pub async fn unaccept(
     pool: &SqlitePool,
     caller: &Caller<'_>,
+    is_admin: bool,
     id: &str,
     now: i64,
 ) -> Result<(), AppError> {
     let (source_id, requested) = split_id(id)?;
-    let source = owned_source(pool, caller.id, source_id).await?;
+    let source = if is_admin {
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        source_db::find_by_id(&mut conn, source_id)
+            .await?
+            .ok_or(AppError::NotFound)?
+    } else {
+        owned_source(pool, caller.id, source_id).await?
+    };
     // #337: an alias in the id names the record of its primary id.
     let primary = {
         let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
@@ -477,6 +486,7 @@ mod tests {
             for id in ["u1", "u2", "u9"] {
                 seed_user(&state.pool, id, "user").await;
             }
+            seed_user(&state.pool, "a1", "admin").await;
             seed_github(&state.pool, "u1", "cg", "github").await;
             seed_source(&state.pool, "u1", "m1", "cg", "octo", "app").await;
             let mut conn = state.pool.acquire().await.unwrap();
@@ -533,12 +543,23 @@ mod tests {
         }
 
         async fn unaccept(&self, who: &str, id: &str, now: i64) -> Result<(), AppError> {
+            self.unaccept_as(who, false, id, now).await
+        }
+
+        async fn unaccept_as(
+            &self,
+            who: &str,
+            is_admin: bool,
+            id: &str,
+            now: i64,
+        ) -> Result<(), AppError> {
             unaccept(
                 &self.state.pool,
                 &Caller {
                     id: who,
                     username: who,
                 },
+                is_admin,
                 id,
                 now,
             )
@@ -649,6 +670,56 @@ mod tests {
         assert_eq!(
             f.unaccept("u1", ID, NOW + 3).await.unwrap_err(),
             AppError::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_who_is_not_the_owner_can_un_accept() {
+        let f = Fixture::new("admin-unaccept").await;
+        f.accept("u1", ID, "vendor patch is scheduled", None)
+            .await
+            .unwrap();
+
+        f.unaccept_as("a1", true, ID, NOW + 1).await.unwrap();
+
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM cve_acceptances WHERE revoked_at IS NULL")
+                .await,
+            0
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM cve_acceptances WHERE revoked_by = 'a1'")
+                .await,
+            1
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM audit_log WHERE action = 'cve.unaccept' AND actor_username = 'a1'")
+                .await,
+            1
+        );
+        // The CVE can be accepted again: it is active once more.
+        f.accept("u1", ID, "accepted again", None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_user_who_is_neither_owner_nor_admin_cannot_un_accept() {
+        let f = Fixture::new("stranger-unaccept").await;
+        f.accept("u1", ID, "vendor patch is scheduled", None)
+            .await
+            .unwrap();
+
+        let refused = f.unaccept_as("u2", false, ID, NOW + 1).await.unwrap_err();
+
+        assert_eq!(refused, AppError::NotFound);
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM cve_acceptances WHERE revoked_at IS NULL")
+                .await,
+            1
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM audit_log WHERE action = 'cve.unaccept'")
+                .await,
+            0
         );
     }
 

@@ -202,7 +202,7 @@ async fn accept_with<G: IssueApi>(
     Ok((StatusCode::CREATED, Json(Accepted { acceptance })))
 }
 
-/// `POST /api/v1/cves/:id/unaccept`. The caller must own the mapping. Returns `204`; `404`
+/// `POST /api/v1/cves/:id/unaccept`. The caller must own the mapping or be an admin. Returns `204`; `404`
 /// for an unknown or foreign mapping or when no acceptance is active.
 pub async fn unaccept(
     State(state): State<AppState>,
@@ -215,6 +215,7 @@ pub async fn unaccept(
             id: &user.id,
             username: &user.username,
         },
+        user.role == Role::Admin,
         &id,
         now_secs(),
     )
@@ -483,6 +484,7 @@ mod tests {
                 id: "u2",
                 username: "u2",
             },
+            false,
             "m1:CVE-2026-0001",
             now_secs(),
         )
@@ -512,6 +514,7 @@ mod tests {
                 id: "u2",
                 username: "u2",
             },
+            false,
             "m1:CVE-2026-0001",
             now_secs(),
         )
