@@ -4,6 +4,9 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+### Changed
+- Dockward no longer closes a GitHub issue when its CVE is fixed. It posts one note saying the CVE is no longer reported and the issue can be closed, and leaves the issue open for the user to close. The note is recorded in `github_issues.fixed_noted_at` (migration 0014) and is posted again only after the CVE has returned and been fixed again.
+
 ## 0.6.0 - 2026-11-13
 
 ### Added

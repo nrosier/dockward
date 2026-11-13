@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE github_issues SET fixed_noted_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "3afd2f99a234ed96abae6f201caaac6a2d4d73ded14bb3f87d7c1aac7d42b348"
+}

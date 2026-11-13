@@ -621,6 +621,7 @@ impl<G: IssueApi> Ctx<'_, G> {
             github_issue_url: issue.html_url,
             status: "open".to_owned(),
             closed_manually: false,
+            fixed_noted_at: None,
         }))
     }
 
@@ -798,8 +799,9 @@ impl<G: IssueApi> Ctx<'_, G> {
         Ok(())
     }
 
-    /// Comments on the issue of an open row, closes it, and marks the row `closed`.
-    async fn close(&self, row: &IssueRow, comment: &str) -> Result<(), Failure> {
+    /// Posts the fixed note on the issue of an open row and records it. The issue stays open:
+    /// the user closes it (`specs/cve-lifecycle.md`, "note only").
+    async fn note_fixed(&self, row: &IssueRow) -> Result<(), Failure> {
         let number = to_number(row.github_issue_number)?;
         self.gh
             .comment(
@@ -807,17 +809,7 @@ impl<G: IssueApi> Ctx<'_, G> {
                 self.owner(),
                 self.repo(),
                 number,
-                comment,
-                self.now,
-            )
-            .await?;
-        self.gh
-            .set_state(
-                self.token,
-                self.owner(),
-                self.repo(),
-                number,
-                false,
+                &fixed_note(&row.cve_id),
                 self.now,
             )
             .await?;
@@ -826,7 +818,7 @@ impl<G: IssueApi> Ctx<'_, G> {
             .acquire()
             .await
             .map_err(|_| AppError::InternalError)?;
-        issue_db::set_status(&mut conn, &row.id, "closed").await?;
+        issue_db::mark_fixed_noted(&mut conn, &row.id, self.now).await?;
         Ok(())
     }
 
@@ -930,18 +922,22 @@ impl<G: IssueApi> Ctx<'_, G> {
             (Some(row), _) if row.status == "open" => {
                 let reported = reported || self.reported_elsewhere(cve_id).await?;
                 if self.github_is_open(&row).await? {
-                    // Open on both sides. When the newest digest no longer reports the CVE:
-                    // comment, then close. An enabled scanner with no report for the newest
-                    // digest holds the issue open (#224 d14).
+                    // Open on both sides. When the newest digest no longer reports the CVE,
+                    // post the fixed note once and leave the issue open. An enabled scanner
+                    // with no report for the newest digest holds the note back (#224 d14).
                     if !reported {
-                        if !rules.close_blocked {
-                            let comment = format!(
-                                "No scanner reports this CVE since scan {}.",
-                                rules.scan_label
-                            );
-                            self.close(&row, &comment).await?;
+                        if !rules.close_blocked && row.fixed_noted_at.is_none() {
+                            self.note_fixed(&row).await?;
                         }
                     } else {
+                        if row.fixed_noted_at.is_some() {
+                            let mut conn = self
+                                .pool
+                                .acquire()
+                                .await
+                                .map_err(|_| AppError::InternalError)?;
+                            issue_db::clear_fixed_noted(&mut conn, &row.id).await?;
+                        }
                         self.refresh_found_by(&row, &view_scanners).await?;
                     }
                 } else if reported {
@@ -964,6 +960,15 @@ impl<G: IssueApi> Ctx<'_, G> {
     }
 }
 
+/// The fixed note: a fixed English text for the GitHub comment (not UI text, so it is not in the
+/// string catalog). It holds the CVE id only.
+fn fixed_note(cve_id: &str) -> String {
+    format!(
+        "{cve_id} is no longer reported by any scanner on the latest scan of its image. \
+         This issue can be closed."
+    )
+}
+
 /// The source's rule inputs for one reconcile run.
 struct Rules<'a> {
     auto_create: bool,
@@ -977,7 +982,7 @@ struct Rules<'a> {
     /// The scanners that report each CVE on the newest digest (#224).
     scanners: HashMap<String, Vec<ScannerRef>>,
     /// True while an enabled scanner has no report for the newest digest of this source or of a
-    /// source that shares the GitHub repository. No issue closes then (#224 d14).
+    /// source that shares the GitHub repository. No fixed note is posted then (#224 d14).
     close_blocked: bool,
 }
 
@@ -1380,6 +1385,24 @@ pub(crate) mod test_support {
                     .cloned()
                     .collect()
             })
+        }
+
+        /// Bodies of the fixed notes posted on issues (`fixed_note`).
+        pub fn notes(&self) -> Vec<String> {
+            self.writes()
+                .into_iter()
+                .filter(|(method, path, _)| *method == "POST" && path.ends_with("/comments"))
+                .filter_map(|(_, _, body)| body["body"].as_str().map(str::to_owned))
+                .filter(|text| text.ends_with("This issue can be closed."))
+                .collect()
+        }
+
+        /// True when no request changed an issue state (no PATCH with a `state`).
+        pub fn never_changed_state(&self) -> bool {
+            !self
+                .writes()
+                .iter()
+                .any(|(method, _, body)| *method == "PATCH" && body.get("state").is_some())
         }
 
         pub fn requests(&self) -> usize {
@@ -2125,7 +2148,9 @@ mod tests {
             .unwrap();
         assert_eq!(fx.issues().await[0].2, "open");
 
-        // The last source stops reporting it: now the issue closes.
+        assert!(fx.github.notes().is_empty());
+
+        // The last source stops reporting it: now the note is posted, the issue stays open.
         sqlx::query("UPDATE cve_findings SET status = 'fixed' WHERE source_id = 'm2'")
             .execute(&fx.pool)
             .await
@@ -2133,7 +2158,8 @@ mod tests {
         reconcile(&fx.pool, &fx.gh, TOKEN, &m2, "ghcr.io/o/web:v3", 1_000)
             .await
             .unwrap();
-        assert_eq!(fx.issues().await[0].2, "closed");
+        assert_eq!(fx.issues().await[0].2, "open");
+        assert_eq!(fx.github.notes().len(), 1);
     }
 
     #[tokio::test]
@@ -2314,9 +2340,10 @@ mod tests {
         assert!(!without.contains("Description"));
     }
 
-    /// Newest digest clean, an older tag still reports the CVE: the issue closes (#196).
+    /// Newest digest clean, an older tag still reports the CVE: the fixed note is posted and
+    /// the issue stays open (#196, "note only").
     #[tokio::test]
-    async fn closes_when_newest_digest_is_clean_though_an_older_tag_reports() {
+    async fn notes_when_newest_digest_is_clean_though_an_older_tag_reports() {
         let fx = Fixture::new("newest-clean", "CRITICAL", true).await;
         fx.report("v1", "sha256:old", 100).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
@@ -2328,11 +2355,12 @@ mod tests {
         fx.report("v2", "sha256:new", 200).await;
         fx.reconcile("ghcr.io/o/app:v2").await;
 
-        assert_eq!(fx.issues().await[0].2, "closed");
-        let writes = fx.github.writes();
-        // create, comment, close.
-        assert_eq!(writes.len(), 3);
-        assert_eq!(writes[2].2["state"], "closed");
+        assert_eq!(fx.issues().await[0].2, "open");
+        // create, note. The issue is never closed.
+        assert_eq!(fx.github.writes().len(), 2);
+        assert_eq!(fx.github.notes().len(), 1);
+        assert!(fx.github.never_changed_state());
+        assert!(fx.github.with(|state| state.issues[0].open));
         assert_eq!(
             fx.count("SELECT COUNT(*) FROM cve_findings WHERE status = 'open'")
                 .await,
@@ -2379,7 +2407,8 @@ mod tests {
         assert_eq!(fx.github.writes().len(), 1, "only the create");
     }
 
-    /// Newest digest clean, then it reports the CVE again: the same issue reopens.
+    /// Newest digest clean (note posted), the user closes the issue on GitHub, then the newest
+    /// digest reports the CVE again: the same issue reopens with the reopen comment.
     #[tokio::test]
     async fn reopens_the_same_issue_when_the_newest_digest_reports_again() {
         let fx = Fixture::new("newest-back", "CRITICAL", true).await;
@@ -2389,7 +2418,14 @@ mod tests {
         fx.reconcile("ghcr.io/o/app:v1").await;
         fx.report("v2", "sha256:new", 200).await;
         fx.reconcile("ghcr.io/o/app:v2").await;
+        assert_eq!(fx.issues().await[0].2, "open");
+        assert_eq!(fx.github.notes().len(), 1);
+
+        // The user closes the issue on GitHub after the note: the row follows, with no comment.
+        fx.github.with(|state| state.issues[0].open = false);
+        fx.reconcile("ghcr.io/o/app:v2").await;
         assert_eq!(fx.issues().await[0].2, "closed");
+        assert_eq!(fx.github.writes().len(), 2, "create and the note only");
 
         // A later scan of the newest digest reports the CVE again.
         fx.finding("m1", "v2", "CVE-2026-0001", "CRITICAL", 40)
@@ -2398,10 +2434,10 @@ mod tests {
 
         assert_eq!(fx.github.creates().len(), 1, "no new issue");
         let writes = fx.github.writes();
-        // create, comment, close, reopen, comment.
-        assert_eq!(writes.len(), 5);
-        assert_eq!(writes[3].2["state"], "open");
-        assert_eq!(writes[4].2["body"], "CVE is back in scan ghcr.io/o/app:v2");
+        // create, note, reopen, comment.
+        assert_eq!(writes.len(), 4);
+        assert_eq!(writes[2].2["state"], "open");
+        assert_eq!(writes[3].2["body"], "CVE is back in scan ghcr.io/o/app:v2");
         assert_eq!(
             fx.issues().await,
             vec![("CVE-2026-0001".to_owned(), 1, "open".to_owned())]
@@ -2435,7 +2471,7 @@ mod tests {
             "the issue is still closed on GitHub"
         );
 
-        // The CVE then leaves the newest digest: still no close comment on a closed issue.
+        // The CVE then leaves the newest digest: still no note on a closed issue.
         fx.fix("v1", "CVE-2026-0001").await;
         fx.reconcile("ghcr.io/o/app:v1").await;
         assert_eq!(fx.github.writes().len(), 1);
@@ -2451,6 +2487,9 @@ mod tests {
             .await;
         fx.reconcile("ghcr.io/o/app:v1").await;
         fx.report("v2", "sha256:new", 200).await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
+        // The user closes the issue on GitHub after the note; the row follows.
+        fx.github.with(|state| state.issues[0].open = false);
         fx.reconcile("ghcr.io/o/app:v2").await;
         assert_eq!(fx.issues().await[0].2, "closed");
         sqlx::query(
@@ -2512,9 +2551,10 @@ mod tests {
     }
 
     /// d14: the issue stays open while an enabled scanner has no finished run for the newest
-    /// image, and closes only when every enabled scanner has finished and none reports the CVE.
+    /// image, and the fixed note is posted only when every enabled scanner has finished and none
+    /// reports the CVE. The issue is never closed.
     #[tokio::test]
-    async fn closes_only_when_every_enabled_scanner_runs_clean() {
+    async fn notes_only_when_every_enabled_scanner_runs_clean() {
         let fx = Fixture::new("d14", "CRITICAL", true).await;
         fx.observe("v1", "sha256:old", 100).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
@@ -2534,22 +2574,23 @@ mod tests {
         assert_eq!(
             fx.issues().await[0].2,
             "open",
-            "Grype has not finished on the newest image: a partial result never closes"
+            "Grype has not finished on the newest image: a partial result posts nothing"
         );
+        assert!(fx.github.notes().is_empty());
 
-        // Grype is clean too: the issue closes.
+        // Grype is clean too: the note is posted and the issue stays open.
         fx.scan_run("sha256:new", "grype", &[]).await;
         fx.reconcile("ghcr.io/o/app:v2").await;
-        assert_eq!(fx.issues().await[0].2, "closed");
-        let writes = fx.github.writes();
-        let comment = writes
-            .iter()
-            .find(|(_, path, _)| path.ends_with("/comments"))
-            .unwrap();
+        assert_eq!(fx.issues().await[0].2, "open");
         assert_eq!(
-            comment.2["body"],
-            "No scanner reports this CVE since scan ghcr.io/o/app:v2."
+            fx.github.notes(),
+            vec![
+                "CVE-2026-0001 is no longer reported by any scanner on the latest scan of its \
+                 image. This issue can be closed."
+                    .to_owned()
+            ]
         );
+        assert!(fx.github.never_changed_state());
     }
 
     /// A scanner that is not enabled is not waited for (`scanners.enabled` of `system_config`).
@@ -2572,13 +2613,14 @@ mod tests {
 
         fx.reconcile("ghcr.io/o/app:v2").await;
 
-        assert_eq!(fx.issues().await[0].2, "closed", "Grype is not enabled");
+        assert_eq!(fx.github.notes().len(), 1, "Grype is not enabled");
+        assert_eq!(fx.issues().await[0].2, "open");
     }
 
-    /// A platform with no finished run holds a close, and an evicted platform counts through its
+    /// A platform with no finished run holds the note, and an evicted platform counts through its
     /// last `done` run (section 9).
     #[tokio::test]
-    async fn every_platform_must_have_finished_before_a_close() {
+    async fn every_platform_must_have_finished_before_the_note() {
         let fx = Fixture::new("platforms", "CRITICAL", true).await;
         fx.observe("v1", "sha256:old", 100).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
@@ -2602,6 +2644,7 @@ mod tests {
         .unwrap();
         fx.reconcile("ghcr.io/o/app:v2").await;
         assert_eq!(fx.issues().await[0].2, "open");
+        assert!(fx.github.notes().is_empty());
 
         // The platform is stored and both scanners finish on it, then it is evicted: it still
         // counts through its last done run.
@@ -2622,7 +2665,8 @@ mod tests {
             .await
             .unwrap();
         fx.reconcile("ghcr.io/o/app:v2").await;
-        assert_eq!(fx.issues().await[0].2, "closed");
+        assert_eq!(fx.github.notes().len(), 1);
+        assert_eq!(fx.issues().await[0].2, "open");
     }
 
     /// A scanner that still reports the CVE keeps the issue open even though another is clean.
@@ -2647,7 +2691,7 @@ mod tests {
                 .writes()
                 .iter()
                 .any(|(_, p, _)| p.ends_with("/comments")),
-            "no close comment"
+            "no note"
         );
     }
 
@@ -2680,9 +2724,11 @@ mod tests {
         assert!(old.is_empty());
     }
 
+    /// The fixed note is posted once, on the first scan that finds the CVE fixed. The issue is
+    /// neither closed nor changed, and later scans post nothing more.
     #[tokio::test]
-    async fn closes_when_no_tag_reports() {
-        let fx = Fixture::new("closes", "CRITICAL", true).await;
+    async fn posts_one_fixed_note_and_leaves_the_issue_open() {
+        let fx = Fixture::new("notes", "CRITICAL", true).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
         fx.reconcile("ghcr.io/o/app:v1").await;
@@ -2691,29 +2737,96 @@ mod tests {
         fx.reconcile("ghcr.io/o/app:v2").await;
 
         let writes = fx.github.writes();
-        // create, comment, close.
-        assert_eq!(writes.len(), 3);
+        // create, note.
+        assert_eq!(writes.len(), 2);
         assert_eq!(writes[1].0, "POST");
         assert_eq!(writes[1].1, "repos/octo/app/issues/1/comments");
         assert_eq!(
             writes[1].2["body"],
-            "No scanner reports this CVE since scan ghcr.io/o/app:v2."
+            "CVE-2026-0001 is no longer reported by any scanner on the latest scan of its \
+             image. This issue can be closed."
         );
-        assert_eq!(writes[2].0, "PATCH");
-        assert_eq!(writes[2].2["state"], "closed");
-        assert_eq!(fx.issues().await[0].2, "closed");
-        // Running again does nothing more.
+        assert!(fx.github.never_changed_state());
+        assert!(fx.github.with(|state| state.issues[0].open));
+        assert_eq!(fx.issues().await[0].2, "open");
+        assert!(
+            fx.count("SELECT COUNT(*) FROM github_issues WHERE fixed_noted_at IS NOT NULL")
+                .await
+                == 1
+        );
+        // Running again, while the CVE stays fixed, posts nothing more.
         fx.reconcile("ghcr.io/o/app:v2").await;
-        assert_eq!(fx.github.writes().len(), 3);
+        fx.reconcile("ghcr.io/o/app:v3").await;
+        assert_eq!(fx.github.writes().len(), 2);
     }
 
+    /// The CVE returns while the note stands: the flag is cleared, nothing is posted or reopened
+    /// and no issue is created. A later fix notes again.
     #[tokio::test]
-    async fn reopens_when_cve_returns() {
+    async fn a_returning_cve_clears_the_note_flag_so_a_later_fix_notes_again() {
+        let fx = Fixture::new("note-cycle", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        fx.fix("v1", "CVE-2026-0001").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
+        assert_eq!(fx.github.notes().len(), 1);
+
+        // The CVE returns on a later scan of v3.
+        fx.finding("m1", "v3", "CVE-2026-0001", "CRITICAL", 40)
+            .await;
+        fx.reconcile("ghcr.io/o/app:v3").await;
+
+        assert_eq!(fx.github.creates().len(), 1, "the same issue is reused");
+        assert_eq!(fx.github.writes().len(), 2, "no reopen, no extra comment");
+        assert_eq!(
+            fx.count("SELECT COUNT(*) FROM github_issues WHERE fixed_noted_at IS NOT NULL")
+                .await,
+            0,
+            "the flag is cleared"
+        );
+        assert_eq!(
+            fx.issues().await,
+            vec![("CVE-2026-0001".to_owned(), 1, "open".to_owned())]
+        );
+
+        // Fixed again: a second note.
+        fx.fix("v3", "CVE-2026-0001").await;
+        fx.reconcile("ghcr.io/o/app:v4").await;
+        assert_eq!(fx.github.notes().len(), 2);
+        assert!(fx.github.never_changed_state());
+    }
+
+    /// The user closes the issue on GitHub after the note: the row is stored as closed, with no
+    /// comment and no state change from Dockward.
+    #[tokio::test]
+    async fn closed_on_github_after_the_note_gets_no_comment() {
+        let fx = Fixture::new("note-then-closed", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        fx.fix("v1", "CVE-2026-0001").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
+        assert_eq!(fx.github.writes().len(), 2);
+
+        fx.github.with(|state| state.issues[0].open = false);
+        fx.reconcile("ghcr.io/o/app:v2").await;
+
+        assert_eq!(fx.issues().await[0].2, "closed");
+        assert_eq!(fx.github.writes().len(), 2, "no comment, no state change");
+    }
+
+    /// A closed issue whose CVE returns is reopened with the reopen comment (the row was not
+    /// closed by hand while the CVE was reported).
+    #[tokio::test]
+    async fn reopens_a_closed_issue_when_cve_returns() {
         let fx = Fixture::new("reopens", "CRITICAL", true).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
         fx.reconcile("ghcr.io/o/app:v1").await;
         fx.fix("v1", "CVE-2026-0001").await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
+        fx.github.with(|state| state.issues[0].open = false);
         fx.reconcile("ghcr.io/o/app:v2").await;
         assert_eq!(fx.issues().await[0].2, "closed");
 
@@ -2724,11 +2837,11 @@ mod tests {
 
         assert_eq!(fx.github.creates().len(), 1, "the same issue is reused");
         let writes = fx.github.writes();
-        // create, comment, close, reopen, comment.
-        assert_eq!(writes.len(), 5);
-        assert_eq!(writes[3].0, "PATCH");
-        assert_eq!(writes[3].2["state"], "open");
-        assert_eq!(writes[4].2["body"], "CVE is back in scan ghcr.io/o/app:v3");
+        // create, note, reopen, comment.
+        assert_eq!(writes.len(), 4);
+        assert_eq!(writes[2].0, "PATCH");
+        assert_eq!(writes[2].2["state"], "open");
+        assert_eq!(writes[3].2["body"], "CVE is back in scan ghcr.io/o/app:v3");
         assert_eq!(
             fx.issues().await,
             vec![("CVE-2026-0001".to_owned(), 1, "open".to_owned())]
@@ -2761,14 +2874,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_create_off_skips_creation_but_still_closes() {
+    async fn auto_create_off_skips_creation_but_still_notes() {
         let fx = Fixture::new("autooff", "CRITICAL", false).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
             .await;
         fx.reconcile("ghcr.io/o/app:v1").await;
         assert!(fx.github.creates().is_empty());
 
-        // An issue made by hand exists; it still follows the close rule.
+        // An issue made by hand exists; it still follows the note rule.
         sqlx::query(
             "INSERT INTO github_issues (id, github_owner, github_repo, cve_id, github_issue_number, github_issue_url, status)
              VALUES ('gi1', 'octo', 'app', 'CVE-2026-0001', 7, 'https://github.com/octo/app/issues/7', 'open')",
@@ -2787,7 +2900,8 @@ mod tests {
         });
         fx.fix("v1", "CVE-2026-0001").await;
         fx.reconcile("ghcr.io/o/app:v1").await;
-        assert_eq!(fx.issues().await[0].2, "closed");
+        assert_eq!(fx.issues().await[0].2, "open");
+        assert_eq!(fx.github.notes().len(), 1);
     }
 
     #[tokio::test]
