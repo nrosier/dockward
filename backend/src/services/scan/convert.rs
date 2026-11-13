@@ -45,6 +45,8 @@ pub struct CveRow {
     pub fixed_in_version: Option<String>,
     pub description: Option<String>,
     pub alias: Option<String>,
+    /// The keys of the scanners that report the CVE (any package), in the merged-view order (#366).
+    pub scanners: Vec<String>,
 }
 
 /// One row per CVE id from the merged findings, which arrive sorted by (CVE id, package).
@@ -57,6 +59,16 @@ pub fn per_cve(findings: &[MergedFinding]) -> Vec<CveRow> {
             if rank(finding.severity) < rank(last.severity) {
                 last.severity = finding.severity;
             }
+            let keys: Vec<String> = last
+                .scanners
+                .iter()
+                .cloned()
+                .chain(finding.scanners.iter().map(|scanner| scanner.key.clone()))
+                .collect();
+            last.scanners = merged_view::order_scanners(&keys)
+                .into_iter()
+                .map(|scanner| scanner.key)
+                .collect();
             continue;
         }
         rows.push(CveRow {
@@ -66,6 +78,11 @@ pub fn per_cve(findings: &[MergedFinding]) -> Vec<CveRow> {
             fixed_in_version: finding.fixed_in_version.clone(),
             description: finding.description.clone(),
             alias: finding.alias.clone(),
+            scanners: finding
+                .scanners
+                .iter()
+                .map(|scanner| scanner.key.clone())
+                .collect(),
         });
     }
     rows
@@ -102,6 +119,14 @@ pub async fn recompute_image(
                     alias: row.alias.as_deref(),
                     now,
                 },
+            )
+            .await?;
+            findings::set_scanners(
+                conn,
+                &tag.source_id,
+                &tag.tag,
+                &row.cve_id,
+                &row.scanners.join(","),
             )
             .await?;
         }

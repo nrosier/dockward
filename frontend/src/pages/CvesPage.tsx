@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { CveFilterBar } from "../components/cves/CveFilterBar";
 import { CreateIssueDialog } from "../components/cves/CreateIssueDialog";
-import { CveStatusPill, SeverityPill, issueEligible } from "../components/cves/CvePills";
+import { CveStatusPill, SeverityPill, issueEligible, scannerLabel } from "../components/cves/CvePills";
 import { safeHttpsUrl } from "../components/cves/safeUrl";
 import { PageHeader } from "../components/mappings/PageHeader";
 import { LINK, TABLE, TD, TH } from "../components/mappings/styles";
@@ -218,6 +218,7 @@ export default function CvesPage() {
                   <th className={TH}>{t("cves.col.status")}</th>
                   <th className={TH}>{t("cves.col.package")}</th>
                   <th className={TH}>{t("cves.col.fixedIn")}</th>
+                  <th className={TH}>{t("cves.col.scanners")}</th>
                   <th className={TH}>{t("cves.col.mapping")}</th>
                   <th className={TH}>{t("cves.col.tags")}</th>
                   <th className={TH}>{t("cves.col.issue")}</th>
@@ -250,6 +251,7 @@ export default function CvesPage() {
                       </td>
                       <td className={TD}>{cve.package}</td>
                       <td className={`${TD} font-mono text-[12.5px]`}>{cve.fixed_in_version ?? t("cves.unknown")}</td>
+                      <td className={`${TD} whitespace-nowrap`}>{scannerLabel(cve.scanners)}</td>
                       <td className={TD}>{sourceLabel}</td>
                       <td className={`${TD} whitespace-nowrap text-muted`}>
                         {t("cves.tags", { open: cve.open_tags, tracked: cve.tracked_tags })}

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT h.host || '/' || m.repository AS \"image!: String\",\n                  f.image_tag AS \"image_tag!: String\", f.status AS \"status!: String\",\n                  f.fixed_in_version AS \"fixed_in_version?: String\",\n                  f.description AS \"description?: String\",\n                  f.alias AS \"alias?: String\",\n                  ts.scan_at AS \"last_scan_at?: i64\",\n                  (nd.image_tag IS NOT NULL) AS \"newest_digest!: bool\"\n           FROM cve_findings f\n           JOIN image_sources m ON m.id = f.source_id\n           JOIN hubs h ON h.id = m.hub_id\n           LEFT JOIN newest_digest_tags nd\n                  ON nd.source_id = f.source_id AND nd.image_tag = f.image_tag\n           LEFT JOIN (\n               SELECT image_tag, scan_at, seen_at FROM tag_scan_times WHERE source_id = ?1\n           ) ts ON ts.image_tag = f.image_tag\n           WHERE f.source_id = ?1\n             AND COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id) = ?2\n           ORDER BY COALESCE(ts.scan_at, -1) DESC, COALESCE(ts.seen_at, -1) DESC,\n                    f.last_seen_at DESC, f.id DESC\n           LIMIT ?3",
+  "query": "SELECT h.host || '/' || m.repository AS \"image!: String\",\n                  f.image_tag AS \"image_tag!: String\", f.status AS \"status!: String\",\n                  f.fixed_in_version AS \"fixed_in_version?: String\",\n                  f.description AS \"description?: String\",\n                  f.alias AS \"alias?: String\", f.scanners AS \"scanners?: String\",\n                  ts.scan_at AS \"last_scan_at?: i64\",\n                  (nd.image_tag IS NOT NULL) AS \"newest_digest!: bool\"\n           FROM cve_findings f\n           JOIN image_sources m ON m.id = f.source_id\n           JOIN hubs h ON h.id = m.hub_id\n           LEFT JOIN newest_digest_tags nd\n                  ON nd.source_id = f.source_id AND nd.image_tag = f.image_tag\n           LEFT JOIN (\n               SELECT image_tag, scan_at, seen_at FROM tag_scan_times WHERE source_id = ?1\n           ) ts ON ts.image_tag = f.image_tag\n           WHERE f.source_id = ?1\n             AND COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id) = ?2\n           ORDER BY COALESCE(ts.scan_at, -1) DESC, COALESCE(ts.seen_at, -1) DESC,\n                    f.last_seen_at DESC, f.id DESC\n           LIMIT ?3",
   "describe": {
     "columns": [
       {
@@ -65,14 +65,25 @@
         }
       },
       {
-        "name": "last_scan_at?: i64",
+        "name": "scanners?: String",
         "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "scanners"
+          }
+        }
+      },
+      {
+        "name": "last_scan_at?: i64",
+        "ordinal": 7,
         "type_info": "Null",
         "origin": "Expression"
       },
       {
         "name": "newest_digest!: bool",
-        "ordinal": 7,
+        "ordinal": 8,
         "type_info": "Integer",
         "origin": "Expression"
       }
@@ -88,8 +99,9 @@
       true,
       true,
       true,
+      true,
       false
     ]
   },
-  "hash": "22659a2007e25fa5651e1bdd6f09569c5efedbd0a8f6d3c713698bae376c556a"
+  "hash": "cd8158105ef3806d2ebe00bdc4180bb0c2cd216fc9d9b5a698d656ce0c8caac5"
 }

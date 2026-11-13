@@ -81,6 +81,8 @@ export interface CveSummary {
   tracked_tags: number;
   github_issue_number: number | null;
   github_issue_status: "open" | "closed" | null;
+  // Scanner keys that reported the CVE (`trivy`, `grype`); empty when unknown (#366).
+  scanners: string[];
 }
 
 export interface CveTag {
@@ -92,6 +94,8 @@ export interface CveTag {
   fixed_in_version: string | null;
   // True for a tag of the mapping's newest scanned digest (#196).
   newest_digest: boolean;
+  // Scanner keys that reported the CVE on this tag; empty when unknown (#366).
+  scanners: string[];
 }
 
 export interface Acceptance {

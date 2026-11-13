@@ -912,6 +912,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #366: the list row and the detail's tag rows return the scanner keys.
+    #[tokio::test]
+    async fn detail_and_list_return_the_scanners() {
+        let (state, dir, _, _) = setup("scanners-returned").await;
+        report_on(&state, "m1", "0.4", "sha256:old", 1000).await;
+        report_on(&state, "m1", "latest", "sha256:new", 2000).await;
+        seen(&state, "m1", "0.4", "CVE-2026-0001", "HIGH", 1000).await;
+        seen(&state, "m1", "latest", "CVE-2026-0001", "HIGH", 2000).await;
+        seen(&state, "m1", "latest", "CVE-2026-0002", "HIGH", 2000).await;
+        let mut conn = state.pool.acquire().await.unwrap();
+        for (tag, cve, scanners) in [
+            ("0.4", "CVE-2026-0001", "trivy"),
+            ("latest", "CVE-2026-0001", "grype,trivy"),
+            ("latest", "CVE-2026-0002", "grype"),
+        ] {
+            db::findings::set_scanners(&mut conn, "m1", tag, cve, scanners)
+                .await
+                .unwrap();
+        }
+        drop(conn);
+
+        let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        let per_tag: Vec<(&str, &[String])> = detail
+            .tags
+            .iter()
+            .map(|t| (t.image_tag.as_str(), t.scanners.as_slice()))
+            .collect();
+        assert_eq!(
+            per_tag,
+            [
+                ("latest", &["grype".to_owned(), "trivy".to_owned()][..]),
+                ("0.4", &["trivy".to_owned()][..])
+            ]
+        );
+        assert_eq!(detail.summary.scanners, ["grype", "trivy"]);
+
+        let page = all_cves(&state, &user("u1"), "").await.unwrap();
+        assert_eq!(item(&page, "CVE-2026-0001").scanners, ["grype", "trivy"]);
+        assert_eq!(item(&page, "CVE-2026-0002").scanners, ["grype"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// #350: a tag whose scan no longer reports the CVE keeps its row, shown as fixed.
     #[tokio::test]
     async fn a_tag_that_stopped_reporting_the_cve_shows_as_fixed() {

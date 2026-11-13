@@ -122,6 +122,7 @@
   "cves.col.status": "Status",
   "cves.col.package": "Package",
   "cves.col.fixedIn": "Fixed in",
+  "cves.col.scanners": "Scanners",
   "cves.col.mapping": "Mapping",
   "cves.col.tags": "Tags (n of m)",
   "cves.col.issue": "Issue",

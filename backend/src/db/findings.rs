@@ -84,6 +84,45 @@ pub async fn upsert(conn: &mut SqliteConnection, finding: &Finding<'_>) -> Resul
     Ok(())
 }
 
+/// Records which scanners report the CVE on the tag (#366): a comma list of scanner keys in the
+/// merged-view order. It replaces the earlier list, so a scanner that stopped reporting the CVE
+/// drops out.
+pub async fn set_scanners(
+    conn: &mut SqliteConnection,
+    source_id: &str,
+    image_tag: &str,
+    cve_id: &str,
+    scanners: &str,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "UPDATE cve_findings SET scanners = ?
+         WHERE source_id = ? AND image_tag = ? AND cve_id = ?",
+        scanners,
+        source_id,
+        image_tag,
+        cve_id
+    )
+    .execute(conn)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// The scanner keys of a stored comma list, in stable order and without duplicates. `None` or
+/// an empty text gives an empty list (unknown).
+pub fn scanner_keys(stored: Option<&str>) -> Vec<String> {
+    let keys: Vec<String> = stored
+        .unwrap_or_default()
+        .split(',')
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+        .collect();
+    crate::services::merged_view::order_scanners(&keys)
+        .into_iter()
+        .map(|scanner| scanner.key)
+        .collect()
+}
+
 /// Why an accepted CVE needs a new review (#196), from the stored facts and the new ones.
 /// `None` when neither the severity nor the fixed-in version moved.
 fn change_reason(
@@ -289,6 +328,8 @@ pub struct CveSummaryRow {
     pub github_issue_number: Option<i64>,
     pub github_issue_status: Option<String>,
     pub accepted: bool,
+    /// The scanners that report the CVE on the newest tags, as keys (#366).
+    pub scanners: Vec<String>,
 }
 
 /// One page of CVE summaries, one per (mapping, CVE) (`specs/api.md`, CVEs;
@@ -331,7 +372,7 @@ pub async fn list_cves(
                       COALESCE(f.alias, CASE WHEN f.cve_id <> COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id)
                                              THEN f.cve_id END) AS alias,
                       f.first_seen_at AS first_seen_at, f.last_seen_at AS last_seen_at,
-                      f.status AS status,
+                      f.status AS status, f.scanners AS scanners,
                       CASE f.severity WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4
                            WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 ELSE 1 END AS sev_rank,
                       (nd.image_tag IS NOT NULL) AS nd,
@@ -368,7 +409,9 @@ pub async fn list_cves(
                       MAX(nd AND status = 'open') AS any_open,
                       MAX(CASE WHEN rn = 1 THEN package END) AS package,
                       MAX(CASE WHEN rn = 1 THEN fixed_in_version END) AS fixed_in_version,
-                      MAX(CASE WHEN rn = 1 THEN alias END) AS alias
+                      MAX(CASE WHEN rn = 1 THEN alias END) AS alias,
+                      COALESCE(group_concat(CASE WHEN nd THEN scanners END, ','),
+                               group_concat(scanners, ',')) AS scanners
                FROM tag_rows
                GROUP BY source_id, cve_id
            ),
@@ -381,7 +424,7 @@ pub async fn list_cves(
                            END AS open_severity,
                       CASE WHEN s.any_open = 1 THEN 'open' ELSE 'fixed' END AS status,
                       s.package AS package, s.fixed_in_version AS fixed_in_version,
-                      s.alias AS alias,
+                      s.alias AS alias, s.scanners AS scanners,
                       (SELECT MIN(af.first_seen_at) FROM cve_findings af
                        WHERE af.source_id = s.source_id
                          AND COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = af.cve_id), af.cve_id) = s.cve_id)
@@ -409,7 +452,7 @@ pub async fn list_cves(
                   severity AS "severity!: String", open_severity AS "open_severity?: String",
                   status AS "status!: String",
                   package AS "package?: String", fixed_in_version AS "fixed_in_version?: String",
-                  alias AS "alias?: String",
+                  alias AS "alias?: String", scanners AS "scanners?: String",
                   first_seen_at AS "first_seen_at?: i64", last_seen_at AS "last_seen_at?: i64",
                   open_tags AS "open_tags!: i64", tracked_tags AS "tracked_tags!: i64",
                   github_issue_url AS "github_issue_url?: String",
@@ -494,6 +537,7 @@ pub async fn list_cves(
             github_issue_number: row.github_issue_number,
             github_issue_status: row.github_issue_status,
             accepted: row.accepted != 0,
+            scanners: scanner_keys(row.scanners.as_deref()),
         })
         .collect())
 }
@@ -626,6 +670,8 @@ pub struct CveTagRow {
     pub last_scan_at: Option<i64>,
     /// True for a tag of the mapping's newest scanned digest (#196).
     pub newest_digest: bool,
+    /// The scanners that report the CVE on this tag, as keys (#366).
+    pub scanners: Vec<String>,
 }
 
 /// The most tag rows the CVE detail returns (#350).
@@ -657,13 +703,12 @@ pub async fn cve_tags(
     source_id: &str,
     cve_id: &str,
 ) -> Result<Vec<CveTagRow>, AppError> {
-    sqlx::query_as!(
-        CveTagRow,
+    let rows = sqlx::query!(
         r#"SELECT h.host || '/' || m.repository AS "image!: String",
                   f.image_tag AS "image_tag!: String", f.status AS "status!: String",
                   f.fixed_in_version AS "fixed_in_version?: String",
                   f.description AS "description?: String",
-                  f.alias AS "alias?: String",
+                  f.alias AS "alias?: String", f.scanners AS "scanners?: String",
                   ts.scan_at AS "last_scan_at?: i64",
                   (nd.image_tag IS NOT NULL) AS "newest_digest!: bool"
            FROM cve_findings f
@@ -685,7 +730,21 @@ pub async fn cve_tags(
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| AppError::InternalError)
+    .map_err(|_| AppError::InternalError)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| CveTagRow {
+            image: row.image,
+            image_tag: row.image_tag,
+            status: row.status,
+            fixed_in_version: row.fixed_in_version,
+            description: row.description,
+            alias: row.alias,
+            last_scan_at: row.last_scan_at,
+            newest_digest: row.newest_digest,
+            scanners: scanner_keys(row.scanners.as_deref()),
+        })
+        .collect())
 }
 
 /// The image reference of a source's tag: `<hub host>/<repository>:<tag>` (#323). The host

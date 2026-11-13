@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { AcceptDialog } from "../components/cves/AcceptDialog";
 import { CreateIssueDialog } from "../components/cves/CreateIssueDialog";
-import { CveStatusPill, SeverityPill, issueEligible } from "../components/cves/CvePills";
+import { CveStatusPill, SeverityPill, issueEligible, scannerLabel } from "../components/cves/CvePills";
 import { safeHttpsUrl } from "../components/cves/safeUrl";
 import { ConfirmDialog } from "../components/mappings/ConfirmDialog";
 import { LINK, TABLE, TD, TH } from "../components/mappings/styles";
@@ -247,6 +247,7 @@ export default function CveDetailPage() {
                     <th className={TH}>{t("cves.col.status")}</th>
                     <th className={TH}>{t("cves.detail.col.lastScan")}</th>
                     <th className={TH}>{t("cves.col.fixedIn")}</th>
+                    <th className={TH}>{t("cves.col.scanners")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -264,6 +265,7 @@ export default function CveDetailPage() {
                         <Time iso={tag.last_scan_at} />
                       </td>
                       <td className={`${TD} font-mono text-[12.5px]`}>{tag.fixed_in_version ?? t("cves.unknown")}</td>
+                      <td className={`${TD} whitespace-nowrap`}>{scannerLabel(tag.scanners)}</td>
                     </tr>
                   ))}
                 </tbody>
