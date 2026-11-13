@@ -1289,3 +1289,99 @@ async fn current_tag_image_uses_latest_observation() {
     let other = db::scans::current_tag_image(&mut conn, "s2", "v1").await;
     assert!(matches!(other, Ok(None)));
 }
+
+impl Fx {
+    /// The stored `scanners` text of the tag's row for the CVE (#366).
+    async fn scanners_of(&self, tag: &str, cve: &str) -> Option<String> {
+        match sqlx::query_scalar::<_, Option<String>>(
+            "SELECT scanners FROM cve_findings
+             WHERE source_id = 's1' AND image_tag = ? AND cve_id = ?",
+        )
+        .bind(tag)
+        .bind(cve)
+        .fetch_one(&self.pool)
+        .await
+        {
+            Ok(value) => value,
+            Err(err) => panic!("scanners: {err}"),
+        }
+    }
+}
+
+/// #366: a CVE both scanners report stores both keys, in the merged-view order.
+#[tokio::test]
+async fn a_cve_from_both_scanners_stores_both() {
+    let (trivy, grype) = ok_scripts("");
+    let fx = Fx::new("scanners-both", &trivy, &grype).await;
+    fx.queue(P_OLD).await;
+    fx.drain().await;
+    assert_eq!(
+        fx.scanners_of("v1", "CVE-2026-4738").await.as_deref(),
+        Some("grype,trivy")
+    );
+}
+
+/// #366: a CVE one scanner reports stores that one only.
+#[tokio::test]
+async fn a_cve_from_one_scanner_stores_one() {
+    let (trivy, grype) = ok_scripts("");
+    let fx = Fx::new("scanners-one", &trivy, &grype).await;
+    fx.queue(P_OLD).await;
+    fx.drain().await;
+    assert_eq!(
+        fx.scanners_of("v1", "CVE-2025-60876").await.as_deref(),
+        Some("grype")
+    );
+}
+
+/// #366: a scanner that stops reporting a CVE is removed from the tag's record on the next
+/// recompute.
+#[tokio::test]
+async fn a_scanner_dropping_a_cve_updates_the_record() {
+    let (trivy, grype) = ok_scripts("");
+    let fx = Fx::new("scanners-drop", &trivy, &grype).await;
+    fx.queue(P_OLD).await;
+    fx.drain().await;
+    let empty = fx.dir.join("grype-empty.json");
+    if let Err(err) = std::fs::write(
+        &empty,
+        br#"{"matches":[],"descriptor":{"version":"0.121.2"}}"#,
+    ) {
+        panic!("write: {err}");
+    }
+    fx.script("grype", &format!("cat '{}'", empty.display()));
+    queue_scans(&fx.pool, P_OLD, Some("s1"), "db_update", NOW)
+        .await
+        .ok();
+    fx.drain().await;
+    assert_eq!(
+        fx.scanners_of("v1", "CVE-2026-4738").await.as_deref(),
+        Some("trivy")
+    );
+}
+
+/// #366: the record stays open while another scanner still reports the CVE; a CVE no scanner
+/// reports any more is fixed.
+#[tokio::test]
+async fn the_record_stays_while_another_scanner_reports_it() {
+    let (trivy, grype) = ok_scripts("");
+    let fx = Fx::new("scanners-stay", &trivy, &grype).await;
+    fx.queue(P_OLD).await;
+    fx.drain().await;
+    let empty = fx.dir.join("grype-empty.json");
+    if let Err(err) = std::fs::write(
+        &empty,
+        br#"{"matches":[],"descriptor":{"version":"0.121.2"}}"#,
+    ) {
+        panic!("write: {err}");
+    }
+    fx.script("grype", &format!("cat '{}'", empty.display()));
+    queue_scans(&fx.pool, P_OLD, Some("s1"), "db_update", NOW)
+        .await
+        .ok();
+    fx.drain().await;
+    let rows = fx.tag_rows("v1").await;
+    let status = |cve: &str| rows.iter().find(|r| r.0 == cve).map(|r| r.3.clone());
+    assert_eq!(status("CVE-2026-4738").as_deref(), Some("open"));
+    assert_eq!(status("CVE-2025-60876").as_deref(), Some("fixed"));
+}

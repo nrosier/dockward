@@ -119,6 +119,8 @@ pub struct CveSummary {
     pub github_issue_number: Option<i64>,
     /// `open`, `closed`, or `null` when the CVE has no issue.
     pub github_issue_status: Option<String>,
+    /// The scanners that reported the CVE, as keys (`trivy`, `grype`); empty when unknown (#366).
+    pub scanners: Vec<String>,
 }
 
 impl CveSummary {
@@ -141,6 +143,7 @@ impl CveSummary {
             tracked_tags: row.tracked_tags,
             github_issue_number: row.github_issue_number,
             github_issue_status: row.github_issue_status,
+            scanners: row.scanners,
         })
     }
 }
@@ -157,6 +160,8 @@ pub struct CveTag {
     pub fixed_in_version: Option<String>,
     /// True for a tag of the mapping's newest scanned digest (#196).
     pub newest_digest: bool,
+    /// The scanners that reported the CVE on this tag, as keys; empty when unknown (#366).
+    pub scanners: Vec<String>,
 }
 
 /// `GET /cves/:id` (`specs/api.md`, CVEs, `CveDetail`).
@@ -465,6 +470,7 @@ fn to_tag(row: &CveTagRow, accepted: bool) -> Result<CveTag, AppError> {
         last_scan_at: row.last_scan_at.map(time::rfc3339).transpose()?,
         fixed_in_version: row.fixed_in_version.clone(),
         newest_digest: row.newest_digest,
+        scanners: row.scanners.clone(),
     })
 }
 

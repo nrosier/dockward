@@ -46,8 +46,9 @@ function cve(over: Partial<CveDetail>): CveDetail {
     tracked_tags: 10,
     github_issue_number: null,
     github_issue_status: null,
+    scanners: [],
     tags_total: 1,
-    tags: [{ image: "ghcr.io/team/app", image_tag: "1.42.0", status: "open", last_scan_at: "2026-11-03T14:58:00Z", fixed_in_version: "v0.31.0", newest_digest: true }],
+    tags: [{ image: "ghcr.io/team/app", image_tag: "1.42.0", status: "open", last_scan_at: "2026-11-03T14:58:00Z", fixed_in_version: "v0.31.0", newest_digest: true, scanners: ["trivy", "grype"] }],
     acceptance: null,
     description: "Misuse may cause an authorization bypass.",
     older_tags_only: false,
@@ -98,9 +99,9 @@ describe("CveDetailPage", () => {
         open_tags: 0,
         older_tags_only: true,
         tags: [
-          { image: "ghcr.io/team/app", image_tag: "0.4", status: "open", last_scan_at: null, fixed_in_version: null, newest_digest: false },
-          { image: "ghcr.io/team/app", image_tag: "0.4.2", status: "open", last_scan_at: null, fixed_in_version: null, newest_digest: false },
-          { image: "ghcr.io/team/app", image_tag: "latest", status: "fixed", last_scan_at: null, fixed_in_version: null, newest_digest: true },
+          { image: "ghcr.io/team/app", image_tag: "0.4", status: "open", last_scan_at: null, fixed_in_version: null, newest_digest: false, scanners: [] },
+          { image: "ghcr.io/team/app", image_tag: "0.4.2", status: "open", last_scan_at: null, fixed_in_version: null, newest_digest: false, scanners: [] },
+          { image: "ghcr.io/team/app", image_tag: "latest", status: "fixed", last_scan_at: null, fixed_in_version: null, newest_digest: true, scanners: ["trivy", "grype"] },
         ],
       }),
     );
@@ -114,9 +115,9 @@ describe("CveDetailPage", () => {
       cve({
         tags_total: 120,
         tags: [
-          { image: "ghcr.io/team/app", image_tag: "1.42.0", status: "open", last_scan_at: "2026-11-03T14:58:00Z", fixed_in_version: "v0.31.0", newest_digest: true },
-          { image: "ghcr.io/team/worker", image_tag: "2.0", status: "fixed", last_scan_at: "2026-11-01T10:00:00Z", fixed_in_version: null, newest_digest: false },
-          { image: "ghcr.io/team/api", image_tag: "3.1", status: "accepted", last_scan_at: null, fixed_in_version: null, newest_digest: false },
+          { image: "ghcr.io/team/app", image_tag: "1.42.0", status: "open", last_scan_at: "2026-11-03T14:58:00Z", fixed_in_version: "v0.31.0", newest_digest: true, scanners: ["trivy", "grype"] },
+          { image: "ghcr.io/team/worker", image_tag: "2.0", status: "fixed", last_scan_at: "2026-11-01T10:00:00Z", fixed_in_version: null, newest_digest: false, scanners: [] },
+          { image: "ghcr.io/team/api", image_tag: "3.1", status: "accepted", last_scan_at: null, fixed_in_version: null, newest_digest: false, scanners: [] },
         ],
       }),
     );
@@ -129,6 +130,7 @@ describe("CveDetailPage", () => {
       t("cves.col.status"),
       t("cves.detail.col.lastScan"),
       t("cves.col.fixedIn"),
+      t("cves.col.scanners"),
     ]);
     const rows = within(table).getAllByRole("row");
     expect(within(rows[1]).getByText("ghcr.io/team/app")).toBeInTheDocument();
@@ -137,6 +139,22 @@ describe("CveDetailPage", () => {
     expect(within(rows[2]).getByText("ghcr.io/team/worker")).toBeInTheDocument();
     expect(within(rows[3]).getByText("ghcr.io/team/api")).toBeInTheDocument();
     expect(screen.getByText(t("cves.detail.tagsShowing", { shown: 3, total: 120 }))).toBeInTheDocument();
+  });
+
+  it("detail_tag_rows_show_the_scanners", async () => {
+    stub(
+      cve({
+        tags: [
+          { image: "ghcr.io/team/app", image_tag: "1.42.0", status: "open", last_scan_at: null, fixed_in_version: null, newest_digest: true, scanners: ["trivy", "grype"] },
+          { image: "ghcr.io/team/app", image_tag: "1.41.0", status: "open", last_scan_at: null, fixed_in_version: null, newest_digest: false, scanners: ["grype"] },
+        ],
+      }),
+    );
+    renderWithRoutes(routes, url);
+    const table = await screen.findByRole("table");
+    const rows = within(table).getAllByRole("row");
+    expect(within(rows[1]).getByText(`${t("jobs.scanner.trivy")}, ${t("jobs.scanner.grype")}`)).toBeInTheDocument();
+    expect(within(rows[2]).getByText(t("jobs.scanner.grype"))).toBeInTheDocument();
   });
 
   it("empty_state_when_no_tags", async () => {

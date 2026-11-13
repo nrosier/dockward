@@ -26,6 +26,7 @@ const medium: CveSummary = {
   tracked_tags: 10,
   github_issue_number: null,
   github_issue_status: null,
+  scanners: [],
 };
 
 function row(over: Partial<CveSummary>): CveSummary {
@@ -332,6 +333,20 @@ describe("CvesPage", () => {
     expect(within(tr).getByText("#7")).toBeInTheDocument();
     expect(within(tr).getByText(t("cves.issue.closed"))).toBeInTheDocument();
     expect(within(tr).queryByRole("button", { name: t("cves.action.createIssue") })).not.toBeInTheDocument();
+  });
+
+  it("list_row_shows_the_reporting_scanners", async () => {
+    stub([
+      row({ cve_id: "CVE-2026-0002", id: "m1:CVE-2026-0002", scanners: ["trivy", "grype"] }),
+      row({ cve_id: "CVE-2026-0003", id: "m1:CVE-2026-0003", scanners: ["grype"] }),
+    ]);
+    renderAt(<CvesPage />);
+    expect(await screen.findByRole("columnheader", { name: t("cves.col.scanners") })).toBeInTheDocument();
+    const both = (await screen.findByText("CVE-2026-0002")).closest("tr") as HTMLElement;
+    expect(within(both).getByText(`${t("jobs.scanner.trivy")}, ${t("jobs.scanner.grype")}`)).toBeInTheDocument();
+    const one = (await screen.findByText("CVE-2026-0003")).closest("tr") as HTMLElement;
+    expect(within(one).getByText(t("jobs.scanner.grype"))).toBeInTheDocument();
+    expect(within(one).queryByText(new RegExp(t("jobs.scanner.trivy")))).not.toBeInTheDocument();
   });
 
   it("disables Create issue while an acceptance is active", async () => {
