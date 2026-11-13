@@ -945,6 +945,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #350: a tag that is open while the CVE has an active acceptance is listed as accepted;
+    /// a fixed tag stays fixed.
+    #[tokio::test]
+    async fn an_open_tag_is_listed_as_accepted_while_the_cve_is_accepted() {
+        let (state, dir, _, _) = setup("detail-accepted").await;
+        report_on(&state, "m1", "0.4", "sha256:old", 1000).await;
+        report_on(&state, "m1", "latest", "sha256:new", 2000).await;
+        seen(&state, "m1", "0.4", "CVE-2026-0001", "HIGH", 1000).await;
+        seen(&state, "m1", "latest", "CVE-2026-0001", "HIGH", 2000).await;
+        fix(&state, "m1", "0.4", "CVE-2026-0001").await;
+        sqlx::query(
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username)
+             VALUES ('a1', 'm1', 'CVE-2026-0001', 'accepted for the test', 'u1', 'u1')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        let rows: Vec<(&str, &str)> = detail
+            .tags
+            .iter()
+            .map(|t| (t.image_tag.as_str(), t.status.as_str()))
+            .collect();
+        assert_eq!(rows, [("latest", "accepted"), ("0.4", "fixed")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn detail_lists_tags_and_acceptance() {
         let (state, dir, _, _) = setup("read-detail").await;
