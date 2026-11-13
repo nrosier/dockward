@@ -202,6 +202,28 @@ async fn accept_with<G: IssueApi>(
     Ok((StatusCode::CREATED, Json(Accepted { acceptance })))
 }
 
+/// `POST /api/v1/cves/:id/review`. The caller must own the mapping or be an admin. Clears the
+/// re-review flag of the active acceptance (#196). Returns `204`; `404` for an unknown or
+/// foreign mapping or when no acceptance is active.
+pub async fn review(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    acceptance::review(
+        &state.pool,
+        &Caller {
+            id: &user.id,
+            username: &user.username,
+        },
+        user.role == Role::Admin,
+        &id,
+        now_secs(),
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// The optional body of `POST /api/v1/cves/:id/unaccept`: `{"reopen_issue": true}` asks to
 /// reopen the CVE's closed GitHub issue (#196). An empty body, or a missing flag, is `false`.
 #[derive(Debug, Default, Deserialize)]
@@ -1041,6 +1063,50 @@ mod tests {
             .map(|t| (t.image_tag.as_str(), t.status.as_str()))
             .collect();
         assert_eq!(rows, [("latest", "accepted"), ("0.4", "fixed")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn detail_returns_the_changed_flag_for_a_changed_acceptance() {
+        let (state, dir, _, _) = setup("detail-changed").await;
+        report(&state, "m1", "v1", AT, "success").await;
+        seen(&state, "m1", "v1", "CVE-2026-0001", "HIGH", AT).await;
+        sqlx::query(
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username, created_at, changed_at, change_reason)
+             VALUES ('a1', 'm1', 'CVE-2026-0001', 'vendor fix scheduled', 'u1', 'u1', ?, ?, 'fix_available')",
+        )
+        .bind(AT)
+        .bind(AT + 60)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        let acceptance = detail.acceptance.expect("the active acceptance");
+        assert_eq!(
+            acceptance.changed_at.as_deref(),
+            Some("2001-09-09T01:47:40Z")
+        );
+        assert_eq!(acceptance.change_reason.as_deref(), Some("fix_available"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn detail_has_no_changed_flag_for_an_unchanged_acceptance() {
+        let (state, dir, _, _) = setup("detail-unchanged").await;
+        report(&state, "m1", "v1", AT, "success").await;
+        seen(&state, "m1", "v1", "CVE-2026-0001", "HIGH", AT).await;
+        sqlx::query(
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username, created_at)
+             VALUES ('a1', 'm1', 'CVE-2026-0001', 'vendor fix scheduled', 'u1', 'u1', ?)",
+        )
+        .bind(AT)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let detail = one(&state, &user("u1"), "m1:CVE-2026-0001").await.unwrap();
+        let acceptance = detail.acceptance.expect("the active acceptance");
+        assert_eq!(acceptance.changed_at, None);
+        assert_eq!(acceptance.change_reason, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

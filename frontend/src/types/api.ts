@@ -108,6 +108,9 @@ export interface Acceptance {
   created_by: string;
   created_at: string | null;
   expires_at: string | null;
+  // Set when the severity or fixed version changed under the acceptance (#196).
+  changed_at: string | null;
+  change_reason: "severity_changed" | "fix_available" | "fixed_version_changed" | null;
 }
 
 export interface CveDetail extends CveSummary {

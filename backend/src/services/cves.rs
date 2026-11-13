@@ -582,6 +582,8 @@ pub async fn detail(
             created_by: row.created_by_username,
             created_at: row.created_at.map(time::rfc3339).transpose()?,
             expires_at: row.expires_at.map(time::rfc3339).transpose()?,
+            changed_at: row.changed_at.map(time::rfc3339).transpose()?,
+            change_reason: row.change_reason,
         }),
     };
     let tags = tag_rows

@@ -64,8 +64,13 @@ function stub(
   onIssue?: (path: string) => void,
   sourceOverride: Source = source,
   onUnaccept?: () => void,
+  onReview?: () => void,
 ) {
   return stubApi((path, init) => {
+    if (path === "/api/v1/cves/m1%3ACVE-2026-0001/review" && init?.method === "POST") {
+      onReview?.();
+      return new Response(null, { status: 204 });
+    }
     if (path === "/api/v1/cves/m1%3ACVE-2026-0001/unaccept" && init?.method === "POST") {
       onUnaccept?.();
       return json({}, 200);
@@ -434,6 +439,8 @@ describe("CveDetailPage acceptance note (#351)", () => {
           created_by: "alice",
           created_at: "2026-11-05T10:00:00Z",
           expires_at: null,
+          changed_at: null,
+          change_reason: null,
         },
       }),
     );
@@ -455,6 +462,8 @@ describe("CveDetailPage acceptance note (#351)", () => {
           created_by: "alice",
           created_at: "2026-11-05T10:00:00Z",
           expires_at: null,
+          changed_at: null,
+          change_reason: null,
         },
       }),
     );
@@ -577,5 +586,65 @@ describe("CveDetailPage acceptance note (#351)", () => {
       expect(router.state.location.pathname).toBe("/cves");
     });
     expect(router.state.location.search).toBe("?severity=HIGH&status=open");
+  });
+});
+
+function acceptedCve(changed: Pick<NonNullable<CveDetail["acceptance"]>, "changed_at" | "change_reason">): CveDetail {
+  return cve({
+    accepted: true,
+    acceptance: {
+      id: "a1",
+      mapping_id: "m1",
+      cve_id: "CVE-2026-0001",
+      reason: "Vendor patch next sprint",
+      created_by: "alice",
+      created_at: "2026-11-05T10:00:00Z",
+      expires_at: null,
+      ...changed,
+    },
+  });
+}
+
+describe("CveDetailPage re-review flag (#196)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("changed_acceptance_shows_the_reason_on_the_detail", async () => {
+    stub(acceptedCve({ changed_at: "2026-11-12T09:00:00Z", change_reason: "fix_available" }));
+    renderWithRoutes(routes, url);
+    const flag = await screen.findByRole("region", { name: t("cves.detail.changed.title") });
+    expect(within(flag).getByText(t("cves.detail.changed.fix_available"))).toBeInTheDocument();
+    expect(within(flag).getByText(t("cves.detail.changed.since", { date: formatDate("2026-11-12T09:00:00Z") }))).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: t("cves.detail.changed.review") })).toBeInTheDocument();
+  });
+
+  it("unchanged_acceptance_shows_no_flag", async () => {
+    stub(acceptedCve({ changed_at: null, change_reason: null }));
+    renderWithRoutes(routes, url);
+    await screen.findByText("Vendor patch next sprint");
+    expect(screen.queryByText(t("cves.detail.changed.title"))).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: t("cves.detail.changed.review") })).not.toBeInTheDocument();
+  });
+
+  it("mark_reviewed_sends_one_request_and_clears_the_flag", async () => {
+    const reviewed = vi.fn();
+    let current = acceptedCve({ changed_at: "2026-11-12T09:00:00Z", change_reason: "severity_changed" });
+    stubApi((path, init) => {
+      if (path === "/api/v1/account/me") return json({ user: user("user") });
+      if (path === "/api/v1/image-sources/s1") return json(source);
+      if (path === "/api/v1/cves/m1%3ACVE-2026-0001/review" && init?.method === "POST") {
+        reviewed();
+        current = acceptedCve({ changed_at: null, change_reason: null });
+        return new Response(null, { status: 204 });
+      }
+      if (path === "/api/v1/cves/m1%3ACVE-2026-0001" && init?.method === "GET") return json(current);
+      return undefined;
+    });
+    renderWithRoutes(routes, url);
+    expect(await screen.findByText(t("cves.detail.changed.severity_changed"))).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.changed.review") }));
+    await vi.waitFor(() => expect(screen.queryByText(t("cves.detail.changed.severity_changed"))).not.toBeInTheDocument());
+    expect(reviewed).toHaveBeenCalledTimes(1);
   });
 });
