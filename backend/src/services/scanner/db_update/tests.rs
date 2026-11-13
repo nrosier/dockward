@@ -775,3 +775,74 @@ async fn log_output_is_capped_at_500_lines() {
     let log = log_of(&fx.pool).await;
     assert!(log.steps[0].truncated, "the step is flagged truncated");
 }
+
+#[tokio::test]
+async fn each_log_line_carries_the_scanner_name_or_job_kind() {
+    for (scanner, name) in [(Scanner::Trivy, "trivy"), (Scanner::Grype, "grype")] {
+        let fx = Fx::new(&format!("line-scanner-{name}"), TRIVY_NEW).await;
+        write_script(
+            &fx.dir.join("bin").join(name),
+            &format!("echo '{name} progress' >&2"),
+        );
+        let _ = fx.run(scanner).await;
+
+        let log = log_of(&fx.pool).await;
+        assert!(!log.lines.is_empty(), "{name} has lines");
+        for line in &log.lines {
+            assert_eq!(line.scanner.as_deref(), Some(name), "{line:?}");
+            assert_eq!(line.kind.as_deref(), Some("db_update"), "{line:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn grype_update_is_its_own_logged_step() {
+    let fx = Fx::new("grype-step", TRIVY_OLD).await;
+    write_script(
+        &fx.dir.join("bin").join("grype"),
+        "echo 'grype update progress' >&2\nif [ \"$1 $2\" = \"db status\" ]; then\n\
+         printf '{\"built\":\"2026-11-10T00:00:00Z\"}'\nfi",
+    );
+    let _ = fx.run(Scanner::Grype).await;
+
+    let log = log_of(&fx.pool).await;
+    // Only the update is a step: the status read is not logged. Trivy's two downloads are
+    // not part of a Grype job.
+    assert_eq!(log.steps.len(), 1, "{:?}", log.steps);
+    let step = &log.steps[0];
+    assert_eq!(step.seq, 0);
+    assert_eq!(step.command, "grype db update");
+    assert_eq!(step.outcome, "ok");
+    assert_eq!(step.exit_code, Some(0));
+    assert!(step.finished_at.is_some(), "a finished step has a duration");
+    assert!(step.timeout_secs > 0);
+    assert!(log.lines.iter().all(|l| l.seq == 0));
+}
+
+#[tokio::test]
+async fn a_timed_out_step_records_its_command_and_the_timeout_that_applied() {
+    let fx = Fx::new("timeout-step", TRIVY_NEW).await;
+    exec(
+        &fx.pool,
+        "INSERT INTO system_config (key, value) VALUES ('scanner.timeout_s', '10')",
+        &[],
+    )
+    .await;
+    // The vulnerability DB step passes; the Java DB step hangs.
+    write_script(
+        &fx.dir.join("bin/trivy"),
+        "case \"$*\" in *java*) /bin/sleep 30;; esac",
+    );
+    let outcome = fx.run(Scanner::Trivy).await;
+    assert!(matches!(outcome, JobOutcome::Permanent(_)), "{outcome:?}");
+
+    let log = log_of(&fx.pool).await;
+    assert_eq!(log.steps.len(), 2, "{:?}", log.steps);
+    assert_eq!(log.steps[0].command, "trivy image --download-db-only");
+    assert_eq!(log.steps[0].outcome, "ok");
+    assert_eq!(log.steps[0].exit_code, Some(0));
+    assert_eq!(log.steps[1].command, "trivy image --download-java-db-only");
+    assert_eq!(log.steps[1].outcome, "timed_out");
+    assert_eq!(log.steps[1].exit_code, None);
+    assert_eq!(log.steps[1].timeout_secs, 10);
+}

@@ -59,6 +59,14 @@ describe("JobsPage", () => {
     vi.unstubAllGlobals();
   });
 
+  it("db_update row shows the scanner", async () => {
+    stub([
+      { ...failed, id: "d1", trigger: "db_update", scanner: "grype", source_id: null, image: { repo_full_name: null, tag: null, digest: null } },
+    ]);
+    renderAt(<JobsPage />);
+    expect(await screen.findByText(t("jobs.scanner.refreshes", { scanner: t("jobs.scanner.grype") }))).toBeInTheDocument();
+  });
+
   it("shows the trigger and the error row for a failed job", async () => {
     stub();
     renderAt(<JobsPage />);
