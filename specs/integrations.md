@@ -54,7 +54,7 @@ Decisions are marked `Decided (<date>, <who>)`. `Verified (<date>)` marks a clai
 ### Pinned binaries
 
 - The Dockerfile copies the scanners from digest-pinned release images, never a floating tag: Trivy from `aquasec/trivy@sha256:8f6bb947...` (`/usr/local/bin/trivy`), Grype from `anchore/grype@sha256:13113eec...` (`/grype`). Both are static, so they run on `scratch`. See [deployment.md](deployment.md).
-- Versions. Trivy 0.76.2 is the pinned version in the test fixtures (`backend/tests/fixtures/scanner/`), `services/scanner/parse/tests.rs` and `.github/workflows/security-scan.yml`. Grype 0.121.2 is the version in `services/scanner/db_update/tests.rs`, in the test fixtures and in the CI pin `GRYPE_VERSION` in `security-scan.yml`. Decision 29 verified Grype v0.121.2 at digest `6a36234d...`, which is not the digest the Dockerfile pins. The Dockerfile states no version, so the Grype version of the shipped image is not known from the repository (see the OPEN item below).
+- Versions (verified 2026-11-13). The bundled Trivy is v0.76.2 (`sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb`) and the bundled Grype is v0.121.3 (`sha256:13113eeceab017260370cf540e1d25442c59665fd07d1b09b66d63bb0c282887`), the latest stable releases of each. The Dockerfile records the release in a comment above each pin, `security-scan.yml` pins the same versions (`TRIVY_VERSION`, `GRYPE_VERSION`), and `scripts/check-scanner-pins.sh` fails the build if a pin is missing, floating, or has no version comment. The fixtures and the `db_update` tests carry older Grype strings (v0.121.2) as sample data, not as the shipped version. Each release re-checks the pins (see [deployment.md](deployment.md), "Releases").
 
 ### Run arguments
 
@@ -167,7 +167,6 @@ Read from the image config of the scanned platform image (`extra_attrs`-style co
 
 ## OPEN
 
-- OPEN: the Grype version of the shipped image. The Dockerfile pins `anchore/grype@sha256:13113eec...` with no version comment. Decision 29 verified v0.121.2 at digest `6a36234d...`, and CI pins v0.121.2. The repository does not show which version `13113eec...` is. Decide whether to pin the verified digest, or record the version the digest is confirmed to be.
 - OPEN: the alert payload key `mapping.harbor` (see [alerts.md](alerts.md)). It holds a hub and repository, not a Harbor value.
 - OPEN: the Rust config reads `DOCKWARD_ALLOW_PRIVATE_HARBOR` (`backend/src/config.rs`) but no service uses it (verified by search of `backend/src`). Remove or keep.
 - UNVERIFIED: a live pull from `ghcr.io` and `docker.io` with a real credential, the anonymous Docker Hub rate-limit answer, and whether `docker.io` returns a `Retry-After` header on `429`. Only a live run can check these.
