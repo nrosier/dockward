@@ -99,6 +99,32 @@ jobs:
       - name: Test the version check
         run: bash scripts/test-check-scanner-versions.sh
 
+  scanner-versions-image:
+    name: Scanner versions (built image)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The Dockerfile requires the REVISION build argument, as in docker.yml.
+      - name: Build the image
+        env:
+          REVISION: ${{ github.sha }}
+        run: docker build --build-arg "REVISION=$REVISION" -t dockward-ci:scanner-check .
+
+      - name: Check the scanner versions the image reports
+        run: bash scripts/check-scanner-versions.sh Dockerfile CHANGELOG.md dockward-ci:scanner-check
+
   frontend:
     name: Frontend (audit, lint, build)
     runs-on: ubuntu-latest
