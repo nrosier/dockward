@@ -12,7 +12,7 @@ use axum::{
     },
     http::StatusCode,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::state::AppState;
 use crate::error::AppError;
@@ -202,13 +202,40 @@ async fn accept_with<G: IssueApi>(
     Ok((StatusCode::CREATED, Json(Accepted { acceptance })))
 }
 
-/// `POST /api/v1/cves/:id/unaccept`. The caller must own the mapping or be an admin. Returns `204`; `404`
-/// for an unknown or foreign mapping or when no acceptance is active.
+/// The optional body of `POST /api/v1/cves/:id/unaccept`: `{"reopen_issue": true}` asks to
+/// reopen the CVE's closed GitHub issue (#196). An empty body, or a missing flag, is `false`.
+#[derive(Debug, Default, Deserialize)]
+struct UnacceptInput {
+    #[serde(default)]
+    reopen_issue: bool,
+}
+
+/// `POST /api/v1/cves/:id/unaccept`. The caller must own the mapping or be an admin. The body
+/// is optional: `{"reopen_issue": bool}`. Returns `204`; `400` for a body that is not JSON;
+/// `404` for an unknown or foreign mapping or when no acceptance is active.
 pub async fn unaccept(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Result<StatusCode, AppError> {
+    unaccept_with(&state, &user, &id, &body, state.issues_client.as_ref()).await
+}
+
+/// The route's work with the GitHub client passed in, so tests use a fake.
+async fn unaccept_with<G: IssueApi>(
+    state: &AppState,
+    user: &AuthUser,
+    id: &str,
+    body: &[u8],
+    gh: &G,
+) -> Result<StatusCode, AppError> {
+    let input: UnacceptInput = if body.iter().all(u8::is_ascii_whitespace) {
+        UnacceptInput::default()
+    } else {
+        serde_json::from_slice(body)
+            .map_err(|_| AppError::InvalidRequest("The request body is not valid.".to_owned()))?
+    };
     acceptance::unaccept(
         &state.pool,
         &Caller {
@@ -216,7 +243,8 @@ pub async fn unaccept(
             username: &user.username,
         },
         user.role == Role::Admin,
-        &id,
+        id,
+        input.reopen_issue.then_some((gh, &state.credentials_key)),
         now_secs(),
     )
     .await?;
@@ -486,6 +514,7 @@ mod tests {
             },
             false,
             "m1:CVE-2026-0001",
+            None::<(&FakeIssues, &crate::auth::crypto::DerivedKey)>,
             now_secs(),
         )
         .await
@@ -516,6 +545,7 @@ mod tests {
             },
             false,
             "m1:CVE-2026-0001",
+            None::<(&FakeIssues, &crate::auth::crypto::DerivedKey)>,
             now_secs(),
         )
         .await

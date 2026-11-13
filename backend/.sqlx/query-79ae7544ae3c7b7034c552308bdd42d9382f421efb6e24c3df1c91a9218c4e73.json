@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT severity, fixed_in_version FROM cve_findings\n         WHERE source_id = ? AND image_tag = ? AND cve_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "severity",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "severity"
+          }
+        }
+      },
+      {
+        "name": "fixed_in_version",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "fixed_in_version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "79ae7544ae3c7b7034c552308bdd42d9382f421efb6e24c3df1c91a9218c4e73"
+}
