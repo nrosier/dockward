@@ -704,10 +704,10 @@ fn the_scanner_process_gets_the_verified_flags_and_a_cleared_environment() {
     assert!(!logged.contains(&layout), "no layout path in the logs");
 }
 
-/// A failed scanner on the newest image never closes an issue; once it finishes clean, the
-/// issue closes.
+/// A failed scanner on the newest image never posts the fixed note; once it finishes clean, the
+/// note is posted and the issue stays open.
 #[tokio::test]
-async fn a_failed_scanner_never_closes_an_issue() {
+async fn a_failed_scanner_never_notes_an_issue() {
     let (trivy, grype) = ok_scripts("");
     let fx = Fx::new("close", &trivy, &grype).await;
     fx.queue(P_OLD).await;
@@ -811,7 +811,18 @@ async fn a_failed_scanner_never_closes_an_issue() {
         "the retry reuses its run"
     );
     reconcile().await;
-    assert_eq!(open("closed").await, 1);
+    assert_eq!(open("closed").await, 0, "Dockward never closes the issue");
+    assert_eq!(open("open").await, 1);
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM github_issues WHERE fixed_noted_at IS NOT NULL",
+            &[]
+        )
+        .await,
+        1,
+        "the fixed note was posted"
+    );
     assert_eq!(
         fx.tag_rows("v1")
             .await

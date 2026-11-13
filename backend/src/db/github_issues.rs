@@ -21,6 +21,8 @@ pub struct IssueRow {
     pub status: String,
     /// True when the issue was closed by hand on GitHub while the CVE was still reported.
     pub closed_manually: bool,
+    /// Unix seconds of the "fixed, can be closed" note, or `None` when no note stands.
+    pub fixed_noted_at: Option<i64>,
 }
 
 /// A new row. It starts `open`.
@@ -45,7 +47,8 @@ pub async fn find(
         r#"SELECT id AS "id!", github_owner AS "github_owner!", github_repo AS "github_repo!",
                   cve_id AS "cve_id!", github_issue_number AS "github_issue_number!: i64",
                   github_issue_url AS "github_issue_url!", status AS "status!",
-                  closed_manually AS "closed_manually!: bool"
+                  closed_manually AS "closed_manually!: bool",
+                  fixed_noted_at AS "fixed_noted_at?: i64"
            FROM github_issues
            WHERE github_owner = ? AND github_repo = ? AND cve_id = ?"#,
         owner,
@@ -79,16 +82,45 @@ pub async fn insert(conn: &mut SqliteConnection, row: &NewIssue<'_>) -> Result<b
     .map_err(|_| AppError::InternalError)
 }
 
-/// Sets the row's status to `open` or `closed`. It clears `closed_manually`: the status is
-/// now Dockward's own.
+/// Sets the row's status to `open` or `closed`. It clears `closed_manually` (the status is
+/// now Dockward's own) and `fixed_noted_at` (a new status starts a new cycle).
 pub async fn set_status(
     conn: &mut SqliteConnection,
     id: &str,
     status: &str,
 ) -> Result<(), AppError> {
     sqlx::query!(
-        "UPDATE github_issues SET status = ?, closed_manually = 0 WHERE id = ?",
+        "UPDATE github_issues SET status = ?, closed_manually = 0, fixed_noted_at = NULL WHERE id = ?",
         status,
+        id
+    )
+    .execute(conn)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Records that the fixed note was posted at `now` (Unix seconds).
+pub async fn mark_fixed_noted(
+    conn: &mut SqliteConnection,
+    id: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "UPDATE github_issues SET fixed_noted_at = ? WHERE id = ?",
+        now,
+        id
+    )
+    .execute(conn)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Clears the fixed note flag: the CVE is reported again, so a later fix notes again.
+pub async fn clear_fixed_noted(conn: &mut SqliteConnection, id: &str) -> Result<(), AppError> {
+    sqlx::query!(
+        "UPDATE github_issues SET fixed_noted_at = NULL WHERE id = ?",
         id
     )
     .execute(conn)

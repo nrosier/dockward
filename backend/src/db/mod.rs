@@ -436,13 +436,13 @@ mod tests {
             .await
             .map_err(|_| AppError::InternalError)?;
         assert_eq!((runs, findings), (1, 1));
-        // Every migration applied, in order: 0007 (aliases), 0008 (manual trigger), 0009 (TOTP), 0010 (empty jobs), 0012 (CVE scanners), 0013 (id reason).
+        // Every migration applied, in order: 0007 (aliases), 0008 (manual trigger), 0009 (TOTP), 0010 (empty jobs), 0012 (CVE scanners), 0013 (id reason), 0014 (fixed note).
         let versions: Vec<i64> =
             sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&pool)
                 .await
                 .map_err(|_| AppError::InternalError)?;
-        assert_eq!(versions, (1..=13).collect::<Vec<i64>>());
+        assert_eq!(versions, (1..=14).collect::<Vec<i64>>());
         let names: Vec<(String,)> = sqlx::query_as(
             "SELECT name FROM sqlite_master
              WHERE name IN ('idx_scan_runs_current', 'newest_digest_tags', 'tag_scan_times',

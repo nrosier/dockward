@@ -449,6 +449,22 @@ impl Fx {
             .with(|state| state.issues.iter().filter(|issue| issue.open).count())
     }
 
+    /// How many fixed notes were posted.
+    fn notes(&self) -> usize {
+        self.github.with(|state| {
+            state
+                .log
+                .iter()
+                .filter(|(_, path, body)| {
+                    path.ends_with("/comments")
+                        && body["body"]
+                            .as_str()
+                            .is_some_and(|text| text.ends_with("This issue can be closed."))
+                })
+                .count()
+        })
+    }
+
     fn all_issues(&self) -> usize {
         self.github.with(|state| state.issues.len())
     }
@@ -745,16 +761,25 @@ async fn two_tags_get_two_categories_and_two_sources_share_one_issue() {
     fx.drain().await;
     assert_eq!(
         fx.open_issues(),
-        0,
-        "closed when no source of the repository reports it"
+        1,
+        "Dockward never closes the issue: it only notes that it can be closed"
+    );
+    assert!(
+        fx.github
+            .with(|state| state.log.iter().any(|(_, path, body)| {
+                path.ends_with("/comments")
+                    && body["body"]
+                        .as_str()
+                        .is_some_and(|text| text.ends_with("This issue can be closed."))
+            }))
     );
     assert_eq!(fx.all_issues(), 1);
 }
 
 /// A failed scanner, a failed platform and a platform that was never scanned each upload the
-/// SARIF but never close an issue.
+/// SARIF but never post the fixed note.
 #[tokio::test]
-async fn a_failed_scanner_or_platform_never_closes_an_issue() {
+async fn a_failed_scanner_or_platform_never_notes_an_issue() {
     let fx = Fx::new("failed").await;
     fx.finished_image(
         IMG_1,
@@ -807,11 +832,7 @@ async fn a_failed_scanner_or_platform_never_closes_an_issue() {
     fx.recompute(IMG_3).await;
     assert_eq!(fx.queue(IMG_3).await, 1);
     fx.drain().await;
-    assert_eq!(
-        fx.open_issues(),
-        1,
-        "a failed platform never closes an issue"
-    );
+    assert_eq!(fx.notes(), 0, "a failed platform never posts the note");
 
     // The same image once every platform has a result: the issue closes.
     exec(
@@ -826,7 +847,8 @@ async fn a_failed_scanner_or_platform_never_closes_an_issue() {
     fx.recompute(IMG_3).await;
     assert_eq!(fx.queue(IMG_3).await, 1);
     fx.drain().await;
-    assert_eq!(fx.open_issues(), 0);
+    assert_eq!(fx.notes(), 1);
+    assert_eq!(fx.open_issues(), 1, "the issue stays open");
 }
 
 /// A missing revision label and a source label for another repository fail the publish for good
