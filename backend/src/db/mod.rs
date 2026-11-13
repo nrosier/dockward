@@ -442,7 +442,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .map_err(|_| AppError::InternalError)?;
-        assert_eq!(versions, (1..=10).collect::<Vec<i64>>());
+        assert_eq!(versions, (1..=11).collect::<Vec<i64>>());
         let names: Vec<(String,)> = sqlx::query_as(
             "SELECT name FROM sqlite_master
              WHERE name IN ('idx_scan_runs_current', 'newest_digest_tags', 'tag_scan_times',

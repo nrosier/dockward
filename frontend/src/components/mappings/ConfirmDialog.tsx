@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Dialog } from "../ui/Dialog";
 import { Button } from "../ui/Button";
 import { t } from "../../i18n";
@@ -12,6 +13,7 @@ interface ConfirmDialogProps {
   pending?: boolean;
   danger?: boolean;
   error?: string | null;
+  children?: ReactNode;
 }
 
 export function ConfirmDialog({
@@ -24,9 +26,11 @@ export function ConfirmDialog({
   pending = false,
   danger = false,
   error = null,
+  children,
 }: ConfirmDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange} title={title} description={description}>
+      {children}
       {error === null ? null : (
         <p role="alert" className="text-[13px] text-crit-ink">
           {error}

@@ -903,11 +903,9 @@ impl<G: IssueApi> Ctx<'_, G> {
             (None, None) => {}
             // (b) A row Dockward closed, and the newest digest reports the CVE again: reopen
             // the same issue. A row closed by hand is only reopened if someone reopened the
-            // issue on GitHub (then only the row is updated). An accepted CVE never reopens
-            // (#196): its closed issue stays closed, with no reopen and no comment.
-            (Some(row), Some(_))
-                if row.status == "closed" && !rules.accepted.iter().any(|id| id == cve_id) =>
-            {
+            // issue on GitHub (then only the row is updated). An accepted CVE reopens too
+            // (#196, 2026-11-13): the CVE returning is new evidence.
+            (Some(row), Some(_)) if row.status == "closed" => {
                 if row.closed_manually {
                     if self.github_is_open(&row).await? {
                         self.store_status(&row, "open").await?;
@@ -1129,6 +1127,36 @@ pub async fn reconcile<G: IssueApi>(
         }
     }
     Ok(Outcome::Complete)
+}
+
+/// Reopens the closed issue of a CVE when its acceptance is revoked and the user asked for it
+/// (#196, 2026-11-13). Uses the same reopen path as the scan: the issue is opened, the row is
+/// marked `open`, then the comment is posted. Returns `false` and does nothing when the CVE
+/// has no `github_issues` row or its row is not closed. A GitHub failure is `502`.
+pub async fn reopen_closed<G: IssueApi>(
+    pool: &SqlitePool,
+    gh: &G,
+    token: &[u8],
+    source: &SourceRow,
+    cve_id: &str,
+    comment: &str,
+    now: i64,
+) -> Result<bool, AppError> {
+    let ctx = Ctx {
+        pool,
+        gh,
+        token,
+        source,
+        now,
+    };
+    let Some(row) = ctx.find_row(cve_id).await? else {
+        return Ok(false);
+    };
+    if row.status != "closed" {
+        return Ok(false);
+    }
+    ctx.reopen(&row, comment).await.map_err(manual_error)?;
+    Ok(true)
 }
 
 /// A GitHub failure in the manual route is `502`; a database error stays as it is.
@@ -2413,10 +2441,10 @@ mod tests {
         assert_eq!(fx.github.writes().len(), 1);
     }
 
-    /// An accepted CVE never reopens its existing issue: accepting stops new issues and a
-    /// closed issue stays closed when the CVE returns. No reopen call and no comment.
+    /// An accepted CVE's closed issue is reopened when the newest digest reports the CVE again,
+    /// with a comment that names the new evidence (#196, decision of 2026-11-13).
     #[tokio::test]
-    async fn accepted_cve_with_a_closed_issue_stays_closed() {
+    async fn an_accepted_cve_with_a_closed_issue_reopens_when_it_returns() {
         let fx = Fixture::new("accepted-closed", "CRITICAL", true).await;
         fx.report("v1", "sha256:old", 100).await;
         fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
@@ -2438,13 +2466,15 @@ mod tests {
             .await;
         fx.reconcile("ghcr.io/o/app:v2").await;
 
-        assert_eq!(fx.github.creates().len(), 1, "accepting never creates one");
+        assert_eq!(fx.github.creates().len(), 1, "the same issue is reused");
+        let writes = fx.github.writes();
+        assert_eq!(writes.len(), writes_before + 2, "a reopen and a comment");
+        assert_eq!(writes[writes_before].2["state"], "open");
         assert_eq!(
-            fx.github.writes().len(),
-            writes_before,
-            "no reopen call and no comment"
+            writes[writes_before + 1].2["body"],
+            "CVE is back in scan ghcr.io/o/app:v2"
         );
-        assert_eq!(fx.issues().await[0].2, "closed");
+        assert_eq!(fx.issues().await[0].2, "open");
     }
 
     /// The merged CVE found by two scanners gets one issue whose body says so, and the line is

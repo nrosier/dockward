@@ -32,6 +32,16 @@ pub struct Finding<'a> {
 /// the new facts, moves `last_seen_at` forward and goes back to `open` (a CVE that returns
 /// on a tag reopens its row). `first_seen_at` is kept.
 pub async fn upsert(conn: &mut SqliteConnection, finding: &Finding<'_>) -> Result<(), AppError> {
+    let before = sqlx::query!(
+        "SELECT severity, fixed_in_version FROM cve_findings
+         WHERE source_id = ? AND image_tag = ? AND cve_id = ?",
+        finding.source_id,
+        finding.image_tag,
+        finding.cve_id
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
     sqlx::query!(
         "INSERT INTO cve_findings
             (id, source_id, image_tag, cve_id, package, severity,
@@ -55,6 +65,61 @@ pub async fn upsert(conn: &mut SqliteConnection, finding: &Finding<'_>) -> Resul
         finding.description,
         finding.alias,
         finding.now,
+        finding.now
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    if let Some(before) = before {
+        let reason = change_reason(
+            &before.severity,
+            before.fixed_in_version.as_deref(),
+            finding.severity,
+            finding.fixed_in_version,
+        );
+        if let Some(reason) = reason {
+            mark_acceptance_changed(conn, finding, reason).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Why an accepted CVE needs a new review (#196), from the stored facts and the new ones.
+/// `None` when neither the severity nor the fixed-in version moved.
+fn change_reason(
+    old_severity: &str,
+    old_fixed: Option<&str>,
+    new_severity: &str,
+    new_fixed: Option<&str>,
+) -> Option<&'static str> {
+    let old_fixed = old_fixed.filter(|v| !v.is_empty());
+    let new_fixed = new_fixed.filter(|v| !v.is_empty());
+    if old_severity != new_severity {
+        Some("severity_changed")
+    } else if old_fixed.is_none() && new_fixed.is_some() {
+        Some("fix_available")
+    } else if old_fixed != new_fixed {
+        Some("fixed_version_changed")
+    } else {
+        None
+    }
+}
+
+/// Flags the active acceptance of the CVE in the source as changed, for re-review. An
+/// acceptance that is revoked or expired is left alone. The acceptance itself stays active.
+async fn mark_acceptance_changed(
+    conn: &mut SqliteConnection,
+    finding: &Finding<'_>,
+    reason: &str,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "UPDATE cve_acceptances SET changed_at = ?, change_reason = ?
+         WHERE source_id = ? AND cve_id = ? AND revoked_at IS NULL
+           AND (expires_at IS NULL OR expires_at > ?)",
+        finding.now,
+        reason,
+        finding.source_id,
+        finding.cve_id,
         finding.now
     )
     .execute(conn)

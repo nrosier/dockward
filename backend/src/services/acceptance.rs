@@ -416,12 +416,14 @@ async fn comment_on_open_issue<G: IssueApi>(
 /// `POST /api/v1/cves/:id/unaccept` for the owner of the source, or for any admin. `404`
 /// when the id is malformed, the source is not the caller's (and the caller is not an
 /// admin), or no acceptance is active. Soft revoke with
-/// `revoked_by` the caller, audited as `cve.unaccept` (`{"reason":"manual"}`). No GitHub call.
-pub async fn unaccept(
+/// `revoked_by` the caller, audited as `cve.unaccept` (`{"reason":"manual"}`). With `reopen_issue` and a closed
+/// issue, the issue is reopened with a comment (#196); otherwise there is no GitHub call.
+pub async fn unaccept<G: IssueApi>(
     pool: &SqlitePool,
     caller: &Caller<'_>,
     is_admin: bool,
     id: &str,
+    reopen: Option<(&G, &DerivedKey)>,
     now: i64,
 ) -> Result<(), AppError> {
     let (source_id, requested) = split_id(id)?;
@@ -454,7 +456,47 @@ pub async fn unaccept(
         Some(&serde_json::json!({"reason": "manual"})),
     )
     .await?;
-    tx.commit().await.map_err(|_| AppError::InternalError)
+    tx.commit().await.map_err(|_| AppError::InternalError)?;
+    if let Some((gh, credentials_key)) = reopen {
+        reopen_closed_issue(pool, credentials_key, gh, &source, cve_id, caller, now).await;
+    }
+    Ok(())
+}
+
+/// Reopens the CVE's closed issue after an un-accept that asked for it (#196). The
+/// un-accept is already committed, so a failure is swallowed after one fixed-text log line.
+async fn reopen_closed_issue<G: IssueApi>(
+    pool: &SqlitePool,
+    credentials_key: &DerivedKey,
+    gh: &G,
+    source: &SourceRow,
+    cve_id: &str,
+    caller: &Caller<'_>,
+    now: i64,
+) {
+    let reopened = async {
+        let credential = {
+            let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+            credential_db::find_owned(&mut conn, &source.user_id, &source.github_cred_id)
+                .await?
+                .ok_or(AppError::NotFound)?
+        };
+        let token = decrypt_token(credentials_key, &credential)?;
+        let comment = format!(
+            "{} un-accepted this CVE and asked to reopen the issue.",
+            caller.username
+        );
+        crate::services::issue_lifecycle::reopen_closed(
+            pool, gh, &token, source, cve_id, &comment, now,
+        )
+        .await
+    }
+    .await;
+    if reopened.is_err() {
+        tracing::warn!(
+            "reopening the GitHub issue after the un-accept failed; the un-accept stands"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -561,7 +603,23 @@ mod tests {
                 },
                 is_admin,
                 id,
+                None::<(&FakeIssues, &DerivedKey)>,
                 now,
+            )
+            .await
+        }
+
+        async fn unaccept_reopen(&self, id: &str, reopen: bool) -> Result<(), AppError> {
+            unaccept(
+                &self.state.pool,
+                &Caller {
+                    id: "u1",
+                    username: "u1",
+                },
+                false,
+                id,
+                reopen.then_some((&self.gh, &self.state.credentials_key)),
+                NOW + 1,
             )
             .await
         }
@@ -699,6 +757,122 @@ mod tests {
         );
         // The CVE can be accepted again: it is active once more.
         f.accept("u1", ID, "accepted again", None).await.unwrap();
+    }
+
+    async fn rescan(f: &Fixture, severity: &str, fixed_in: Option<&str>, at: i64) {
+        let mut conn = f.state.pool.acquire().await.unwrap();
+        db::findings::upsert(
+            &mut conn,
+            &db::findings::Finding {
+                id: &ids::new_id().unwrap_or_default(),
+                source_id: "m1",
+                image_tag: "v1",
+                cve_id: CVE,
+                package: Some("openssl"),
+                severity,
+                fixed_in_version: fixed_in,
+                description: None,
+                alias: None,
+                now: at,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn changed(f: &Fixture) -> (Option<i64>, Option<String>) {
+        sqlx::query_as(
+            "SELECT changed_at, change_reason FROM cve_acceptances WHERE revoked_at IS NULL",
+        )
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_accepted_cve_whose_priority_changes_is_marked_changed() {
+        let f = Fixture::new("priority-changed").await;
+        f.accept("u1", ID, "vendor patch is scheduled", None)
+            .await
+            .unwrap();
+        // The same facts again change nothing.
+        rescan(&f, "CRITICAL", None, 20).await;
+        assert_eq!(changed(&f).await, (None, None));
+
+        rescan(&f, "HIGH", None, 30).await;
+
+        assert_eq!(
+            changed(&f).await,
+            (Some(30), Some("severity_changed".to_owned()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fix_becoming_available_marks_an_accepted_cve_changed() {
+        let f = Fixture::new("fix-available").await;
+        f.accept("u1", ID, "no fix yet", None).await.unwrap();
+
+        rescan(&f, "CRITICAL", Some("3.0.1"), 30).await;
+
+        assert_eq!(
+            changed(&f).await,
+            (Some(30), Some("fix_available".to_owned()))
+        );
+    }
+
+    #[tokio::test]
+    async fn un_accept_with_reopen_reopens_the_closed_issue() {
+        let f = Fixture::new("unaccept-reopen").await;
+        f.issue("closed").await;
+        f.accept("u1", ID, "vendor patch is scheduled", None)
+            .await
+            .unwrap();
+        let before = f.github.writes().len();
+
+        f.unaccept_reopen(ID, true).await.unwrap();
+
+        let writes = f.github.writes();
+        assert_eq!(writes.len(), before + 2, "a reopen and a comment");
+        assert_eq!(writes[before].2["state"], "open");
+        assert!(
+            writes[before + 1].2["body"]
+                .as_str()
+                .unwrap()
+                .contains("un-accepted")
+        );
+        assert!(f.github.with(|s| s.issues[0].open));
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM github_issues WHERE id = 'gi1'")
+                .fetch_one(&f.state.pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "open");
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM cve_acceptances WHERE revoked_at IS NULL")
+                .await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn un_accept_without_reopen_leaves_the_issue_closed() {
+        let f = Fixture::new("unaccept-no-reopen").await;
+        f.issue("closed").await;
+        f.accept("u1", ID, "vendor patch is scheduled", None)
+            .await
+            .unwrap();
+        let before = f.github.writes().len();
+
+        f.unaccept_reopen(ID, false).await.unwrap();
+
+        assert_eq!(f.github.writes().len(), before, "nothing changes on GitHub");
+        assert!(!f.github.with(|s| s.issues[0].open));
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM github_issues WHERE id = 'gi1'")
+                .fetch_one(&f.state.pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "closed");
     }
 
     #[tokio::test]

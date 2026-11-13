@@ -168,6 +168,7 @@
   "cves.delete.body": "This removes the record of {cve} for {source}, with its scan findings. Other sources and GitHub issues are not changed. This cannot be undone.",
   "cves.delete.confirm": "Delete record",
   "cves.unaccept.body": "The CVE becomes active again, and a new issue can be created for it.",
+  "cves.unaccept.reopen": "Reopen the GitHub issue",
   "cves.filter.group": "CVE filters",
   "cves.filter.tag": "Tag",
   "cves.filter.namespace": "Namespace",

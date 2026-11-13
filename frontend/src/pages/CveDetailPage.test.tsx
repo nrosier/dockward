@@ -441,6 +441,46 @@ describe("CveDetailPage acceptance note (#351)", () => {
     await vi.waitFor(() => expect(unaccepted).toHaveBeenCalledTimes(1));
   });
 
+  function stubUnacceptBody(detail: CveDetail, onBody: (body: unknown) => void) {
+    return stubApi((path, init) => {
+      if (path === "/api/v1/account/me") return json({ user: user("user") });
+      if (path === "/api/v1/cves/m1%3ACVE-2026-0001" && init?.method === "GET") return json(detail);
+      if (path === "/api/v1/image-sources/s1") return json(source);
+      if (path === "/api/v1/cves/m1%3ACVE-2026-0001/unaccept" && init?.method === "POST") {
+        onBody(init.body === undefined ? undefined : JSON.parse(String(init.body)));
+        return json({}, 200);
+      }
+      return undefined;
+    });
+  }
+
+  it("un_accept_shows_reopen_checkbox_when_issue_is_closed", async () => {
+    stubUnacceptBody(cve({ accepted: true, github_issue_number: 7, github_issue_status: "closed" }), vi.fn());
+    renderWithRoutes(routes, url);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.unaccept") }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("checkbox", { name: t("cves.unaccept.reopen") })).not.toBeChecked();
+  });
+
+  it("un_accept_hides_reopen_checkbox_without_a_closed_issue", async () => {
+    stubUnacceptBody(cve({ accepted: true, github_issue_number: 7, github_issue_status: "open" }), vi.fn());
+    renderWithRoutes(routes, url);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.unaccept") }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+  });
+
+  it("un_accept_sends_reopen_issue_flag", async () => {
+    const bodies: unknown[] = [];
+    stubUnacceptBody(cve({ accepted: true, github_issue_number: 7, github_issue_status: "closed" }), (body) => bodies.push(body));
+    renderWithRoutes(routes, url);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.unaccept") }));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: t("cves.unaccept.reopen") }));
+    await userEvent.click(within(dialog).getByRole("button", { name: t("cves.detail.unaccept") }));
+    await vi.waitFor(() => expect(bodies).toEqual([{ reopen_issue: true }]));
+  });
+
   function stubUnaccept(role: "admin" | "user", onUnaccept: () => void) {
     const foreign: Source = { ...source, user_id: "someone-else" };
     return stubApi((path, init) => {

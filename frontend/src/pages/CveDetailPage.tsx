@@ -29,6 +29,7 @@ export default function CveDetailPage() {
   const queryClient = useQueryClient();
   const [acceptOpen, setAcceptOpen] = useState(false);
   const [revokeOpen, setRevokeOpen] = useState(false);
+  const [reopenIssue, setReopenIssue] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const navigate = useNavigate();
@@ -57,9 +58,11 @@ export default function CveDetailPage() {
     onSuccess: refresh,
   });
   const revoke = useMutation({
-    mutationFn: () => api("POST", `/cves/${encodeURIComponent(id)}/unaccept`),
+    mutationFn: (reopen: boolean) =>
+      api("POST", `/cves/${encodeURIComponent(id)}/unaccept`, reopen ? { reopen_issue: true } : undefined),
     onSuccess: async () => {
       setRevokeOpen(false);
+      setReopenIssue(false);
       await refresh();
     },
   });
@@ -311,10 +314,22 @@ export default function CveDetailPage() {
           title={t("cves.unaccept.title", { cve: cve.cve_id })}
           description={t("cves.unaccept.body")}
           confirmLabel={t("cves.detail.unaccept")}
-          onConfirm={() => revoke.mutate()}
+          onConfirm={() => revoke.mutate(cve.github_issue_status === "closed" && reopenIssue)}
           pending={revoke.isPending}
           error={revoke.isError ? t("errors.generic") : null}
-        />
+        >
+          {cve.github_issue_status === "closed" ? (
+            <label className="inline-flex cursor-pointer items-center gap-2 text-[13px]">
+              <input
+                type="checkbox"
+                checked={reopenIssue}
+                onChange={(event) => setReopenIssue(event.target.checked)}
+                className="size-4 cursor-pointer accent-accent"
+              />
+              {t("cves.unaccept.reopen")}
+            </label>
+          ) : null}
+        </ConfirmDialog>
       ) : null}
     </>
   );
