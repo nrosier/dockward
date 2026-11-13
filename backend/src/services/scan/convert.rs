@@ -45,8 +45,16 @@ pub struct CveRow {
     pub fixed_in_version: Option<String>,
     pub description: Option<String>,
     pub alias: Option<String>,
+    /// Why a GHSA or GO id has no CVE id behind it (#367); `None` otherwise.
+    pub id_reason: Option<&'static str>,
     /// The keys of the scanners that report the CVE (any package), in the merged-view order (#366).
     pub scanners: Vec<String>,
+}
+
+/// The reason a GHSA or GO id with no CVE alias is kept as it is (#367).
+fn id_reason(id: &str, alias: Option<&str>) -> Option<&'static str> {
+    (alias.is_none() && (id.starts_with("GHSA-") || id.starts_with("GO-")))
+        .then_some(findings::NO_CVE_REASON)
 }
 
 /// One row per CVE id from the merged findings, which arrive sorted by (CVE id, package).
@@ -78,6 +86,7 @@ pub fn per_cve(findings: &[MergedFinding]) -> Vec<CveRow> {
             fixed_in_version: finding.fixed_in_version.clone(),
             description: finding.description.clone(),
             alias: finding.alias.clone(),
+            id_reason: id_reason(&finding.cve_id, finding.alias.as_deref()),
             scanners: finding
                 .scanners
                 .iter()
@@ -104,6 +113,9 @@ pub async fn recompute_image(
     let reported: HashSet<&str> = rows.iter().map(|row| row.cve_id.as_str()).collect();
     for tag in &tags {
         for row in &rows {
+            if let Some(alias) = row.alias.as_deref() {
+                findings::fold_alias(conn, &tag.source_id, &tag.tag, &row.cve_id, alias).await?;
+            }
             let id = ids::new_id()?;
             findings::upsert(
                 conn,
@@ -121,6 +133,8 @@ pub async fn recompute_image(
                 },
             )
             .await?;
+            findings::set_id_reason(conn, &tag.source_id, &tag.tag, &row.cve_id, row.id_reason)
+                .await?;
             findings::set_scanners(
                 conn,
                 &tag.source_id,

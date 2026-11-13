@@ -242,6 +242,11 @@ export default function CvesPage() {
                             </>
                           )}
                         </Link>
+                        {cve.id_reason === null ? null : (
+                          <span data-testid="cve-id-reason" className="ml-2 text-[12px] text-muted">
+                            {t("cves.idReason")}
+                          </span>
+                        )}
                       </td>
                       <td className={TD}>
                         <SeverityPill severity={cve.severity} />

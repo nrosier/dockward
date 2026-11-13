@@ -34,6 +34,7 @@ function cve(over: Partial<CveDetail>): CveDetail {
     severity: "CRITICAL",
     open_severity: "CRITICAL",
     alias: null,
+    id_reason: null,
     image: null,
     status: "open",
     package: "golang.org/x/crypto",
@@ -258,6 +259,19 @@ describe("CveDetailPage", () => {
     expect(line.textContent).toBe(t("cves.detail.aliasOf", { id: "CVE-2025-64756", alias: "GHSA-3g3m-2fjr-6pw4" }));
     // The alias line sits after the title row and before the image line.
     expect(heading.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("unresolved_id_shows_its_reason", async () => {
+    stub(cve({ cve_id: "GHSA-8rvm-662m-jvqv", id_reason: "no CVE id published" }));
+    renderWithRoutes(routes, url);
+    expect(await screen.findByTestId("cve-id-reason")).toHaveTextContent(t("cves.idReason"));
+  });
+
+  it("a record with a CVE id shows no reason", async () => {
+    stub(cve({}));
+    renderWithRoutes(routes, url);
+    await screen.findByRole("heading", { name: "CVE-2026-0001" });
+    expect(document.querySelector("[data-testid='cve-id-reason']")).toBeNull();
   });
 
   it("a GHSA-only record shows its id and no alias line (#337)", async () => {

@@ -70,6 +70,8 @@ export interface CveSummary {
   open_severity: Severity | null;
   // Another id of the record, or null (#337). The list does not show it; the detail uses `aliases`.
   alias: string | null;
+  // Why the id is a GHSA or GO id and not a CVE id (#367), or null.
+  id_reason: string | null;
   status: "open" | "fixed";
   package: string | null;
   first_seen_at: string | null;

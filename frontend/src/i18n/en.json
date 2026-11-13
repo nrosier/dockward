@@ -111,6 +111,7 @@
   "cves.subtitle": "One row per CVE per mapping, for the newest image.",
   "cves.empty": "No CVEs match these filters.",
   "cves.unknown": "Unknown",
+  "cves.idReason": "No CVE id published",
   "cves.tags": "{open} of {tracked}",
   "cves.back": "← CVEs",
   "cves.filter.search": "Search CVEs",

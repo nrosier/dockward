@@ -238,6 +238,17 @@ fn grype_ghsa_with_cve_related_is_stored_under_the_cve_id() {
 }
 
 #[test]
+fn grype_go_id_with_a_cve_related_is_stored_under_the_cve() {
+    let body = br#"{"matches":[{"vulnerability":{"id":"GO-2024-2687","severity":"High"},
+        "artifact":{"name":"golang.org/x/net","version":"0.1.0"},
+        "relatedVulnerabilities":[{"id":"GO-2024-2687"},{"id":"CVE-2023-45288","description":"d"}]}],
+        "descriptor":{"version":"1.0.0"}}"#;
+    let found = &parse_grype_ok(body).findings[0];
+    assert_eq!(found.cve_id, "CVE-2023-45288");
+    assert_eq!(found.alias.as_deref(), Some("GO-2024-2687"));
+}
+
+#[test]
 fn grype_first_cve_id_wins_and_no_cve_keeps_the_ghsa_id() {
     let two = br#"{"matches":[{"vulnerability":{"id":"GHSA-a","severity":"High"},
         "artifact":{"name":"glob","version":"1"},

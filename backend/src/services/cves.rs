@@ -114,6 +114,9 @@ pub struct CveSummary {
     pub fixed_in_version: Option<String>,
     /// The CVE id behind the primary id (#323), or `null` when the scanner names none.
     pub alias: Option<String>,
+    /// Why the id is a GHSA or GO id and not a CVE id, such as "no CVE id published" (#367);
+    /// `null` for a CVE id and for a record linked to one.
+    pub id_reason: Option<String>,
     pub open_tags: i64,
     pub tracked_tags: i64,
     pub github_issue_number: Option<i64>,
@@ -139,6 +142,7 @@ impl CveSummary {
             accepted: row.accepted,
             fixed_in_version: row.fixed_in_version,
             alias: row.alias,
+            id_reason: row.id_reason,
             open_tags: row.open_tags,
             tracked_tags: row.tracked_tags,
             github_issue_number: row.github_issue_number,
