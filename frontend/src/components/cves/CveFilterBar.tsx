@@ -5,7 +5,9 @@ import {
   STATUSES,
   type CveFilterState,
   FIXES,
+  FILTER_KEYS,
   namespaceOf,
+  toUrlParams,
   type FixValue,
   type HasIssue,
   type SeverityValue,
@@ -13,6 +15,7 @@ import {
 } from "../../lib/cveFilters";
 import type { MappingTag } from "../../types/api";
 import type { Source } from "../../types/sources";
+import { Button } from "../ui/Button";
 import { Combobox } from "../ui/Combobox";
 import { INPUT } from "../mappings/styles";
 
@@ -143,6 +146,11 @@ export function CveFilterBar({ state, sources, tags, onChange }: CveFilterBarPro
     onChange({ namespace, ...(stillFits ? {} : { repository: "" }) });
   }
 
+  const hasFilters = Object.keys(toUrlParams(state)).length > 0;
+  function clearAll() {
+    onChange(Object.fromEntries(FILTER_KEYS.map((key) => [key, ""])));
+  }
+
   return (
     <search aria-label={t("cves.filter.group")} className="flex flex-col gap-3 rounded-[10px] border border-border bg-surface px-4 py-3.5">
       <SearchField value={state.q} onCommit={(value) => onChange({ q: value })} />
@@ -233,6 +241,11 @@ export function CveFilterBar({ state, sources, tags, onChange }: CveFilterBarPro
           allAsValue
           onChange={(mapping) => onChange({ mapping })}
         />
+      </div>
+      <div>
+        <Button variant="small" disabled={!hasFilters} onClick={clearAll}>
+          {t("cves.filter.clearAll")}
+        </Button>
       </div>
     </search>
   );

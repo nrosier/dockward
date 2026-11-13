@@ -184,6 +184,7 @@
   "cves.confirm.body": "This CVE is {severity} at its highest open severity. A GitHub issue is not created for it automatically. Create one anyway?",
   "cves.confirm.create": "Create issue",
   "cves.filter.clear": "Clear",
+  "cves.filter.clearAll": "Clear filter",
   "cves.filter.issue": "GitHub issue",
   "cves.filter.hasIssue": "Has issue",
   "cves.filter.noIssue": "No issue",

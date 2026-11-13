@@ -75,6 +75,13 @@ function githubRepository(source: { github_owner: string; github_repo: string } 
   return source === undefined ? "" : `${source.github_owner}/${source.github_repo}`;
 }
 
+// The detail link carries the list's query as `from`, so Back returns to the same list.
+function detailPath(id: string, params: URLSearchParams): string {
+  const path = `/cves/${encodeURIComponent(id)}`;
+  const from = params.toString();
+  return from === "" ? path : `${path}?${new URLSearchParams({ from }).toString()}`;
+}
+
 export default function CvesPage() {
   const me = useMe();
   // The Mapping combobox is the only scope control (#257, decision 2), so there is no
@@ -122,7 +129,7 @@ export default function CvesPage() {
         updated.delete("page");
         return updated;
       },
-      { replace: "q" in patch },
+      { replace: "q" in patch && Object.keys(patch).length === 1 },
     );
   }
 
@@ -225,7 +232,7 @@ export default function CvesPage() {
                   return (
                     <tr key={cve.id}>
                       <td className={`${TD} whitespace-nowrap`}>
-                        <Link to={`/cves/${encodeURIComponent(cve.id)}`} className={`font-mono text-[13px] ${LINK}`}>
+                        <Link to={detailPath(cve.id, params)} className={`font-mono text-[13px] ${LINK}`}>
                           {cve.cve_id}
                           {sourceLabel === "" ? null : (
                             <>
