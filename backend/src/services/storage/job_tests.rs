@@ -151,7 +151,7 @@ async fn a_pull_job_stores_the_image_and_reports_done() {
     // A repeated job for a stored image does nothing.
     assert_eq!(
         run(&env, &digest).await,
-        JobOutcome::DoneWithNote("already pulled".to_owned())
+        JobOutcome::DoneEmpty(Some("already pulled".to_owned()))
     );
 }
 
@@ -285,7 +285,7 @@ async fn a_stored_pull_queues_one_scan_per_enabled_scanner() {
     assert_eq!(scan_jobs(&env).await, expected);
     assert_eq!(
         run(&env, &digest).await,
-        JobOutcome::DoneWithNote("already pulled".to_owned())
+        JobOutcome::DoneEmpty(Some("already pulled".to_owned()))
     );
     assert_eq!(scan_jobs(&env).await, expected, "queued once");
 }
@@ -362,7 +362,7 @@ async fn pull_of_stored_image_redownloads_and_keeps_stored_files() {
     let marker = store_with_marker(&env).await;
     let store = StoreRoot::at(env.dir.join("images"));
     let outcome = run_pull(&env.pool, &env.discovery, &store, &manual_job(&digest), NOW).await;
-    assert_eq!(outcome, JobOutcome::Done);
+    assert_eq!(outcome, JobOutcome::DoneEmpty(None));
     assert_eq!(
         blob_requests(&env),
         2,
@@ -405,8 +405,29 @@ async fn a_discovery_pull_of_a_stored_image_still_downloads_nothing() {
     store_with_marker(&env).await;
     assert_eq!(
         run(&env, &digest).await,
-        JobOutcome::DoneWithNote("already pulled".to_owned())
+        JobOutcome::DoneEmpty(Some("already pulled".to_owned()))
     );
     assert!(env.script.hits().is_empty());
     assert_eq!(pulled_at_of(&env).await, Some(5));
+}
+
+/// An unchanged pull (a stored digest, skipped or verified) is recorded as empty (#360).
+#[tokio::test]
+async fn an_unchanged_pull_is_recorded_as_empty() {
+    let env = env("pull-job-empty").await;
+    let digest = publish(&env, b"layer", b"layer", 5);
+    seed(&env, &digest).await;
+    // The first pull stores the image: it has output.
+    assert_eq!(run(&env, &digest).await, JobOutcome::Done);
+    // A repeated pull is skipped: empty, with its note kept.
+    assert_eq!(
+        run(&env, &digest).await,
+        JobOutcome::DoneEmpty(Some("already pulled".to_owned()))
+    );
+    // A manual pull of the stored image only verifies it: empty.
+    let store = StoreRoot::at(env.dir.join("images"));
+    assert_eq!(
+        run_pull(&env.pool, &env.discovery, &store, &manual_job(&digest), NOW).await,
+        JobOutcome::DoneEmpty(None)
+    );
 }

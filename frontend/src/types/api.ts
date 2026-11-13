@@ -142,8 +142,10 @@ export interface Job {
   last_error: string | null;
   created_at: string | null;
   updated_at: string | null;
-  // The trigger the job was queued by, from its payload. Null when the payload has none.
-  trigger: string | null;
+  // The trigger the job was queued by. Never null: a job no caller asked for is "scheduled".
+  trigger: string;
+  // True when the finished job produced nothing new, for example an unchanged pull.
+  empty?: boolean;
   // The kind of work the job does (discover, pull, scan, publish, db_update, cleanup, retention).
   kind?: string | null;
   // The scanner a db_update job refreshes ("trivy" or "grype"). Absent on other jobs.

@@ -40,8 +40,12 @@ pub async fn run_pull(
     }
     match pull_once(pool, discovery, store, job, &payload, now).await {
         Ok(Pulled::Stored) => queued_outcome(pool, job, &payload, now, JobOutcome::Done).await,
+        // A manual pull of a stored image only verified it: nothing changed (#360).
+        Ok(Pulled::Verified) => {
+            queued_outcome(pool, job, &payload, now, JobOutcome::DoneEmpty(None)).await
+        }
         Ok(Pulled::AlreadyDone) => {
-            let note = JobOutcome::DoneWithNote("already pulled".to_owned());
+            let note = JobOutcome::DoneEmpty(Some("already pulled".to_owned()));
             queued_outcome(pool, job, &payload, now, note).await
         }
         Err((AppError::ImageTooLarge, _)) => {
@@ -55,6 +59,8 @@ pub async fn run_pull(
 enum Pulled {
     /// The image was stored, or a manual pull verified the stored image again.
     Stored,
+    /// A manual pull verified the stored image again and changed nothing.
+    Verified,
     /// The row is not waiting for a pull (stored, evicting or evicted): nothing to do.
     AlreadyDone,
 }
@@ -126,7 +132,7 @@ async fn pull_once(
             .await
             .map_err(fail)?;
         tracing::info!(bytes, refreshed, "stored image verified");
-        return Ok(Pulled::Stored);
+        return Ok(Pulled::Verified);
     }
     let outcome = pull_platform(
         &repo,

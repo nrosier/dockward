@@ -143,7 +143,7 @@ pub async fn claim_next(pool: &SqlitePool, now: i64) -> Result<Option<ClaimedJob
 /// Marks a job `done` after a successful run.
 pub async fn mark_done(pool: &SqlitePool, id: &str, now: i64) -> Result<(), AppError> {
     sqlx::query!(
-        "UPDATE jobs SET status = 'done', last_error = NULL, updated_at = ? WHERE id = ?",
+        "UPDATE jobs SET status = 'done', last_error = NULL, empty = 0, updated_at = ? WHERE id = ?",
         now,
         id
     )
@@ -162,7 +162,27 @@ pub async fn mark_done_with_note(
     now: i64,
 ) -> Result<(), AppError> {
     sqlx::query!(
-        "UPDATE jobs SET status = 'done', last_error = ?, updated_at = ? WHERE id = ?",
+        "UPDATE jobs SET status = 'done', last_error = ?, empty = 0, updated_at = ? WHERE id = ?",
+        note,
+        now,
+        id
+    )
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Marks a job `done` with `empty` set: it produced nothing new (#360). `note` is a fixed text
+/// kept in `last_error`, or `None`.
+pub async fn mark_done_empty(
+    pool: &SqlitePool,
+    id: &str,
+    note: Option<&str>,
+    now: i64,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "UPDATE jobs SET status = 'done', last_error = ?, empty = 1, updated_at = ? WHERE id = ?",
         note,
         now,
         id
@@ -299,6 +319,8 @@ pub struct JobRow {
     pub updated_at: Option<i64>,
     /// `payload.trigger`, or `None` when the payload has none.
     pub trigger: Option<String>,
+    /// Whether the finished job produced nothing new (`jobs.empty`).
+    pub empty: bool,
     /// `payload.kind`, or `None` when the payload has none (a job).
     pub kind: Option<String>,
     /// `payload.scanner` for a `db_update` job, or `None` for any other job.
@@ -329,6 +351,8 @@ pub struct JobFilter<'a> {
     pub id: Option<&'a str>,
     pub status: Option<&'a str>,
     pub source_id: Option<&'a str>,
+    /// Leaves out jobs whose `empty` flag is set.
+    pub hide_empty: bool,
     pub sort: &'a str,
     pub sort_sign: i64,
     pub limit: i64,
@@ -347,11 +371,13 @@ pub async fn list_jobs_in(
     conn: &mut SqliteConnection,
     filter: &JobFilter<'_>,
 ) -> Result<Vec<JobRow>, AppError> {
+    let hide_empty = i64::from(filter.hide_empty);
     let rows = sqlx::query!(
         r#"SELECT j.id AS "id!", j.source_id AS "source_id?: String", j.status AS "status!",
                   j.attempts AS "attempts!: i64", j.next_attempt_at AS "next_attempt_at?: i64",
                   substr(CAST(j.last_error AS TEXT), 1, ?) AS "last_error?: String",
                   j.created_at AS "created_at?: i64", j.updated_at AS "updated_at?: i64",
+                  j.empty AS "empty!: bool",
                   CASE WHEN json_valid(j.payload)
                        THEN substr(CAST(json_extract(j.payload, '$.trigger') AS TEXT), 1, ?) END AS "trigger?: String",
                   CASE WHEN json_valid(j.payload)
@@ -378,6 +404,7 @@ pub async fn list_jobs_in(
              AND (? IS NULL OR j.id = ?)
              AND (? IS NULL OR j.status = ?)
              AND (? IS NULL OR j.source_id = ?)
+             AND (? = 0 OR j.empty = 0)
            ORDER BY
              CASE WHEN ? = 'created_at' AND ? = 1 THEN j.created_at END ASC,
              CASE WHEN ? = 'created_at' AND ? = -1 THEN j.created_at END DESC,
@@ -403,6 +430,7 @@ pub async fn list_jobs_in(
         filter.status,
         filter.source_id,
         filter.source_id,
+        hide_empty,
         filter.sort,
         filter.sort_sign,
         filter.sort,
@@ -448,6 +476,7 @@ pub async fn list_jobs_in(
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 trigger: row.trigger,
+                empty: row.empty,
                 kind: row.kind,
                 scanner: row.scanner,
                 repo_full_name: row.repo_full_name,
@@ -465,19 +494,23 @@ pub async fn count_jobs(
     user_id: Option<&str>,
     status: Option<&str>,
     source_id: Option<&str>,
+    hide_empty: bool,
 ) -> Result<i64, AppError> {
+    let hide_empty = i64::from(hide_empty);
     let row = sqlx::query!(
         r#"SELECT COUNT(*) AS "n!: i64" FROM jobs j
            LEFT JOIN image_sources m ON m.id = j.source_id
            WHERE (? IS NULL OR m.user_id = ?)
              AND (? IS NULL OR j.status = ?)
-             AND (? IS NULL OR j.source_id = ?)"#,
+             AND (? IS NULL OR j.source_id = ?)
+             AND (? = 0 OR j.empty = 0)"#,
         user_id,
         user_id,
         status,
         status,
         source_id,
-        source_id
+        source_id,
+        hide_empty
     )
     .fetch_one(pool)
     .await
@@ -511,6 +544,7 @@ pub async fn find(pool: &SqlitePool, id: &str) -> Result<Option<JobRow>, AppErro
         id: Some(id),
         status: None,
         source_id: None,
+        hide_empty: false,
         sort: "created_at",
         sort_sign: -1,
         limit: 1,
@@ -527,6 +561,7 @@ pub async fn find_in(conn: &mut SqliteConnection, id: &str) -> Result<Option<Job
         id: Some(id),
         status: None,
         source_id: None,
+        hide_empty: false,
         sort: "created_at",
         sort_sign: -1,
         limit: 1,

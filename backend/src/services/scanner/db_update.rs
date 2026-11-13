@@ -46,6 +46,9 @@ const SCANNERS: [Scanner; 2] = [Scanner::Trivy, Scanner::Grype];
 pub struct DbUpdatePayload {
     pub kind: String,
     pub scanner: String,
+    /// `scheduled` for the daily pass (#360).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
 }
 
 impl DbUpdatePayload {
@@ -53,6 +56,7 @@ impl DbUpdatePayload {
         Self {
             kind: "db_update".to_owned(),
             scanner: scanner.key().to_owned(),
+            trigger: Some("scheduled".to_owned()),
         }
     }
 

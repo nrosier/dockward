@@ -27,6 +27,8 @@ pub struct JobListParams {
     pub scope: Option<String>,
     pub status: Option<String>,
     pub source_id: Option<String>,
+    /// `true` leaves out jobs that produced nothing new. Off when absent.
+    pub hide_empty: Option<bool>,
 }
 
 /// `GET /api/v1/jobs`. `scope=all` is honored for admins only; another role gets `403`.
@@ -48,6 +50,7 @@ pub async fn list(
         order: params.order,
         status: params.status,
         source_id: params.source_id,
+        hide_empty: params.hide_empty.unwrap_or(false),
         all_users,
     };
     Ok(Json(jobs::list(&state.pool, &user.id, &query).await?))
@@ -232,7 +235,7 @@ mod tests {
         .await;
 
         let job = jobs::get(&pool, "owner", false, "job-1").await.unwrap();
-        assert_eq!(job.trigger.as_deref(), Some("discovery"));
+        assert_eq!(job.trigger, "discovery");
         assert_eq!(job.image.repo_full_name.as_deref(), Some("p/r"));
         assert_eq!(job.image.tag.as_deref(), Some("v1"));
         assert_eq!(job.image.digest.as_deref(), Some("sha256:aa"));
@@ -300,7 +303,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn payload_without_trigger_has_a_null_trigger() {
+    async fn a_job_with_no_trigger_lists_as_scheduled() {
         let (pool, dir) = fresh_pool("trigger").await;
         seed_job(
             &pool,
@@ -309,7 +312,26 @@ mod tests {
         .await;
 
         let job = jobs::get(&pool, "owner", false, "job-1").await.unwrap();
-        assert_eq!(job.trigger, None);
+        assert_eq!(job.trigger, "scheduled");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn manual_and_pull_triggers_are_unchanged() {
+        let (pool, dir) = fresh_pool("triggers-kept").await;
+        seed_job(&pool, r#"{"kind":"pull","trigger":"manual"}"#).await;
+        let job = jobs::get(&pool, "owner", false, "job-1").await.unwrap();
+        assert_eq!(job.trigger, "manual");
+        for trigger in ["first_pull", "tag_moved"] {
+            sqlx::query("UPDATE jobs SET payload = ? WHERE id = 'job-1'")
+                .bind(format!(r#"{{"kind":"pull","trigger":"{trigger}"}}"#))
+                .execute(&pool)
+                .await
+                .unwrap();
+            let job = jobs::get(&pool, "owner", false, "job-1").await.unwrap();
+            assert_eq!(job.trigger, trigger);
+        }
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

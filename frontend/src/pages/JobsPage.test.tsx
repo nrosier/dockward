@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatDateTime } from "../components/jobs/dates";
@@ -65,6 +65,40 @@ describe("JobsPage", () => {
     ]);
     renderAt(<JobsPage />);
     expect(await screen.findByText(t("jobs.scanner.refreshes", { scanner: t("jobs.scanner.grype") }))).toBeInTheDocument();
+  });
+
+  it("hide_empty_is_off_by_default", async () => {
+    const empty: Job = { ...failed, id: "e1", status: "done", last_error: "already pulled", empty: true, trigger: "first_pull" };
+    const fetchMock = stubApi((path) => {
+      if (path === "/api/v1/account/me") return json({ user: user("user") });
+      if (path.startsWith("/api/v1/jobs")) return json({ items: [empty, failed], page: 1, page_size: 50, total: 2 });
+      if (path.startsWith("/api/v1/image-sources")) return json({ items: [], page: 1, page_size: 200, total: 0 });
+      return undefined;
+    });
+    renderAt(<JobsPage />);
+    expect(await screen.findByRole("checkbox", { name: t("jobs.filter.hideEmpty") })).not.toBeChecked();
+    expect(await screen.findByText(t("jobs.trigger.onPull"))).toBeInTheDocument();
+    const jobCalls = fetchMock.mock.calls.map(([path]) => String(path)).filter((path) => path.includes("/jobs?"));
+    expect(jobCalls.length).toBeGreaterThan(0);
+    expect(jobCalls.some((path) => path.includes("hide_empty"))).toBe(false);
+  });
+
+  it("hide_empty_hides_empty_jobs_when_on", async () => {
+    const empty: Job = { ...failed, id: "e1", status: "done", last_error: "already pulled", empty: true, trigger: "first_pull" };
+    stubApi((path) => {
+      if (path === "/api/v1/account/me") return json({ user: user("user") });
+      if (path.startsWith("/api/v1/jobs")) {
+        const items = path.includes("hide_empty=true") ? [failed] : [empty, failed];
+        return json({ items, page: 1, page_size: 50, total: items.length });
+      }
+      if (path.startsWith("/api/v1/image-sources")) return json({ items: [], page: 1, page_size: 200, total: 0 });
+      return undefined;
+    });
+    renderAt(<JobsPage />);
+    expect(await screen.findByText(t("jobs.trigger.onPull"))).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("checkbox", { name: t("jobs.filter.hideEmpty") }));
+    await waitFor(() => expect(screen.queryByText(t("jobs.trigger.onPull"))).not.toBeInTheDocument());
+    expect(screen.getByText(t("jobs.trigger.discovery"))).toBeInTheDocument();
   });
 
   it("shows the trigger and the error row for a failed job", async () => {

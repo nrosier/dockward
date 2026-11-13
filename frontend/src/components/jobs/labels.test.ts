@@ -13,7 +13,7 @@ function job(over: Partial<Job>): Job {
     last_error: null,
     created_at: null,
     updated_at: null,
-    trigger: null,
+    trigger: "scheduled",
     image: { repo_full_name: null, tag: null, digest: null },
     report: null,
     ...over,

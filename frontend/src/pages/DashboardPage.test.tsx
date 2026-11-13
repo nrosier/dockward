@@ -93,7 +93,7 @@ describe("DashboardPage", () => {
               mapping_id: "",
               kind: "db_update",
               scanner: "trivy",
-              trigger: null,
+              trigger: "scheduled",
               image: { repo_full_name: null, tag: null, digest: null },
             }),
           ],

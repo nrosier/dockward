@@ -61,6 +61,8 @@ export default function JobsPage() {
   const status = (STATUSES as readonly string[]).includes(rawStatus) ? rawStatus : "";
   // The Mapping filter is the source (#323): it sends `source_id`, the key the jobs route reads.
   const sourceId = params.get("source_id") ?? "";
+  // Jobs with empty output (an unchanged pull) show by default; "Hide empty" is opt-in (#360).
+  const hideEmpty = params.get("hide_empty") === "1";
   const sourceList = useQuery({
     queryKey: ["image-sources", "list", scopeAll],
     queryFn: () => api<Page<Source>>("GET", `/image-sources?page_size=200${scopeAll ? "&scope=all" : ""}`),
@@ -71,7 +73,7 @@ export default function JobsPage() {
   const [logJobId, setLogJobId] = useState<string | null>(null);
 
   const list = useQuery({
-    queryKey: ["jobs", scopeAll, page, status, sourceId],
+    queryKey: ["jobs", scopeAll, page, status, sourceId, hideEmpty],
     queryFn: () => {
       const query = new URLSearchParams({ page: String(page), page_size: String(PAGE_SIZE), sort: "created_at", order: "desc" });
       if (status !== "") {
@@ -79,6 +81,9 @@ export default function JobsPage() {
       }
       if (sourceId !== "") {
         query.set("source_id", sourceId);
+      }
+      if (hideEmpty) {
+        query.set("hide_empty", "true");
       }
       if (scopeAll) {
         query.set("scope", "all");
@@ -125,6 +130,15 @@ export default function JobsPage() {
         sources={sourceItems}
         onChange={(value) => setParam("source_id", value)}
       />
+      <label className="inline-flex min-h-8 cursor-pointer items-center gap-2 text-[12.5px] text-muted">
+        <input
+          type="checkbox"
+          checked={hideEmpty}
+          onChange={(event) => setParam("hide_empty", event.target.checked ? "1" : "")}
+          className="size-4 cursor-pointer accent-accent"
+        />
+        {t("jobs.filter.hideEmpty")}
+      </label>
     </div>
   );
 

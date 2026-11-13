@@ -319,6 +319,7 @@
   "jobs.nextAttempt": "Next attempt {time}",
   "jobs.filter.status": "Status",
   "jobs.filter.all": "All",
+  "jobs.filter.hideEmpty": "Hide empty",
   "jobs.col.image": "Image",
   "jobs.col.subject": "Subject",
   "jobs.col.trigger": "Trigger",

@@ -238,7 +238,7 @@ impl Fx {
                 .unwrap_or_default();
             let outcome = run_scan(&self.pool, &self.env, &self.store, &job, NOW).await;
             let finished = match &outcome {
-                JobOutcome::Done | JobOutcome::DoneWithNote(_) => {
+                JobOutcome::Done | JobOutcome::DoneWithNote(_) | JobOutcome::DoneEmpty(_) => {
                     crate::db::jobs::mark_done(&self.pool, &job.id, NOW).await
                 }
                 JobOutcome::Failed(text) | JobOutcome::Permanent(text) => {
@@ -1075,7 +1075,7 @@ async fn the_jobs_list_returns_the_image_of_a_new_scan_job() {
     assert_eq!(job.image.repo_full_name.as_deref(), Some("o/app"));
     assert_eq!(job.image.tag.as_deref(), Some("v1"));
     assert_eq!(job.image.digest.as_deref(), Some("sha256:old"));
-    assert_eq!(job.trigger.as_deref(), Some("first_pull"));
+    assert_eq!(job.trigger, "first_pull");
 }
 
 fn trivy_ghsa_report(id: &str) -> String {

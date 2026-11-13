@@ -2,9 +2,9 @@ import { t, type MessageKey } from "../../i18n";
 import type { Job } from "../../types/api";
 import { shortDigest } from "../ui/ShaBadge";
 
-// The label for a job's trigger, from the payload. Never blank or "None": a job with no trigger
-// is a scheduled one. A trigger the client does not know shows as its raw value.
-export function triggerLabel(trigger: Job["trigger"]): string {
+// The label for a job's trigger, from the payload. A trigger the client does not know shows as
+// its raw value, never as a made-up label: an unknown trigger is shown, not hidden as Webhook.
+export function triggerLabel(trigger: Job["trigger"] | null | undefined): string {
   const keys: Record<string, MessageKey> = {
     discovery: "jobs.trigger.discovery",
     first_pull: "jobs.trigger.onPull",
@@ -13,7 +13,8 @@ export function triggerLabel(trigger: Job["trigger"]): string {
     manual: "jobs.trigger.manual",
     scheduled: "jobs.trigger.scheduled",
   };
-  if (trigger === null || trigger.trim() === "") {
+  // Every job has a trigger. An absent or blank one (an older server) is a scheduled job.
+  if (trigger === null || trigger === undefined || trigger.trim() === "") {
     return t("jobs.trigger.scheduled");
   }
   const key = keys[trigger];

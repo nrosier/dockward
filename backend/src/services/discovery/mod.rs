@@ -79,15 +79,25 @@ pub struct DiscoverPayload {
     pub repository: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
+    /// `scheduled` for the hourly pass, `discovery` for a source's own first discovery (#360).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
 }
 
 impl DiscoverPayload {
+    /// The same payload with its trigger set.
+    pub fn with_trigger(mut self, trigger: &str) -> Self {
+        self.trigger = Some(trigger.to_owned());
+        self
+    }
+
     pub fn new(hub_id: &str, repository: &str, source_id: Option<&str>) -> Self {
         Self {
             kind: "discover".to_owned(),
             hub_id: hub_id.to_owned(),
             repository: repository.to_owned(),
             source_id: source_id.map(str::to_owned),
+            trigger: None,
         }
     }
 
@@ -293,7 +303,11 @@ impl Discovery {
                     "discovery finished"
                 );
                 self.record_run(now, report.queued, None).await;
-                JobOutcome::Done
+                if report.queued == 0 {
+                    JobOutcome::DoneEmpty(None)
+                } else {
+                    JobOutcome::Done
+                }
             }
             Ok((report, Some((error, docker_anonymous)))) => {
                 self.record_run(now, report.queued, Some(fixed_text(&error)))

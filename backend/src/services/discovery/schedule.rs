@@ -32,7 +32,9 @@ pub async fn schedule_once(pool: &SqlitePool, now: i64) -> Result<usize, AppErro
     let targets = db::distinct_repositories(pool).await?;
     let mut queued = 0usize;
     for target in targets {
-        let payload = DiscoverPayload::new(&target.hub_id, &target.repository, None).to_text()?;
+        let payload = DiscoverPayload::new(&target.hub_id, &target.repository, None)
+            .with_trigger("scheduled")
+            .to_text()?;
         let mut tx = pool
             .begin_with("BEGIN IMMEDIATE")
             .await
@@ -60,7 +62,9 @@ pub async fn queue_source_discovery(
     repository: &str,
     now: i64,
 ) -> Result<bool, AppError> {
-    let payload = DiscoverPayload::new(hub_id, repository, Some(source_id)).to_text()?;
+    let payload = DiscoverPayload::new(hub_id, repository, Some(source_id))
+        .with_trigger("discovery")
+        .to_text()?;
     if matches!(
         db::latest_job_status(&mut *conn, &payload)
             .await?

@@ -49,6 +49,10 @@ pub enum JobOutcome {
     /// The job is complete, with a fixed note kept in `last_error` (for example
     /// `covered by parent index`). It becomes `done`.
     DoneWithNote(String),
+    /// The job is complete and produced nothing new (an unchanged pull, a discovery with no new
+    /// tag). It becomes `done` with `empty` set, so the Jobs dashboard can hide it. The optional
+    /// fixed note is kept in `last_error`, as for `DoneWithNote`.
+    DoneEmpty(Option<String>),
     /// The attempt failed and may succeed later. Its text is stored in `last_error`, and the
     /// job retries with backoff.
     Failed(String),
@@ -143,6 +147,10 @@ pub async fn step<H: JobHandler>(
         }
         JobOutcome::DoneWithNote(note) => {
             with_write_retries(|| jobs::mark_done_with_note(pool, id, &note, now)).await?;
+            Ok(Step::Done)
+        }
+        JobOutcome::DoneEmpty(note) => {
+            with_write_retries(|| jobs::mark_done_empty(pool, id, note.as_deref(), now)).await?;
             Ok(Step::Done)
         }
         JobOutcome::Failed(message) => {
