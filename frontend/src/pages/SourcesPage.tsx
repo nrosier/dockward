@@ -128,6 +128,9 @@ export default function SourcesPage() {
                       ) : (
                         <Time iso={toIso(source.last_discovery_at)} />
                       )}
+                      {source.discovery_status !== "idle" && (
+                        <span className="ml-2">{t(`sources.discovery.${source.discovery_status}`)}</span>
+                      )}
                     </td>
                   </tr>
                 ))}

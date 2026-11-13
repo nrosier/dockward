@@ -27,6 +27,8 @@ export interface Source {
   has_credential: boolean;
   // Unix seconds or an RFC 3339 string; null before the first discovery.
   last_discovery_at: number | string | null;
+  // The scoped discover job: queued or running while pending, else idle.
+  discovery_status: "queued" | "running" | "idle";
 }
 
 export type PlatformState = "queued" | "pulling" | "stored" | "evicting" | "evicted" | "failed";

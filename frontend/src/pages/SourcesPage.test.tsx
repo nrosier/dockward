@@ -28,6 +28,7 @@ function source(id: string, repository: string, tag: string, hubId = "h1"): Sour
     min_issue_severity: "CRITICAL",
     has_credential: false,
     last_discovery_at: 1_700_000_000,
+    discovery_status: "idle",
   };
 }
 
@@ -112,6 +113,24 @@ describe("SourcesPage", () => {
     fireEvent.change(screen.getByLabelText(t("sources.filter.tag")), { target: { value: "latest" } });
     expect(screen.queryByText("nrosier/walley")).not.toBeInTheDocument();
     expect(screen.getByText("other/app")).toBeInTheDocument();
+  });
+
+  it("shows a queued or running discovery next to the last discovery time", async () => {
+    stubCommon((path) =>
+      path === "/api/v1/image-sources?page_size=200"
+        ? json(
+            page([
+              { ...source("s1", "nrosier/walley", "1.*"), last_discovery_at: null, discovery_status: "queued" as const },
+              { ...source("s2", "other/app", "latest"), discovery_status: "running" as const },
+              source("s3", "third/app", "2.*"),
+            ]),
+          )
+        : undefined,
+    );
+    renderWithRoutes(routes, "/sources");
+    expect(await screen.findByText(t("sources.discovery.queued"))).toBeInTheDocument();
+    expect(screen.getByText(t("sources.discovery.running"))).toBeInTheDocument();
+    expect(screen.queryAllByText(/^Discovery (queued|running)$/)).toHaveLength(2);
   });
 
   it("shows the empty message when nothing matches", async () => {

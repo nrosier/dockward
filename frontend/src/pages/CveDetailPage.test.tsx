@@ -23,6 +23,7 @@ const source: Source = {
   min_issue_severity: "HIGH",
   has_credential: true,
   last_discovery_at: null,
+  discovery_status: "idle",
 };
 
 function cve(over: Partial<CveDetail>): CveDetail {
