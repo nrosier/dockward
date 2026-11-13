@@ -67,6 +67,11 @@ export default function CveDetailPage() {
     },
   });
 
+  const review = useMutation({
+    mutationFn: () => api("POST", `/cves/${encodeURIComponent(id)}/review`),
+    onSuccess: refresh,
+  });
+
   const remove = useMutation({
     mutationFn: () =>
       api("DELETE", `/admin/image-sources/${encodeURIComponent(sourceId ?? "")}/cves/${encodeURIComponent(cveQuery.data?.cve_id ?? "")}`),
@@ -211,6 +216,23 @@ export default function CveDetailPage() {
                 <span className="text-muted">{t("cves.detail.notAccepted")}</span>
               ) : (
                 <div className="flex flex-col gap-1">
+                  {acceptance.changed_at !== null && acceptance.change_reason !== null ? (
+                    <section
+                      aria-label={t("cves.detail.changed.title")}
+                      className="mb-1 flex flex-col gap-1.5 rounded-md border border-crit-ink/30 px-2.5 py-2 text-[12.5px]"
+                    >
+                      <span className="font-semibold">{t("cves.detail.changed.title")}</span>
+                      <span>{t(`cves.detail.changed.${acceptance.change_reason}`)}</span>
+                      <span className="text-muted">{t("cves.detail.changed.since", { date: formatDate(acceptance.changed_at) })}</span>
+                      {canUnaccept ? (
+                        <div>
+                          <Button disabled={review.isPending} onClick={() => review.mutate()}>
+                            {t("cves.detail.changed.review")}
+                          </Button>
+                        </div>
+                      ) : null}
+                    </section>
+                  ) : null}
                   <span>{t("cves.detail.acceptedBy", { user: acceptance.created_by })}</span>
                   <span className="text-[12.5px] text-muted">
                     {t("cves.detail.acceptedAt", { date: formatDate(acceptance.created_at) })}

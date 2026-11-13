@@ -51,6 +51,11 @@ pub struct Acceptance {
     pub created_by: String,
     pub created_at: Option<String>,
     pub expires_at: Option<String>,
+    /// Set when the CVE's severity or fixed version changed under the acceptance (#196): the
+    /// acceptance is flagged for re-review until [`review`] clears it.
+    pub changed_at: Option<String>,
+    /// `severity_changed`, `fix_available` or `fixed_version_changed` while flagged.
+    pub change_reason: Option<String>,
 }
 
 impl Acceptance {
@@ -63,6 +68,8 @@ impl Acceptance {
             created_by: row.created_by_username,
             created_at: row.created_at.map(time::rfc3339).transpose()?,
             expires_at: row.expires_at.map(time::rfc3339).transpose()?,
+            changed_at: row.changed_at.map(time::rfc3339).transpose()?,
+            change_reason: row.change_reason,
         })
     }
 }
@@ -463,6 +470,53 @@ pub async fn unaccept<G: IssueApi>(
     Ok(())
 }
 
+/// `POST /api/v1/cves/:id/review` for the owner of the source, or for any admin: clears the
+/// re-review flag of the active acceptance (#196), audited as `cve.review`. The acceptance
+/// stays active. `404` when the id is malformed, the source is not the caller's (and the
+/// caller is not an admin), or no acceptance is active.
+pub async fn review(
+    pool: &SqlitePool,
+    caller: &Caller<'_>,
+    is_admin: bool,
+    id: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    let (source_id, requested) = split_id(id)?;
+    let source = if is_admin {
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        source_db::find_by_id(&mut conn, source_id)
+            .await?
+            .ok_or(AppError::NotFound)?
+    } else {
+        owned_source(pool, caller.id, source_id).await?
+    };
+    let primary = {
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        crate::db::findings::primary_id(&mut conn, requested).await?
+    };
+    let cve_id = primary.as_str();
+    let mut tx = begin(pool).await?;
+    let active = acceptance_db::active(&mut tx, &source.id, cve_id, now)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !acceptance_db::clear_change(&mut tx, &active.id).await? {
+        return Err(AppError::NotFound);
+    }
+    audit::record(
+        &mut tx,
+        &caller.actor(),
+        "cve.review",
+        &audit_target(&source.id, cve_id),
+        active
+            .change_reason
+            .as_deref()
+            .map(|reason| serde_json::json!({"reason": reason}))
+            .as_ref(),
+    )
+    .await?;
+    tx.commit().await.map_err(|_| AppError::InternalError)
+}
+
 /// Reopens the CVE's closed issue after an un-accept that asked for it (#196). The
 /// un-accept is already committed, so a failure is swallowed after one fixed-text log line.
 async fn reopen_closed_issue<G: IssueApi>(
@@ -805,6 +859,91 @@ mod tests {
             changed(&f).await,
             (Some(30), Some("severity_changed".to_owned()))
         );
+    }
+
+    #[tokio::test]
+    async fn reviewing_clears_the_changed_flag_and_audits_it() {
+        let f = Fixture::new("review").await;
+        f.accept("u1", ID, "vendor patch is scheduled", None)
+            .await
+            .unwrap();
+        rescan(&f, "HIGH", None, 30).await;
+        assert_eq!(
+            changed(&f).await,
+            (Some(30), Some("severity_changed".to_owned()))
+        );
+
+        review(
+            &f.state.pool,
+            &Caller {
+                id: "u1",
+                username: "u1",
+            },
+            false,
+            ID,
+            40,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(changed(&f).await, (None, None));
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM audit_log WHERE action = 'cve.review' AND actor_username = 'u1'")
+                .await,
+            1
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM cve_acceptances WHERE revoked_at IS NULL")
+                .await,
+            1,
+            "the acceptance stays active"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_owner_non_admin_cannot_review() {
+        let f = Fixture::new("review-denied").await;
+        f.accept("u1", ID, "vendor patch is scheduled", None)
+            .await
+            .unwrap();
+        rescan(&f, "HIGH", None, 30).await;
+
+        let denied = review(
+            &f.state.pool,
+            &Caller {
+                id: "u2",
+                username: "u2",
+            },
+            false,
+            ID,
+            40,
+        )
+        .await;
+
+        assert!(matches!(denied, Err(AppError::NotFound)));
+        assert_eq!(
+            changed(&f).await,
+            (Some(30), Some("severity_changed".to_owned()))
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM audit_log WHERE action = 'cve.review'")
+                .await,
+            0
+        );
+        // An admin can.
+        review(
+            &f.state.pool,
+            &Caller {
+                id: "a1",
+                username: "a1",
+            },
+            true,
+            ID,
+            50,
+        )
+        .await
+        .unwrap();
+        assert_eq!(changed(&f).await, (None, None));
     }
 
     #[tokio::test]

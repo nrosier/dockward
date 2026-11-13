@@ -152,6 +152,7 @@ Decided (2026-11-08, #243): the purge ignores the page's `status` and `source_id
 | POST | `/api/v1/cves/:id/issue` | session (owner) | yes | Creates or reopens the GitHub issue for the CVE. `422` when the CVE is fixed on every tag. `409` when an open issue or an active acceptance exists. |
 | POST | `/api/v1/cves/:id/accept` | session (owner) | yes | `{"reason","expires_at"}`; `reason` may be empty (max 1000 characters). Applies to the whole source. Does not close an open issue. |
 | POST | `/api/v1/cves/:id/unaccept` | session (owner) | yes | Soft revoke. |
+| POST | `/api/v1/cves/:id/review` | session (owner or admin) | yes | Clears the re-review flag (`changed_at`, `change_reason`) of the active acceptance. `204`. Audited as `cve.review`. The acceptance stays active. The CVE detail's `acceptance` carries `changed_at` and `change_reason` (both null when not changed). |
 
 CVE list filters (spinoff section 10, decision 38, and [frontend.md](frontend.md), "CVE list control bar"):
 

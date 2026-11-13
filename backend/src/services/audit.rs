@@ -24,6 +24,7 @@ pub const ACTIONS: &[&str] = &[
     "credential.delete",
     "cve.accept",
     "cve.unaccept",
+    "cve.review",
     "cve.delete",
     "mapping.create",
     "mapping.update",

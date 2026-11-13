@@ -146,6 +146,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         .route("/api/v1/cves/{id}/issue", post(api::cves::issue))
         .route("/api/v1/cves/{id}/accept", post(api::cves::accept))
         .route("/api/v1/cves/{id}/unaccept", post(api::cves::unaccept))
+        .route("/api/v1/cves/{id}/review", post(api::cves::review))
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
         .route("/api/v1/admin/jobs", get(api::admin::admin_jobs))
         .route("/api/v1/admin/health", get(api::admin::health))

@@ -18,6 +18,8 @@ pub struct AcceptanceRow {
     pub created_by_username: String,
     pub created_at: Option<i64>,
     pub expires_at: Option<i64>,
+    pub changed_at: Option<i64>,
+    pub change_reason: Option<String>,
 }
 
 /// A new acceptance. It starts active.
@@ -43,7 +45,7 @@ pub async fn active(
         AcceptanceRow,
         r#"SELECT id AS "id!", source_id AS "source_id!", cve_id AS "cve_id!",
                   reason AS "reason!", created_by_username AS "created_by_username!",
-                  created_at, expires_at
+                  created_at, expires_at, changed_at, change_reason
            FROM cve_acceptances
            WHERE source_id = ? AND cve_id = ? AND revoked_at IS NULL
              AND (expires_at IS NULL OR expires_at > ?)"#,
@@ -117,6 +119,20 @@ pub async fn revoke(
          WHERE id = ? AND revoked_at IS NULL",
         now,
         by_user,
+        id
+    )
+    .execute(conn)
+    .await
+    .map(|done| done.rows_affected() == 1)
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Clears the re-review flag (`changed_at`, `change_reason`) of an unrevoked acceptance. The
+/// acceptance stays active. Returns `false` when the row is revoked or missing.
+pub async fn clear_change(conn: &mut SqliteConnection, id: &str) -> Result<bool, AppError> {
+    sqlx::query!(
+        "UPDATE cve_acceptances SET changed_at = NULL, change_reason = NULL
+         WHERE id = ? AND revoked_at IS NULL",
         id
     )
     .execute(conn)
