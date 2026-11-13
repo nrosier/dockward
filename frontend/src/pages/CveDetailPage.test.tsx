@@ -512,4 +512,38 @@ describe("CveDetailPage acceptance note (#351)", () => {
     await screen.findByRole("heading", { level: 1 });
     expect(screen.queryByRole("button", { name: t("cves.detail.unaccept") })).not.toBeInTheDocument();
   });
+
+  it("back_returns_to_the_filtered_list", async () => {
+    stub(cve({}));
+    const { router } = renderWithRoutes(
+      [...routes, { path: "/cves", element: <p>list</p> }],
+      `${url}?from=${encodeURIComponent("severity=HIGH&status=open")}`,
+    );
+    const back = await screen.findByRole("link", { name: t("cves.back") });
+    expect(back).toHaveAttribute("href", "/cves?severity=HIGH&status=open");
+    await userEvent.click(back);
+    expect(router.state.location.pathname).toBe("/cves");
+    expect(router.state.location.search).toBe("?severity=HIGH&status=open");
+  });
+
+  it("back_without_a_list_query_goes_to_cves", async () => {
+    stub(cve({}));
+    renderWithRoutes(routes, url);
+    expect(await screen.findByRole("link", { name: t("cves.back") })).toHaveAttribute("href", "/cves");
+  });
+
+  it("browser_back_returns_to_the_filtered_list", async () => {
+    stub(cve({}));
+    const { router } = renderWithRoutes(
+      [...routes, { path: "/cves", element: <p>list</p> }],
+      "/cves?severity=HIGH&status=open",
+    );
+    await router.navigate(`${url}?from=${encodeURIComponent("severity=HIGH&status=open")}`);
+    await screen.findByRole("link", { name: t("cves.back") });
+    await router.navigate(-1);
+    await vi.waitFor(() => {
+      expect(router.state.location.pathname).toBe("/cves");
+    });
+    expect(router.state.location.search).toBe("?severity=HIGH&status=open");
+  });
 });
