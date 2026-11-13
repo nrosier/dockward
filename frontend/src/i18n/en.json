@@ -218,6 +218,8 @@
   "sources.back": "Back to sources",
   "sources.empty": "No sources match this filter.",
   "sources.neverDiscovered": "Not yet",
+  "sources.discovery.queued": "Discovery queued",
+  "sources.discovery.running": "Discovery running",
   "sources.filter.namespace": "Namespace",
   "sources.filter.allNamespaces": "All namespaces",
   "sources.filter.tag": "Tag value",

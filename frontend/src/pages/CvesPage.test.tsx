@@ -51,6 +51,7 @@ function imageSource(id: string, repository: string, github_repo: string): Sourc
     min_issue_severity: "HIGH",
     has_credential: true,
     last_discovery_at: null,
+    discovery_status: "idle",
   };
 }
 const sources = [

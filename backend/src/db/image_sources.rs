@@ -28,6 +28,8 @@ pub struct SourceFull {
     pub auto_create_issues: bool,
     pub min_issue_severity: String,
     pub last_discovery_at: Option<i64>,
+    /// `running`, `queued` or `idle`, from the source's scoped discover jobs (#331).
+    pub discovery_status: String,
     pub has_credential: bool,
 }
 
@@ -72,6 +74,15 @@ pub async fn list(
                   s.github_repo AS "github_repo!", s.default_branch AS "default_branch!",
                   s.auto_create_issues AS "auto_create_issues!: bool",
                   s.min_issue_severity AS "min_issue_severity!", s.last_discovery_at,
+                  CASE
+                    WHEN EXISTS (SELECT 1 FROM jobs j WHERE j.source_id = s.id
+                                 AND json_extract(j.payload, '$.kind') = 'discover'
+                                 AND j.status = 'running') THEN 'running'
+                    WHEN EXISTS (SELECT 1 FROM jobs j WHERE j.source_id = s.id
+                                 AND json_extract(j.payload, '$.kind') = 'discover'
+                                 AND j.status = 'queued') THEN 'queued'
+                    ELSE 'idle'
+                  END AS "discovery_status!: String",
                   EXISTS (SELECT 1 FROM source_credentials c WHERE c.source_id = s.id)
                       AS "has_credential!: bool"
            FROM image_sources s JOIN hubs h ON h.id = s.hub_id
@@ -123,6 +134,15 @@ pub async fn find(conn: &mut SqliteConnection, id: &str) -> Result<Option<Source
                   s.github_repo AS "github_repo!", s.default_branch AS "default_branch!",
                   s.auto_create_issues AS "auto_create_issues!: bool",
                   s.min_issue_severity AS "min_issue_severity!", s.last_discovery_at,
+                  CASE
+                    WHEN EXISTS (SELECT 1 FROM jobs j WHERE j.source_id = s.id
+                                 AND json_extract(j.payload, '$.kind') = 'discover'
+                                 AND j.status = 'running') THEN 'running'
+                    WHEN EXISTS (SELECT 1 FROM jobs j WHERE j.source_id = s.id
+                                 AND json_extract(j.payload, '$.kind') = 'discover'
+                                 AND j.status = 'queued') THEN 'queued'
+                    ELSE 'idle'
+                  END AS "discovery_status!: String",
                   EXISTS (SELECT 1 FROM source_credentials c WHERE c.source_id = s.id)
                       AS "has_credential!: bool"
            FROM image_sources s JOIN hubs h ON h.id = s.hub_id WHERE s.id = ?"#,

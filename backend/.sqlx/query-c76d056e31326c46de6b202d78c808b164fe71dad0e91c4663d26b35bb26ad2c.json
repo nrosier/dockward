@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT s.id AS \"id!\", s.user_id AS \"user_id!\", s.hub_id AS \"hub_id!\", h.host AS \"hub_host!\",\n                  s.repository AS \"repository!\", s.name, s.tag_value AS \"tag_value!\",\n                  s.github_cred_id AS \"github_cred_id!\", s.github_owner AS \"github_owner!\",\n                  s.github_repo AS \"github_repo!\", s.default_branch AS \"default_branch!\",\n                  s.auto_create_issues AS \"auto_create_issues!: bool\",\n                  s.min_issue_severity AS \"min_issue_severity!\", s.last_discovery_at,\n                  EXISTS (SELECT 1 FROM source_credentials c WHERE c.source_id = s.id)\n                      AS \"has_credential!: bool\"\n           FROM image_sources s JOIN hubs h ON h.id = s.hub_id\n           WHERE (? IS NULL OR s.user_id = ?)\n           ORDER BY\n             CASE WHEN ? = 'repository' AND ? = 1 THEN s.repository END ASC,\n             CASE WHEN ? = 'repository' AND ? = -1 THEN s.repository END DESC,\n             CASE WHEN ? = 'created_at' AND ? = 1 THEN s.created_at END ASC,\n             CASE WHEN ? = 'created_at' AND ? = -1 THEN s.created_at END DESC,\n             s.id ASC\n           LIMIT ? OFFSET ?",
+  "query": "SELECT s.id AS \"id!\", s.user_id AS \"user_id!\", s.hub_id AS \"hub_id!\", h.host AS \"hub_host!\",\n                  s.repository AS \"repository!\", s.name, s.tag_value AS \"tag_value!\",\n                  s.github_cred_id AS \"github_cred_id!\", s.github_owner AS \"github_owner!\",\n                  s.github_repo AS \"github_repo!\", s.default_branch AS \"default_branch!\",\n                  s.auto_create_issues AS \"auto_create_issues!: bool\",\n                  s.min_issue_severity AS \"min_issue_severity!\", s.last_discovery_at,\n                  CASE\n                    WHEN EXISTS (SELECT 1 FROM jobs j WHERE j.source_id = s.id\n                                 AND json_extract(j.payload, '$.kind') = 'discover'\n                                 AND j.status = 'running') THEN 'running'\n                    WHEN EXISTS (SELECT 1 FROM jobs j WHERE j.source_id = s.id\n                                 AND json_extract(j.payload, '$.kind') = 'discover'\n                                 AND j.status = 'queued') THEN 'queued'\n                    ELSE 'idle'\n                  END AS \"discovery_status!: String\",\n                  EXISTS (SELECT 1 FROM source_credentials c WHERE c.source_id = s.id)\n                      AS \"has_credential!: bool\"\n           FROM image_sources s JOIN hubs h ON h.id = s.hub_id\n           WHERE (? IS NULL OR s.user_id = ?)\n           ORDER BY\n             CASE WHEN ? = 'repository' AND ? = 1 THEN s.repository END ASC,\n             CASE WHEN ? = 'repository' AND ? = -1 THEN s.repository END DESC,\n             CASE WHEN ? = 'created_at' AND ? = 1 THEN s.created_at END ASC,\n             CASE WHEN ? = 'created_at' AND ? = -1 THEN s.created_at END DESC,\n             s.id ASC\n           LIMIT ? OFFSET ?",
   "describe": {
     "columns": [
       {
@@ -158,8 +158,14 @@
         }
       },
       {
-        "name": "has_credential!: bool",
+        "name": "discovery_status!: String",
         "ordinal": 14,
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "name": "has_credential!: bool",
+        "ordinal": 15,
         "type_info": "Integer",
         "origin": "Expression"
       }
@@ -182,8 +188,9 @@
       false,
       false,
       true,
+      false,
       false
     ]
   },
-  "hash": "6ab0c031f746f8310226ed2346560840218923a2568552a76a3bc5c90cfb645e"
+  "hash": "c76d056e31326c46de6b202d78c808b164fe71dad0e91c4663d26b35bb26ad2c"
 }

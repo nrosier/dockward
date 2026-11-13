@@ -1280,6 +1280,87 @@ mod discovery_on_save {
         fx.finish().await;
     }
 
+    async fn status_of(fx: &Fixture, uri: &str) -> String {
+        let (code, body) = fx.read(uri, &fx.owner).await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        body["discovery_status"].as_str().unwrap().to_owned()
+    }
+
+    #[tokio::test]
+    async fn the_source_shows_its_discovery_job_as_queued_then_running_then_idle() {
+        let fx = fixture("rt-discover-status").await;
+        let id = make_source(&fx, "1.*").await;
+        let uri = format!("/api/v1/image-sources/{id}");
+        assert_eq!(status_of(&fx, &uri).await, "queued");
+        let (_, list) = fx.read("/api/v1/image-sources", &fx.owner).await;
+        assert_eq!(list["items"][0]["discovery_status"], "queued");
+        sqlx::query("UPDATE jobs SET status = 'running' WHERE source_id = ?")
+            .bind(&id)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        assert_eq!(status_of(&fx, &uri).await, "running");
+        settle(&fx, &id).await;
+        assert_eq!(status_of(&fx, &uri).await, "idle");
+        fx.finish().await;
+    }
+
+    /// Box 2 of #331: the real worker claims the job the create handler queued, runs it against
+    /// the fake registry, and the source then carries its images and last discovery time.
+    #[tokio::test]
+    async fn the_worker_runs_the_queued_discovery_and_the_source_shows_the_result() {
+        use crate::services::discovery::handler::SpinoffJobs;
+        use crate::worker::{self, Step};
+
+        let fx = fixture("rt-discover-worker").await;
+        fake::set_tags(&fx.script, "team/app", &["1.0", "1.1", "2.0"]);
+        fake::put_single(&fx.script, "team/app", "1.0", "amd64", "a");
+        fake::put_single(&fx.script, "team/app", "1.1", "amd64", "b");
+        fake::put_single(&fx.script, "team/app", "2.0", "amd64", "c");
+
+        let id = make_source(&fx, "1.*").await;
+        let uri = format!("/api/v1/image-sources/{id}");
+        let (_, before) = fx.read(&uri, &fx.owner).await;
+        assert_eq!(before["discovery_status"], "queued");
+        assert!(before["last_discovery_at"].is_null());
+
+        let key = Arc::new(
+            auth::crypto::credentials_key(
+                &config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+        let store = crate::services::storage::StoreRoot::at(fx.dir.join("images"));
+        let handler = Arc::new(SpinoffJobs::new(
+            crate::services::discovery::Discovery::for_test_with_pool(fx.pool.clone()),
+            crate::services::alerts::Notifier::new(fx.pool.clone(), key.clone(), false),
+            fx.pool.clone(),
+            store.clone(),
+            crate::services::scan::ScanEnv::under(&fx.dir),
+            crate::services::publish::Publisher::new(
+                fx.pool.clone(),
+                key,
+                store,
+                crate::services::github_url::GithubTarget::default(),
+            )
+            .unwrap(),
+        ));
+        // One normal worker iteration: it claims the oldest due job, the discover job.
+        let step = worker::tick(&fx.pool, &handler, worker::now_secs())
+            .await
+            .unwrap();
+        assert_eq!(step, Step::Done);
+
+        let (_, after) = fx.read(&uri, &fx.owner).await;
+        assert_eq!(after["discovery_status"], "idle");
+        assert!(after["last_discovery_at"].is_string(), "{after}");
+        let (code, images) = fx.read(&format!("{uri}/images"), &fx.owner).await;
+        assert_eq!(code, StatusCode::OK, "{images}");
+        assert_eq!(images["total"], 2, "{images}");
+        fx.finish().await;
+    }
+
     #[tokio::test]
     async fn updating_the_repository_tag_or_hub_queues_one_scoped_job() {
         let fx = fixture("rt-discover-update").await;

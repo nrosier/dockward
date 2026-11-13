@@ -64,6 +64,8 @@ pub struct Source {
     /// (decision 42). Derived, not stored.
     pub anonymous_pull: bool,
     pub last_discovery_at: Option<String>,
+    /// `queued` or `running` while a discover job scoped to this source is pending, else `idle`.
+    pub discovery_status: String,
 }
 
 fn view(row: SourceFull) -> Result<Source, AppError> {
@@ -85,6 +87,7 @@ fn view(row: SourceFull) -> Result<Source, AppError> {
         has_credential: row.has_credential,
         anonymous_pull,
         last_discovery_at: row.last_discovery_at.map(time::rfc3339).transpose()?,
+        discovery_status: row.discovery_status,
     })
 }
 
