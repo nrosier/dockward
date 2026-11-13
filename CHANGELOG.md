@@ -2,6 +2,25 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
+## 0.5.1 - 2026-11-13
+
+### Added
+- An admin who is not the owner of the source can un-accept a CVE (PR #356, #351).
+- The CVE detail lists every image and tag where the CVE was found, with the status, last scan and fixed-in version. The list is capped at 100 tags, with a total shown beside it (PR #355, PR #357, #350).
+- An accept note, which may be empty, is shown on the CVE detail with who accepted it and when (PR #353, #351).
+- An admin can delete one CVE record for one source. The delete is refused while an acceptance is active. Shared image rows are kept (PR #352, #349).
+
+### Changed
+- Each scan-log line carries the scanner and the job kind. The db_update scanner shows in the Jobs UI, and each update step is logged on its own (PR #358, PR #354, #308).
+
+### Fixed
+- The log redaction masks a bare Basic credential, webhook URL path tokens and session cookie values (PR #354, #308).
+- The CodeQL-flagged redaction test failure message no longer echoes a secret value (PR #354, #308).
+
+### Upgrade notes
+- There are no new migrations in this release.
+- The admin delete of a CVE record and the accept note are optional features. Nothing needs migrating.
+
 ## 0.5.0 - 2026-11-12
 
 ### Added
