@@ -31,7 +31,7 @@ Purpose: schema reference for dockward 0.2.0's SQLite database, and the decision
 | `publish_reports` | The SARIF upload record for each publish. |
 | `github_issues` | Tracked GitHub issues, one per (owner, repo, CVE). Shared by every source that targets that GitHub repository. |
 | `cve_findings` | One row per (source, tag, CVE): the merged view of the tag's current image. |
-| `cve_acceptances` | Accepted risk, per source and CVE. |
+| `cve_acceptances` | Accepted risk or a false-positive verdict, per source and CVE. |
 | `totp_secrets` | One row per local user who started TOTP enrolment: the sealed secret, `enabled`, `totp_last_step` (replay guard), timestamps. Migration 0009 (#341). |
 | `totp_recovery_codes` | Argon2id hashes of a user's recovery codes and `used_at`. Migration 0009 (#341). |
 | `audit_log` | Admin and security-relevant actions. |
@@ -56,7 +56,7 @@ Column names that changed from HarborGate: `sync_job_id` is `job_id` where it na
 - `publish_reports`: `source_id` cascades. `image_id` and `job_id` are `ON DELETE SET NULL`.
 - `github_issues`: `UNIQUE (github_owner, github_repo, cve_id)`. `closed_manually` is `0` or `1`. `fixed_noted_at` is a nullable Unix-seconds timestamp: set when Dockward posted the "fixed, can be closed" note for the CVE, cleared when the CVE is reported again or the row status is set (migration `0014_fixed_note.sql`, "note only" decision of 2026-11-13, see [cve-lifecycle.md](cve-lifecycle.md)). Rows are never deleted by retention or by a source delete.
 - `cve_findings`: `UNIQUE (source_id, image_tag, cve_id)`. `status` stores only `open` or `fixed`. `github_issue_id` is `ON DELETE SET NULL`.
-- `cve_acceptances`: at most one active acceptance per source and CVE (partial unique index). `CHECK ((revoked_at IS NULL) = (revoked_by IS NULL))`.
+- `cve_acceptances`: at most one active acceptance per source and CVE, of either kind (partial unique index `idx_cve_acceptances_active` on `(source_id, cve_id) WHERE revoked_at IS NULL`). `CHECK ((revoked_at IS NULL) = (revoked_by IS NULL))`. `kind` is `accepted` or `false_positive`, `NOT NULL DEFAULT 'accepted'` (migration `0015_acceptance_kind.sql`, 2026-11-13; rows written before it are `accepted`). See [cve-lifecycle.md](cve-lifecycle.md), "False positive".
 - `job_runs`: `job_kind` is one of `cleanup`, `retention`, `discover`, `db_update`.
 
 The #311 re-key bookkeeping tables (migration `0002_github_rekey.sql`):
@@ -125,6 +125,7 @@ Source for the OIDC claim model: OpenID Connect Core 1.0.
 - Kept: `user.create`, `user.delete`, `user.role_change`, `oidc.config_change`, `credential.create`, `credential.rotate`, `credential.delete`, `cve.accept`, `cve.unaccept`, `cve.review`, `alert.config_change`, `backup.run`, `restore.run`, `key.rotate`, `retention.run`, `log.level_change`, `sync_job.retry`, `sync_job.purge`.
 - Added (#341, TOTP): `user.totp_enable`, `user.totp_disable`, `user.totp_reset` (admin action; target `user:<id>`; no details), `user.totp_lockout` (actor is the locked user; `details` is `{"failures": n}`). None carries a code, a secret or a hash.
 - Added (spinoff): `hub.create`, `hub.delete`, `source.create`, `source.update`, `source.delete`, `source.scan`, `source.tag_pull`, `source.tag_scan` (#335; details hold the source id, the tag and the queued count), `image.evict` (actor `system`; details name the hub, repository, and platform digest, never a path with a secret), `settings.change` (scan limits and retention; details hold the old and new values).
+- Added (2026-11-13, False positive): `cve.false_positive` (target `cve:<source_id>:<cve_id>`; `details` is `{"cve_id", "source_id", "expires_at"}` like `cve.accept`; the note is never in it).
 - Removed (spinoff): `mapping.*`, `project_webhook.*`, `artifact.remove`, `key.migrate_labels`. The `key.migrate_labels` action belonged to the label migration that decision 56 removed.
 
 - `github.rekey_issues` (the one-time re-key of a repository's GitHub issues, decision 60, issue #311; actor `system`; target `<owner>/<repo>`; `details` is `{"issues", "label"}`: `issues` is the count of old issues re-keyed and `label` is `renamed`, `absent`, or `kept`, the same text stored in `issue_rekeys.label_result`. It carries a count and a fixed word, never a token or a name; written once when the re-key completes). Source: `backend/src/services/issue_rekey.rs` (`AUDIT_ACTION`, `json!`). Verified (2026-11-11) by grep of `backend/src/services/audit.rs` ACTIONS.

@@ -6,21 +6,42 @@ import { INPUT, TEXTAREA } from "../mappings/styles";
 import { Button } from "../ui/Button";
 import { Dialog } from "../ui/Dialog";
 import { Field } from "../ui/Field";
-import type { CveDetail } from "../../types/api";
+import type { AcceptanceKind, CveDetail } from "../../types/api";
 
 // The end of the chosen day in UTC, as RFC 3339.
 export function endOfDayUtc(date: string): string {
   return `${date}T23:59:59Z`;
 }
 
+// The text and endpoint of each verdict. A false positive uses the same form as Accept risk.
+const VERDICT = {
+  accepted: {
+    path: "accept",
+    title: "cves.accept.title",
+    body: "cves.accept.body",
+    issueNote: "cves.accept.issueNote",
+    submit: "cves.accept.submit",
+  },
+  false_positive: {
+    path: "false-positive",
+    title: "cves.falsePositive.title",
+    body: "cves.falsePositive.body",
+    issueNote: "cves.falsePositive.issueNote",
+    submit: "cves.falsePositive.submit",
+  },
+} as const;
+
 interface AcceptDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   cve: CveDetail;
   mappingLabel: string;
+  // Which verdict the dialog records; Accept risk when left out.
+  kind?: AcceptanceKind;
 }
 
-export function AcceptDialog({ open, onOpenChange, cve, mappingLabel }: AcceptDialogProps) {
+export function AcceptDialog({ open, onOpenChange, cve, mappingLabel, kind = "accepted" }: AcceptDialogProps) {
+  const text = VERDICT[kind];
   const queryClient = useQueryClient();
   const [reason, setReason] = useState("");
   const [expires, setExpires] = useState("");
@@ -28,7 +49,7 @@ export function AcceptDialog({ open, onOpenChange, cve, mappingLabel }: AcceptDi
 
   const accept = useMutation({
     mutationFn: () =>
-      api("POST", `/cves/${encodeURIComponent(cve.id)}/accept`, {
+      api("POST", `/cves/${encodeURIComponent(cve.id)}/${text.path}`, {
         reason: reason.trim(),
         expires_at: expires === "" ? null : endOfDayUtc(expires),
       }),
@@ -47,7 +68,7 @@ export function AcceptDialog({ open, onOpenChange, cve, mappingLabel }: AcceptDi
 
   const issueNote =
     cve.github_issue_status === "open" && cve.github_issue_number !== null
-      ? ` ${t("cves.accept.issueNote", { number: cve.github_issue_number })}`
+      ? ` ${t(text.issueNote, { number: cve.github_issue_number })}`
       : "";
 
   function submit(event: FormEvent) {
@@ -63,26 +84,26 @@ export function AcceptDialog({ open, onOpenChange, cve, mappingLabel }: AcceptDi
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      title={t("cves.accept.title", { cve: cve.cve_id })}
-      description={`${t("cves.accept.body", { mapping: mappingLabel })}${issueNote}`}
+      title={t(text.title, { cve: cve.cve_id })}
+      description={`${t(text.body, { mapping: mappingLabel })}${issueNote}`}
     >
       <form onSubmit={submit} className="flex flex-col gap-4">
-        <Field id="accept-reason" label={t("cves.accept.reason")} help={t("cves.accept.reasonHelp")}>
+        <Field id={`${kind}-reason`} label={t("cves.accept.reason")} help={t("cves.accept.reasonHelp")}>
           <textarea
-            id="accept-reason"
-            aria-describedby="accept-reason-help"
+            id={`${kind}-reason`}
+            aria-describedby={`${kind}-reason-help`}
             value={reason}
             onChange={(event) => setReason(event.target.value)}
             className={TEXTAREA}
           />
         </Field>
-        <Field id="accept-expires" label={t("cves.accept.expires")} help={t("cves.accept.expiresHelp")}>
+        <Field id={`${kind}-expires`} label={t("cves.accept.expires")} help={t("cves.accept.expiresHelp")}>
           <input
-            id="accept-expires"
+            id={`${kind}-expires`}
             type="date"
             value={expires}
             onChange={(event) => setExpires(event.target.value)}
-            aria-describedby="accept-expires-help"
+            aria-describedby={`${kind}-expires-help`}
             className={INPUT}
           />
         </Field>
@@ -94,7 +115,7 @@ export function AcceptDialog({ open, onOpenChange, cve, mappingLabel }: AcceptDi
         <div className="flex flex-wrap justify-end gap-2.5">
           <Button onClick={() => onOpenChange(false)}>{t("mappings.cancel")}</Button>
           <Button type="submit" variant="primary" disabled={accept.isPending}>
-            {t("cves.accept.submit")}
+            {t(text.submit)}
           </Button>
         </div>
       </form>

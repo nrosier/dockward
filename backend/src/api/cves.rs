@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::state::AppState;
 use crate::error::AppError;
 use crate::models::role::Role;
-use crate::services::acceptance::{self, AcceptInput, Acceptance, Caller};
+use crate::services::acceptance::{self, AcceptInput, Acceptance, Caller, Verdict};
 use crate::services::cves::{self, CveDetail, CveSummary, ListParams, Reader};
 use crate::services::issue_lifecycle::{self, IssueApi};
 use crate::services::pagination::Page;
@@ -184,21 +184,71 @@ async fn accept_with<G: IssueApi>(
     body: &[u8],
     gh: &G,
 ) -> Result<(StatusCode, Json<Accepted>), AppError> {
+    verdict_with(state, user, id, body, gh, Verdict::Accepted).await
+}
+
+/// `POST /api/v1/cves/:id/false-positive`. The same body, checks and answers as
+/// [`accept`]; the verdict is stored with `kind = 'false_positive'` and audited as
+/// `cve.false_positive`. An open issue gets a comment and stays open. `409` while any verdict
+/// is active.
+pub async fn false_positive(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<Accepted>), AppError> {
+    verdict_with(
+        &state,
+        &user,
+        &id,
+        &body,
+        state.issues_client.as_ref(),
+        Verdict::FalsePositive,
+    )
+    .await
+}
+
+/// Parses the body and records the verdict, shared by accept and false positive.
+async fn verdict_with<G: IssueApi>(
+    state: &AppState,
+    user: &AuthUser,
+    id: &str,
+    body: &[u8],
+    gh: &G,
+    verdict: Verdict,
+) -> Result<(StatusCode, Json<Accepted>), AppError> {
     let input: AcceptInput = serde_json::from_slice(body)
         .map_err(|_| AppError::InvalidRequest("The request body is not valid.".to_owned()))?;
-    let acceptance = acceptance::accept(
-        &state.pool,
-        &state.credentials_key,
-        gh,
-        &Caller {
-            id: &user.id,
-            username: &user.username,
-        },
-        id,
-        input,
-        now_secs(),
-    )
-    .await?;
+    let caller = Caller {
+        id: &user.id,
+        username: &user.username,
+    };
+    let acceptance = match verdict {
+        Verdict::Accepted => {
+            acceptance::accept(
+                &state.pool,
+                &state.credentials_key,
+                gh,
+                &caller,
+                id,
+                input,
+                now_secs(),
+            )
+            .await?
+        }
+        Verdict::FalsePositive => {
+            acceptance::mark_false_positive(
+                &state.pool,
+                &state.credentials_key,
+                gh,
+                &caller,
+                id,
+                input,
+                now_secs(),
+            )
+            .await?
+        }
+    };
     Ok((StatusCode::CREATED, Json(Accepted { acceptance })))
 }
 

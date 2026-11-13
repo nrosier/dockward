@@ -436,13 +436,13 @@ mod tests {
             .await
             .map_err(|_| AppError::InternalError)?;
         assert_eq!((runs, findings), (1, 1));
-        // Every migration applied, in order: 0007 (aliases), 0008 (manual trigger), 0009 (TOTP), 0010 (empty jobs), 0012 (CVE scanners), 0013 (id reason), 0014 (fixed note).
+        // Every migration applied, in order: 0007 (aliases), 0008 (manual trigger), 0009 (TOTP), 0010 (empty jobs), 0012 (CVE scanners), 0013 (id reason), 0014 (fixed note), 0015 (acceptance kind).
         let versions: Vec<i64> =
             sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&pool)
                 .await
                 .map_err(|_| AppError::InternalError)?;
-        assert_eq!(versions, (1..=14).collect::<Vec<i64>>());
+        assert_eq!(versions, (1..=15).collect::<Vec<i64>>());
         let names: Vec<(String,)> = sqlx::query_as(
             "SELECT name FROM sqlite_master
              WHERE name IN ('idx_scan_runs_current', 'newest_digest_tags', 'tag_scan_times',
@@ -476,6 +476,66 @@ mod tests {
             .await
             .map_err(|_| AppError::InternalError)?;
         assert_eq!(left, 0);
+        Ok(())
+    }
+    /// Migration 0015 adds `cve_acceptances.kind`: a row written before it reads as
+    /// `accepted`, only `accepted` and `false_positive` are allowed, and the partial unique
+    /// index still allows one active verdict per source and CVE, of either kind.
+    #[tokio::test]
+    async fn migration_0015_keeps_existing_acceptances_as_accepted() -> Result<(), AppError> {
+        let options = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let migrator = sqlx::migrate!("./migrations");
+        migrator
+            .run_to(14, &pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        seed_source(&pool).await?;
+        sqlx::query(
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username)
+             VALUES ('old', 'src-1', 'CVE-1', 'before 0015', 'user-1', 'test-user')",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        migrator
+            .run(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let kind: String = sqlx::query_scalar("SELECT kind FROM cve_acceptances WHERE id = 'old'")
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        assert_eq!(kind, "accepted");
+        // Any other kind is refused by the CHECK.
+        let bad = sqlx::query(
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by_username, kind)
+             VALUES ('bad', 'src-1', 'CVE-2', '', 'test-user', 'ignored')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(bad.is_err());
+        // A false positive for the same CVE is refused while the old acceptance is active.
+        let second = sqlx::query(
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by_username, kind)
+             VALUES ('fp', 'src-1', 'CVE-1', '', 'test-user', 'false_positive')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(second.is_err());
+        let index: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_cve_acceptances_active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        assert_eq!(index, 1);
         Ok(())
     }
 }

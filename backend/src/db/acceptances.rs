@@ -1,5 +1,5 @@
 //! SQL for the `cve_acceptances` table (`specs/database.md`, `specs/cve-lifecycle.md`,
-//! "Acceptance"). An acceptance is active when `revoked_at IS NULL` and the expiry is empty
+//! "Acceptance"). A row is an accepted risk or a false positive (`kind`). An acceptance is active when `revoked_at IS NULL` and the expiry is empty
 //! or after `now`. Rows hold a reason and user names only, never secrets.
 //!
 //! Every function takes a connection so the caller can group them in one transaction.
@@ -20,6 +20,8 @@ pub struct AcceptanceRow {
     pub expires_at: Option<i64>,
     pub changed_at: Option<i64>,
     pub change_reason: Option<String>,
+    /// `accepted` or `false_positive` (migration 0015).
+    pub kind: String,
 }
 
 /// A new acceptance. It starts active.
@@ -32,6 +34,8 @@ pub struct NewAcceptance<'a> {
     pub created_by_username: &'a str,
     pub created_at: i64,
     pub expires_at: Option<i64>,
+    /// `accepted` or `false_positive`. The table's CHECK refuses anything else.
+    pub kind: &'a str,
 }
 
 /// The active acceptance of the CVE in the source, if one exists.
@@ -45,7 +49,7 @@ pub async fn active(
         AcceptanceRow,
         r#"SELECT id AS "id!", source_id AS "source_id!", cve_id AS "cve_id!",
                   reason AS "reason!", created_by_username AS "created_by_username!",
-                  created_at, expires_at, changed_at, change_reason
+                  created_at, expires_at, changed_at, change_reason, kind AS "kind!"
            FROM cve_acceptances
            WHERE source_id = ? AND cve_id = ? AND revoked_at IS NULL
              AND (expires_at IS NULL OR expires_at > ?)"#,
@@ -88,8 +92,9 @@ pub async fn insert(
 ) -> Result<bool, AppError> {
     sqlx::query!(
         "INSERT INTO cve_acceptances
-            (id, source_id, cve_id, reason, created_by, created_by_username, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (id, source_id, cve_id, reason, created_by, created_by_username, created_at, expires_at,
+             kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT DO NOTHING",
         row.id,
         row.source_id,
@@ -98,7 +103,8 @@ pub async fn insert(
         row.created_by,
         row.created_by_username,
         row.created_at,
-        row.expires_at
+        row.expires_at,
+        row.kind
     )
     .execute(conn)
     .await

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!\", source_id AS \"source_id!\", cve_id AS \"cve_id!\",\n                  reason AS \"reason!\", created_by_username AS \"created_by_username!\",\n                  created_at, expires_at, changed_at, change_reason\n           FROM cve_acceptances\n           WHERE source_id = ? AND cve_id = ? AND revoked_at IS NULL\n             AND (expires_at IS NULL OR expires_at > ?)",
+  "query": "SELECT id AS \"id!\", source_id AS \"source_id!\", cve_id AS \"cve_id!\",\n                  reason AS \"reason!\", created_by_username AS \"created_by_username!\",\n                  created_at, expires_at, changed_at, change_reason, kind AS \"kind!\"\n           FROM cve_acceptances\n           WHERE source_id = ? AND cve_id = ? AND revoked_at IS NULL\n             AND (expires_at IS NULL OR expires_at > ?)",
   "describe": {
     "columns": [
       {
@@ -101,6 +101,17 @@
             "name": "change_reason"
           }
         }
+      },
+      {
+        "name": "kind!",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_acceptances",
+            "name": "kind"
+          }
+        }
       }
     ],
     "parameters": {
@@ -115,8 +126,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "3fc31460d36580abaa678d584d25b280584b3d54f41d3d46718464d5107c8937"
+  "hash": "26f06ec7306c562a9e7112482de8c98fc35a53f3d83f41c95f3220be06308a4e"
 }

@@ -4,6 +4,12 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+### Added
+- False positive is a second verdict next to Accept risk on a CVE (`POST /api/v1/cves/:id/false-positive`, audited as `cve.false_positive`). It records the verdict with an optional note and expiry, comments on the open GitHub issue and never closes it, and blocks new issues like an acceptance. Un-accept clears either verdict, and the CVE detail shows which one is active (migration 0015).
+
+### Upgrade notes
+- Migration 0015 runs on first start. It adds `cve_acceptances.kind`; existing rows are `accepted`.
+
 ## 0.7.0 - 2026-11-13
 
 ### Changed

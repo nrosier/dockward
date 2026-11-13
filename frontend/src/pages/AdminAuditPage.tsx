@@ -22,6 +22,7 @@ const ACTIONS = [
   "credential.delete",
   "cve.accept",
   "cve.unaccept",
+  "cve.false_positive",
   "mapping.create",
   "mapping.update",
   "mapping.delete",

@@ -1,7 +1,8 @@
 //! CVE acceptance (`specs/cve-lifecycle.md`, "Acceptance"; `specs/api.md`, CVEs).
 //!
-//! [`accept`] records a risk acceptance for a CVE on a source the caller owns, and
-//! [`unaccept`] revokes it softly. An acceptance applies to the whole source, never to one
+//! [`accept`] records a risk acceptance for a CVE on a source the caller owns,
+//! [`mark_false_positive`] records a false-positive verdict the same way (`kind`), and
+//! [`unaccept`] revokes either softly. An acceptance applies to the whole source, never to one
 //! tag. Accepting does not close an open GitHub issue: it adds a comment. Both actions are
 //! audited, in the same transaction as the change.
 //!
@@ -41,6 +42,33 @@ pub struct AcceptInput {
     pub expires_at: Option<String>,
 }
 
+/// The verdict a `cve_acceptances` row records (`kind`, migration 0015). A false positive
+/// behaves like an acceptance: it comments on an open issue, never closes it, and blocks new
+/// issues (`specs/cve-lifecycle.md`, "False positive").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Accepted,
+    FalsePositive,
+}
+
+impl Verdict {
+    /// The stored `kind` value.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::FalsePositive => "false_positive",
+        }
+    }
+
+    /// The audit action of recording this verdict.
+    fn audit_action(self) -> &'static str {
+        match self {
+            Self::Accepted => "cve.accept",
+            Self::FalsePositive => "cve.false_positive",
+        }
+    }
+}
+
 /// The acceptance as the accept route answers with it.
 #[derive(Debug, Serialize)]
 pub struct Acceptance {
@@ -56,6 +84,8 @@ pub struct Acceptance {
     pub changed_at: Option<String>,
     /// `severity_changed`, `fix_available` or `fixed_version_changed` while flagged.
     pub change_reason: Option<String>,
+    /// `accepted` or `false_positive`: which verdict is active.
+    pub kind: String,
 }
 
 impl Acceptance {
@@ -70,6 +100,7 @@ impl Acceptance {
             expires_at: row.expires_at.map(time::rfc3339).transpose()?,
             changed_at: row.changed_at.map(time::rfc3339).transpose()?,
             change_reason: row.change_reason,
+            kind: row.kind,
         })
     }
 }
@@ -208,11 +239,15 @@ pub(crate) fn parse_rfc3339(text: &str) -> Option<i64> {
 
 /// The text of the comment on an open issue. `@` is followed by a zero-width space, so the
 /// reason cannot mention a GitHub user or team.
-fn comment_text(username: &str, reason: &str) -> String {
+fn comment_text(verdict: Verdict, username: &str, reason: &str) -> String {
+    let lead = match verdict {
+        Verdict::Accepted => "Risk accepted by",
+        Verdict::FalsePositive => "Marked as a false positive by",
+    };
     let text = if reason.is_empty() {
-        format!("Risk accepted by {username}.")
+        format!("{lead} {username}.")
     } else {
-        format!("Risk accepted by {username}: {reason}")
+        format!("{lead} {username}: {reason}")
     };
     text.replace('@', "@\u{200b}")
 }
@@ -260,6 +295,56 @@ pub async fn accept<G: IssueApi>(
     caller: &Caller<'_>,
     id: &str,
     input: AcceptInput,
+    now: i64,
+) -> Result<Acceptance, AppError> {
+    record_verdict(
+        pool,
+        credentials_key,
+        gh,
+        caller,
+        id,
+        input,
+        Verdict::Accepted,
+        now,
+    )
+    .await
+}
+
+/// `POST /api/v1/cves/:id/false-positive` for the owner of the source. The same rules and
+/// answers as [`accept`], with `kind = 'false_positive'`, the audit action
+/// `cve.false_positive` and the comment `Marked as a false positive by {user}: {reason}`. It
+/// never closes the issue. Any active verdict of either kind is `409`.
+pub async fn mark_false_positive<G: IssueApi>(
+    pool: &SqlitePool,
+    credentials_key: &DerivedKey,
+    gh: &G,
+    caller: &Caller<'_>,
+    id: &str,
+    input: AcceptInput,
+    now: i64,
+) -> Result<Acceptance, AppError> {
+    record_verdict(
+        pool,
+        credentials_key,
+        gh,
+        caller,
+        id,
+        input,
+        Verdict::FalsePositive,
+        now,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_verdict<G: IssueApi>(
+    pool: &SqlitePool,
+    credentials_key: &DerivedKey,
+    gh: &G,
+    caller: &Caller<'_>,
+    id: &str,
+    input: AcceptInput,
+    verdict: Verdict,
     now: i64,
 ) -> Result<Acceptance, AppError> {
     let (source_id, requested) = split_id(id)?;
@@ -338,6 +423,7 @@ pub async fn accept<G: IssueApi>(
             created_by_username: caller.username,
             created_at: now,
             expires_at,
+            kind: verdict.kind(),
         },
     )
     .await?;
@@ -347,7 +433,7 @@ pub async fn accept<G: IssueApi>(
     audit::record(
         &mut tx,
         &actor,
-        "cve.accept",
+        verdict.audit_action(),
         &target,
         Some(&serde_json::json!({
             "cve_id": cve_id,
@@ -367,7 +453,7 @@ pub async fn accept<G: IssueApi>(
         gh,
         &source,
         cve_id,
-        &comment_text(caller.username, reason),
+        &comment_text(verdict, caller.username, reason),
         now,
     )
     .await;
@@ -422,7 +508,7 @@ async fn comment_on_open_issue<G: IssueApi>(
 
 /// `POST /api/v1/cves/:id/unaccept` for the owner of the source, or for any admin. `404`
 /// when the id is malformed, the source is not the caller's (and the caller is not an
-/// admin), or no acceptance is active. Soft revoke with
+/// admin), or no verdict is active. The active verdict of either kind is revoked. Soft revoke with
 /// `revoked_by` the caller, audited as `cve.unaccept` (`{"reason":"manual"}`). With `reopen_issue` and a closed
 /// issue, the issue is reopened with a comment (#196); otherwise there is no GitHub call.
 pub async fn unaccept<G: IssueApi>(
@@ -632,6 +718,25 @@ mod tests {
                 AcceptInput {
                     reason: reason.to_owned(),
                     expires_at: expires_at.map(str::to_owned),
+                },
+                NOW,
+            )
+            .await
+        }
+
+        async fn false_positive(&self, who: &str, reason: &str) -> Result<Acceptance, AppError> {
+            mark_false_positive(
+                &self.state.pool,
+                &self.state.credentials_key,
+                &self.gh,
+                &Caller {
+                    id: who,
+                    username: who,
+                },
+                ID,
+                AcceptInput {
+                    reason: reason.to_owned(),
+                    expires_at: None,
                 },
                 NOW,
             )
@@ -1454,9 +1559,139 @@ mod tests {
         assert_eq!(last.expires_at.as_deref(), Some("9999-12-31T23:59:59Z"));
     }
 
+    #[tokio::test]
+    async fn false_positive_comments_on_the_open_issue_and_does_not_close_it() {
+        let f = Fixture::new("fp-comment").await;
+        f.issue("open").await;
+
+        let stored = f.false_positive("u1", "not reachable").await.unwrap();
+
+        assert_eq!(stored.kind, "false_positive");
+        let writes = f.github.writes();
+        assert_eq!(writes.len(), 1, "one comment and nothing else");
+        let (method, path, body) = &writes[0];
+        assert_eq!(*method, "POST");
+        assert_eq!(path, "repos/octo/app/issues/1/comments");
+        assert_eq!(
+            body["body"],
+            "Marked as a false positive by u1: not reachable"
+        );
+        assert!(f.github.with(|s| s.issues[0].open), "the issue stays open");
+        let status: String = sqlx::query_scalar("SELECT status FROM github_issues")
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "open");
+        let kind: String =
+            sqlx::query_scalar("SELECT kind FROM cve_acceptances WHERE revoked_at IS NULL")
+                .fetch_one(&f.state.pool)
+                .await
+                .unwrap();
+        assert_eq!(kind, "false_positive");
+    }
+
+    #[tokio::test]
+    async fn false_positive_is_audited_without_the_note() {
+        let f = Fixture::new("fp-audit").await;
+        f.false_positive("u1", "kept private").await.unwrap();
+
+        let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT action, actor_username, target, details FROM audit_log ORDER BY rowid",
+        )
+        .fetch_all(&f.state.pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "cve.false_positive");
+        assert_eq!(rows[0].1, "u1");
+        assert_eq!(rows[0].2, "cve:m1:CVE-2026-0001");
+        let details: serde_json::Value =
+            serde_json::from_str(rows[0].3.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            details,
+            serde_json::json!({"cve_id": CVE, "source_id": "m1", "expires_at": null})
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM audit_log WHERE action = 'cve.accept'")
+                .await,
+            0
+        );
+    }
+
+    /// One active verdict at a time: a false positive while an acceptance is active (and the
+    /// other way round) is the same `409` as accepting twice, and writes nothing.
+    #[tokio::test]
+    async fn one_active_verdict_at_a_time() {
+        let f = Fixture::new("fp-one").await;
+        f.accept("u1", ID, "first", None).await.unwrap();
+        let twice = f.accept("u1", ID, "second", None).await.unwrap_err();
+
+        let fp = f.false_positive("u1", "after accept").await.unwrap_err();
+
+        assert_eq!(fp, twice);
+        assert_eq!(fp.status(), StatusCode::CONFLICT);
+        assert_eq!(f.count("SELECT COUNT(*) FROM cve_acceptances").await, 1);
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM audit_log WHERE action = 'cve.false_positive'")
+                .await,
+            0
+        );
+
+        f.unaccept("u1", ID, NOW + 1).await.unwrap();
+        f.false_positive("u1", "now").await.unwrap();
+        let accept = f.accept("u1", ID, "after fp", None).await.unwrap_err();
+        assert_eq!(accept, twice);
+        let fp_again = f.false_positive("u1", "again").await.unwrap_err();
+        assert_eq!(fp_again, twice);
+    }
+
+    #[tokio::test]
+    async fn un_accept_clears_a_false_positive() {
+        let f = Fixture::new("fp-unaccept").await;
+        f.false_positive("u1", "").await.unwrap();
+        let reader = crate::services::cves::Reader {
+            user_id: "u1",
+            is_admin: false,
+        };
+        let before = crate::services::cves::detail(&f.state.pool, &reader, ID, NOW + 1)
+            .await
+            .unwrap();
+        assert!(before.summary.accepted);
+        assert_eq!(
+            before.acceptance.as_ref().map(|a| a.kind.as_str()),
+            Some("false_positive")
+        );
+
+        f.unaccept("u1", ID, NOW + 2).await.unwrap();
+
+        let after = crate::services::cves::detail(&f.state.pool, &reader, ID, NOW + 3)
+            .await
+            .unwrap();
+        assert!(!after.summary.accepted);
+        assert!(after.acceptance.is_none());
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM audit_log WHERE action = 'cve.unaccept'")
+                .await,
+            1
+        );
+    }
+
+    #[test]
+    fn the_false_positive_comment_text() {
+        assert_eq!(
+            comment_text(Verdict::FalsePositive, "alice", ""),
+            "Marked as a false positive by alice."
+        );
+        let text = comment_text(Verdict::FalsePositive, "alice", "ask @bob");
+        assert_eq!(
+            text,
+            "Marked as a false positive by alice: ask @\u{200b}bob"
+        );
+    }
+
     #[test]
     fn the_comment_cannot_mention_a_user() {
-        let text = comment_text("alice", "ask @bob and @org/team");
+        let text = comment_text(Verdict::Accepted, "alice", "ask @bob and @org/team");
         assert!(!text.contains("@b") && !text.contains("@o"));
         assert!(text.starts_with("Risk accepted by alice: "));
     }
