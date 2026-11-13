@@ -4,8 +4,15 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.7.0 - 2026-11-13
+
 ### Changed
+- Bundled scanners: Trivy v0.76.2, Grype v0.121.3 (unchanged from 0.6.0).
 - Dockward no longer closes a GitHub issue when its CVE is fixed. It posts one note saying the CVE is no longer reported and the issue can be closed, and leaves the issue open for the user to close. The note is recorded in `github_issues.fixed_noted_at` (migration 0014) and is posted again only after the CVE has returned and been fixed again.
+
+### Upgrade notes
+- Migration 0014 runs on first start. It adds `github_issues.fixed_noted_at`.
+- Issues of fixed CVEs are no longer closed automatically. Dockward posts one note and leaves the issue open.
 
 ## 0.6.0 - 2026-11-13
 
