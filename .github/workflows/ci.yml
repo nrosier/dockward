@@ -70,6 +70,29 @@ jobs:
       - name: Dependency policy (cargo-deny)
         run: cargo deny check
 
+  scanner-pins:
+    name: Scanner pins (Trivy and Grype)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the scanner pins in the Dockerfile
+        run: bash scripts/check-scanner-pins.sh Dockerfile
+
+      - name: Test the pin check
+        run: bash scripts/test-check-scanner-pins.sh
+
   frontend:
     name: Frontend (audit, lint, build)
     runs-on: ubuntu-latest
