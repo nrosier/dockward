@@ -40,3 +40,15 @@ export function newVulnsText(job: Job): string | null {
   }
   return ids.length === 0 ? t("jobs.noNewVulns") : t("jobs.newVulns", { ids: ids.join(", ") });
 }
+
+// The name of the scanner a db_update job or run refreshes. An unknown scanner shows as its raw
+// value. Null when the job or run has none.
+export function scannerLabel(scanner: string | null | undefined): string | null {
+  if (scanner === null || scanner === undefined) {
+    return null;
+  }
+  if (scanner === "trivy") {
+    return t("jobs.scanner.trivy");
+  }
+  return scanner === "grype" ? t("jobs.scanner.grype") : scanner;
+}

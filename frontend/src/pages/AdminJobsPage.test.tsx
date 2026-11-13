@@ -31,6 +31,17 @@ describe("AdminJobsPage", () => {
     expect(await screen.findAllByRole("button", { name: t("admin.jobs.viewLog") })).toHaveLength(1);
   });
 
+  it("db_update row shows the scanner", async () => {
+    stubApi((path) =>
+      path.startsWith("/api/v1/admin/jobs")
+        ? json({ items: [run, { ...run, id: "r3", scanner: "grype" }, { ...run, id: "r4", job_kind: "cleanup", scanner: null }], page: 1, page_size: 50, total: 3 })
+        : undefined,
+    );
+    renderAt(<AdminJobsPage />);
+    expect(await screen.findByText(t("jobs.scanner.trivy"))).toBeInTheDocument();
+    expect(screen.getByText(t("jobs.scanner.grype"))).toBeInTheDocument();
+  });
+
   it("filters offer the backend's kinds, not poll", async () => {
     stubApi(() => json({ items: [], page: 1, page_size: 50, total: 0 }));
     renderAt(<AdminJobsPage />);

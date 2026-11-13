@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router";
 import { Badge, ROW, Segmented, Tag, TD, TH } from "../components/admin/parts";
 import { formatDateTime } from "../components/jobs/dates";
 import { JobLogDialog } from "../components/jobs/JobLogDialog";
+import { scannerLabel } from "../components/jobs/labels";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { ErrorMessage, LoadingMessage } from "../components/ui/StatusMessage";
@@ -73,6 +74,9 @@ export default function AdminJobsPage() {
                 <tr key={run.id} className={ROW}>
                   <td className={TD}>
                     <Tag>{run.job_kind}</Tag>
+                    {scannerLabel(run.scanner) === null ? null : (
+                      <span className="ml-2">{scannerLabel(run.scanner)}</span>
+                    )}
                   </td>
                   <td className={TD}>
                     <Badge tone={run.status === "done" ? "ok" : "crit"}>

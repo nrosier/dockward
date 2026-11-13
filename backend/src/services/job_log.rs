@@ -46,6 +46,10 @@ pub struct LineView {
     pub at: String,
     pub stream: String,
     pub text: String,
+    /// The scanner of the job (`trivy` or `grype`), on every line. `null` for a job without one.
+    pub scanner: Option<String>,
+    /// The kind of the job, on every line. `null` when the payload has none.
+    pub kind: Option<String>,
 }
 
 /// The log of one job, as `GET /jobs/:id/log` returns it.
@@ -117,6 +121,7 @@ pub async fn get(
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
+    let (line_scanner, line_kind) = (job.scanner.clone(), job.kind.clone());
     let lines = rows
         .into_iter()
         .map(|row| {
@@ -126,6 +131,8 @@ pub async fn get(
                 at: crate::services::time::rfc3339(row.at)?,
                 stream: row.stream,
                 text: row.text,
+                scanner: line_scanner.clone(),
+                kind: line_kind.clone(),
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;

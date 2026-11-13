@@ -214,6 +214,9 @@ export interface JobLogLine {
   at: string;
   stream: "stderr" | "stdout";
   text: string;
+  // The scanner and job kind of the line's job, on every line. Null when the job has none.
+  scanner?: string | null;
+  kind?: string | null;
 }
 
 // GET /jobs/:id/log, the latest attempt of one job.
