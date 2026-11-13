@@ -2,6 +2,11 @@
 
 All notable changes are recorded here. Versions follow semantic versioning.
 
+## Unreleased
+
+### Changed
+- Bundled scanners: Trivy v0.76.2, Grype v0.121.3 (pinned by digest in the Dockerfile, checked by `scripts/check-scanner-versions.sh`, #368).
+
 ## 0.5.1 - 2026-11-13
 
 ### Added

@@ -43,6 +43,15 @@ describe("catalog", () => {
   });
 });
 
+describe("catalog keys for the CVE scanner, back and clear-filter strings", () => {
+  const keys = ["cves.col.scanners", "cves.filter.clearAll", "cves.back", "cves.detail.col.tag"];
+  it.each(keys)("%s has a non-empty English value", (key) => {
+    const value = (en as Record<string, string>)[key];
+    expect(typeof value).toBe("string");
+    expect(value.trim()).not.toBe("");
+  });
+});
+
 describe("catalog scanners", () => {
   it("flag hard-coded JSX text and text attributes", () => {
     const source = [

@@ -411,6 +411,57 @@ async fn a_discovery_pull_of_a_stored_image_still_downloads_nothing() {
     assert_eq!(pulled_at_of(&env).await, Some(5));
 }
 
+/// Runs `pull` jobs through the real worker step, so the stored `jobs` row is written as in
+/// production.
+struct PullHandler {
+    pool: sqlx::SqlitePool,
+    discovery: std::sync::Arc<crate::services::discovery::Discovery>,
+    store: StoreRoot,
+}
+
+impl crate::worker::JobHandler for PullHandler {
+    async fn run(&self, job: ClaimedJob) -> JobOutcome {
+        run_pull(&self.pool, &self.discovery, &self.store, &job, NOW).await
+    }
+}
+
+/// Enqueues the pull as job `id`, runs one worker step, and returns the stored `jobs.empty`.
+async fn stored_empty_after_step(env: &Env, id: &str, digest: &str) -> i64 {
+    let payload = format!(
+        r#"{{"kind":"pull","platform_id":"{PID}","digest":"{digest}","trigger":"first_pull"}}"#
+    );
+    // Earlier pulls queued scan jobs; the step must claim only this one.
+    exec(env, "DELETE FROM jobs", &[]).await;
+    if let Err(err) = crate::db::jobs::enqueue(&env.pool, id, None, &payload, NOW).await {
+        panic!("enqueue: {err:?}");
+    }
+    let handler = std::sync::Arc::new(PullHandler {
+        pool: env.pool.clone(),
+        discovery: env.discovery.clone(),
+        store: StoreRoot::at(env.dir.join("images")),
+    });
+    if let Err(err) = crate::worker::step(&env.pool, &handler, NOW).await {
+        panic!("step: {err:?}");
+    }
+    let status: String = match sqlx::query_scalar("SELECT status FROM jobs WHERE id = ?")
+        .bind(id)
+        .fetch_one(&env.pool)
+        .await
+    {
+        Ok(value) => value,
+        Err(err) => panic!("jobs.status: {err}"),
+    };
+    assert_eq!(status, "done", "the step ran this job");
+    match sqlx::query_scalar("SELECT empty FROM jobs WHERE id = ?")
+        .bind(id)
+        .fetch_one(&env.pool)
+        .await
+    {
+        Ok(value) => value,
+        Err(err) => panic!("jobs.empty: {err}"),
+    }
+}
+
 /// An unchanged pull (a stored digest, skipped or verified) is recorded as empty (#360).
 #[tokio::test]
 async fn an_unchanged_pull_is_recorded_as_empty() {
@@ -423,6 +474,11 @@ async fn an_unchanged_pull_is_recorded_as_empty() {
     assert_eq!(
         run(&env, &digest).await,
         JobOutcome::DoneEmpty(Some("already pulled".to_owned()))
+    );
+    // The worker stores the flag: the same unchanged pull, run as a job, sets `jobs.empty`.
+    assert_eq!(
+        stored_empty_after_step(&env, "j-unchanged", &digest).await,
+        1
     );
     // A manual pull of the stored image only verifies it: empty.
     let store = StoreRoot::at(env.dir.join("images"));
