@@ -108,6 +108,149 @@ pub async fn set_scanners(
     .map_err(|_| AppError::InternalError)
 }
 
+/// The reason recorded for a GHSA or GO id that no CVE id stands behind (#367).
+pub const NO_CVE_REASON: &str = "no CVE id published";
+
+/// Sets or clears the reason a tag's row is shown under a non-CVE id (#367).
+pub async fn set_id_reason(
+    conn: &mut SqliteConnection,
+    source_id: &str,
+    image_tag: &str,
+    cve_id: &str,
+    id_reason: Option<&str>,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "UPDATE cve_findings SET id_reason = ?
+         WHERE source_id = ? AND image_tag = ? AND cve_id = ?",
+        id_reason,
+        source_id,
+        image_tag,
+        cve_id
+    )
+    .execute(conn)
+    .await
+    .map(|_| ())
+    .map_err(|_| AppError::InternalError)
+}
+
+/// Folds the records of `alias` (a GHSA or GO id) into the record of the CVE id on a re-scan
+/// (#367). On the tag, the alias row becomes the CVE row, or, when the CVE row exists, lends it
+/// its earliest first-seen time and its issue pointer and is removed. An active acceptance of
+/// the alias on the source follows the CVE id unless the CVE id has one. A GitHub issue of the
+/// alias follows the CVE id in its repository, or is replaced by the CVE's issue.
+pub async fn fold_alias(
+    conn: &mut SqliteConnection,
+    source_id: &str,
+    image_tag: &str,
+    cve_id: &str,
+    alias: &str,
+) -> Result<(), AppError> {
+    if alias == cve_id {
+        return Ok(());
+    }
+    let fail = |_| AppError::InternalError;
+    let has_cve_row = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM cve_findings
+           WHERE source_id = ? AND image_tag = ? AND cve_id = ?"#,
+        source_id,
+        image_tag,
+        cve_id
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(fail)?
+        > 0;
+    if has_cve_row {
+        sqlx::query!(
+            "UPDATE cve_findings SET
+                first_seen_at = MIN(COALESCE(first_seen_at, (SELECT a.first_seen_at FROM cve_findings a WHERE a.source_id = ?1 AND a.image_tag = ?2 AND a.cve_id = ?4)),
+                                    COALESCE((SELECT a.first_seen_at FROM cve_findings a WHERE a.source_id = ?1 AND a.image_tag = ?2 AND a.cve_id = ?4), first_seen_at)),
+                github_issue_id = COALESCE(github_issue_id,
+                    (SELECT a.github_issue_id FROM cve_findings a WHERE a.source_id = ?1 AND a.image_tag = ?2 AND a.cve_id = ?4))
+             WHERE source_id = ?1 AND image_tag = ?2 AND cve_id = ?3
+               AND EXISTS (SELECT 1 FROM cve_findings a WHERE a.source_id = ?1 AND a.image_tag = ?2 AND a.cve_id = ?4)",
+            source_id,
+            image_tag,
+            cve_id,
+            alias
+        )
+        .execute(&mut *conn)
+        .await
+        .map_err(fail)?;
+        sqlx::query!(
+            "DELETE FROM cve_findings WHERE source_id = ? AND image_tag = ? AND cve_id = ?",
+            source_id,
+            image_tag,
+            alias
+        )
+        .execute(&mut *conn)
+        .await
+        .map_err(fail)?;
+    } else {
+        sqlx::query!(
+            "UPDATE cve_findings SET cve_id = ?, alias = ?, id_reason = NULL
+             WHERE source_id = ? AND image_tag = ? AND cve_id = ?",
+            cve_id,
+            alias,
+            source_id,
+            image_tag,
+            alias
+        )
+        .execute(&mut *conn)
+        .await
+        .map_err(fail)?;
+    }
+    sqlx::query!(
+        "UPDATE cve_acceptances SET cve_id = ?1
+         WHERE source_id = ?2 AND cve_id = ?3 AND revoked_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM cve_acceptances c
+                           WHERE c.source_id = ?2 AND c.cve_id = ?1 AND c.revoked_at IS NULL)",
+        cve_id,
+        source_id,
+        alias
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(fail)?;
+    // Where the repository has an issue for the CVE id already, the alias issue's tracked rows
+    // point at it and its own row goes; elsewhere the alias issue is renamed.
+    sqlx::query!(
+        "UPDATE cve_findings SET github_issue_id = (
+             SELECT k.id FROM github_issues l JOIN github_issues k
+                 ON k.github_owner = l.github_owner AND k.github_repo = l.github_repo AND k.cve_id = ?1
+             WHERE l.id = cve_findings.github_issue_id)
+         WHERE github_issue_id IN (
+             SELECT l.id FROM github_issues l JOIN github_issues k
+                 ON k.github_owner = l.github_owner AND k.github_repo = l.github_repo AND k.cve_id = ?1
+             WHERE l.cve_id = ?2)",
+        cve_id,
+        alias
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(fail)?;
+    sqlx::query!(
+        "DELETE FROM github_issues WHERE cve_id = ?2 AND EXISTS (
+             SELECT 1 FROM github_issues k
+             WHERE k.github_owner = github_issues.github_owner
+               AND k.github_repo = github_issues.github_repo AND k.cve_id = ?1)",
+        cve_id,
+        alias
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(fail)?;
+    sqlx::query!(
+        "UPDATE github_issues SET cve_id = ? WHERE cve_id = ?",
+        cve_id,
+        alias
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(fail)?;
+    Ok(())
+}
+
 /// The scanner keys of a stored comma list, in stable order and without duplicates. `None` or
 /// an empty text gives an empty list (unknown).
 pub fn scanner_keys(stored: Option<&str>) -> Vec<String> {
@@ -320,6 +463,8 @@ pub struct CveSummaryRow {
     pub fixed_in_version: Option<String>,
     /// The other id of the CVE (its GHSA id, #337), from the same tag row as `package` (#323).
     pub alias: Option<String>,
+    /// Why the id is a GHSA or GO id and not a CVE id (#367); `None` otherwise.
+    pub id_reason: Option<String>,
     pub first_seen_at: Option<i64>,
     pub last_seen_at: Option<i64>,
     pub open_tags: i64,
@@ -371,6 +516,8 @@ pub async fn list_cves(
                       f.package AS package, f.fixed_in_version AS fixed_in_version,
                       COALESCE(f.alias, CASE WHEN f.cve_id <> COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id)
                                              THEN f.cve_id END) AS alias,
+                      CASE WHEN f.cve_id = COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = f.cve_id), f.cve_id)
+                           THEN f.id_reason END AS id_reason,
                       f.first_seen_at AS first_seen_at, f.last_seen_at AS last_seen_at,
                       f.status AS status, f.scanners AS scanners,
                       CASE f.severity WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4
@@ -410,6 +557,7 @@ pub async fn list_cves(
                       MAX(CASE WHEN rn = 1 THEN package END) AS package,
                       MAX(CASE WHEN rn = 1 THEN fixed_in_version END) AS fixed_in_version,
                       MAX(CASE WHEN rn = 1 THEN alias END) AS alias,
+                      MAX(CASE WHEN rn = 1 THEN id_reason END) AS id_reason,
                       COALESCE(group_concat(CASE WHEN nd THEN scanners END, ','),
                                group_concat(scanners, ',')) AS scanners
                FROM tag_rows
@@ -424,7 +572,7 @@ pub async fn list_cves(
                            END AS open_severity,
                       CASE WHEN s.any_open = 1 THEN 'open' ELSE 'fixed' END AS status,
                       s.package AS package, s.fixed_in_version AS fixed_in_version,
-                      s.alias AS alias, s.scanners AS scanners,
+                      s.alias AS alias, s.id_reason AS id_reason, s.scanners AS scanners,
                       (SELECT MIN(af.first_seen_at) FROM cve_findings af
                        WHERE af.source_id = s.source_id
                          AND COALESCE((SELECT va.primary_id FROM vulnerability_aliases va WHERE va.alias = af.cve_id), af.cve_id) = s.cve_id)
@@ -452,7 +600,8 @@ pub async fn list_cves(
                   severity AS "severity!: String", open_severity AS "open_severity?: String",
                   status AS "status!: String",
                   package AS "package?: String", fixed_in_version AS "fixed_in_version?: String",
-                  alias AS "alias?: String", scanners AS "scanners?: String",
+                  alias AS "alias?: String", id_reason AS "id_reason?: String",
+                  scanners AS "scanners?: String",
                   first_seen_at AS "first_seen_at?: i64", last_seen_at AS "last_seen_at?: i64",
                   open_tags AS "open_tags!: i64", tracked_tags AS "tracked_tags!: i64",
                   github_issue_url AS "github_issue_url?: String",
@@ -529,6 +678,7 @@ pub async fn list_cves(
             package: row.package,
             fixed_in_version: row.fixed_in_version,
             alias: row.alias.filter(|alias| *alias != row.cve_id),
+            id_reason: row.id_reason,
             first_seen_at: row.first_seen_at,
             last_seen_at: row.last_seen_at,
             open_tags: row.open_tags,

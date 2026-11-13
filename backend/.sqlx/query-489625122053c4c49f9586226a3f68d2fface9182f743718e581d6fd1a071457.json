@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE cve_findings SET cve_id = ?, alias = ?, id_reason = NULL\n             WHERE source_id = ? AND image_tag = ? AND cve_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "489625122053c4c49f9586226a3f68d2fface9182f743718e581d6fd1a071457"
+}

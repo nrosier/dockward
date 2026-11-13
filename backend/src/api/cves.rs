@@ -2514,6 +2514,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #367: the list and the detail return `id_reason` for a GHSA id with no CVE, and `null`
+    /// for a CVE id.
+    #[tokio::test]
+    async fn detail_and_list_return_the_id_reason_for_a_gho_without_cve() {
+        let (state, dir, _, _) = setup("id-reason-returned").await;
+        stored(&state, "v1", "GHSA-aaaa-bbbb-cccc", None, 100).await;
+        stored(&state, "v1", "CVE-2026-0001", None, 100).await;
+        sqlx::query("UPDATE cve_findings SET id_reason = ? WHERE cve_id = 'GHSA-aaaa-bbbb-cccc'")
+            .bind(db::findings::NO_CVE_REASON)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let page = by_mapping(&state, &user("u1"), "m1", "").await.unwrap();
+        let reason = |id: &str| {
+            page.items
+                .iter()
+                .find(|item| item.cve_id == id)
+                .and_then(|item| item.id_reason.clone())
+        };
+        assert_eq!(
+            reason("GHSA-aaaa-bbbb-cccc").as_deref(),
+            Some("no CVE id published")
+        );
+        assert_eq!(reason("CVE-2026-0001"), None);
+        let detail = one(&state, &user("u1"), "m1:GHSA-aaaa-bbbb-cccc")
+            .await
+            .unwrap();
+        assert_eq!(
+            detail.summary.id_reason.as_deref(),
+            Some("no CVE id published")
+        );
+        let json = serde_json::to_value(&detail).unwrap();
+        assert_eq!(json["id_reason"], "no CVE id published");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn a_cve_only_record() {
         let (state, dir, _, _) = setup("cve-only").await;

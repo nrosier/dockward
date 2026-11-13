@@ -15,6 +15,7 @@ const medium: CveSummary = {
   severity: "MEDIUM",
   open_severity: "MEDIUM",
   alias: null,
+  id_reason: null,
   status: "open",
   package: "libfoo",
   first_seen_at: null,
@@ -333,6 +334,18 @@ describe("CvesPage", () => {
     expect(within(tr).getByText("#7")).toBeInTheDocument();
     expect(within(tr).getByText(t("cves.issue.closed"))).toBeInTheDocument();
     expect(within(tr).queryByRole("button", { name: t("cves.action.createIssue") })).not.toBeInTheDocument();
+  });
+
+  it("unresolved_id_shows_its_reason", async () => {
+    stub([
+      row({ cve_id: "GHSA-aaaa-bbbb-cccc", id: "m1:GHSA-aaaa-bbbb-cccc", id_reason: "no CVE id published" }),
+      row({ cve_id: "CVE-2026-0003", id: "m1:CVE-2026-0003" }),
+    ]);
+    renderAt(<CvesPage />);
+    const ghsa = (await screen.findByText("GHSA-aaaa-bbbb-cccc")).closest("tr") as HTMLElement;
+    expect(within(ghsa).getByText(t("cves.idReason"))).toBeInTheDocument();
+    const cveRow = (await screen.findByText("CVE-2026-0003")).closest("tr") as HTMLElement;
+    expect(within(cveRow).queryByText(t("cves.idReason"))).not.toBeInTheDocument();
   });
 
   it("list_row_shows_the_reporting_scanners", async () => {

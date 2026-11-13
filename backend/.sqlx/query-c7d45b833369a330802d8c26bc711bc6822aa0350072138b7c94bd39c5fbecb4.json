@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE cve_findings SET github_issue_id = (\n             SELECT k.id FROM github_issues l JOIN github_issues k\n                 ON k.github_owner = l.github_owner AND k.github_repo = l.github_repo AND k.cve_id = ?1\n             WHERE l.id = cve_findings.github_issue_id)\n         WHERE github_issue_id IN (\n             SELECT l.id FROM github_issues l JOIN github_issues k\n                 ON k.github_owner = l.github_owner AND k.github_repo = l.github_repo AND k.cve_id = ?1\n             WHERE l.cve_id = ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "c7d45b833369a330802d8c26bc711bc6822aa0350072138b7c94bd39c5fbecb4"
+}

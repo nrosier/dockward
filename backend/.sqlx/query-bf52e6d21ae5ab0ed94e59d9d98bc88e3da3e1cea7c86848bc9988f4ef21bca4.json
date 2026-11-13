@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE cve_findings SET\n                first_seen_at = MIN(COALESCE(first_seen_at, (SELECT a.first_seen_at FROM cve_findings a WHERE a.source_id = ?1 AND a.image_tag = ?2 AND a.cve_id = ?4)),\n                                    COALESCE((SELECT a.first_seen_at FROM cve_findings a WHERE a.source_id = ?1 AND a.image_tag = ?2 AND a.cve_id = ?4), first_seen_at)),\n                github_issue_id = COALESCE(github_issue_id,\n                    (SELECT a.github_issue_id FROM cve_findings a WHERE a.source_id = ?1 AND a.image_tag = ?2 AND a.cve_id = ?4))\n             WHERE source_id = ?1 AND image_tag = ?2 AND cve_id = ?3\n               AND EXISTS (SELECT 1 FROM cve_findings a WHERE a.source_id = ?1 AND a.image_tag = ?2 AND a.cve_id = ?4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "bf52e6d21ae5ab0ed94e59d9d98bc88e3da3e1cea7c86848bc9988f4ef21bca4"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE github_issues SET cve_id = ? WHERE cve_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "7ad29c7fd732086784c136083c3b3f7a70a61da719b7d33374c24307dcdc5c57"
+}

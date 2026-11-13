@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE cve_acceptances SET cve_id = ?1\n         WHERE source_id = ?2 AND cve_id = ?3 AND revoked_at IS NULL\n           AND NOT EXISTS (SELECT 1 FROM cve_acceptances c\n                           WHERE c.source_id = ?2 AND c.cve_id = ?1 AND c.revoked_at IS NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "b28064384a65823b719b59e494145c8a92e1104ef8aee074bfbe6a734c654ceb"
+}

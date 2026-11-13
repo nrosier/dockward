@@ -1385,3 +1385,93 @@ async fn the_record_stays_while_another_scanner_reports_it() {
     assert_eq!(status("CVE-2026-4738").as_deref(), Some("open"));
     assert_eq!(status("CVE-2025-60876").as_deref(), Some("fixed"));
 }
+
+const NO_CVE_REASON: &str = "no CVE id published";
+
+/// #367: a GHSA id and a GO id with no CVE id anywhere are kept as they are, with no alias and
+/// the reason the UI shows. A CVE id carries no reason.
+#[tokio::test]
+async fn ghsa_or_go_with_no_cve_is_kept_with_a_reason() {
+    let grype = r#"{"matches":[
+        {"vulnerability":{"id":"GHSA-only-0000-0000","severity":"High"},"artifact":{"name":"a","version":"1"},"relatedVulnerabilities":[{"id":"GHSA-only-0000-0000"}]},
+        {"vulnerability":{"id":"GO-2024-0001","severity":"High"},"artifact":{"name":"b","version":"1"}},
+        {"vulnerability":{"id":"CVE-2026-0009","severity":"High"},"artifact":{"name":"c","version":"1"}}],
+        "descriptor":{"version":"1.0.0"}}"#;
+    let grype = format!("printf '%s' '{grype}'");
+    let fx = Fx::new("id-reason", "echo '{}'", &grype).await;
+    assert_eq!(fx.queue(P_OLD).await, 2);
+    fx.drain().await;
+    for id in ["GHSA-only-0000-0000", "GO-2024-0001"] {
+        let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT alias, id_reason FROM cve_findings WHERE source_id = 's1' AND cve_id = ?",
+        )
+        .bind(id)
+        .fetch_all(&fx.pool)
+        .await
+        .unwrap_or_else(|err| panic!("rows: {err}"));
+        assert_eq!(rows, vec![(None, Some(NO_CVE_REASON.to_owned()))], "{id}");
+    }
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM cve_findings WHERE cve_id = 'CVE-2026-0009' AND id_reason IS NULL",
+            &[]
+        )
+        .await,
+        1
+    );
+}
+
+/// #367: a GHSA record stored before its CVE id was known merges into the CVE record on the
+/// next scan: one row, the earlier first-seen time kept, the GHSA id as the alias, and the
+/// record's GitHub issue and acceptance follow the CVE id.
+#[tokio::test]
+async fn an_existing_ghsa_record_merges_into_the_cve_on_rescan() {
+    let grype = format!("printf '%s' '{}'", grype_ghsa_report());
+    let fx = Fx::new("ghsa-merge", "echo '{}'", &grype).await;
+    exec(
+        &fx.pool,
+        "INSERT INTO cve_findings (id, source_id, image_tag, cve_id, package, severity,
+             first_seen_at, last_seen_at, status, id_reason)
+         VALUES ('old', 's1', 'v1', ?, 'glob', 'HIGH', 5, 6, 'open', 'no CVE id published')",
+        &[GHSA],
+    )
+    .await;
+    exec(
+        &fx.pool,
+        "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by_username)
+         VALUES ('acc', 's1', ?, 'r', 'u1')",
+        &[GHSA],
+    )
+    .await;
+    assert_eq!(fx.queue(P_OLD).await, 2);
+    fx.drain().await;
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM cve_findings WHERE source_id = 's1' AND image_tag = 'v1'",
+            &[]
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM cve_findings WHERE cve_id = ? AND alias = ? AND first_seen_at = 5
+               AND id_reason IS NULL AND status = 'open'",
+            &[GHSA_CVE, GHSA]
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM cve_acceptances WHERE id = 'acc' AND cve_id = ?",
+            &[GHSA_CVE]
+        )
+        .await,
+        1
+    );
+}

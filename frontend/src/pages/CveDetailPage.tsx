@@ -119,6 +119,11 @@ export default function CveDetailPage() {
               <SeverityPill severity={cve.severity} />
               <CveStatusPill cve={cve} />
             </div>
+            {cve.id_reason === null ? null : (
+              <p data-testid="cve-id-reason" className="text-[12.5px] text-muted">
+                {t("cves.idReason")}
+              </p>
+            )}
             {aliases.length === 0 ? null : (
               <p data-testid="cve-alias-line" className="font-mono text-[12.5px] text-muted">
                 {t("cves.detail.aliasOf", { id: cve.cve_id, alias: aliases.join(", ") })}

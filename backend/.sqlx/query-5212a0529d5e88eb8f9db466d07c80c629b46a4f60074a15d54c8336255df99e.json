@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM github_issues WHERE cve_id = ?2 AND EXISTS (\n             SELECT 1 FROM github_issues k\n             WHERE k.github_owner = github_issues.github_owner\n               AND k.github_repo = github_issues.github_repo AND k.cve_id = ?1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "5212a0529d5e88eb8f9db466d07c80c629b46a4f60074a15d54c8336255df99e"
+}
