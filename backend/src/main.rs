@@ -145,6 +145,10 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         .route("/api/v1/cves/{id}", get(api::cves::get))
         .route("/api/v1/cves/{id}/issue", post(api::cves::issue))
         .route("/api/v1/cves/{id}/accept", post(api::cves::accept))
+        .route(
+            "/api/v1/cves/{id}/false-positive",
+            post(api::cves::false_positive),
+        )
         .route("/api/v1/cves/{id}/unaccept", post(api::cves::unaccept))
         .route("/api/v1/cves/{id}/review", post(api::cves::review))
         .route("/api/v1/admin/audit-log", get(api::admin::audit_log))
@@ -2041,10 +2045,11 @@ pub(crate) mod tests {
         assert_eq!(issues, 0);
     }
 
-    /// `POST /api/v1/cves/:id/accept` and `/unaccept` through the full router: a missing
-    /// `X-CSRF-Token` is `403`, a CSRF token with no session is `401`, and another user's
-    /// mapping in the percent-encoded `<mapping_id>%3A<cve_id>` form is `404` with nothing
-    /// stored. The owner gets `201` and then `204`.
+    /// `POST /api/v1/cves/:id/accept`, `/false-positive` and `/unaccept` through the full
+    /// router: a missing `X-CSRF-Token` is `403`, a CSRF token with no session is `401`, and
+    /// another user's mapping in the percent-encoded `<mapping_id>%3A<cve_id>` form is `404`
+    /// with nothing stored. The owner gets `201` and then `204`; a false positive while an
+    /// acceptance is active is `409`, and after the un-accept it is `201`.
     #[tokio::test]
     async fn cve_accept_routes_check_csrf_session_and_tenancy() {
         use axum::body::Body;
@@ -2100,7 +2105,7 @@ pub(crate) mod tests {
             if let Some(token) = token {
                 builder = builder.header("x-csrf-token", token);
             }
-            let body = if action == "accept" {
+            let body = if action == "accept" || action == "false-positive" {
                 Body::from(r#"{"reason":"vendor fix scheduled","expires_at":null}"#)
             } else {
                 Body::empty()
@@ -2111,10 +2116,13 @@ pub(crate) mod tests {
         let mut statuses = Vec::new();
         for (action, cookie, token) in [
             ("accept", other.as_str(), None),
+            ("false-positive", other.as_str(), None),
             ("unaccept", other.as_str(), None),
             ("accept", csrf_cookie.as_str(), Some(csrf.as_str())),
+            ("false-positive", csrf_cookie.as_str(), Some(csrf.as_str())),
             ("unaccept", csrf_cookie.as_str(), Some(csrf.as_str())),
             ("accept", other.as_str(), Some(csrf.as_str())),
+            ("false-positive", other.as_str(), Some(csrf.as_str())),
             ("unaccept", other.as_str(), Some(csrf.as_str())),
         ] {
             let response = router
@@ -2140,7 +2148,36 @@ pub(crate) mod tests {
             .await
             .unwrap()
             .status();
+        let fp_while_accepted = router
+            .clone()
+            .oneshot(post("false-positive", &owner, Some(&csrf)))
+            .await
+            .unwrap()
+            .status();
         let owner_unaccept = router
+            .clone()
+            .oneshot(post("unaccept", &owner, Some(&csrf)))
+            .await
+            .unwrap()
+            .status();
+        let owner_fp = router
+            .clone()
+            .oneshot(post("false-positive", &owner, Some(&csrf)))
+            .await
+            .unwrap()
+            .status();
+        let kinds: Vec<String> =
+            sqlx::query_scalar("SELECT kind FROM cve_acceptances WHERE revoked_at IS NULL")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let fp_audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'cve.false_positive'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let owner_unaccept_fp = router
             .oneshot(post("unaccept", &owner, Some(&csrf)))
             .await
             .unwrap()
@@ -2153,8 +2190,11 @@ pub(crate) mod tests {
             [
                 StatusCode::FORBIDDEN,
                 StatusCode::FORBIDDEN,
+                StatusCode::FORBIDDEN,
                 StatusCode::UNAUTHORIZED,
                 StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::NOT_FOUND,
                 StatusCode::NOT_FOUND,
                 StatusCode::NOT_FOUND,
             ]
@@ -2163,6 +2203,11 @@ pub(crate) mod tests {
         assert_eq!(owner_accept, StatusCode::CREATED);
         assert_eq!(foreign_unaccept_after, StatusCode::NOT_FOUND);
         assert_eq!(owner_unaccept, StatusCode::NO_CONTENT);
+        assert_eq!(fp_while_accepted, StatusCode::CONFLICT);
+        assert_eq!(owner_fp, StatusCode::CREATED);
+        assert_eq!(kinds, ["false_positive"]);
+        assert_eq!(fp_audits, 1);
+        assert_eq!(owner_unaccept_fp, StatusCode::NO_CONTENT);
     }
 
     /// The CVE read routes through the full router: no session is `401` on all three, another

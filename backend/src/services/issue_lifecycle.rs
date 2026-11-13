@@ -2873,6 +2873,40 @@ mod tests {
         assert_eq!(fx.github.creates().len(), 1);
     }
 
+    /// A false positive blocks new issues like an acceptance does, on the scan and on the
+    /// manual route (`specs/cve-lifecycle.md`, "False positive").
+    #[tokio::test]
+    async fn false_positive_blocks_automatic_and_manual_issues() {
+        let fx = Fixture::new("false-positive", "CRITICAL", true).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        sqlx::query(
+            "INSERT INTO cve_acceptances (id, source_id, cve_id, reason, created_by, created_by_username, kind)
+             VALUES ('fp1', 'm1', 'CVE-2026-0001', 'not reachable', 'u1', 'u1', 'false_positive')",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        assert!(fx.github.creates().is_empty());
+        assert!(fx.issues().await.is_empty());
+
+        let source = fx.source("m1").await;
+        let refused = create_manual(&fx.pool, &fx.gh, TOKEN, &source, "CVE-2026-0001", 1_000)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.status(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(fx.github.requests(), 0);
+
+        // Revoked, it blocks nothing: the next scan creates the issue.
+        sqlx::query("UPDATE cve_acceptances SET revoked_at = 5, revoked_by = 'u1'")
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        assert_eq!(fx.github.creates().len(), 1);
+    }
+
     #[tokio::test]
     async fn auto_create_off_skips_creation_but_still_notes() {
         let fx = Fixture::new("autooff", "CRITICAL", false).await;

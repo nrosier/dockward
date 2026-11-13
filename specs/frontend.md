@@ -25,6 +25,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 | CVE list | `Cves.dc.html` | `/cves` |
 | Per-CVE view | `CveDetail.dc.html` | `/cves/:id` |
 | Accept risk dialog | `CveAccept.dc.html` | modal on `/cves/:id` |
+| False positive dialog | `CveAccept.dc.html` (reused) | modal on `/cves/:id` |
 | Jobs (was Sync jobs) | `SyncJobs.dc.html` | `/jobs` |
 | Account | `Account.dc.html` | `/account` |
 | Add credential | `CredentialNew.dc.html` | `/account/credentials/new` |
@@ -153,6 +154,7 @@ Decided 2026-11-08 (user, #257, decisions 1 to 13), with the Fix available group
 
 - A detail page for one CVE, linkable by URL. `{id}` is `<source_id>:<cve_id>`, URL-encoded.
 - Header: CVE id, severity pill, status pill, package, first seen date, link to the GitHub issue, and an "Accept risk" action.
+- False positive (Decided 2026-11-13, user, dialogue, "Record and comment"): a "False positive" button sits next to "Accept risk", shown to the owner when no verdict is active. It opens the Accept risk dialog with a `kind` prop: the title, body and submit text differ, the note and expiry fields are the same, and the dialog says the GitHub issue stays open. Submit calls `POST /api/v1/cves/{id}/false-positive`. While a verdict is active both buttons are replaced by Un-accept (label unchanged), and the acceptance block shows which verdict is active (`cves.detail.verdict.accepted` or `cves.detail.verdict.false_positive`). Catalog keys: `cves.detail.falsePositive`, `cves.falsePositive.title`, `cves.falsePositive.body`, `cves.falsePositive.issueNote`, `cves.falsePositive.submit`, `cves.detail.verdict.accepted`, `cves.detail.verdict.false_positive`.
 - The manual-issue button sits in this header, next to the GitHub issue link. It calls `POST /api/v1/cves/{id}/issue`.
 - Below the header: a table with one row per tracked tag that reports this CVE (up to 10). Columns: tag, status, last scan date, fixed-in version when known.
 - A row for a tag of the newest scanned digest has no marker. A row for any other tag shows the plain text `cves.detail.olderTag`.

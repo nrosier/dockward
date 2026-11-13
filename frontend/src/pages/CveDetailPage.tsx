@@ -28,6 +28,7 @@ export default function CveDetailPage() {
   const me = useMe();
   const queryClient = useQueryClient();
   const [acceptOpen, setAcceptOpen] = useState(false);
+  const [falsePositiveOpen, setFalsePositiveOpen] = useState(false);
   const [revokeOpen, setRevokeOpen] = useState(false);
   const [reopenIssue, setReopenIssue] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -158,9 +159,12 @@ export default function CveDetailPage() {
             {cve.accepted && canUnaccept ? (
               <Button onClick={() => setRevokeOpen(true)}>{t("cves.detail.unaccept")}</Button>
             ) : owner && !cve.accepted ? (
-              <Button variant="primary" onClick={() => setAcceptOpen(true)}>
-                {t("cves.detail.accept")}
-              </Button>
+              <>
+                <Button onClick={() => setFalsePositiveOpen(true)}>{t("cves.detail.falsePositive")}</Button>
+                <Button variant="primary" onClick={() => setAcceptOpen(true)}>
+                  {t("cves.detail.accept")}
+                </Button>
+              </>
             ) : null}
             {admin ? (
               <Button variant="danger" onClick={() => setDeleteOpen(true)}>
@@ -233,6 +237,7 @@ export default function CveDetailPage() {
                       ) : null}
                     </section>
                   ) : null}
+                  <span className="font-semibold">{t(`cves.detail.verdict.${acceptance.kind}`)}</span>
                   <span>{t("cves.detail.acceptedBy", { user: acceptance.created_by })}</span>
                   <span className="text-[12.5px] text-muted">
                     {t("cves.detail.acceptedAt", { date: formatDate(acceptance.created_at) })}
@@ -324,6 +329,13 @@ export default function CveDetailPage() {
       {owner ? (
         <>
           <AcceptDialog open={acceptOpen} onOpenChange={setAcceptOpen} cve={cve} mappingLabel={sourceLabel} />
+          <AcceptDialog
+            open={falsePositiveOpen}
+            onOpenChange={setFalsePositiveOpen}
+            cve={cve}
+            mappingLabel={sourceLabel}
+            kind="false_positive"
+          />
           <CreateIssueDialog
             cve={createOpen ? cve : null}
             repository={issueRepository}

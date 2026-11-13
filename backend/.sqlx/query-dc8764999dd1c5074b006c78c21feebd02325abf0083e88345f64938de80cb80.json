@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO cve_acceptances\n            (id, source_id, cve_id, reason, created_by, created_by_username, created_at, expires_at,\n             kind)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "dc8764999dd1c5074b006c78c21feebd02325abf0083e88345f64938de80cb80"
+}

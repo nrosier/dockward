@@ -66,8 +66,13 @@ function stub(
   sourceOverride: Source = source,
   onUnaccept?: () => void,
   onReview?: () => void,
+  onFalsePositive?: (body: unknown) => void,
 ) {
   return stubApi((path, init) => {
+    if (path === "/api/v1/cves/m1%3ACVE-2026-0001/false-positive" && init?.method === "POST") {
+      onFalsePositive?.(JSON.parse(String(init.body)));
+      return json({ acceptance: {} }, 201);
+    }
     if (path === "/api/v1/cves/m1%3ACVE-2026-0001/review" && init?.method === "POST") {
       onReview?.();
       return new Response(null, { status: 204 });
@@ -442,6 +447,7 @@ describe("CveDetailPage acceptance note (#351)", () => {
           expires_at: null,
           changed_at: null,
           change_reason: null,
+          kind: "accepted",
         },
       }),
     );
@@ -465,6 +471,7 @@ describe("CveDetailPage acceptance note (#351)", () => {
           expires_at: null,
           changed_at: null,
           change_reason: null,
+          kind: "accepted",
         },
       }),
     );
@@ -601,6 +608,7 @@ function acceptedCve(changed: Pick<NonNullable<CveDetail["acceptance"]>, "change
       created_by: "alice",
       created_at: "2026-11-05T10:00:00Z",
       expires_at: null,
+      kind: "accepted",
       ...changed,
     },
   });
@@ -647,5 +655,54 @@ describe("CveDetailPage re-review flag (#196)", () => {
     await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.changed.review") }));
     await vi.waitFor(() => expect(screen.queryByText(t("cves.detail.changed.severity_changed"))).not.toBeInTheDocument());
     expect(reviewed).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("CveDetailPage false positive", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("shows False positive next to Accept risk for the owner", async () => {
+    stub(cve({}));
+    renderWithRoutes(routes, url);
+    const accept = await screen.findByRole("button", { name: t("cves.detail.accept") });
+    const falsePositive = screen.getByRole("button", { name: t("cves.detail.falsePositive") });
+    expect(falsePositive.parentElement).toBe(accept.parentElement);
+  });
+
+  it("opens the dialog with the false-positive copy and says the issue stays open", async () => {
+    stub(cve({ github_issue_number: 7, github_issue_status: "open", github_issue_url: "https://github.com/example-org/api-gateway/issues/7" }));
+    renderWithRoutes(routes, url);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.falsePositive") }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(t("cves.falsePositive.title", { cve: "CVE-2026-0001" }))).toBeInTheDocument();
+    expect(dialog).toHaveTextContent(t("cves.falsePositive.body", { mapping: "ghcr.io/team/app" }));
+    expect(dialog).toHaveTextContent(t("cves.falsePositive.issueNote", { number: 7 }));
+    expect(within(dialog).getByRole("button", { name: t("cves.falsePositive.submit") })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: t("cves.accept.submit") })).not.toBeInTheDocument();
+  });
+
+  it("submits to the false-positive endpoint, not accept", async () => {
+    const accepted = vi.fn();
+    const marked = vi.fn();
+    stub(cve({}), accepted, undefined, source, undefined, undefined, marked);
+    renderWithRoutes(routes, url);
+    await userEvent.click(await screen.findByRole("button", { name: t("cves.detail.falsePositive") }));
+    await userEvent.type(await screen.findByLabelText(t("cves.accept.reason")), "Code path not reachable");
+    await userEvent.click(screen.getByRole("button", { name: t("cves.falsePositive.submit") }));
+    await vi.waitFor(() => expect(marked).toHaveBeenCalledTimes(1));
+    expect(marked).toHaveBeenCalledWith({ reason: "Code path not reachable", expires_at: null });
+    expect(accepted).not.toHaveBeenCalled();
+  });
+
+  it("shows which verdict is active and offers Un-accept instead of both buttons", async () => {
+    const detail = acceptedCve({ changed_at: null, change_reason: null });
+    stub({ ...detail, acceptance: detail.acceptance === null ? null : { ...detail.acceptance, kind: "false_positive" } });
+    renderWithRoutes(routes, url);
+    expect(await screen.findByText(t("cves.detail.verdict.false_positive"))).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: t("cves.detail.unaccept") })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: t("cves.detail.falsePositive") })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: t("cves.detail.accept") })).not.toBeInTheDocument();
   });
 });

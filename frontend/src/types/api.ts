@@ -111,7 +111,11 @@ export interface Acceptance {
   // Set when the severity or fixed version changed under the acceptance (#196).
   changed_at: string | null;
   change_reason: "severity_changed" | "fix_available" | "fixed_version_changed" | null;
+  // Which verdict is active: an accepted risk or a false positive (migration 0015).
+  kind: AcceptanceKind;
 }
+
+export type AcceptanceKind = "accepted" | "false_positive";
 
 export interface CveDetail extends CveSummary {
   // The image the CVE is for: the newest tag's `<hub host>/<repository>:<tag>` (#323).
