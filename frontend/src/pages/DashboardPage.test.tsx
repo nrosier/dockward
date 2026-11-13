@@ -81,6 +81,32 @@ describe("DashboardPage", () => {
     expect(screen.getByText(summary.recent_syncs[1].last_error ?? "")).toBeInTheDocument();
   });
 
+  it("dashboard_row_shows_a_subject_for_a_job_with_no_image", async () => {
+    stubApi((path) => {
+      if (path === "/api/v1/account/me") return json({ user: user("user") });
+      if (path.startsWith("/api/v1/dashboard/summary")) {
+        return json({
+          ...summary,
+          recent_syncs: [
+            job({
+              id: "db1",
+              mapping_id: "",
+              kind: "db_update",
+              scanner: "trivy",
+              trigger: null,
+              image: { repo_full_name: null, tag: null, digest: null },
+            }),
+          ],
+        });
+      }
+      return undefined;
+    });
+    renderAt(<DashboardPage />);
+    expect(await screen.findByText("Vulnerability DB update (Trivy)")).toBeInTheDocument();
+    expect(screen.getByText(t("jobs.trigger.scheduled"))).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: t("jobs.col.subject") })).toBeInTheDocument();
+  });
+
   it("retry posts to the job and refreshes the summary", async () => {
     const retried = vi.fn();
     const fetchMock = stub(retried);

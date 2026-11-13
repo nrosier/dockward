@@ -3,10 +3,9 @@ import { Link } from "react-router";
 import { PageHeader } from "../components/mappings/PageHeader";
 import { LINK, TABLE, TD, TH } from "../components/mappings/styles";
 import { TableScroll } from "../components/mappings/TableScroll";
-import { useMappingLookup, useScopeAll } from "../components/mappings/useMappings";
-import { ImageCell } from "../components/jobs/ImageCell";
+import { useScopeAll } from "../components/mappings/useMappings";
 import { JobStatusPill } from "../components/jobs/jobPill";
-import { triggerLabel } from "../components/jobs/labels";
+import { jobSubject, triggerLabel } from "../components/jobs/labels";
 import { RetryButton } from "../components/jobs/RetryButton";
 import { Time } from "../components/jobs/Time";
 import { Card } from "../components/ui/Card";
@@ -55,9 +54,12 @@ export default function DashboardPage() {
   const scopeAll = useScopeAll();
   const summary = useQuery({
     queryKey: ["dashboard", "summary", scopeAll],
-    queryFn: () => api<DashboardSummary>("GET", `/dashboard/summary${scopeAll ? "?scope=all" : ""}`),
+    queryFn: () =>
+      api<DashboardSummary>(
+        "GET",
+        `/dashboard/summary${scopeAll ? "?scope=all" : ""}`,
+      ),
   });
-  const mappings = useMappingLookup(scopeAll);
 
   const header = (
     <PageHeader title={t("page.dashboard")} subtitle={t("dashboard.subtitle")}>
@@ -131,7 +133,12 @@ export default function DashboardPage() {
           label={t("dashboard.fixedCves")}
           to={`/cves?status=fixed`}
         />
-        <CountCard kind="accepted" count={data.accepted_cves} label={t("dashboard.acceptedCves")} to="/cves?accepted=true" />
+        <CountCard
+          kind="accepted"
+          count={data.accepted_cves}
+          label={t("dashboard.acceptedCves")}
+          to="/cves?accepted=true"
+        />
         <Card className="p-0">
           <Link
             to="/cves?has_issue=true"
@@ -140,8 +147,12 @@ export default function DashboardPage() {
             <span className="inline-flex h-[22px] items-center rounded-full border border-border bg-text/5 px-[9px] text-[11px] leading-none font-semibold tracking-[0.05em] uppercase">
               {t("dashboard.issues")}
             </span>
-            <span className="text-[32px] leading-none font-semibold">{data.open_issues}</span>
-            <span className="text-[12.5px] text-muted">{t("dashboard.openIssues")}</span>
+            <span className="text-[32px] leading-none font-semibold">
+              {data.open_issues}
+            </span>
+            <span className="text-[12.5px] text-muted">
+              {t("dashboard.openIssues")}
+            </span>
           </Link>
         </Card>
         <CountCard
@@ -163,14 +174,15 @@ export default function DashboardPage() {
           </Link>
         </div>
         {data.recent_syncs.length === 0 ? (
-          <p className="px-[18px] pt-2 pb-5 text-muted">{t("dashboard.noSyncs")}</p>
+          <p className="px-[18px] pt-2 pb-5 text-muted">
+            {t("dashboard.noSyncs")}
+          </p>
         ) : (
           <TableScroll label={t("dashboard.recentSyncs")}>
             <table className={TABLE}>
               <thead>
                 <tr>
-                  <th className={TH}>{t("jobs.col.image")}</th>
-                  <th className={TH}>{t("dashboard.col.target")}</th>
+                  <th className={TH}>{t("jobs.col.subject")}</th>
                   <th className={TH}>{t("jobs.col.trigger")}</th>
                   <th className={TH}>{t("jobs.col.status")}</th>
                   <th className={TH}>{t("dashboard.col.when")}</th>
@@ -180,27 +192,32 @@ export default function DashboardPage() {
                 </tr>
               </thead>
               <tbody>
-                {data.recent_syncs.map((job) => {
-                  const mapping = mappings.get(job.mapping_id);
-                  return (
-                    <tr key={job.id}>
-                      <td className={TD}>
-                        <ImageCell job={job} showError />
-                      </td>
-                      <td className={`${TD} font-mono text-[12.5px]`}>
-                        {mapping === undefined ? null : `${mapping.github_owner}/${mapping.github_repo}`}
-                      </td>
-                      <td className={`${TD} text-muted`}>{triggerLabel(job.trigger)}</td>
-                      <td className={TD}>
-                        <JobStatusPill status={job.status} />
-                      </td>
-                      <td className={`${TD} text-muted`}>
-                        <Time iso={job.updated_at} />
-                      </td>
-                      <td className={`${TD} text-right`}>{job.status === "failed" ? <RetryButton job={job} /> : null}</td>
-                    </tr>
-                  );
-                })}
+                {data.recent_syncs.map((job) => (
+                  <tr key={job.id}>
+                    <td className={TD}>
+                      <div className="font-medium">{jobSubject(job)}</div>
+                      {job.status === "failed" && job.last_error !== null ? (
+                        <div className="mt-1 text-[12.5px] text-crit-ink">
+                          {job.last_error}
+                        </div>
+                      ) : null}
+                    </td>
+                    <td className={`${TD} text-muted`}>
+                      {triggerLabel(job.trigger)}
+                    </td>
+                    <td className={TD}>
+                      <JobStatusPill status={job.status} />
+                    </td>
+                    <td className={`${TD} text-muted`}>
+                      <Time iso={job.updated_at} />
+                    </td>
+                    <td className={`${TD} text-right`}>
+                      {job.status === "failed" ? (
+                        <RetryButton job={job} />
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </TableScroll>
