@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink } from "lucide-react";
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { AcceptDialog } from "../components/cves/AcceptDialog";
 import { CreateIssueDialog } from "../components/cves/CreateIssueDialog";
 import { CveStatusPill, SeverityPill, issueEligible } from "../components/cves/CvePills";
@@ -32,6 +32,9 @@ export default function CveDetailPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const navigate = useNavigate();
+  // The list's query, carried in `from` by the CVEs list; a direct URL has none.
+  const from = useSearchParams()[0].get("from") ?? "";
+  const backTo = from === "" ? "/cves" : `/cves?${from}`;
 
   const cveQuery = useQuery({
     queryKey: ["cve", id],
@@ -101,7 +104,7 @@ export default function CveDetailPage() {
   return (
     <>
       <Panel className="flex flex-col gap-4 px-6 py-[22px]" aria-labelledby="cve-h">
-        <Link to="/cves" className={`text-[13px] ${LINK}`}>
+        <Link to={backTo} className={`text-[13px] ${LINK}`}>
           {t("cves.back")}
         </Link>
         <div className="flex flex-wrap items-start justify-between gap-4">

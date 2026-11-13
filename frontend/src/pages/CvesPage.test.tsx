@@ -408,4 +408,35 @@ describe("CvesPage", () => {
     expect(within(cell).queryByRole("button", { name: t("cves.action.createIssue") })).not.toBeInTheDocument();
     expect(within(cell).getByText(t("cves.issue.notEligible"))).toBeInTheDocument();
   });
+
+  it("opening_a_cve_keeps_the_list_query_for_back", async () => {
+    stub();
+    renderAt(<CvesPage />, "/cves?severity=HIGH&status=open&q=lib&order=asc");
+    const link = await screen.findByRole("link", { name: /^CVE-2026-0002/ });
+    const target = new URL(link.getAttribute("href") ?? "", "http://x");
+    expect(target.pathname).toBe("/cves/m1%3ACVE-2026-0002");
+    expect(target.searchParams.get("from")).toBe("severity=HIGH&status=open&q=lib&order=asc");
+  });
+
+  it("clear_filter_removes_all_filters_and_the_search", async () => {
+    const fetchMock = stub();
+    const { router } = renderAt(<CvesPage />, "/cves?severity=HIGH&status=fixed&q=lib&has_issue=true&order=asc");
+    await screen.findByText("CVE-2026-0002");
+    await userEvent.click(screen.getByRole("button", { name: t("cves.filter.clearAll") }));
+    await vi.waitFor(() => {
+      expect(router.state.location.search).toBe("?order=asc");
+    });
+    await vi.waitFor(() => {
+      expect(lastQuery(fetchMock).get("severity")).toBeNull();
+    });
+    expect(screen.getByRole("searchbox", { name: t("cves.filter.search") })).toHaveValue("");
+    expect(screen.getByRole("button", { name: t("cves.filter.clearAll") })).toBeDisabled();
+  });
+
+  it("clear_filter_is_disabled_with_no_filters", async () => {
+    stub();
+    renderAt(<CvesPage />, "/cves");
+    await screen.findByText("CVE-2026-0002");
+    expect(screen.getByRole("button", { name: t("cves.filter.clearAll") })).toBeDisabled();
+  });
 });
