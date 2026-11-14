@@ -11,6 +11,7 @@ All notable changes are recorded here. Versions follow semantic versioning.
 - A tag that moves to a digest dockward has already scanned now queues a scan of that digest (trigger `tag_moved`), so the tag's CVE findings and the `Found by` line of its issues are rebuilt instead of staying stale. A repeated discovery queues no duplicate (#391).
 
 ### Added
+- Open issues are refreshed on each scan: the description (wrapped as in a new issue) and the `Affected tags:` line follow the current scan, and a severity increase posts one comment naming the old and new severity. A decrease or no change posts none, and a closed issue is left alone (#393).
 - The version in the header is a button that opens an About dialog with the dockward version, the bundled Trivy and Grype versions, and the full MIT and Apache-2.0 licence texts. The backend reads the scanner versions once at startup (`trivy --version`, `grype version`, 5 second timeout) and serves them from `GET /api/v1/about`; a failed read shows `unknown`. The image now carries the Trivy and Grype Apache-2.0 licence and notice texts and the dockward MIT licence under `/usr/share/licenses/` (#388).
 
 ## 0.8.0 - 2026-11-14
