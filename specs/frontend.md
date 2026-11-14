@@ -38,6 +38,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 | Admin: Settings > Alerts | `AdminAlerts.dc.html` | `/admin/settings/alerts` |
 | Admin: Settings > Backup and restore | `AdminBackup.dc.html` | `/admin/settings/backup` |
 | Admin: Settings > GitHub | (no artboard; minimal) | `/admin/settings/github` |
+| About dialog | `About.html` | modal opened from the header version |
 | Shell parts: rail, sticky header, Admin tabs | `Rail.dc.html`, `Topbar.dc.html`, `AdminTabs.dc.html` | every page |
 
 - Decisions approved with the designs (2026-11-03, user):
@@ -55,7 +56,8 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
   - Light theme uses the same layouts with the light tokens. It is not drawn separately.
   - On narrow screens the rail becomes a drawer behind a menu button in the sticky header. It is not drawn separately.
 - Decided (2026-11-03, delegated): details the designs leave open.
-  - Sticky header: the environment badges (registry reachable, GitHub reachable) are shown to admins only. They come from `GET /api/v1/admin/health`, fetched at most once every 10 minutes, because that route makes outbound calls. Regular users see no badges. The header also shows the app version (from `frontend/package.json`, injected at build time) and Sign out.
+  - Sticky header: the environment badges (registry reachable, GitHub reachable) are shown to admins only. They come from `GET /api/v1/admin/health`, fetched at most once every 10 minutes, because that route makes outbound calls. Regular users see no badges. The header also shows the app version (from `frontend/package.json`, injected at build time) as a button that opens the About dialog, and Sign out.
+  - About dialog (Decided 2026-11-14, user, #388; design approved, `designs/About.html`): a Radix Dialog (`components/shell/AboutDialog.tsx`) opened by the header version button. Escape, the Close button, the X and an outside click close it, and focus returns to the version button. It fetches `GET /api/v1/about` when first opened and shows three version rows (dockward, Trivy (bundled), Grype (bundled)); a scanner the backend could not read shows `unknown`. Below, a Licences table has one row per component (dockward MIT, Trivy and Grype Apache-2.0) with a Full text button that shows that licence in the text area below it, in the dialog, so it works offline (MIT first). The texts live in `frontend/src/licenses/` and are bundled with the frontend (`?raw`). `dockward-mit.txt` is a copy of the root `LICENSE`, and the Trivy and Grype files are the upstream `LICENSE` (and Trivy `NOTICE`) of the pinned releases. The Dockerfile copies the same directory into the image at `/usr/share/licenses/`. Catalog keys: `about.*`.
   - Edit source (`/sources/:id`) reuses the source form, filled in. A "Delete source" button opens a confirmation dialog that says open GitHub issues stay open. Edit credential reuses the Add credential form with the token field empty ("Leave empty to keep it").
   - Shown-once values live only in component state. They are never written to `localStorage`, the URL, the TanStack Query cache, or logs. Leaving the screen discards them.
   - Routing uses `react-router` (declarative `createBrowserRouter`). Signed-out visitors go to `/login`, or to `/setup` while `setup_required` is true.

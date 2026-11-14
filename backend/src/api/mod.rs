@@ -1,3 +1,4 @@
+pub mod about;
 #[allow(dead_code)] // The admin routes are mounted by the app router.
 pub mod admin;
 #[allow(dead_code)] // The extractor and logout routes are mounted by the app router.
