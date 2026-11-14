@@ -168,6 +168,27 @@ pub trait IssueApi: Send + Sync + 'static {
         now: i64,
     ) -> impl Future<Output = Result<String, ScanError>> + Send;
 
+    /// Removes one label from an issue.
+    fn remove_label(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        label: &str,
+        now: i64,
+    ) -> impl Future<Output = Result<(), ScanError>> + Send;
+
+    /// The label names and the body of an issue.
+    fn labels_and_body(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        now: i64,
+    ) -> impl Future<Output = Result<(Vec<String>, String), ScanError>> + Send;
+
     /// Replaces the body of an issue.
     fn set_body(
         &self,
@@ -296,6 +317,29 @@ impl IssueApi for GithubIssues {
         now: i64,
     ) -> Result<String, ScanError> {
         GithubIssues::body(self, token, owner, repo, number, now).await
+    }
+
+    async fn remove_label(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        label: &str,
+        now: i64,
+    ) -> Result<(), ScanError> {
+        GithubIssues::remove_label(self, token, owner, repo, number, label, now).await
+    }
+
+    async fn labels_and_body(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        now: i64,
+    ) -> Result<(Vec<String>, String), ScanError> {
+        GithubIssues::labels_and_body(self, token, owner, repo, number, now).await
     }
 
     async fn set_body(
@@ -699,6 +743,63 @@ impl<G: IssueApi> Ctx<'_, G> {
         Ok(())
     }
 
+    /// Brings the severity of an open issue in step with the CVE (`specs/cve-lifecycle.md`,
+    /// "GitHub issues"): the old severity label goes, the new one is added (none for UNKNOWN),
+    /// and the `Severity` row of the body is set. No other label and no other line of the body
+    /// is touched, and nothing is commented or reopened. Nothing is written when both agree.
+    async fn refresh_severity(&self, row: &IssueRow, severity: &str) -> Result<(), Failure> {
+        let number = to_number(row.github_issue_number)?;
+        let wanted = github_issues::severity_label(severity);
+        let (have, body) = self
+            .gh
+            .labels_and_body(self.token, self.owner(), self.repo(), number, self.now)
+            .await?;
+        for stale in github_issues::SEVERITY_LABELS {
+            if Some(stale) != wanted && have.iter().any(|label| label == stale) {
+                self.gh
+                    .remove_label(
+                        self.token,
+                        self.owner(),
+                        self.repo(),
+                        number,
+                        stale,
+                        self.now,
+                    )
+                    .await?;
+            }
+        }
+        if let Some(label) = wanted
+            && !have.iter().any(|existing| existing == label)
+        {
+            self.gh
+                .ensure_labels(self.token, self.owner(), self.repo(), &[label], self.now)
+                .await?;
+            self.gh
+                .add_labels(
+                    self.token,
+                    self.owner(),
+                    self.repo(),
+                    number,
+                    &[label],
+                    self.now,
+                )
+                .await?;
+        }
+        if let Some(next) = github_issues::with_severity(&body, severity) {
+            self.gh
+                .set_body(
+                    self.token,
+                    self.owner(),
+                    self.repo(),
+                    number,
+                    &next,
+                    self.now,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Sets the `Found by` line of an open issue to the scanners that report the CVE now, with a
     /// PATCH on the body, only when the line differs (`specs/integrations.md`, "GitHub issues").
     /// Nothing is read or sent when no scanner is known, so a source that has no stored scanner
@@ -876,6 +977,7 @@ impl<G: IssueApi> Ctx<'_, G> {
             view.tags = all_tags;
             view
         });
+        let severity = view.as_ref().map(|view| view.severity);
         let view_scanners: Vec<ScannerRef> = view
             .as_ref()
             .map(|view| view.scanners.clone())
@@ -937,6 +1039,9 @@ impl<G: IssueApi> Ctx<'_, G> {
                                 .await
                                 .map_err(|_| AppError::InternalError)?;
                             issue_db::clear_fixed_noted(&mut conn, &row.id).await?;
+                        }
+                        if let Some(severity) = severity {
+                            self.refresh_severity(&row, severity).await?;
                         }
                         self.refresh_found_by(&row, &view_scanners).await?;
                     }
@@ -1578,6 +1683,21 @@ pub(crate) mod test_support {
                         }
                         Ok(reply(200, json!([])))
                     }
+                    ("DELETE", labelled) if labelled.contains("/labels/") => {
+                        let (issue_path, name) = labelled
+                            .split_once("/labels/")
+                            .unwrap_or((labelled, ""));
+                        let number: Option<u64> =
+                            issue_path.rsplit('/').next().and_then(|n| n.parse().ok());
+                        let name = name.replace("%3A", ":");
+                        match state.issues.iter_mut().find(|i| Some(i.number) == number) {
+                            Some(issue) if issue.labels.contains(&name) => {
+                                issue.labels.retain(|l| *l != name);
+                                Ok(reply(200, json!([])))
+                            }
+                            _ => Ok(reply(404, json!({"message": "Label does not exist"}))),
+                        }
+                    }
                     ("POST", _) => Ok(reply(201, json!({}))),
                     (_, _) => {
                         let number: Option<u64> =
@@ -1769,6 +1889,29 @@ pub(crate) mod test_support {
             now: i64,
         ) -> Result<String, ScanError> {
             github_issues::body_with(&*self.0, token, owner, repo, number, now).await
+        }
+
+        async fn remove_label(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            label: &str,
+            now: i64,
+        ) -> Result<(), ScanError> {
+            github_issues::remove_label_with(&*self.0, token, owner, repo, number, label, now).await
+        }
+
+        async fn labels_and_body(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            now: i64,
+        ) -> Result<(Vec<String>, String), ScanError> {
+            github_issues::labels_and_body_with(&*self.0, token, owner, repo, number, now).await
         }
 
         async fn set_body(
@@ -2087,8 +2230,9 @@ mod tests {
 
         assert_eq!(fx.github.creates().len(), 1);
         assert_eq!(fx.issues().await.len(), 1);
-        // The second run only reads the issue's state (one GET): nothing is created or changed.
-        assert_eq!(fx.github.requests(), listed_after_first + 1);
+        // The second run reads the issue's state and its labels and body (two GETs): nothing is
+        // created or changed.
+        assert_eq!(fx.github.requests(), listed_after_first + 2);
         assert_eq!(fx.github.writes().len(), 1);
         assert_eq!(
             fx.count("SELECT COUNT(*) FROM cve_findings WHERE github_issue_id IS NOT NULL")
@@ -2475,6 +2619,102 @@ mod tests {
         fx.fix("v1", "CVE-2026-0001").await;
         fx.reconcile("ghcr.io/o/app:v1").await;
         assert_eq!(fx.github.writes().len(), 1);
+    }
+
+    /// Seeds an open issue for a CRITICAL CVE with a user label, then returns the fixture.
+    async fn severity_fixture(name: &str) -> Fixture {
+        let fx = Fixture::new(name, "CRITICAL", true).await;
+        fx.report("v1", "sha256:aaa", 100).await;
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 10)
+            .await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        fx.github
+            .with(|state| state.issues[0].labels.push("needs-triage".to_owned()));
+        fx
+    }
+
+    /// A severity change on an open issue swaps the severity label and the body row, keeps
+    /// every other label and the rest of the body, and posts nothing.
+    #[tokio::test]
+    async fn a_severity_change_updates_the_label_and_body_row_of_an_open_issue() {
+        let fx = severity_fixture("sev-change").await;
+        let before = fx.github.with(|state| state.issues[0].body.clone());
+        assert!(before.contains("| Severity | CRITICAL |"));
+        let writes_before = fx.github.writes().len();
+
+        fx.finding("m1", "v1", "CVE-2026-0001", "HIGH", 20).await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+
+        let (labels, body, open) = fx.github.with(|state| {
+            let issue = &state.issues[0];
+            (issue.labels.clone(), issue.body.clone(), issue.open)
+        });
+        assert!(labels.contains(&"high".to_owned()), "{labels:?}");
+        assert!(!labels.contains(&"critical".to_owned()), "{labels:?}");
+        assert!(labels.contains(&"needs-triage".to_owned()), "{labels:?}");
+        assert!(labels.contains(&github_issues::SECURITY_LABEL.to_owned()));
+        assert!(labels.contains(&github_issues::LABEL.to_owned()));
+        assert_eq!(
+            body,
+            before.replace("| Severity | CRITICAL |", "| Severity | HIGH |")
+        );
+        assert!(open);
+        let writes = fx.github.writes();
+        assert!(
+            writes[writes_before..]
+                .iter()
+                .all(|(_, path, _)| !path.ends_with("/comments")),
+            "no comment"
+        );
+        assert!(fx.github.never_changed_state(), "no reopen, no close");
+
+        // Nothing differs now: a further scan writes nothing.
+        let settled = fx.github.writes().len();
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        assert_eq!(fx.github.writes().len(), settled);
+    }
+
+    /// A closed issue keeps its label and body when the severity changes.
+    #[tokio::test]
+    async fn a_severity_change_leaves_a_closed_issue_alone() {
+        let fx = severity_fixture("sev-closed").await;
+        fx.github.with(|state| state.issues[0].open = false);
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        let writes_before = fx.github.writes().len();
+        let (labels, body) = fx
+            .github
+            .with(|state| (state.issues[0].labels.clone(), state.issues[0].body.clone()));
+
+        fx.finding("m1", "v1", "CVE-2026-0001", "HIGH", 20).await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+
+        assert_eq!(fx.github.writes().len(), writes_before);
+        fx.github.with(|state| {
+            assert_eq!(state.issues[0].labels, labels);
+            assert_eq!(state.issues[0].body, body);
+            assert!(!state.issues[0].open);
+        });
+    }
+
+    /// A change to a severity with no label removes the old label and adds none.
+    #[tokio::test]
+    async fn a_change_to_unknown_severity_removes_the_severity_label() {
+        let fx = severity_fixture("sev-unknown").await;
+
+        fx.finding("m1", "v1", "CVE-2026-0001", "UNKNOWN", 20).await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+
+        let (labels, body) = fx
+            .github
+            .with(|state| (state.issues[0].labels.clone(), state.issues[0].body.clone()));
+        for severity in github_issues::SEVERITY_LABELS {
+            assert!(!labels.contains(&severity.to_owned()), "{labels:?}");
+        }
+        assert!(labels.contains(&"needs-triage".to_owned()));
+        assert!(labels.contains(&github_issues::SECURITY_LABEL.to_owned()));
+        assert!(body.contains("| Severity | UNKNOWN |"), "{body}");
+        assert!(fx.github.never_changed_state());
+        assert!(fx.github.notes().is_empty());
     }
 
     /// An accepted CVE's closed issue is reopened when the newest digest reports the CVE again,
@@ -3166,6 +3406,33 @@ mod tests {
             now: i64,
         ) -> Result<String, ScanError> {
             self.inner.body(token, owner, repo, number, now).await
+        }
+
+        async fn remove_label(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            label: &str,
+            now: i64,
+        ) -> Result<(), ScanError> {
+            self.inner
+                .remove_label(token, owner, repo, number, label, now)
+                .await
+        }
+
+        async fn labels_and_body(
+            &self,
+            token: &[u8],
+            owner: &str,
+            repo: &str,
+            number: u64,
+            now: i64,
+        ) -> Result<(Vec<String>, String), ScanError> {
+            self.inner
+                .labels_and_body(token, owner, repo, number, now)
+                .await
         }
 
         async fn set_body(

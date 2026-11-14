@@ -57,6 +57,10 @@ pub fn severity_label(severity: &str) -> Option<&'static str> {
     }
 }
 
+/// Every severity label HarborGate sets. Only these are ever removed from an issue when its
+/// severity changes; any other label is left alone.
+pub const SEVERITY_LABELS: [&str; 4] = ["critical", "high", "medium", "low"];
+
 /// Every label a HarborGate issue carries for a CVE of `severity`.
 pub fn issue_labels(severity: &str) -> Vec<&'static str> {
     let mut labels = vec![LABEL, SECURITY_LABEL];
@@ -396,6 +400,75 @@ pub async fn add_labels_with<H: ScanHttp>(
     Ok(())
 }
 
+/// Removes one label from an issue. A label the issue does not carry (`404`) counts as done.
+/// The label stays in the repository.
+pub async fn remove_label_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    number: u64,
+    label: &str,
+    now: i64,
+) -> Result<(), ScanError> {
+    check_names(owner, repo)?;
+    let encoded: String = label
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.') {
+                char::from(b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    let path = format!("repos/{owner}/{repo}/issues/{number}/labels/{encoded}");
+    let response = http.delete(&path, token).await?;
+    match response.status {
+        200 | 404 => Ok(()),
+        _ => Err(classify(&response, now)),
+    }
+}
+
+/// Reads one issue and returns the names of its labels and its body, in one call.
+pub async fn labels_and_body_with<H: ScanHttp>(
+    http: &H,
+    token: &[u8],
+    owner: &str,
+    repo: &str,
+    number: u64,
+    now: i64,
+) -> Result<(Vec<String>, String), ScanError> {
+    check_names(owner, repo)?;
+    let path = format!("repos/{owner}/{repo}/issues/{number}");
+    let response = http.get(&path, token).await?;
+    if response.status != 200 {
+        return Err(classify(&response, now));
+    }
+    let labels = response
+        .body
+        .get("labels")
+        .and_then(Value::as_array)
+        .ok_or_else(bad_answer)?;
+    let names = labels
+        .iter()
+        .filter_map(|label| {
+            label
+                .get("name")
+                .and_then(Value::as_str)
+                .or_else(|| label.as_str())
+        })
+        .map(str::to_owned)
+        .collect();
+    let body = response
+        .body
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    Ok((names, body))
+}
+
 /// Changes the title of an issue.
 pub async fn retitle_with<H: ScanHttp>(
     http: &H,
@@ -511,6 +584,25 @@ pub fn with_found_by(body: &str, line: &str) -> Option<String> {
     next.push("");
     next.push(line);
     next.extend_from_slice(&lines[last_row + 1..]);
+    Some(next.join("\n"))
+}
+
+/// The body with its `| Severity | ... |` table row set to `severity`. Everything else is kept.
+/// Returns `None` when the row already says this, or the body has no Dockward table row.
+pub fn with_severity(body: &str, severity: &str) -> Option<String> {
+    let lines: Vec<&str> = body.split('\n').collect();
+    let header = lines.iter().position(|l| *l == "| Field | Value |")?;
+    let offset = lines[header..]
+        .iter()
+        .take_while(|l| l.starts_with('|'))
+        .position(|l| l.starts_with("| Severity | "))?;
+    let index = header + offset;
+    let row = format!("| Severity | {} |", cell(severity));
+    if lines[index] == row {
+        return None;
+    }
+    let mut next = lines.clone();
+    next[index] = &row;
     Some(next.join("\n"))
 }
 
@@ -640,6 +732,31 @@ impl GithubIssues {
         now: i64,
     ) -> Result<(), ScanError> {
         add_labels_with(&self.http(), token, owner, repo, number, labels, now).await
+    }
+
+    /// Removes one label from an issue. See [`remove_label_with`].
+    pub async fn remove_label(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        label: &str,
+        now: i64,
+    ) -> Result<(), ScanError> {
+        remove_label_with(&self.http(), token, owner, repo, number, label, now).await
+    }
+
+    /// Reads the label names and body of an issue. See [`labels_and_body_with`].
+    pub async fn labels_and_body(
+        &self,
+        token: &[u8],
+        owner: &str,
+        repo: &str,
+        number: u64,
+        now: i64,
+    ) -> Result<(Vec<String>, String), ScanError> {
+        labels_and_body_with(&self.http(), token, owner, repo, number, now).await
     }
 
     /// Changes an issue title. See [`retitle_with`].
@@ -1080,6 +1197,25 @@ mod tests {
         let outcome = list_open_labelled_with(&fake, b"token", "../octo", "app", LABEL, 1000).await;
         assert!(matches!(outcome, Err(ScanError::Rejected(_))));
         assert!(fake.sent().is_empty());
+    }
+
+    #[test]
+    fn with_severity_sets_only_the_severity_row() {
+        let body = issue_body(
+            "CVE-1",
+            "HIGH",
+            "pkg",
+            None,
+            "img",
+            Some("| Severity | HIGH |"),
+        );
+        let next = with_severity(&body, "LOW").unwrap();
+        assert_eq!(
+            next,
+            body.replacen("| Severity | HIGH |", "| Severity | LOW |", 1)
+        );
+        assert!(with_severity(&body, "HIGH").is_none());
+        assert!(with_severity("no table", "LOW").is_none());
     }
 
     #[test]
