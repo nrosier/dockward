@@ -135,7 +135,7 @@ pub struct Job {
     /// `discover`, `pull`, `scan`, `publish` or `db_update`. A payload with no known `kind`
     /// is `null`.
     pub kind: Option<String>,
-    /// `trivy` or `grype` for a `db_update` job (the scanner it refreshes), otherwise `null`.
+    /// `trivy` or `grype` for a `db_update` or `scan` job (the scanner it refreshes or runs), otherwise `null`.
     pub scanner: Option<String>,
     pub image: JobImage,
     pub report: Option<SyncReport>,
@@ -742,7 +742,7 @@ mod scanner_tests {
     use super::*;
     use crate::db;
 
-    /// A migrated database with one `db_update` job for Grype and one `scan` job.
+    /// A migrated database with a `db_update` job for Grype, a `scan` job for Trivy, and publish, pull and discover jobs.
     async fn seed(name: &str) -> (SqlitePool, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "dockward-jobs-scanner-{name}-{}",
@@ -761,7 +761,10 @@ mod scanner_tests {
         sqlx::query(
             "INSERT INTO jobs (id, source_id, status, attempts, payload, created_at, updated_at) VALUES
              ('j-db', NULL, 'failed', 8, '{\"kind\":\"db_update\",\"scanner\":\"grype\"}', 1, 1),
-             ('j-scan', NULL, 'done', 1, '{\"kind\":\"scan\",\"scanner\":\"trivy\"}', 1, 1)",
+             ('j-scan', NULL, 'done', 1, '{\"kind\":\"scan\",\"scanner\":\"trivy\"}', 1, 1),
+             ('j-publish', NULL, 'done', 1, '{\"kind\":\"publish\",\"scanner\":\"trivy\"}', 1, 1),
+             ('j-pull', NULL, 'done', 1, '{\"kind\":\"pull\"}', 1, 1),
+             ('j-discover', NULL, 'done', 1, '{\"kind\":\"discover\"}', 1, 1)",
         )
         .execute(&pool)
         .await
@@ -770,7 +773,7 @@ mod scanner_tests {
     }
 
     #[tokio::test]
-    async fn a_db_update_job_shows_its_scanner_and_other_jobs_do_not() {
+    async fn a_scan_or_db_update_job_shows_its_scanner_and_other_jobs_do_not() {
         let (pool, dir) = seed("job").await;
         let query = ListQuery {
             all_users: true,
@@ -782,7 +785,11 @@ mod scanner_tests {
         let db_job = page.items.iter().find(|job| job.id == "j-db").unwrap();
         let scan_job = page.items.iter().find(|job| job.id == "j-scan").unwrap();
         assert_eq!(db_job.scanner.as_deref(), Some("grype"));
-        assert_eq!(scan_job.scanner, None);
+        assert_eq!(scan_job.scanner.as_deref(), Some("trivy"));
+        for id in ["j-publish", "j-pull", "j-discover"] {
+            let other = page.items.iter().find(|job| job.id == id).unwrap();
+            assert_eq!(other.scanner, None, "{id}");
+        }
     }
 
     #[tokio::test]
