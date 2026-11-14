@@ -323,7 +323,7 @@ pub struct JobRow {
     pub empty: bool,
     /// `payload.kind`, or `None` when the payload has none (a job).
     pub kind: Option<String>,
-    /// `payload.scanner` for a `db_update` job, or `None` for any other job.
+    /// `payload.scanner` for a `db_update` or `scan` job, or `None` for any other job.
     pub scanner: Option<String>,
     pub repo_full_name: Option<String>,
     pub tag: Option<String>,
@@ -382,7 +382,7 @@ pub async fn list_jobs_in(
                        THEN substr(CAST(json_extract(j.payload, '$.trigger') AS TEXT), 1, ?) END AS "trigger?: String",
                   CASE WHEN json_valid(j.payload)
                        THEN substr(CAST(json_extract(j.payload, '$.kind') AS TEXT), 1, ?) END AS "kind?: String",
-                  CASE WHEN json_valid(j.payload) AND json_extract(j.payload, '$.kind') = 'db_update'
+                  CASE WHEN json_valid(j.payload) AND json_extract(j.payload, '$.kind') IN ('db_update', 'scan')
                        THEN substr(CAST(json_extract(j.payload, '$.scanner') AS TEXT), 1, ?) END AS "scanner?: String",
                   CASE WHEN json_valid(j.payload)
                        THEN substr(CAST(json_extract(j.payload, '$.repo_full_name') AS TEXT), 1, ?) END AS "repo_full_name?: String",

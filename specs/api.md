@@ -123,7 +123,7 @@ A source is `{"id","hub_id","repository","tag_value","github_owner","github_repo
 
 ## Jobs
 
-A job is `{"id","source_id","kind","status","attempts","next_attempt_at","last_error","created_at","updated_at","image"}`. `kind` is `discover`, `pull`, `scan`, `publish`, or `db_update` (decision 58). `status` is `queued`, `running`, `done`, or `failed`.
+A job is `{"id","source_id","kind","status","attempts","next_attempt_at","last_error","created_at","updated_at","image","scanner"}`. `scanner` is `trivy` or `grype` for a `scan` or `db_update` job (from its payload) and `null` for any other kind (#410). `kind` is `discover`, `pull`, `scan`, `publish`, or `db_update` (decision 58). `status` is `queued`, `running`, `done`, or `failed`.
 
 | Method | Path | Auth | Built | Notes |
 | --- | --- | --- | --- | --- |

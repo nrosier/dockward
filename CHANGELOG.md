@@ -6,6 +6,7 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ### Changed
 - The Jobs page shows what each job does as a muted line under the image, with the same wording as the dashboard (`jobSubject`). A scan names its scanner and a database refresh names the scanner it refreshed (#407).
+- The jobs API returns `scanner` for a scan job as well as a database refresh job, so the Jobs page names the scanner on a scan row (#410).
 
 ## 0.9.0 - 2026-11-14
 
