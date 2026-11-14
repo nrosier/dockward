@@ -1486,3 +1486,140 @@ async fn an_existing_ghsa_record_merges_into_the_cve_on_rescan() {
         1
     );
 }
+
+/// #379: a loopback TLS server that answers as both advisory hosts, and the lookup that asks it.
+async fn advisory_fake(
+    osv: &'static str,
+    github: &'static str,
+) -> (
+    crate::services::advisory_lookup::AdvisoryLookup,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&hits);
+    let (port, root) =
+        crate::services::outbound::socket_tests::loopback_tls_server_with(move |head| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            let target = head.split_whitespace().nth(1).unwrap_or("");
+            let body = if target.starts_with("/v1/vulns/") {
+                osv
+            } else if target.starts_with("/advisories/") {
+                github
+            } else {
+                ""
+            };
+            if body.is_empty() {
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_owned()
+            } else {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            }
+        })
+        .await;
+    (
+        crate::services::advisory_lookup::AdvisoryLookup::local(port, port, root),
+        hits,
+    )
+}
+
+/// #379: a GHSA id the scanner gives no CVE id for is looked up, and the record is stored under
+/// the CVE id the advisory names, with the GHSA id as its alias. A second scan reads the cache.
+#[tokio::test]
+async fn a_ghsa_with_no_scanner_cve_is_looked_up_and_stored_under_the_cve() {
+    let trivy = format!("printf '%s' '{}'", trivy_ghsa_report(GHSA));
+    let mut fx = Fx::new("lookup-resolve", &trivy, "echo '{}'").await;
+    let (lookup, hits) = advisory_fake(
+        r#"{"id":"GHSA-3g3m-2fjr-6pw4","aliases":["CVE-2025-64756"]}"#,
+        "",
+    )
+    .await;
+    fx.env = fx.env.clone().with_advisory(lookup);
+    assert_eq!(fx.queue(P_OLD).await, 2);
+    fx.drain().await;
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM cve_findings WHERE cve_id = ? AND alias = ? AND id_reason IS NULL",
+            &[GHSA_CVE, GHSA]
+        )
+        .await,
+        1
+    );
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
+    // A later scan of the same id asks nobody.
+    let again = queue_scans(&fx.pool, P_OLD, Some("s1"), "db_update", NOW).await;
+    assert_eq!(again.ok(), Some(2));
+    fx.drain().await;
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
+}
+
+/// #379: an advisory with no CVE id keeps the GHSA id, with the reason, and is asked once.
+#[tokio::test]
+async fn a_ghsa_with_no_published_cve_keeps_its_id_and_reason() {
+    let trivy = format!("printf '%s' '{}'", trivy_ghsa_report("GHSA-gpwc-27cw-rh9r"));
+    let mut fx = Fx::new("lookup-none", &trivy, "echo '{}'").await;
+    let (lookup, hits) = advisory_fake(r#"{"id":"GHSA-gpwc-27cw-rh9r"}"#, "").await;
+    fx.env = fx.env.clone().with_advisory(lookup);
+    assert_eq!(fx.queue(P_OLD).await, 2);
+    fx.drain().await;
+    let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT alias, id_reason FROM cve_findings WHERE source_id = 's1' AND cve_id = 'GHSA-gpwc-27cw-rh9r'",
+    )
+    .fetch_all(&fx.pool)
+    .await
+    .unwrap_or_else(|err| panic!("rows: {err}"));
+    assert_eq!(rows, vec![(None, Some(NO_CVE_REASON.to_owned()))]);
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
+}
+
+/// #379: both sources down. The scan still completes, the id stays unresolved with its reason,
+/// nothing is cached, and the next scan asks again and resolves it.
+#[tokio::test]
+async fn both_sources_down_does_not_fail_the_scan_and_the_next_scan_retries() {
+    let trivy = format!("printf '%s' '{}'", trivy_ghsa_report(GHSA));
+    let mut fx = Fx::new("lookup-down", &trivy, "echo '{}'").await;
+    let (down, down_hits) = advisory_fake("", "").await;
+    fx.env = fx.env.clone().with_advisory(down);
+    assert_eq!(fx.queue(P_OLD).await, 2);
+    let outcomes = fx.drain().await;
+    // The Grype stub prints no report, so only Trivy's job is the one that reads the lookup.
+    assert!(
+        outcomes
+            .iter()
+            .any(|(scanner, outcome)| scanner == "trivy" && matches!(outcome, JobOutcome::Done)),
+        "{:?}",
+        outcomes_only(&outcomes)
+    );
+    assert!(down_hits.load(Ordering::Relaxed) >= 2, "OSV, then GitHub");
+    assert_eq!(
+        count(&fx.pool, "SELECT COUNT(*) FROM advisory_lookups", &[]).await,
+        0
+    );
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM cve_findings WHERE cve_id = ? AND id_reason = ?",
+            &[GHSA, NO_CVE_REASON]
+        )
+        .await,
+        1
+    );
+    // The source comes back: the next scan resolves the id.
+    let (up, _) = advisory_fake(r#"{"aliases":["CVE-2025-64756"]}"#, "").await;
+    fx.env = fx.env.clone().with_advisory(up);
+    let again = queue_scans(&fx.pool, P_OLD, Some("s1"), "db_update", NOW).await;
+    assert_eq!(again.ok(), Some(2));
+    fx.drain().await;
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM cve_findings WHERE cve_id = ? AND alias = ?",
+            &[GHSA_CVE, GHSA]
+        )
+        .await,
+        1
+    );
+}

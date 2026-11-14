@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cve_id FROM advisory_lookups WHERE advisory_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "cve_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "advisory_lookups",
+            "name": "cve_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "bad9fa9cfdf9062cc670a7e09e573e3b644156c1ccc93821101fe758054103ef"
+}

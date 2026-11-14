@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 
 pub mod acceptances;
+pub mod advisory_lookups;
 pub mod alert_channels;
 pub mod alert_deliveries;
 #[cfg(test)]
@@ -212,6 +213,7 @@ mod tests {
         let pool = test_pool().await?;
         let tables = table_names(&pool).await?;
         let expected = [
+            "advisory_lookups",
             "alert_carryovers",
             "alert_channels",
             "alert_deliveries",
@@ -436,13 +438,13 @@ mod tests {
             .await
             .map_err(|_| AppError::InternalError)?;
         assert_eq!((runs, findings), (1, 1));
-        // Every migration applied, in order: 0007 (aliases), 0008 (manual trigger), 0009 (TOTP), 0010 (empty jobs), 0012 (CVE scanners), 0013 (id reason), 0014 (fixed note), 0015 (acceptance kind).
+        // Every migration applied, in order: 0007 (aliases), 0008 (manual trigger), 0009 (TOTP), 0010 (empty jobs), 0012 (CVE scanners), 0013 (id reason), 0014 (fixed note), 0015 (acceptance kind), 0016 (advisory lookups).
         let versions: Vec<i64> =
             sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&pool)
                 .await
                 .map_err(|_| AppError::InternalError)?;
-        assert_eq!(versions, (1..=15).collect::<Vec<i64>>());
+        assert_eq!(versions, (1..=16).collect::<Vec<i64>>());
         let names: Vec<(String,)> = sqlx::query_as(
             "SELECT name FROM sqlite_master
              WHERE name IN ('idx_scan_runs_current', 'newest_digest_tags', 'tag_scan_times',

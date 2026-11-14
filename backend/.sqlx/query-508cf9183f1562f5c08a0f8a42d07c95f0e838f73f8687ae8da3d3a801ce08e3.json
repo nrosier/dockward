@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO advisory_lookups (advisory_id, cve_id, looked_up_at, source)\n         VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "508cf9183f1562f5c08a0f8a42d07c95f0e838f73f8687ae8da3d3a801ce08e3"
+}

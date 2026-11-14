@@ -3,6 +3,7 @@
 pub mod acceptance;
 #[allow(dead_code)] // Used by the account routes.
 pub mod account;
+pub mod advisory_lookup;
 pub mod alert_channels;
 #[allow(dead_code)] // The scan and publish steps raise alerts (Step 4+).
 pub mod alert_send;

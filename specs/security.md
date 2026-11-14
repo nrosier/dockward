@@ -219,6 +219,8 @@ Decided (2026-11-05, user, #136). The application log is the `tracing` output us
   - Each class has its own environment-only opt-out, default `false`: `DOCKWARD_ALLOW_PRIVATE_REGISTRIES` (hub hosts), `DOCKWARD_ALLOW_PRIVATE_OIDC`, and `DOCKWARD_ALLOW_PRIVATE_ALERTS`. The last two names are Decided (2026-11-03, delegated).
   - GitHub requests go only to the configured API base URL. The default is the fixed host `api.github.com`. An admin may set a custom one (GitHub Enterprise Server); see "GitHub base URL" below.
 
+- Advisory lookups (Decided 2026-11-13, user, #379): the scan step calls two fixed public hosts, `api.osv.dev` and `api.github.com`, to learn the CVE id behind a GHSA or GO id ([integrations.md](integrations.md), "Advisory lookup"). They use the guarded client with the class `Advisory`: HTTPS only, no redirects, the resolved-address check, no opt-out. The request is a `GET` with the advisory id in the path and no token or other data. The GitHub advisory call never carries a credential and ignores the configured GitHub base URL.
+
 ## GitHub base URL
 
 - Decided (2026-11-06, user, #184): the custom GitHub base URL is an instance setting, one value for the whole instance, set by the admin. Empty means `https://api.github.com` (API) and `https://github.com` (web). See [integrations.md](integrations.md), "GitHub base URL".

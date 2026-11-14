@@ -37,6 +37,7 @@ use sqlx::SqlitePool;
 use crate::db::jobs::ClaimedJob;
 use crate::db::scans as db;
 use crate::error::{AppError, ScannerFault};
+use crate::services::advisory_lookup::AdvisoryLookup;
 use crate::services::discovery::{MSG_BAD_PAYLOAD, fixed_text};
 use crate::services::jobs::MAX_ATTEMPTS;
 use crate::services::publish;
@@ -66,6 +67,7 @@ pub struct ScanEnv {
     cache_root: PathBuf,
     trivy: PathBuf,
     grype: PathBuf,
+    advisory: AdvisoryLookup,
 }
 
 impl ScanEnv {
@@ -77,6 +79,11 @@ impl ScanEnv {
             cache_root: data_dir.join("scanner-cache"),
             trivy: Scanner::Trivy.program().to_owned(),
             grype: Scanner::Grype.program().to_owned(),
+            // Tests that build the production setup have no network: no lookup is made.
+            #[cfg(not(test))]
+            advisory: AdvisoryLookup::live(),
+            #[cfg(test)]
+            advisory: AdvisoryLookup::off(),
         }
     }
 
@@ -88,7 +95,15 @@ impl ScanEnv {
             cache_root,
             trivy,
             grype,
+            advisory: AdvisoryLookup::off(),
         }
+    }
+
+    /// The same setup with another advisory lookup. Used by the tests.
+    #[cfg(test)]
+    pub fn with_advisory(mut self, advisory: AdvisoryLookup) -> Self {
+        self.advisory = advisory;
+        self
     }
 
     pub(crate) fn program(&self, scanner: Scanner) -> &Path {
@@ -365,6 +380,10 @@ async fn scan_and_store(
         Ok(report) => report,
         Err(fault) => return Err(fail(fault).await),
     };
+
+    // The GHSA and GO ids with no CVE id are looked up before the transaction opens, so no
+    // network call runs inside it. A failed lookup changes nothing (#379).
+    env.advisory.resolve(pool, &report.findings, now).await;
 
     let built_at = {
         let mut conn = pool

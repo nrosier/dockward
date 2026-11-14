@@ -29,6 +29,9 @@ pub enum TargetClass {
     /// check, and the opt-out never applies. Only the admin-configured host is exempt, and only
     /// through [`github_client`] (`specs/security.md`, "GitHub base URL").
     GitHub,
+    /// The public advisory databases asked for the CVE id behind a GHSA or GO id (#379): the
+    /// fixed hosts `api.osv.dev` and `api.github.com`. No token is sent, and there is no opt-out.
+    Advisory,
 }
 
 /// Errors from the outbound layer. Messages are fixed text and never include the URL.
@@ -677,6 +680,17 @@ pub(crate) mod socket_tests {
     /// Starts a loopback HTTPS server on an ephemeral port. It answers every request
     /// with `response`. Returns the port and the trust root for the test certificate.
     pub(crate) async fn loopback_tls_server(response: &'static str) -> (u16, reqwest::Certificate) {
+        loopback_tls_server_with(move |_| response.to_owned()).await
+    }
+
+    /// Like [`loopback_tls_server`], but `handler` gets the request head (the request line and
+    /// the headers, as text) and returns the whole response. A test uses it to route by path and
+    /// to record what the client sent.
+    pub(crate) async fn loopback_tls_server_with<F>(handler: F) -> (u16, reqwest::Certificate)
+    where
+        F: Fn(&str) -> String + Send + Sync + 'static,
+    {
+        let handler = StdArc::new(handler);
         let names = vec!["localhost".to_owned(), "127.0.0.1".to_owned()];
         let certified = match rcgen::generate_simple_self_signed(names) {
             Ok(certified) => certified,
@@ -707,10 +721,18 @@ pub(crate) mod socket_tests {
                     return;
                 };
                 let acceptor = acceptor.clone();
+                let handler = StdArc::clone(&handler);
                 tokio::spawn(async move {
                     if let Ok(mut tls) = acceptor.accept(stream).await {
+                        let mut head = Vec::new();
                         let mut buf = [0u8; 2048];
-                        let _ = tls.read(&mut buf).await;
+                        while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < 16 * 1024 {
+                            match tls.read(&mut buf).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => head.extend_from_slice(&buf[..n]),
+                            }
+                        }
+                        let response = handler(&String::from_utf8_lossy(&head));
                         let _ = tls.write_all(response.as_bytes()).await;
                         let _ = tls.shutdown().await;
                     }
