@@ -4,7 +4,10 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.9.0 - 2026-11-14
+
 ### Changed
+- Bundled scanners: Trivy v0.76.2, Grype v0.121.3 (unchanged from 0.8.0).
 - The CVE description in a new issue body is hard-wrapped at 80 characters inside its code fence, so it no longer scrolls sideways. Existing issues are not rewritten (#392).
 
 ### Fixed
@@ -16,6 +19,12 @@ All notable changes are recorded here. Versions follow semantic versioning.
 - Scanner selection from the data volume, phase 1 (#390). The bundled Trivy and Grype stay the default. At startup a downloaded version under `<data dir>/scanners/<scanner>/<version>/` is used when it is newer than the bundled one (compared per component, so 0.76.10 > 0.76.9); an equal, older or malformed one is purged. One previous version is kept for rollback, which is a pointer change. A downloaded binary that does not start is marked broken and the bundled one takes over, so scans keep running. Once a day dockward asks the GitHub latest-release API (`api.github.com`, no token) for the latest stable Trivy and Grype release and stores it in the new `scanner_releases` table (migration 0017); a failed check is logged and records nothing. `GET /api/v1/about` adds a `scanners` object with the binary in use, a broken version and the last check. Nothing is downloaded yet (phase 2), and there is no screen yet.
 - Open issues are refreshed on each scan: the description (wrapped as in a new issue) and the `Affected tags:` line follow the current scan, and a severity increase posts one comment naming the old and new severity. A decrease or no change posts none, and a closed issue is left alone (#393).
 - The version in the header is a button that opens an About dialog with the dockward version, the bundled Trivy and Grype versions, and the full MIT and Apache-2.0 licence texts. The backend reads the scanner versions once at startup (`trivy --version`, `grype version`, 5 second timeout) and serves them from `GET /api/v1/about`; a failed read shows `unknown`. The image now carries the Trivy and Grype Apache-2.0 licence and notice texts and the dockward MIT licence under `/usr/share/licenses/` (#388).
+
+### Upgrade notes
+- Migration 0017 runs on first start. It adds the `scanner_releases` table.
+- The scanner install and rollback routes are admin only. They install only from the upstream release, after checksum and Sigstore verification.
+- `GET /api/v1/about` gains a `scanners` object and a `previous_version` field on each scanner.
+- Dockward now makes outbound HTTPS calls to GitHub to check for scanner releases and to download them: `api.github.com`, `github.com` and `release-assets.githubusercontent.com`. No token is sent. Allow them if your network filters egress.
 
 ## 0.8.0 - 2026-11-14
 
