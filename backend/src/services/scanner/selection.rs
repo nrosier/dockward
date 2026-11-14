@@ -247,6 +247,33 @@ impl ScannerPrograms {
         self.lock()[index(scanner)]
     }
 
+    /// The previous downloaded version kept for rollback, when its binary is in place. This is
+    /// what a rollback would switch to. Version text only, never a path.
+    pub fn previous_version(&self, scanner: Scanner) -> Option<Version> {
+        self.volume
+            .read(scanner, Slot::Previous)
+            .version()
+            .filter(|version| self.volume.has_binary(scanner, *version))
+    }
+
+    /// Removes the broken marker of the downloaded version that failed to launch and applies the
+    /// selection rule again. Returns that version, or `None` when `scanner` has no broken mark.
+    pub fn clear_broken(
+        &self,
+        scanner: Scanner,
+        bundled: Option<Version>,
+    ) -> Result<Option<Version>, crate::error::AppError> {
+        let Some(version) = self.state(scanner).broken else {
+            return Ok(None);
+        };
+        if !self.volume.is_broken(scanner, version) {
+            return Ok(None);
+        }
+        self.volume.clear_broken(scanner, version)?;
+        self.reselect(scanner, bundled);
+        Ok(Some(version))
+    }
+
     /// The binary to run for `scanner` now, and the selection it came from. Pass the selection
     /// to [`Self::launch_failed`] when the binary does not start.
     pub fn program(&self, scanner: Scanner) -> (PathBuf, Selected) {

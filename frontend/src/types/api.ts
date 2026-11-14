@@ -311,3 +311,21 @@ export interface GitHubRepository {
   private: boolean;
   archived: boolean;
 }
+
+// GET /api/v1/about (specs/api.md, About). Versions are `vX.Y.Z`. No path is ever returned.
+export interface ScannerState {
+  in_use: "bundled" | "downloaded";
+  downloaded_version: string | null;
+  broken_version: string | null;
+  previous_version: string | null;
+  latest_version: string | null;
+  update_available: boolean;
+  checked_at: string | null;
+}
+
+export interface AboutReport {
+  dockward: string;
+  trivy: string | null;
+  grype: string | null;
+  scanners: { trivy: ScannerState; grype: ScannerState };
+}

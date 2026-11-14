@@ -89,6 +89,8 @@ pub struct ScannerView {
     pub downloaded_version: Option<String>,
     /// A downloaded version that failed to launch and is no longer used, or `null`.
     pub broken_version: Option<String>,
+    /// The previous downloaded version kept for rollback, or `null` when none is kept.
+    pub previous_version: Option<String>,
     /// The latest stable upstream release from the last successful daily check, or `null`.
     pub latest_version: Option<String>,
     /// True when that release is newer than the bundled scanner.
@@ -134,6 +136,9 @@ async fn scanner_view(
         in_use,
         downloaded_version,
         broken_version: state.broken.map(|version| version.tagged()),
+        previous_version: programs
+            .previous_version(scanner)
+            .map(|version| version.tagged()),
         latest_version: latest.map(|version| version.tagged()),
         // Newer than the bundled scanner, and not already installed: a downloaded version at or
         // above the latest release needs no update.

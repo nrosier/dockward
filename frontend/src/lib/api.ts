@@ -14,14 +14,24 @@ export class ApiError extends Error {
   // The envelope's `detail` code (picker 422 answers and the mapping duplicate 409),
   // e.g. `robot_scope` or `harbor_repository_mapped`.
   detail?: string;
+  // The fixed `kind` word some routes add beside the envelope (scanner install refusals).
+  kind?: string;
 
-  constructor(status: number, code: string, message: string, retryAfter?: number, detail?: string) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    retryAfter?: number,
+    detail?: string,
+    kind?: string,
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.retryAfter = retryAfter;
     this.detail = detail;
+    this.kind = kind;
   }
 }
 
@@ -65,12 +75,14 @@ async function toApiError(response: Response): Promise<ApiError> {
   }
   if (isEnvelope(parsed)) {
     const detail = (parsed.error as { detail?: unknown }).detail;
+    const kind = (parsed as { kind?: unknown }).kind;
     return new ApiError(
       response.status,
       parsed.error.code,
       parsed.error.message,
       retryAfter,
       typeof detail === "string" ? detail : undefined,
+      typeof kind === "string" ? kind : undefined,
     );
   }
   return new ApiError(response.status, "internal_error", response.statusText, retryAfter);

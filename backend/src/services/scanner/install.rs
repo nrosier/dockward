@@ -81,6 +81,7 @@ impl Limits {
 pub enum InstallError {
     Busy,
     NoPrevious,
+    NoBroken,
     UnsupportedPlatform,
     BundledUnknown,
     ReleaseUnavailable,
@@ -100,6 +101,7 @@ impl InstallError {
         match self {
             InstallError::Busy => "scanner_busy",
             InstallError::NoPrevious => "no_previous_version",
+            InstallError::NoBroken => "no_broken_mark",
             InstallError::UnsupportedPlatform => "unsupported_platform",
             InstallError::BundledUnknown => "bundled_version_unknown",
             InstallError::ReleaseUnavailable => "release_unavailable",
@@ -409,6 +411,30 @@ impl Installer {
             Err(_) => Err(InstallError::Storage),
         };
         log_outcome(scanner, outcome.ok(), outcome, "scanner rollback");
+        outcome
+    }
+
+    /// Removes the broken mark of the downloaded version that failed to launch, so it can be
+    /// selected again. Returns that version. Refused when no version is marked broken.
+    pub async fn clear_broken(&self, scanner: Scanner) -> Result<Version, InstallError> {
+        let Ok(_guard) = self.lock.try_lock() else {
+            log_outcome(
+                scanner,
+                None,
+                Err(InstallError::Busy),
+                "scanner clear broken",
+            );
+            return Err(InstallError::Busy);
+        };
+        let outcome = match self
+            .programs
+            .clear_broken(scanner, self.bundled[index(scanner)])
+        {
+            Ok(Some(version)) => Ok(version),
+            Ok(None) => Err(InstallError::NoBroken),
+            Err(_) => Err(InstallError::Storage),
+        };
+        log_outcome(scanner, outcome.ok(), outcome, "scanner clear broken");
         outcome
     }
 

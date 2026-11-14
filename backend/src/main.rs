@@ -164,6 +164,10 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/admin/scanners/{scanner}/rollback",
             post(api::scanners::rollback),
         )
+        .route(
+            "/api/v1/admin/scanners/{scanner}/clear-broken",
+            post(api::scanners::clear_broken),
+        )
         .route("/api/v1/admin/logs", get(api::admin::logs))
         .route(
             "/api/v1/admin/log-level",
