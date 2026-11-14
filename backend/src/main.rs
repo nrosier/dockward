@@ -156,6 +156,14 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         .route("/api/v1/admin/jobs", get(api::admin::admin_jobs))
         .route("/api/v1/admin/health", get(api::admin::health))
         .route("/api/v1/admin/backup", post(api::admin::backup))
+        .route(
+            "/api/v1/admin/scanners/{scanner}/install",
+            post(api::scanners::install),
+        )
+        .route(
+            "/api/v1/admin/scanners/{scanner}/rollback",
+            post(api::scanners::rollback),
+        )
         .route("/api/v1/admin/logs", get(api::admin::logs))
         .route(
             "/api/v1/admin/log-level",
@@ -618,6 +626,11 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         services::scanner::selection::ScannerPrograms::bundled(&settings.data_dir)
             .select_at_startup(bundled_versions),
     );
+    let scanner_installer = Arc::new(services::scanner::install::Installer::live(
+        &settings.data_dir,
+        scanner_programs.clone(),
+        bundled_versions,
+    ));
     let state = api::state::AppState {
         pool,
         session_key,
@@ -647,6 +660,8 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         ),
         about: Arc::new(about),
         scanner_programs,
+        scanner_installer,
+        scanner_install_limiter: api::hardening::RateLimiter::new(6, Duration::from_secs(3600)),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -965,6 +980,13 @@ pub(crate) mod tests {
             scanner_programs: std::sync::Arc::new(
                 crate::services::scanner::selection::ScannerPrograms::bundled(&dir),
             ),
+            scanner_installer: std::sync::Arc::new(
+                crate::services::scanner::install::Installer::offline(&dir),
+            ),
+            scanner_install_limiter: crate::api::hardening::RateLimiter::new(
+                6,
+                std::time::Duration::from_secs(3600),
+            ),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -1042,6 +1064,13 @@ pub(crate) mod tests {
             }),
             scanner_programs: std::sync::Arc::new(
                 crate::services::scanner::selection::ScannerPrograms::bundled(&dir),
+            ),
+            scanner_installer: std::sync::Arc::new(
+                crate::services::scanner::install::Installer::offline(&dir),
+            ),
+            scanner_install_limiter: crate::api::hardening::RateLimiter::new(
+                6,
+                std::time::Duration::from_secs(3600),
             ),
         };
         (app(Vec::new(), state), pool, dir)

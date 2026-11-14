@@ -32,7 +32,7 @@ use crate::services::outbound::{self, OutboundClient, TargetClass};
 use crate::worker::now_secs;
 
 /// The GitHub API host, always the public one.
-const GITHUB_BASE: &str = "https://api.github.com";
+pub(super) const GITHUB_BASE: &str = "https://api.github.com";
 /// One request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// A release document larger than this is not read. Trivy and Grype releases list many assets.
@@ -203,7 +203,7 @@ async fn check_scanner(
 
 /// One GET of the latest release. `None` for any failure, a draft, a pre-release, or a tag that
 /// is not a plain version.
-async fn fetch_latest(http: &OutboundClient, url: &str) -> Option<Version> {
+pub(super) async fn fetch_latest(http: &OutboundClient, url: &str) -> Option<Version> {
     let url = reqwest::Url::parse(url).ok()?;
     let request = http.get(&url).ok()?;
     let mut response = request

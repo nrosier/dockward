@@ -216,6 +216,21 @@ impl ScannerPrograms {
         self
     }
 
+    /// Applies the startup rule ([`select`]) to `scanner` again, after an install or a rollback
+    /// changed its pointers (#403). Runs that already started keep their binary; the next run
+    /// uses the new selection.
+    pub fn reselect(&self, scanner: Scanner, bundled: Option<Version>) {
+        let (state, decision) = select(&self.volume, scanner, bundled);
+        let version = decision.version().map(|v| v.tagged());
+        tracing::info!(
+            scanner = scanner.key(),
+            decision = decision.text(),
+            downloaded_version = version.as_deref().unwrap_or("none"),
+            "scanner selected"
+        );
+        self.lock()[index(scanner)] = state;
+    }
+
     fn lock(&self) -> MutexGuard<'_, [ScannerState; 2]> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }

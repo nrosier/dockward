@@ -330,6 +330,13 @@ mod tests {
             scanner_programs: std::sync::Arc::new(
                 crate::services::scanner::selection::ScannerPrograms::bundled(&dir),
             ),
+            scanner_installer: std::sync::Arc::new(
+                crate::services::scanner::install::Installer::offline(&dir),
+            ),
+            scanner_install_limiter: crate::api::hardening::RateLimiter::new(
+                6,
+                std::time::Duration::from_secs(3600),
+            ),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }

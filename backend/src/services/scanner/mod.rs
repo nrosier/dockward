@@ -9,7 +9,8 @@
 //!
 //! Submodules: [`process`] runs a child process, [`parse`] reads the JSON, [`db_refresh`] runs
 //! the daily refresh, [`volume`] and [`selection`] pick the bundled or a downloaded binary
-//! (#390), [`upstream_check`] asks GitHub daily for the latest stable release. This module holds
+//! (#390), [`upstream_check`] asks GitHub daily for the latest stable release, [`install`]
+//! downloads, verifies and installs one on an admin's request (#403). This module holds
 //! the command lines. It has no database code.
 
 use std::ffi::OsString;
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 pub mod db_refresh;
 pub mod db_update;
+pub mod install;
 pub mod parse;
 pub mod process;
 pub mod redact;
@@ -40,6 +42,15 @@ impl Scanner {
         match self {
             Scanner::Trivy => "trivy",
             Scanner::Grype => "grype",
+        }
+    }
+
+    /// The scanner with the fixed key `key`, or `None`.
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "trivy" => Some(Scanner::Trivy),
+            "grype" => Some(Scanner::Grype),
+            _ => None,
         }
     }
 

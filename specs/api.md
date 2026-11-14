@@ -194,6 +194,8 @@ All routes are `admin`.
 | POST | `/api/v1/admin/backup` | yes | `{"file","path"}`. Writes only to the configured backup directory. |
 | GET | `/api/v1/admin/logs` | yes | Query `level` (minimum level), `q`. |
 | GET, PUT | `/api/v1/admin/log-level` | yes | `info`, `debug`, or `trace`. A level above `info` reverts after 30 minutes. |
+| POST | `/api/v1/admin/scanners/{scanner}/install` | yes | `scanner` is `trivy` or `grype`, else `404`. Installs the latest stable upstream release if its checksum and Sigstore bundle verify (#403; [integrations.md](integrations.md), "Scanner install and rollback"). `200 {"scanner","version"}` (`vX.Y.Z`, now current). A refusal is the error envelope plus a fixed `kind`: `409` `scanner_busy`, `not_newer_than_bundled`, `already_installed`, `bundled_version_unknown`, `unsupported_platform`; `502` `release_unavailable`, `download_failed`, `download_too_large`, `checksum_missing`, `checksum_mismatch`, `signature_invalid`, `archive_refused`; `500` `storage_failed`. Limited to 6 per scanner per hour (`429` with `Retry-After`). Audited as `scanner.install` (target `scanner:<key>`, details `{"scanner","version"}`). No path or URL is ever returned. `GET /api/v1/about` shows the new version at once. |
+| POST | `/api/v1/admin/scanners/{scanner}/rollback` | yes | Switches the current pointer to the previous downloaded version. `200 {"scanner","version"}`; `409` with `kind` `no_previous_version` when none is kept, or `scanner_busy`. Audited as `scanner.rollback`. |
 
 Restore and key re-encryption are CLI commands, not HTTP routes ([security.md](security.md)).
 

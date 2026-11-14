@@ -60,6 +60,8 @@ pub const ACTIONS: &[&str] = &[
     "image.evict",
     "github.rekey_issues",
     "github.retire_analyses",
+    "scanner.install",
+    "scanner.rollback",
 ];
 
 /// Key names (lowercased) that mark a value as a secret. Any key that contains
