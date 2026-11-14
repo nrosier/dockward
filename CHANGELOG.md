@@ -10,6 +10,7 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ### Fixed
 - An accepted CVE is flagged for re-review only when its severity or fix changes on the newest scanned digest of the source. A change on an older tag no longer sets the flag (#380).
+- An open GitHub issue now follows a change of its CVE's severity: the old severity label is replaced with the new one (none for UNKNOWN), and the Severity row of the body is updated. Other labels and the rest of the body are kept, and nothing is commented, reopened or closed. A closed issue is left alone (#381).
 
 ### Upgrade notes
 - Migration 0015 runs on first start. It adds `cve_acceptances.kind`; existing rows are `accepted`.
