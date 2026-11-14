@@ -170,11 +170,104 @@ pub fn issue_body(
         cell(fixed),
         cell(image),
     );
-    if let Some(text) = description.map(str::trim).filter(|text| !text.is_empty()) {
-        body.push_str("\nDescription:\n\n");
-        body.push_str(&fenced(text));
+    if let Some(section) = description_section(description) {
+        body.push('\n');
+        body.push_str(&section);
     }
     body
+}
+
+/// The `Description:` heading, a blank line and the fenced, wrapped text, ending in a line break.
+/// `None` when the description is missing or blank.
+fn description_section(description: Option<&str>) -> Option<String> {
+    let text = description.map(str::trim).filter(|text| !text.is_empty())?;
+    Some(format!("Description:\n\n{}", fenced(text)))
+}
+
+/// The heading line of the description block.
+const DESCRIPTION_HEADING: &str = "Description:";
+
+/// The `Affected tags` line of an issue body starts with this text.
+const AFFECTED_TAGS_PREFIX: &str = "Affected tags: ";
+
+/// The body with its description block (heading, blank line, fenced text) rewritten the way
+/// [`issue_body`] writes it, wrapped the same. Only that block changes. Without a block, the new one
+/// goes on its own paragraph before the `Affected tags:` line. A missing or blank `description`
+/// keeps what the body has, because a report without text says nothing about the CVE. Returns
+/// `None` when nothing changes.
+pub fn with_description(body: &str, description: Option<&str>) -> Option<String> {
+    let section = description_section(description)?;
+    let new_block: Vec<&str> = section.trim_end_matches('\n').split('\n').collect();
+    let lines: Vec<&str> = body.split('\n').collect();
+    // Only look below the table, so the heading is never taken from the marker or a table cell.
+    let header = lines.iter().position(|l| *l == "| Field | Value |")?;
+    let table_end = header
+        + lines[header..]
+            .iter()
+            .take_while(|l| l.starts_with('|'))
+            .count();
+    let heading = lines[table_end..]
+        .iter()
+        .position(|l| *l == DESCRIPTION_HEADING)
+        .map(|offset| table_end + offset);
+    let mut next: Vec<&str> = Vec::new();
+    match heading {
+        Some(start) => {
+            // The block ends at the closing fence: a line of backticks as long as the opening one.
+            let opening = lines.get(start + 2).copied().unwrap_or("");
+            let ticks = opening.chars().take_while(|c| *c == '`').count();
+            if lines.get(start + 1) != Some(&"") || ticks < 3 || !opening.ends_with("text") {
+                return None;
+            }
+            let end = lines[start + 3..]
+                .iter()
+                .position(|l| l.len() == ticks && l.chars().all(|c| c == '`'))
+                .map(|offset| start + 3 + offset)?;
+            if lines[start..=end] == new_block[..] {
+                return None;
+            }
+            next.extend_from_slice(&lines[..start]);
+            next.extend_from_slice(&new_block);
+            next.extend_from_slice(&lines[end + 1..]);
+        }
+        None => {
+            let tags = lines[table_end..]
+                .iter()
+                .position(|l| l.starts_with(AFFECTED_TAGS_PREFIX))
+                .map(|offset| table_end + offset)?;
+            next.extend_from_slice(&lines[..tags]);
+            next.extend_from_slice(&new_block);
+            next.push("");
+            next.extend_from_slice(&lines[tags..]);
+        }
+    }
+    Some(next.join("\n"))
+}
+
+/// The body with its `Affected tags:` line set to `line` (the whole line). Everything else is
+/// kept. Returns `None` when the line already reads so, or the body has no such line.
+pub fn with_affected_tags(body: &str, line: &str) -> Option<String> {
+    let lines: Vec<&str> = body.split('\n').collect();
+    let index = lines
+        .iter()
+        .rposition(|l| l.starts_with(AFFECTED_TAGS_PREFIX))?;
+    if lines[index] == line {
+        return None;
+    }
+    let mut next = lines.clone();
+    next[index] = line;
+    Some(next.join("\n"))
+}
+
+/// The severity in the `| Severity | ... |` row of the table of an issue body.
+pub fn severity_in(body: &str) -> Option<String> {
+    let lines: Vec<&str> = body.split('\n').collect();
+    let header = lines.iter().position(|l| *l == "| Field | Value |")?;
+    lines[header..]
+        .iter()
+        .take_while(|l| l.starts_with('|'))
+        .find_map(|l| l.strip_prefix("| Severity | ")?.strip_suffix(" |"))
+        .map(str::to_owned)
 }
 
 /// Text in a code fence longer than any backtick run inside it, so Harbor text cannot
@@ -1229,6 +1322,39 @@ mod tests {
         let outcome = list_open_labelled_with(&fake, b"token", "../octo", "app", LABEL, 1000).await;
         assert!(matches!(outcome, Err(ScanError::Rejected(_))));
         assert!(fake.sent().is_empty());
+    }
+
+    #[test]
+    fn with_description_replaces_only_the_block() {
+        let old = issue_body("CVE-1", "HIGH", "`p`", None, "img", Some("old"));
+        let body = format!("{old}\nFound by 1 scanner: `Trivy`\n\nAffected tags: `v1`\n");
+        let next = with_description(&body, Some("new text")).unwrap_or_default();
+        let want = issue_body("CVE-1", "HIGH", "`p`", None, "img", Some("new text"));
+        assert_eq!(
+            next,
+            format!("{want}\nFound by 1 scanner: `Trivy`\n\nAffected tags: `v1`\n")
+        );
+        assert_eq!(with_description(&next, Some("new text")), None);
+        assert_eq!(with_description(&next, None), None);
+    }
+
+    #[test]
+    fn with_description_adds_a_missing_block_before_the_tags() {
+        let old = issue_body("CVE-1", "HIGH", "`p`", None, "img", None);
+        let body = format!("{old}\nAffected tags: `v1`\n");
+        let next = with_description(&body, Some("text")).unwrap_or_default();
+        let want = issue_body("CVE-1", "HIGH", "`p`", None, "img", Some("text"));
+        assert_eq!(next, format!("{want}\nAffected tags: `v1`\n"));
+    }
+
+    #[test]
+    fn with_affected_tags_replaces_only_that_line() {
+        let body = "a\n\nAffected tags: `v1`\n";
+        assert_eq!(
+            with_affected_tags(body, "Affected tags: `v1`, `v2`").as_deref(),
+            Some("a\n\nAffected tags: `v1`, `v2`\n")
+        );
+        assert_eq!(with_affected_tags(body, "Affected tags: `v1`"), None);
     }
 
     #[test]

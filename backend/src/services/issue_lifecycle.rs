@@ -430,6 +430,7 @@ fn full_rank(severity: &str) -> usize {
 }
 
 /// What the open rows of one CVE say, for the issue text and the rules.
+#[derive(Clone)]
 struct CveView {
     cve_id: String,
     /// The highest severity among the open rows, over all five severities.
@@ -526,17 +527,32 @@ fn issue_text(view: &CveView, source: &SourceRow) -> String {
         &image,
         view.description.as_deref(),
     );
-    let tags: Vec<String> = view
-        .tags
-        .iter()
-        .map(|tag| format!("`{}`", plain(tag)))
-        .collect();
-    body.push_str(&format!("\nAffected tags: {}\n", tags.join(", ")));
+    body.push_str(&format!("\n{}\n", affected_tags_line(&view.tags)));
     // The `Found by` line goes right after the table (#224 d2).
     match merged_view::found_by_line(&view.scanners) {
         Some(line) => github_issues::with_found_by(&body, &line).unwrap_or(body),
         None => body,
     }
+}
+
+/// The `Affected tags:` line of an issue body.
+fn affected_tags_line(tags: &[String]) -> String {
+    let tags: Vec<String> = tags.iter().map(|tag| format!("`{}`", plain(tag))).collect();
+    format!("Affected tags: {}", tags.join(", "))
+}
+
+/// Position of `severity` in [`SEVERITY_ORDER`]; a smaller number is a higher severity.
+fn severity_position(severity: &str) -> usize {
+    SEVERITY_ORDER
+        .iter()
+        .position(|known| *known == severity)
+        .unwrap_or(SEVERITY_ORDER.len() - 1)
+}
+
+/// The comment posted when the severity of an open issue rises. A fixed English text (not UI
+/// text, so it is not in the string catalog). It holds the two severities only.
+fn severity_increase_note(old: &str, new: &str) -> String {
+    format!("Severity increased from {old} to {new}.")
 }
 
 fn valid_source_id(id: &str) -> bool {
@@ -796,6 +812,55 @@ impl<G: IssueApi> Ctx<'_, G> {
                     self.now,
                 )
                 .await?;
+            // One comment per increase, after the body says the new severity, so the next scan
+            // finds the row already updated and does not comment again.
+            if let Some(old) = github_issues::severity_in(&body)
+                && severity_position(severity) < severity_position(&old)
+            {
+                self.gh
+                    .comment(
+                        self.token,
+                        self.owner(),
+                        self.repo(),
+                        number,
+                        &severity_increase_note(&old, severity),
+                        self.now,
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Sets the description block and the `Affected tags:` line of an open issue to what the scan
+    /// reports now, with one PATCH on the body, only when either differs. The description is
+    /// written wrapped, the way a new issue gets it. Every other line is kept.
+    async fn refresh_details(&self, row: &IssueRow, view: &CveView) -> Result<(), Failure> {
+        let number = to_number(row.github_issue_number)?;
+        let body = self
+            .gh
+            .body(self.token, self.owner(), self.repo(), number, self.now)
+            .await?;
+        let mut next = body.clone();
+        if let Some(text) = github_issues::with_description(&next, view.description.as_deref()) {
+            next = text;
+        }
+        if let Some(text) =
+            github_issues::with_affected_tags(&next, &affected_tags_line(&view.tags))
+        {
+            next = text;
+        }
+        if next != body {
+            self.gh
+                .set_body(
+                    self.token,
+                    self.owner(),
+                    self.repo(),
+                    number,
+                    &next,
+                    self.now,
+                )
+                .await?;
         }
         Ok(())
     }
@@ -982,6 +1047,7 @@ impl<G: IssueApi> Ctx<'_, G> {
             .as_ref()
             .map(|view| view.scanners.clone())
             .unwrap_or_default();
+        let details = view.clone();
         match (existing, view) {
             // (a) Reported, eligible, and no issue yet: adopt or create. Skipped when
             // `auto_create_issues` is off.
@@ -1044,6 +1110,9 @@ impl<G: IssueApi> Ctx<'_, G> {
                             self.refresh_severity(&row, severity).await?;
                         }
                         self.refresh_found_by(&row, &view_scanners).await?;
+                        if let Some(view) = &details {
+                            self.refresh_details(&row, view).await?;
+                        }
                     }
                 } else if reported {
                     // Closed by hand while the CVE is still reported: honour it.
@@ -2230,10 +2299,10 @@ mod tests {
 
         assert_eq!(fx.github.creates().len(), 1);
         assert_eq!(fx.issues().await.len(), 1);
-        // The second run reads the issue's state and its labels and body (two GETs): nothing is
-        // created or changed.
-        assert_eq!(fx.github.requests(), listed_after_first + 2);
-        assert_eq!(fx.github.writes().len(), 1);
+        // The second run reads the issue's state, its labels and body, and its body again for the
+        // refresh (three GETs). Nothing is created; the body gets the new tag (one PATCH).
+        assert_eq!(fx.github.requests(), listed_after_first + 4);
+        assert_eq!(fx.github.writes().len(), 2);
         assert_eq!(
             fx.count("SELECT COUNT(*) FROM cve_findings WHERE github_issue_id IS NOT NULL")
                 .await,
@@ -2553,7 +2622,11 @@ mod tests {
         fx.reconcile("ghcr.io/o/app:v2").await;
 
         assert_eq!(fx.issues().await[0].2, "open");
-        assert_eq!(fx.github.writes().len(), 1, "only the create");
+        assert_eq!(
+            fx.github.writes().len(),
+            2,
+            "the create, and the body without the cleaned tag"
+        );
     }
 
     /// Newest digest clean (note posted), the user closes the issue on GitHub, then the newest
@@ -2720,6 +2793,186 @@ mod tests {
         assert!(body.contains("| Severity | UNKNOWN |"), "{body}");
         assert!(fx.github.never_changed_state());
         assert!(fx.github.notes().is_empty());
+    }
+
+    /// Seeds an open issue whose CVE has a description, on tag `v1`.
+    async fn refresh_fixture(name: &str, severity: &str, description: &str) -> Fixture {
+        let fx = Fixture::new(name, "HIGH", true).await;
+        fx.observe("v1", "sha256:aaa", 100).await;
+        fx.scan_run("sha256:aaa", "grype", &[("CVE-2026-0001", "openssl")])
+            .await;
+        fx.scan_run("sha256:aaa", "trivy", &[]).await;
+        fx.finding_full(
+            "m1",
+            "v1",
+            "CVE-2026-0001",
+            severity,
+            "openssl",
+            Some(description),
+            10,
+        )
+        .await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        fx
+    }
+
+    fn issue_body_text(fx: &Fixture) -> String {
+        fx.github.with(|state| state.issues[0].body.clone())
+    }
+
+    fn comments(fx: &Fixture) -> Vec<String> {
+        fx.github
+            .writes()
+            .into_iter()
+            .filter(|(method, path, _)| *method == "POST" && path.ends_with("/comments"))
+            .filter_map(|(_, _, body)| body["body"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// A changed description replaces the block, wrapped, and keeps marker, table and Found by.
+    #[tokio::test]
+    async fn a_changed_description_is_updated_on_an_open_issue() {
+        let fx = refresh_fixture("refresh-desc", "HIGH", "Old text.").await;
+        let before = issue_body_text(&fx);
+        assert!(before.contains("Old text."));
+        let long = "word ".repeat(40);
+        let long = long.trim();
+
+        fx.finding_full(
+            "m1",
+            "v1",
+            "CVE-2026-0001",
+            "HIGH",
+            "openssl",
+            Some(long),
+            20,
+        )
+        .await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+
+        let body = issue_body_text(&fx);
+        assert!(!body.contains("Old text."), "{body}");
+        let expected = github_issues::issue_body(
+            "CVE-2026-0001",
+            "HIGH",
+            "`openssl`",
+            None,
+            "ghcr.io/o/app",
+            Some(long),
+        );
+        let block = expected.split("\nDescription:").nth(1).unwrap_or_default();
+        assert!(body.contains(block), "wrapped like a new issue\n{body}");
+        assert!(body.starts_with(github_issues::marker("CVE-2026-0001").as_str()));
+        assert!(body.contains("| Severity | HIGH |"));
+        assert!(body.contains("Affected tags: `v1`"));
+        assert!(
+            body.lines().any(|line| line.starts_with("Found by ")),
+            "{body}"
+        );
+        assert!(comments(&fx).is_empty());
+    }
+
+    /// A changed tag list is written to the `Affected tags:` line.
+    #[tokio::test]
+    async fn a_changed_tag_list_is_updated_on_an_open_issue() {
+        let fx = refresh_fixture("refresh-tags", "HIGH", "Text.").await;
+        fx.report("v2", "sha256:bbb", 200).await;
+        fx.finding_full(
+            "m1",
+            "v2",
+            "CVE-2026-0001",
+            "HIGH",
+            "openssl",
+            Some("Text."),
+            20,
+        )
+        .await;
+        fx.reconcile("ghcr.io/o/app:v2").await;
+
+        let body = issue_body_text(&fx);
+        assert!(body.contains("Affected tags: `v1`, `v2`"), "{body}");
+        assert_eq!(body.matches("Affected tags:").count(), 1);
+        assert!(body.contains("Text."));
+    }
+
+    /// A severity increase posts exactly one comment with the old and new severity.
+    #[tokio::test]
+    async fn a_severity_increase_posts_one_comment() {
+        let fx = refresh_fixture("refresh-up", "HIGH", "Text.").await;
+        fx.finding_full(
+            "m1",
+            "v1",
+            "CVE-2026-0001",
+            "CRITICAL",
+            "openssl",
+            Some("Text."),
+            20,
+        )
+        .await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        assert_eq!(
+            comments(&fx),
+            vec!["Severity increased from HIGH to CRITICAL.".to_owned()]
+        );
+
+        // The row now says CRITICAL, so another scan stays quiet.
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        assert_eq!(comments(&fx).len(), 1);
+    }
+
+    /// A severity decrease, or no change, posts no comment.
+    #[tokio::test]
+    async fn a_severity_decrease_or_no_change_posts_no_comment() {
+        let fx = refresh_fixture("refresh-down", "CRITICAL", "Text.").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        fx.finding_full(
+            "m1",
+            "v1",
+            "CVE-2026-0001",
+            "HIGH",
+            "openssl",
+            Some("Text."),
+            20,
+        )
+        .await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        assert!(issue_body_text(&fx).contains("| Severity | HIGH |"));
+        assert!(comments(&fx).is_empty());
+    }
+
+    /// A closed issue is neither rewritten nor commented on.
+    #[tokio::test]
+    async fn a_closed_issue_is_not_refreshed() {
+        let fx = refresh_fixture("refresh-closed", "HIGH", "Old text.").await;
+        fx.github.with(|state| state.issues[0].open = false);
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        let writes = fx.github.writes().len();
+        let before = issue_body_text(&fx);
+
+        fx.finding_full(
+            "m1",
+            "v1",
+            "CVE-2026-0001",
+            "CRITICAL",
+            "openssl",
+            Some("New."),
+            20,
+        )
+        .await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+
+        assert_eq!(fx.github.writes().len(), writes);
+        assert_eq!(issue_body_text(&fx), before);
+    }
+
+    /// A body that already matches makes no write.
+    #[tokio::test]
+    async fn an_unchanged_body_makes_no_write() {
+        let fx = refresh_fixture("refresh-same", "HIGH", "Same text.").await;
+        let writes = fx.github.writes().len();
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        fx.reconcile("ghcr.io/o/app:v1").await;
+        assert_eq!(fx.github.writes().len(), writes);
     }
 
     /// An accepted CVE's closed issue is reopened when the newest digest reports the CVE again,
@@ -3060,7 +3313,11 @@ mod tests {
         fx.reconcile("ghcr.io/o/app:v3").await;
 
         assert_eq!(fx.github.creates().len(), 1, "the same issue is reused");
-        assert_eq!(fx.github.writes().len(), 2, "no reopen, no extra comment");
+        assert_eq!(
+            fx.github.writes().len(),
+            3,
+            "no reopen, no extra comment; the body gets the new tag"
+        );
         assert_eq!(
             fx.count("SELECT COUNT(*) FROM github_issues WHERE fixed_noted_at IS NOT NULL")
                 .await,
