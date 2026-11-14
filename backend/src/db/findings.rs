@@ -78,7 +78,11 @@ pub async fn upsert(conn: &mut SqliteConnection, finding: &Finding<'_>) -> Resul
             finding.fixed_in_version,
         );
         if let Some(reason) = reason {
-            mark_acceptance_changed(conn, finding, reason).await?;
+            // Only the newest scanned digest of the source decides (#380): a change on an older
+            // tag leaves the flag alone.
+            if is_newest_digest_tag(conn, finding.source_id, finding.image_tag).await? {
+                mark_acceptance_changed(conn, finding, reason).await?;
+            }
         }
     }
     Ok(())
@@ -287,7 +291,28 @@ fn change_reason(
     }
 }
 
-/// Flags the active acceptance of the CVE in the source as changed, for re-review. An
+/// True when `image_tag` is a tag of the source's newest scanned digest (the
+/// `newest_digest_tags` view, #196).
+async fn is_newest_digest_tag(
+    conn: &mut SqliteConnection,
+    source_id: &str,
+    image_tag: &str,
+) -> Result<bool, AppError> {
+    let row = sqlx::query!(
+        r#"SELECT EXISTS (
+               SELECT 1 FROM newest_digest_tags WHERE source_id = ? AND image_tag = ?
+           ) AS "found!: i64""#,
+        source_id,
+        image_tag
+    )
+    .fetch_one(conn)
+    .await
+    .map_err(|_| AppError::InternalError)?;
+    Ok(row.found != 0)
+}
+
+/// Flags the active acceptance of the CVE in the source as changed, for re-review. A later
+/// change overwrites the stored reason and time. An
 /// acceptance that is revoked or expired is left alone. The acceptance itself stays active.
 async fn mark_acceptance_changed(
     conn: &mut SqliteConnection,

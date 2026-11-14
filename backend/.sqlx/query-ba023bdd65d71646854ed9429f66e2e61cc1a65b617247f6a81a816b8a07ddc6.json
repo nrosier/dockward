@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (\n               SELECT 1 FROM newest_digest_tags WHERE source_id = ? AND image_tag = ?\n           ) AS \"found!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "found!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ba023bdd65d71646854ed9429f66e2e61cc1a65b617247f6a81a816b8a07ddc6"
+}
