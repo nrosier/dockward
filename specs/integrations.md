@@ -149,6 +149,19 @@ Read from the image config of the scanned platform image (`extra_attrs`-style co
 - Issue fixed notes (Dockward never closes an issue), reopening and the comment texts are in [cve-lifecycle.md](cve-lifecycle.md), "GitHub issue rules". Changed (2026-11-13, user, "note only"): the close comment is replaced by one fixed note, `<CVE id> is no longer reported by any scanner on the latest scan of its image. This issue can be closed.`, and the issue stays open. Verified (2026-11-11): the reopen comment is `CVE is back in scan <scan>, found by <names>.`, and the manual reopen comment is `CVE reopened manually from Dockward.`. The scan is named `<hub host>/<repository>:<tag>`.
 - Hub-and-repository naming in comments and bodies is the same as the SARIF one.
 
+## Advisory lookup (GHSA and GO ids)
+
+Decided (2026-11-13, user, #379; builds on #367): when a scanner reports a GHSA or GO id and gives no CVE id for it, and `vulnerability_aliases` holds none, Dockward asks a public advisory source for the CVE id behind it (`backend/src/services/advisory_lookup.rs`, called by the scan step in `services/scan/mod.rs` before its transaction opens).
+
+- Primary: OSV, `GET https://api.osv.dev/v1/vulns/<id>`. The CVE id is the alias that starts with `CVE-` in `aliases`. It accepts GHSA and GO ids. No key. Verified (2026-11-13): `GHSA-jfh8-c2jp-5v3q` gives `CVE-2021-44228`; `GO-2021-0113` gives `CVE-2021-38561` and `GHSA-ppp9-7jff-5vj2`; `GHSA-gpwc-27cw-rh9r` has no aliases.
+- Fallback: GitHub advisories, `GET https://api.github.com/advisories/<GHSA id>`, only when OSV gave no answer, and only for a GHSA id. `cve_id` is authoritative (`null` means none published; verified 2026-11-13 for `GHSA-gpwc-27cw-rh9r`). It is never the primary: unauthenticated calls are limited to 60 per hour.
+- Cache: forever, per id, in `advisory_lookups` (migration 0016; [database.md](database.md)). The stored answer is the CVE id, or none (`cve_id` NULL, "no CVE id published"). Each id is asked once. A resolved pair is also recorded in `vulnerability_aliases`, so the rest of the scan treats it like an id the scanner linked (#337, #367).
+- A failed lookup is not an answer. A transport error, a timeout (10 s), a status other than 200 or 404, a response over 1 MiB, or an unreadable body leaves the id as the scanner gave it, stores nothing, and the next scan asks again. The scan never fails because of a lookup. A source that failed once in a scan is not asked again in that scan. A 404 or an unreadable body from one source lets the other answer. At most 50 ids are asked per scan; the rest wait for a later scan.
+- What leaves Dockward: one `GET` per source whose path is the advisory id, with no query and no body, and the headers `Accept` and `User-Agent: Dockward` only. No token, cookie, image name, tag, source, hub or webhook data is sent, and GitHub is called without credentials, whatever the configured GitHub base URL is. An id is sent only when it has the GHSA shape (`GHSA-xxxx-xxxx-xxxx`, lowercase letters and digits) or the GO shape (`GO-YYYY-N`), so an upstream string cannot change the path. A CVE id from an answer is stored only when it has the shape `CVE-YYYY-NNNN`.
+- Outbound rules: the guarded client of [security.md](security.md), "Outbound HTTP (SSRF)", with its own class `Advisory`: HTTPS only, no redirects, every resolved address checked, no environment opt-out. Both hosts are fixed.
+- Logs hold the id and the outcome (`resolved`, `no_cve`, `unavailable`) and the source name only, never a response body.
+- Human pages: `https://github.com/advisories/<GHSA id>` and `https://osv.dev/vulnerability/<id>`.
+
 ## GitHub target
 
 - One GitHub repository (owner, repo) may be the target of several sources, each for a different hub repository, regardless of branch (Decided 2026-11-06, user, #185). Each source's Code Scanning category is its own. Issues are shared per GitHub repository and CVE.

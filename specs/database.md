@@ -31,6 +31,8 @@ Purpose: schema reference for dockward 0.2.0's SQLite database, and the decision
 | `publish_reports` | The SARIF upload record for each publish. |
 | `github_issues` | Tracked GitHub issues, one per (owner, repo, CVE). Shared by every source that targets that GitHub repository. |
 | `cve_findings` | One row per (source, tag, CVE): the merged view of the tag's current image. |
+| `vulnerability_aliases` | Global, public ids only: one row per GHSA or GO id, pointing at its CVE id (migration 0007, #337). Written from scanner reports and from advisory lookups. |
+| `advisory_lookups` | Global, public ids only: the cached answer of an advisory lookup, one row per GHSA or GO id (`advisory_id`): `cve_id` (NULL when none is published), `looked_up_at`, `source` (`osv` or `github`). Kept forever. Failed lookups are not stored. Migration 0016 (#379). |
 | `cve_acceptances` | Accepted risk or a false-positive verdict, per source and CVE. |
 | `totp_secrets` | One row per local user who started TOTP enrolment: the sealed secret, `enabled`, `totp_last_step` (replay guard), timestamps. Migration 0009 (#341). |
 | `totp_recovery_codes` | Argon2id hashes of a user's recovery codes and `used_at`. Migration 0009 (#341). |
