@@ -41,13 +41,14 @@ export function daysLeft(expiresAt: string | null, now = Date.now()): number | n
   return Number.isNaN(end) ? null : Math.ceil((end - now) / 86_400_000);
 }
 
-export type Tone = "ok" | "crit" | "warn" | "neutral";
+export type Tone = "ok" | "crit" | "warn" | "neutral" | "accent";
 
 const TONE: Record<Tone, string> = {
   ok: "text-ok-ink bg-ok/12 border-ok/45",
   crit: "text-crit-ink bg-crit/12 border-crit/45",
   warn: "text-high-ink bg-high/12 border-high/45",
   neutral: "text-text bg-text/5 border-border",
+  accent: "text-accent bg-accent/14 border-accent/50",
 };
 
 // A pill with its own text. Colour is never the only signal.

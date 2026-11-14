@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { ScannersPanel } from "../components/admin/ScannersPanel";
 import { Badge, CardHeading, ROW, TD, TH } from "../components/admin/parts";
 import { HEALTH_INTERVAL_MS } from "../components/shell/Topbar";
 import { Button } from "../components/ui/Button";
@@ -79,6 +80,7 @@ export default function AdminHealthPage() {
           {health.isFetching ? t("admin.health.checking") : t("admin.health.checkNow")}
         </Button>
       </div>
+      <ScannersPanel />
       <div className="grid grid-cols-1 gap-5">
         <ChecksCard id="health-github" title={t("admin.health.github")} checks={report.github} />
       </div>

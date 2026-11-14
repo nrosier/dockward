@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Admin: Health, scanner updates (#403), separate frames per stage</title>
+<style>
+body{margin:0;background:#06060f;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+.frames{display:flex;flex-direction:column;gap:40px;padding:32px}
+.label{font:600 12px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#a390fb;margin-bottom:8px}
+.frame{border:1px dashed #3a3c63;border-radius:12px;overflow:hidden;background:#0b0c18}
+.page{padding:24px 28px 40px;display:flex;flex-direction:column;gap:18px}
+h1{font-size:22px;font-weight:650;margin:0}
+h2{font-size:15px;font-weight:600;margin:0}
+.muted{color:#9b98b8}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.pill{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px;border-radius:999px;font:600 11px/1 'Inter',sans-serif;letter-spacing:.05em;text-transform:uppercase;border:1px solid;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.ok{color:#6ee7b7;background:rgba(16,185,129,.12);border-color:rgba(16,185,129,.45)}
+.high{color:#fdba74;background:rgba(249,115,22,.12);border-color:rgba(249,115,22,.45)}
+.crit{color:#fca5a5;background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.45)}
+.upd{color:#c4b8fd;background:rgba(163,144,251,.14);border-color:rgba(163,144,251,.5)}
+.unk{color:#c9c6e4;background:rgba(201,198,228,.06);border-color:#3a3c63}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font:600 11px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#9b98b8;padding:10px 18px;border-bottom:1px solid #25264a;white-space:nowrap}
+td{padding:10px 18px;border-bottom:1px solid #1d1e38;vertical-align:middle}
+tr:last-child td{border-bottom:0}
+.btn{font:600 13px/1 'Inter',sans-serif;height:32px;padding:0 12px;border-radius:7px;border:1px solid #3a3c63;background:#1b1c35;color:#eceafa}
+.btn:disabled{opacity:.45}
+.btn.primary{background:#7c5cf0;border-color:#7c5cf0;color:#fff}
+.btn.danger{border-color:rgba(239,68,68,.55);color:#fca5a5}
+.scrim{background:rgba(3,3,10,.66);padding:48px 24px;display:flex;justify-content:center}
+.modal{background:#15162a;border:1px solid #25264a;border-radius:12px;width:100%;max-width:30rem;box-shadow:0 18px 50px rgba(0,0,0,.5)}
+.note{font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="frames">
+
+  <!-- Frame 1: normal page, an update is available -->
+  <div>
+    <div class="label">Frame 1 · Normal, update available</div>
+    <div class="frame"><div class="page">
+      <h1>Admin</h1>
+      <div class="card">
+        <div style="padding:16px 18px 8px;display:flex;flex-direction:column;gap:4px">
+          <h2>Scanners</h2>
+          <p class="muted note">The bundled scanner is the default. A newer scanner can be installed. Updates are never automatic.</p>
+        </div>
+        <table>
+          <thead><tr><th>Scanner</th><th>In use</th><th>Latest stable</th><th>Status</th><th style="text-align:right">Action</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Trivy<div class="muted note">Checked 2026-11-14 06:12</div></td>
+              <td class="mono">v0.76.2 <span class="muted">(bundled)</span></td>
+              <td class="mono">v0.77.0</td>
+              <td><span class="pill upd">Update available</span></td>
+              <td style="text-align:right"><button class="btn primary">Install v0.77.0</button></td>
+            </tr>
+            <tr>
+              <td>Grype<div class="muted note">Checked 2026-11-14 06:12</div></td>
+              <td class="mono">v0.121.3 <span class="muted">(bundled)</span></td>
+              <td class="mono">v0.121.3</td>
+              <td><span class="pill ok">Up to date</span></td>
+              <td style="text-align:right"><button class="btn" disabled>Install</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div></div>
+  </div>
+
+  <!-- Frame 2: install confirmation, opened from Install -->
+  <div>
+    <div class="label">Frame 2 · Install confirmation (modal over the page)</div>
+    <div class="frame">
+      <div class="page" style="opacity:.35">
+        <h1>Admin</h1>
+        <div class="card"><table><thead><tr><th>Scanner</th><th>In use</th><th>Latest stable</th><th>Status</th><th style="text-align:right">Action</th></tr></thead>
+          <tbody><tr><td>Trivy</td><td class="mono">v0.76.2</td><td class="mono">v0.77.0</td><td><span class="pill upd">Update available</span></td><td style="text-align:right"><button class="btn primary">Install v0.77.0</button></td></tr></tbody></table></div>
+      </div>
+      <div class="scrim">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="c-title" style="padding:18px 20px">
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <h2 id="c-title">Install Trivy v0.77.0?</h2>
+            <p class="muted note">Dockward downloads the release, then checks the archive's SHA-256 against the upstream checksums file and verifies that file's Sigstore bundle. Nothing is installed unless both checks pass. Scans keep using the current scanner until the install finishes.</p>
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+            <button class="btn">Cancel</button>
+            <button class="btn primary">Install v0.77.0</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Frame 3: install failed, shown after a failed attempt -->
+  <div>
+    <div class="label">Frame 3 · Install failed (shown after a failed attempt, cleared on the next)</div>
+    <div class="frame"><div class="page">
+      <h1>Admin</h1>
+      <div class="card" style="border-color:rgba(239,68,68,.45)">
+        <div style="padding:16px 18px;display:flex;flex-direction:column;gap:6px">
+          <h2>Install failed</h2>
+          <p class="note">Trivy v0.77.0 was not installed: the Sigstore bundle did not verify. Nothing changed; Trivy v0.76.2 is still in use.</p>
+          <p class="muted note">Check the activity log for the outcome. No secrets or paths are shown.</p>
+        </div>
+      </div>
+      <div class="card">
+        <div style="padding:16px 18px 8px"><h2>Scanners</h2></div>
+        <table><tbody>
+          <tr><td>Trivy</td><td class="mono">v0.76.2 <span class="muted">(bundled)</span></td><td><span class="pill upd">Update available</span></td></tr>
+        </tbody></table>
+      </div>
+    </div></div>
+  </div>
+
+  <!-- Frame 4: broken downloaded scanner, shown only when a download is marked broken -->
+  <div>
+    <div class="label">Frame 4 · Broken downloaded scanner (shown only when marked broken)</div>
+    <div class="frame"><div class="page">
+      <h1>Admin</h1>
+      <div class="card" style="border-color:rgba(249,115,22,.45)">
+        <div style="padding:16px 18px;display:flex;flex-direction:column;gap:6px">
+          <h2>Broken scanner</h2>
+          <p class="note" style="color:#fdba74">Trivy v0.78.0 did not start. Scans use the bundled Trivy v0.76.2 until it is removed or a newer release is installed.</p>
+        </div>
+        <div style="padding:8px 18px 16px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+          <span class="pill high">Broken</span>
+          <button class="btn">Clear broken mark</button>
+        </div>
+      </div>
+      <div class="card">
+        <div style="padding:16px 18px 8px"><h2>Scanners</h2></div>
+        <table><tbody>
+          <tr><td>Trivy</td><td class="mono">v0.76.2 <span class="muted">(bundled)</span></td><td><span class="pill ok">Up to date</span></td></tr>
+        </tbody></table>
+      </div>
+    </div></div>
+  </div>
+
+  <!-- Frame 5: data-volume card, shown only once a version is installed -->
+  <div>
+    <div class="label">Frame 5 · After an install (data-volume card shown; hidden before any download)</div>
+    <div class="frame"><div class="page">
+      <h1>Admin</h1>
+      <div class="card">
+        <div style="padding:16px 18px 8px;display:flex;flex-direction:column;gap:4px">
+          <h2>Installed on the data volume</h2>
+          <p class="muted note">One previous version is kept. Rollback switches back to it; nothing is deleted.</p>
+        </div>
+        <table>
+          <thead><tr><th>Scanner</th><th>Current</th><th>Previous</th><th>Status</th><th style="text-align:right">Action</th></tr></thead>
+          <tbody>
+            <tr><td>Trivy</td><td class="mono">v0.77.0</td><td class="mono">v0.76.2 <span class="muted">(bundled)</span></td><td><span class="pill ok">Verified</span></td><td style="text-align:right"><button class="btn danger">Roll back to v0.76.2</button></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div></div>
+  </div>
+
+</div>
+</body>
+</html>

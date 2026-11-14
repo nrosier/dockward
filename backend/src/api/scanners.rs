@@ -33,6 +33,7 @@ fn status(err: InstallError) -> StatusCode {
     match err {
         InstallError::Busy
         | InstallError::NoPrevious
+        | InstallError::NoBroken
         | InstallError::UnsupportedPlatform
         | InstallError::BundledUnknown
         | InstallError::NotNewer
@@ -60,6 +61,7 @@ fn refused(err: InstallError) -> Response {
     let message = match err {
         InstallError::Busy => "Another scanner install or rollback is running.",
         InstallError::NoPrevious => "No previous scanner version is kept.",
+        InstallError::NoBroken => "No scanner version is marked broken.",
         InstallError::NotNewer | InstallError::AlreadyInstalled => {
             "No newer scanner release is available."
         }
@@ -161,6 +163,24 @@ pub async fn rollback(
     }
 }
 
+/// Removes the broken mark of the downloaded version that failed to launch.
+/// `200 {"scanner","version"}`; `404` for an unknown scanner; `409 no_broken_mark` when no
+/// version is marked broken. Audited as `scanner.clear_broken`.
+pub async fn clear_broken(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(key): Path<String>,
+) -> Result<Response, AppError> {
+    let scanner = Scanner::from_key(&key).ok_or(AppError::NotFound)?;
+    match state.scanner_installer.clear_broken(scanner).await {
+        Ok(version) => {
+            record(&state, &admin, "scanner.clear_broken", scanner, version).await?;
+            Ok(done(scanner, version))
+        }
+        Err(err) => Ok(refused(err)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -181,6 +201,7 @@ mod tests {
     struct Fx {
         router: axum::Router,
         pool: sqlx::SqlitePool,
+        programs: Arc<ScannerPrograms>,
         dir: std::path::PathBuf,
         csrf: String,
         admin: String,
@@ -200,6 +221,7 @@ mod tests {
         let programs = Arc::new(ScannerPrograms::bundled(&dir).select_at_startup(BUNDLED));
         let (port, root, _) = serve(Upstream::good()).await;
         state.scanner_programs = programs.clone();
+        let kept = programs.clone();
         state.scanner_installer = Arc::new(Installer::local(
             &dir,
             programs,
@@ -223,6 +245,7 @@ mod tests {
         Fx {
             router: crate::app(Vec::new(), state),
             pool,
+            programs: kept,
             admin: cookie("adm", "admin"),
             user: cookie("usr", "user"),
             anonymous: csrf_cookie.clone(),
@@ -244,6 +267,7 @@ mod tests {
 
     const INSTALL: &str = "/api/v1/admin/scanners/trivy/install";
     const ROLLBACK: &str = "/api/v1/admin/scanners/trivy/rollback";
+    const CLEAR_BROKEN: &str = "/api/v1/admin/scanners/trivy/clear-broken";
 
     #[tokio::test]
     async fn the_install_route_requires_an_admin_session_and_csrf_and_returns_no_path() {
@@ -336,6 +360,106 @@ mod tests {
         );
         let (_, about) = get_json(&fx.router, "/api/v1/about", &fx.admin).await;
         assert_eq!(about["scanners"]["trivy"]["downloaded_version"], "v0.76.5");
+        assert_eq!(about["scanners"]["trivy"]["previous_version"], "v0.77.0");
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn about_shows_the_previous_version_as_text_only() {
+        let fx = fx("scanner-previous-version").await;
+        let csrf = fx.csrf.clone();
+        let (_, about) = get_json(&fx.router, "/api/v1/about", &fx.admin).await;
+        assert!(about["scanners"]["trivy"]["previous_version"].is_null());
+        assert_eq!(
+            fx.post(INSTALL, &fx.admin, Some(&csrf)).await.0,
+            StatusCode::OK
+        );
+        let (_, about) = get_json(&fx.router, "/api/v1/about", &fx.admin).await;
+        assert_eq!(about["scanners"]["trivy"]["previous_version"], "v0.76.5");
+        let dir_text = fx.dir.to_string_lossy().to_string();
+        assert!(!about.to_string().contains(&dir_text));
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn the_clear_broken_route_clears_the_mark_and_refuses_without_one() {
+        let fx = fx("scanner-clear-broken-route").await;
+        let csrf = fx.csrf.clone();
+        let volume = ScannerVolume::under(&fx.dir);
+        // No broken mark: refused with a fixed kind.
+        let (status, body) = fx.post(CLEAR_BROKEN, &fx.admin, Some(&csrf)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["kind"], "no_broken_mark");
+
+        // The downloaded version fails to launch: marked broken, the bundled scanner takes over.
+        volume
+            .mark_broken(Scanner::Trivy, v("0.76.5"))
+            .expect_test_ok();
+        fx.programs.reselect(Scanner::Trivy, BUNDLED[0]);
+        let (_, about) = get_json(&fx.router, "/api/v1/about", &fx.admin).await;
+        assert_eq!(about["scanners"]["trivy"]["broken_version"], "v0.76.5");
+
+        let (status, body) = fx.post(CLEAR_BROKEN, &fx.admin, Some(&csrf)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body,
+            serde_json::json!({"scanner": "trivy", "version": "v0.76.5"})
+        );
+        let dir_text = fx.dir.to_string_lossy().to_string();
+        assert!(!body.to_string().contains(&dir_text));
+        assert!(!volume.is_broken(Scanner::Trivy, v("0.76.5")));
+        let (_, about) = get_json(&fx.router, "/api/v1/about", &fx.admin).await;
+        assert!(about["scanners"]["trivy"]["broken_version"].is_null());
+        assert_eq!(about["scanners"]["trivy"]["downloaded_version"], "v0.76.5");
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'scanner.clear_broken' AND target = 'scanner:trivy'",
+        )
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!(audits, 1);
+
+        // The mark is gone, so a second call is refused.
+        assert_eq!(
+            fx.post(CLEAR_BROKEN, &fx.admin, Some(&csrf)).await.1["kind"],
+            "no_broken_mark"
+        );
+        // An unknown scanner is 404.
+        assert_eq!(
+            fx.post(
+                "/api/v1/admin/scanners/clair/clear-broken",
+                &fx.admin,
+                Some(&csrf)
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn the_clear_broken_route_requires_an_admin_session_and_csrf() {
+        let fx = fx("scanner-clear-broken-auth").await;
+        let csrf = fx.csrf.clone();
+        let volume = ScannerVolume::under(&fx.dir);
+        volume
+            .mark_broken(Scanner::Trivy, v("0.76.5"))
+            .expect_test_ok();
+        fx.programs.reselect(Scanner::Trivy, BUNDLED[0]);
+        assert_eq!(
+            fx.post(CLEAR_BROKEN, &fx.anonymous, Some(&csrf)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            fx.post(CLEAR_BROKEN, &fx.user, Some(&csrf)).await.0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, body) = fx.post(CLEAR_BROKEN, &fx.admin, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "csrf_invalid");
+        // Nothing was cleared.
+        assert!(volume.is_broken(Scanner::Trivy, v("0.76.5")));
         fx.finish().await;
     }
 }

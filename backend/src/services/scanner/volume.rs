@@ -226,6 +226,15 @@ impl ScannerVolume {
         self.version_dir(scanner, version).join(BROKEN).exists()
     }
 
+    /// Removes the broken marker of `version`. A version without the marker is fine.
+    pub fn clear_broken(&self, scanner: Scanner, version: Version) -> Result<(), AppError> {
+        match std::fs::remove_file(self.version_dir(scanner, version).join(BROKEN)) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(io_err(err)),
+        }
+    }
+
     /// Deletes everything downloaded for `scanner`: every version folder and both pointers.
     pub fn purge(&self, scanner: Scanner) -> Result<(), AppError> {
         remove_dir(&self.scanner_dir(scanner))
@@ -428,6 +437,17 @@ pub(crate) mod tests {
             .mark_broken(Scanner::Grype, v("0.122.0"))
             .expect_test_ok();
         assert!(volume.is_broken(Scanner::Grype, v("0.122.0")));
+        volume
+            .clear_broken(Scanner::Grype, v("0.122.0"))
+            .expect_test_ok();
+        assert!(!volume.is_broken(Scanner::Grype, v("0.122.0")));
+        // Clearing a version that is not marked is fine.
+        volume
+            .clear_broken(Scanner::Grype, v("0.122.0"))
+            .expect_test_ok();
+        volume
+            .mark_broken(Scanner::Grype, v("0.122.0"))
+            .expect_test_ok();
         volume.purge(Scanner::Grype).expect_test_ok();
         assert!(!volume.exists(Scanner::Grype));
         // Purging nothing is fine.
