@@ -8,6 +8,9 @@ All notable changes are recorded here. Versions follow semantic versioning.
 - False positive is a second verdict next to Accept risk on a CVE (`POST /api/v1/cves/:id/false-positive`, audited as `cve.false_positive`). It records the verdict with an optional note and expiry, comments on the open GitHub issue and never closes it, and blocks new issues like an acceptance. Un-accept clears either verdict, and the CVE detail shows which one is active (migration 0015).
 - A GHSA or GO id that the scanner gives no CVE id for is looked up at OSV (`api.osv.dev`), then at GitHub advisories when OSV does not answer, and the record is stored under the CVE id the advisory names. The answer, including "no CVE id published", is cached for good in the new `advisory_lookups` table (migration 0016, #379). A failed lookup does not fail the scan, is not cached, and is retried on a later scan. Only the advisory id is sent.
 
+### Fixed
+- An accepted CVE is flagged for re-review only when its severity or fix changes on the newest scanned digest of the source. A change on an older tag no longer sets the flag (#380).
+
 ### Upgrade notes
 - Migration 0015 runs on first start. It adds `cve_acceptances.kind`; existing rows are `accepted`.
 - Migration 0016 runs on first start. It adds the `advisory_lookups` table.

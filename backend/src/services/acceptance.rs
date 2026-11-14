@@ -690,6 +690,7 @@ mod tests {
             .await
             .unwrap();
             drop(conn);
+            observe(&state, "v1", "sha256:new", 100).await;
             let github = Arc::new(FakeGithub::default());
             Self {
                 state,
@@ -918,14 +919,65 @@ mod tests {
         f.accept("u1", ID, "accepted again", None).await.unwrap();
     }
 
+    /// Observes `tag` of `m1` on the image `digest` (first seen at `seen`) and gives the image a
+    /// done scan. The newest image of a source is the latest observation among scanned images.
+    async fn observe(state: &AppState, tag: &str, digest: &str, seen: i64) {
+        let image = format!("img-{digest}");
+        let platform = format!("plat-{digest}");
+        sqlx::query(
+            "INSERT OR IGNORE INTO images (id, hub_id, repository, digest, is_index)
+             VALUES (?, 'hub-default-ghcr', 'm1', ?, 0)",
+        )
+        .bind(&image)
+        .bind(digest)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT OR IGNORE INTO image_platforms (id, image_id, platform, platform_digest, state)
+             VALUES (?, ?, 'linux/amd64', ?, 'stored')",
+        )
+        .bind(&platform)
+        .bind(&image)
+        .bind(digest)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT OR IGNORE INTO scan_runs (id, image_platform_id, scanner, trigger, status, finished_at)
+             VALUES (?, ?, 'grype', 'first_pull', 'done', ?)",
+        )
+        .bind(format!("run-{image}"))
+        .bind(&platform)
+        .bind(seen)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tag_observations (source_id, tag, image_id, first_seen_at, last_seen_at)
+             VALUES ('m1', ?, ?, ?, ?)",
+        )
+        .bind(tag)
+        .bind(&image)
+        .bind(seen)
+        .bind(seen)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    }
+
     async fn rescan(f: &Fixture, severity: &str, fixed_in: Option<&str>, at: i64) {
+        rescan_tag(f, "v1", severity, fixed_in, at).await;
+    }
+
+    async fn rescan_tag(f: &Fixture, tag: &str, severity: &str, fixed_in: Option<&str>, at: i64) {
         let mut conn = f.state.pool.acquire().await.unwrap();
         db::findings::upsert(
             &mut conn,
             &db::findings::Finding {
                 id: &ids::new_id().unwrap_or_default(),
                 source_id: "m1",
-                image_tag: "v1",
+                image_tag: tag,
                 cve_id: CVE,
                 package: Some("openssl"),
                 severity,
@@ -963,6 +1015,59 @@ mod tests {
         assert_eq!(
             changed(&f).await,
             (Some(30), Some("severity_changed".to_owned()))
+        );
+    }
+
+    /// An older tag (on an older digest) and a newest-digest tag, both with the CVE.
+    async fn two_digests(name: &str) -> Fixture {
+        let f = Fixture::new(name).await;
+        // "old" was observed earlier, on an older digest; "v1" is on the newest one.
+        observe(&f.state, "old", "sha256:old", 50).await;
+        rescan_tag(&f, "old", "CRITICAL", None, 20).await;
+        f.accept("u1", ID, "vendor patch is scheduled", None)
+            .await
+            .unwrap();
+        f
+    }
+
+    #[tokio::test]
+    async fn a_change_on_an_older_tag_does_not_flag_the_acceptance() {
+        let f = two_digests("older-change").await;
+
+        rescan_tag(&f, "old", "HIGH", Some("3.0.1"), 30).await;
+
+        assert_eq!(changed(&f).await, (None, None));
+    }
+
+    #[tokio::test]
+    async fn a_change_on_the_newest_digest_flags_with_its_reason() {
+        let f = two_digests("newest-change").await;
+
+        rescan_tag(&f, "v1", "CRITICAL", Some("3.0.1"), 30).await;
+
+        assert_eq!(
+            changed(&f).await,
+            (Some(30), Some("fix_available".to_owned()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_change_on_both_flags_once_with_the_newest_reason() {
+        let f = two_digests("both-change").await;
+
+        rescan_tag(&f, "old", "HIGH", None, 30).await;
+        rescan_tag(&f, "v1", "CRITICAL", Some("3.0.1"), 31).await;
+        // The older tag changing after the newest one does not overwrite the reason.
+        rescan_tag(&f, "old", "LOW", None, 32).await;
+
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM cve_acceptances WHERE revoked_at IS NULL")
+                .await,
+            1
+        );
+        assert_eq!(
+            changed(&f).await,
+            (Some(31), Some("fix_available".to_owned()))
         );
     }
 
