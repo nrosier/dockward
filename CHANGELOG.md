@@ -4,6 +4,9 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+### Added
+- The version in the header is a button that opens an About dialog with the dockward version, the bundled Trivy and Grype versions, and the full MIT and Apache-2.0 licence texts. The backend reads the scanner versions once at startup (`trivy --version`, `grype version`, 5 second timeout) and serves them from `GET /api/v1/about`; a failed read shows `unknown`. The image now carries the Trivy and Grype Apache-2.0 licence and notice texts and the dockward MIT licence under `/usr/share/licenses/` (#388).
+
 ## 0.8.0 - 2026-11-14
 
 ### Added

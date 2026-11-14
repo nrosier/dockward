@@ -52,6 +52,9 @@ FROM anchore/grype@sha256:13113eeceab017260370cf540e1d25442c59665fd07d1b09b66d63
 FROM rootfs AS rootfs-with-scanners
 COPY --from=trivy /usr/local/bin/trivy /rootfs/usr/local/bin/trivy
 COPY --from=grype /grype /rootfs/usr/local/bin/grype
+# The licence and notice texts of dockward, Trivy and Grype (Apache-2.0 for the scanners), taken
+# from the files the About dialog shows, so the image and the dialog carry the same text.
+COPY --from=frontend /build/src/licenses/ /rootfs/usr/share/licenses/
 
 FROM scratch
 ARG REVISION

@@ -722,5 +722,20 @@
   "account.totp.disable.confirming": "Turning off…",
   "account.totp.disable.wrongCode": "That code is not valid.",
   "account.totp.disable.failed": "Could not turn off two-factor sign-in. Try again.",
-  "account.totp.disable.done": "Two-factor sign-in is off."
+  "account.totp.disable.done": "Two-factor sign-in is off.",
+  "about.title": "About dockward",
+  "about.subtitle": "Version {version} · MIT License",
+  "about.versions.dockward": "dockward",
+  "about.versions.trivy": "Trivy (bundled)",
+  "about.versions.grype": "Grype (bundled)",
+  "about.unknown": "unknown",
+  "about.loadFailed": "The versions could not be loaded.",
+  "about.licences.title": "Licences",
+  "about.licences.dockward": "MIT License. Copyright (c) 2026 Nick Rosier.",
+  "about.licences.trivy": "Apache License 2.0. Notice text bundled in the image.",
+  "about.licences.grype": "Apache License 2.0. Notice text bundled in the image.",
+  "about.licences.fullText": "Full text",
+  "about.licences.fullTextFor": "Full text of the {name} licence",
+  "about.licences.textTitle": "Licence text ({name})",
+  "about.licences.textLabel": "Licence text"
 }

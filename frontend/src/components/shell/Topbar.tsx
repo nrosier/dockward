@@ -1,3 +1,4 @@
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Menu } from "lucide-react";
 import { useNavigate } from "react-router";
@@ -5,6 +6,7 @@ import { t } from "../../i18n";
 import { api } from "../../lib/api";
 import { useMe } from "../../lib/session";
 import { Button } from "../ui/Button";
+import { AboutDialog } from "./AboutDialog";
 
 // `GET /admin/health` makes outbound calls, so it is fetched at most once every
 // 10 minutes (specs/frontend.md, "Screen designs").
@@ -59,6 +61,8 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
   const isAdmin = me.data?.role === "admin";
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const versionButton = useRef<HTMLButtonElement>(null);
   const signOut = useMutation({
     mutationFn: () => api<void>("POST", "/auth/logout"),
     onSettled: () => {
@@ -85,7 +89,16 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
         ) : null}
       </div>
       <div className="flex items-center gap-3.5">
-        <span className="font-mono text-xs text-muted">{t("header.version", { version: APP_VERSION })}</span>
+        <button
+          ref={versionButton}
+          type="button"
+          aria-haspopup="dialog"
+          onClick={() => setAboutOpen(true)}
+          className="rounded font-mono text-xs text-muted underline hover:text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
+          {t("header.version", { version: APP_VERSION })}
+        </button>
+        <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} returnFocusTo={versionButton} />
         <Button variant="small" onClick={() => signOut.mutate()} disabled={signOut.isPending}>
           {t("header.signOut")}
         </Button>

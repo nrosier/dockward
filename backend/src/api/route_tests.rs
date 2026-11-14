@@ -2099,3 +2099,24 @@ mod cve_delete {
         fx.finish().await;
     }
 }
+
+#[tokio::test]
+async fn about_returns_the_dockward_and_both_scanner_versions() {
+    let fx = fixture("rt-about").await;
+    // The same session rule as the other read routes: 401 without one.
+    let (status, _) = fx.read("/api/v1/about", &fx.anonymous).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // Any signed-in user reads it, user or admin.
+    for who in [&fx.owner, &fx.admin] {
+        let (status, body) = fx.read("/api/v1/about", who).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "dockward": env!("CARGO_PKG_VERSION"),
+                "trivy": "v0.76.2",
+                "grype": "v0.121.3",
+            })
+        );
+    }
+}

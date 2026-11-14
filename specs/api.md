@@ -141,6 +141,12 @@ Decided (2026-11-08, #243): the purge ignores the page's `status` and `source_id
 | --- | --- | --- | --- | --- |
 | GET | `/api/v1/dashboard/summary` | session | yes | `{"open_cves","fixed_cves","accepted_cves","open_issues","failed_syncs","recent_syncs"}` (`services/dashboard.rs`). Admin may add `scope=all`. Counts follow the newest scanned digest of each source ([cve-lifecycle.md](cve-lifecycle.md)). |
 
+## About
+
+| Method | Path | Auth | Built | Notes |
+| --- | --- | --- | --- | --- |
+| GET | `/api/v1/about` | session | yes | `{"dockward","trivy","grype"}` (`api/about.rs`, `services/about.rs`). `dockward` is the backend's `CARGO_PKG_VERSION`. `trivy` and `grype` are `vX.Y.Z` strings read once at startup by running `/usr/local/bin/trivy --version` and `/usr/local/bin/grype version`, or `null` when a read failed. Each read has a 5 second timeout, an empty environment but the scanner allow-list, and no stdin. Only the binary name and the outcome are logged, never the output. A failed read never stops startup (#388). |
+
 ## CVEs
 
 `{id}` is `<source_id>:<cve_id>`, URL-encoded. A CVE is listed for its source's newest image only. A CVE open only on an older tag is not in the list.

@@ -140,6 +140,7 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
         .route("/api/v1/jobs/{id}", get(api::jobs::get))
         .route("/api/v1/jobs/{id}/log", get(api::jobs::log))
         .route("/api/v1/jobs/{id}/retry", post(api::jobs::retry))
+        .route("/api/v1/about", get(api::about::get))
         .route("/api/v1/dashboard/summary", get(api::dashboard::summary))
         .route("/api/v1/cves", get(api::cves::list))
         .route("/api/v1/cves/{id}", get(api::cves::get))
@@ -636,6 +637,8 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
             5,
             std::time::Duration::from_secs(15 * 60),
         ),
+        // A scanner version that cannot be read is null, and startup goes on.
+        about: Arc::new(services::about::About::read_bundled(&settings.data_dir).await),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -931,6 +934,11 @@ pub(crate) mod tests {
                 5,
                 std::time::Duration::from_secs(15 * 60),
             ),
+            about: std::sync::Arc::new(crate::services::about::About {
+                dockward: env!("CARGO_PKG_VERSION").to_owned(),
+                trivy: Some("v0.0.1".to_owned()),
+                grype: None,
+            }),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -1001,6 +1009,11 @@ pub(crate) mod tests {
                 5,
                 std::time::Duration::from_secs(15 * 60),
             ),
+            about: std::sync::Arc::new(crate::services::about::About {
+                dockward: env!("CARGO_PKG_VERSION").to_owned(),
+                trivy: Some("v0.76.2".to_owned()),
+                grype: Some("v0.121.3".to_owned()),
+            }),
         };
         (app(Vec::new(), state), pool, dir)
     }

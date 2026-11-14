@@ -56,4 +56,7 @@ pub struct AppState {
     /// attempt in the window is refused and the lockout is audited. Held in memory, so a restart
     /// clears it (`specs/security.md`, "Two-factor sign-in (TOTP)").
     pub totp_limiter: RateLimiter,
+    /// The dockward version and the bundled scanner versions, read once at startup
+    /// (`specs/api.md`, About).
+    pub about: Arc<crate::services::about::About>,
 }

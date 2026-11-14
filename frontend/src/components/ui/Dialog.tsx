@@ -14,6 +14,9 @@ interface DialogProps {
   // false hides the close button and ignores Escape and outside clicks, for a step
   // that shows a value only once. The caller must offer its own way to finish.
   dismissible?: boolean;
+  // Called when the dialog has closed and focus is about to move. A dialog that is opened by a
+  // control outside Radix's Trigger uses it to put focus back on that control.
+  onCloseAutoFocus?: (event: Event) => void;
 }
 
 const WIDTH = {
@@ -29,6 +32,7 @@ export function Dialog({
   children,
   size = "default",
   dismissible = true,
+  onCloseAutoFocus,
 }: DialogProps) {
   return (
     <RadixDialog.Root open={open} onOpenChange={(next) => (dismissible || next ? onOpenChange(next) : undefined)}>
@@ -42,6 +46,7 @@ export function Dialog({
                 onPointerDownOutside: (event: Event) => event.preventDefault(),
                 onInteractOutside: (event: Event) => event.preventDefault(),
               })}
+          {...(onCloseAutoFocus === undefined ? {} : { onCloseAutoFocus })}
           {...(description === undefined ? { "aria-describedby": undefined } : {})}
           className={`fixed top-1/2 left-1/2 z-50 flex max-h-[90vh] ${WIDTH[size]} -translate-x-1/2 -translate-y-1/2 flex-col gap-4 overflow-y-auto rounded-xl border border-border bg-surface p-6`}
         >

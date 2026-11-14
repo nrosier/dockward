@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>About dialog: design for approval (#388)</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background: #f4f4f5; margin: 0; padding: 32px; color: #18181b; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .note { font-size: 13px; color: #52525b; margin-bottom: 24px; max-width: 640px; }
+  .header { background: #fff; border-bottom: 1px solid #e4e4e7; padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; max-width: 640px; border-radius: 8px 8px 0 0; }
+  .header .brand { font-weight: 600; }
+  .header .version { font-family: ui-monospace, monospace; font-size: 12px; color: #52525b; text-decoration: underline; cursor: pointer; }
+  .scrim { background: rgba(0,0,0,.35); padding: 24px; max-width: 640px; border-radius: 0 0 8px 8px; }
+  .dialog { background: #fff; border-radius: 10px; width: 100%; box-sizing: border-box; padding: 20px 22px; box-shadow: 0 10px 30px rgba(0,0,0,.2); }
+  .dialog h2 { font-size: 16px; margin: 0 0 2px; }
+  .sub { font-size: 12px; color: #52525b; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 16px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #e4e4e7; vertical-align: top; }
+  th { font-weight: 600; color: #52525b; width: 34%; }
+  td.mono { font-family: ui-monospace, monospace; }
+  .section { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: #52525b; margin: 16px 0 6px; }
+  .licence { font-size: 12px; color: #3f3f46; background: #fafafa; border: 1px solid #e4e4e7; border-radius: 6px; padding: 10px; max-height: 96px; overflow: hidden; }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  .btn { font-size: 13px; padding: 7px 14px; border-radius: 6px; border: 1px solid #d4d4d8; background: #fff; }
+  .btn.primary { background: #18181b; color: #fff; border-color: #18181b; }
+  .unknown { color: #a16207; }
+  .spec { margin-top: 28px; font-size: 12px; color: #52525b; max-width: 640px; }
+  .spec li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<h1>About dialog: design for approval</h1>
+<p class="note">Issue #388. Nothing is built until you approve this layout and wording. The version in the header becomes a button that opens the dialog.</p>
+
+<div class="header">
+  <span class="brand">dockward</span>
+  <span class="version" role="button" tabindex="0">v0.8.0</span>
+</div>
+
+<div class="scrim">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="about-title">
+    <h2 id="about-title">About dockward</h2>
+    <div class="sub">Version 0.8.0 · MIT License</div>
+
+    <table>
+      <tr><th>dockward</th><td class="mono">0.8.0</td></tr>
+      <tr><th>Trivy (bundled)</th><td class="mono">v0.76.2</td></tr>
+      <tr><th>Grype (bundled)</th><td class="mono">v0.121.3</td></tr>
+    </table>
+
+    <div class="section">Licences</div>
+    <table>
+      <tr><th>dockward</th><td>MIT License. Copyright (c) 2026 Nick Rosier. <span class="mono">[full text]</span></td></tr>
+      <tr><th>Trivy</th><td>Apache License 2.0. Notice text bundled in the image. <span class="mono">[full text]</span></td></tr>
+      <tr><th>Grype</th><td>Apache License 2.0. Notice text bundled in the image. <span class="mono">[full text]</span></td></tr>
+    </table>
+
+    <div class="section">Licence text (MIT, shown when [full text] is opened)</div>
+    <div class="licence">Permission is hereby granted, free of charge, to any person obtaining a copy of this software ... THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND ...</div>
+
+    <div class="actions">
+      <button class="btn primary">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="spec">
+  <strong>Behaviour (for review)</strong>
+  <ul>
+    <li>Opened by clicking the header version. Closes with Escape, the Close button, or a click outside. Focus returns to the version button on close.</li>
+    <li>Scanner versions come from the backend, read at startup from the bundled binaries. If a read fails, the row shows <span class="unknown">unknown</span> and startup continues.</li>
+    <li>Licence texts are read from files in the image. The Trivy and Grype rows link to their full text in the same dialog, not an external site, so it works offline.</li>
+    <li>Every label and value is a catalog key in <code>en.json</code>. The dockward and scanner version rows use the same monospace style as the header.</li>
+  </ul>
+  <strong>Open questions for you</strong>
+  <ul>
+    <li>The dialog shows full licence text in-place for all three. Should the Trivy and Grype texts be shown in full too, or only linked from a notice file?</li>
+    <li>Is the wording above acceptable?</li>
+  </ul>
+</div>
+</body>
+</html>

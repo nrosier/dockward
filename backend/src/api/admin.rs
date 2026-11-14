@@ -625,6 +625,11 @@ pub(crate) mod test_support {
                 5,
                 std::time::Duration::from_secs(15 * 60),
             ),
+            about: std::sync::Arc::new(crate::services::about::About {
+                dockward: env!("CARGO_PKG_VERSION").to_owned(),
+                trivy: Some("v0.0.1".to_owned()),
+                grype: None,
+            }),
         };
         (state, dir)
     }
@@ -854,6 +859,11 @@ mod tests {
                 5,
                 std::time::Duration::from_secs(15 * 60),
             ),
+            about: std::sync::Arc::new(crate::services::about::About {
+                dockward: env!("CARGO_PKG_VERSION").to_owned(),
+                trivy: Some("v0.0.1".to_owned()),
+                grype: None,
+            }),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }
