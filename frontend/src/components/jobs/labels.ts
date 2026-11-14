@@ -44,8 +44,16 @@ export function jobSubject(job: Job): string {
       const digest = job.image.digest;
       return digest === null ? t("jobs.subject.pulledPlain") : t("jobs.subject.pulled", { image: shortDigest(digest) });
     }
-    case "scan":
+    case "scan": {
+      // The jobs API sets `scanner` on db_update jobs only today; a scan job that carries one names it.
+      const scanner = scannerLabel(job.scanner);
+      if (scanner !== null) {
+        return image === null
+          ? t("jobs.subject.scannedPlainWith", { scanner })
+          : t("jobs.subject.scannedWith", { scanner, image });
+      }
       return image === null ? t("jobs.subject.scannedPlain") : t("jobs.subject.scanned", { image });
+    }
     case "discover": {
       const repo = job.image.repo_full_name;
       return repo === null ? t("jobs.subject.discoveryPlain") : t("jobs.subject.discovery", { repo });

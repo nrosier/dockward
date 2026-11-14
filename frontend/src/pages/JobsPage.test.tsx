@@ -2,6 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatDateTime } from "../components/jobs/dates";
+import { jobSubject } from "../components/jobs/labels";
 import { t } from "../i18n";
 import { json, renderAt, stubApi, user } from "../test/render";
 import type { Job } from "../types/api";
@@ -65,6 +66,36 @@ describe("JobsPage", () => {
     ]);
     renderAt(<JobsPage />);
     expect(await screen.findByText(t("jobs.scanner.refreshes", { scanner: t("jobs.scanner.grype") }))).toBeInTheDocument();
+  });
+
+  it("each_row_shows_what_the_job_does_under_the_image", async () => {
+    const base: Job = { ...failed, last_error: null, status: "done" };
+    const image = { repo_full_name: "ghcr.io/team/app", tag: "1.2", digest: "sha256:9f2c41e0aabbccdd" };
+    const none = { repo_full_name: null, tag: null, digest: null };
+    stub([
+      { ...base, id: "a1", kind: "pull", image },
+      { ...base, id: "a2", kind: "scan", scanner: "trivy", image },
+      { ...base, id: "a3", kind: "scan", scanner: "grype", image },
+      { ...base, id: "a4", kind: "db_update", scanner: "trivy", image: none },
+      { ...base, id: "a5", kind: "db_update", scanner: "grype", image: none },
+      { ...base, id: "a6", kind: "publish", image },
+      { ...base, id: "a7", kind: null, image: none },
+    ]);
+    renderAt(<JobsPage />);
+    expect(await screen.findByText("New image pulled: ghcr.io/team/app:1.2")).toBeInTheDocument();
+    expect(screen.getByText("Vulnerability scan with Trivy: ghcr.io/team/app:1.2")).toBeInTheDocument();
+    expect(screen.getByText("Vulnerability scan with Grype: ghcr.io/team/app:1.2")).toBeInTheDocument();
+    expect(screen.getByText("Vulnerability DB update (Trivy)")).toBeInTheDocument();
+    expect(screen.getByText("Vulnerability DB update (Grype)")).toBeInTheDocument();
+    expect(screen.getByText("Publish to GitHub: ghcr.io/team/app:1.2")).toBeInTheDocument();
+    expect(screen.getByText(t("jobs.subject.unknown"))).toBeInTheDocument();
+  });
+
+  it("jobs_page_and_dashboard_use_the_same_subject_text", async () => {
+    const same: Job = { ...failed, kind: "publish", status: "done", last_error: null };
+    stub([same]);
+    renderAt(<JobsPage />);
+    expect(await screen.findByText(jobSubject(same))).toBeInTheDocument();
   });
 
   it("hide_empty_is_off_by_default", async () => {

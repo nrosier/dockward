@@ -40,6 +40,14 @@ describe("jobSubject", () => {
     ).toBe("New image pulled: sha256:9f2c41e0");
     expect(jobSubject(job({ kind: "scan", image }))).toBe("Vulnerability scan: ghcr.io/team/app:1.2");
     expect(jobSubject(job({ kind: "scan" }))).toBe("Vulnerability scan");
+    expect(jobSubject(job({ kind: "scan", scanner: "trivy", image }))).toBe(
+      "Vulnerability scan with Trivy: ghcr.io/team/app:1.2",
+    );
+    expect(jobSubject(job({ kind: "scan", scanner: "grype", image }))).toBe(
+      "Vulnerability scan with Grype: ghcr.io/team/app:1.2",
+    );
+    expect(jobSubject(job({ kind: "scan", scanner: "grype" }))).toBe("Vulnerability scan with Grype");
+    expect(jobSubject(job({ kind: null }))).toBe("Background job");
     expect(jobSubject(job({ kind: "discover", image: { ...image, tag: null } }))).toBe("Discovery: ghcr.io/team/app");
     expect(jobSubject(job({ kind: "discover" }))).toBe("Discovery");
     expect(jobSubject(job({ kind: "publish", image }))).toBe("Publish to GitHub: ghcr.io/team/app:1.2");

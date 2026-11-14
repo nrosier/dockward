@@ -9,7 +9,7 @@ import { TableScroll } from "../components/mappings/TableScroll";
 import { useScopeAll } from "../components/mappings/useMappings";
 import { ImageCell } from "../components/jobs/ImageCell";
 import { JobStatusPill } from "../components/jobs/jobPill";
-import { newVulnsText, noteText, triggerLabel } from "../components/jobs/labels";
+import { jobSubject, newVulnsText, noteText, triggerLabel } from "../components/jobs/labels";
 import { PurgeFailed } from "../components/jobs/PurgeFailed";
 import { RetryButton } from "../components/jobs/RetryButton";
 import { formatDateTime } from "../components/jobs/dates";
@@ -202,6 +202,7 @@ export default function JobsPage() {
                       <tr>
                         <td className={TD}>
                           <ImageCell job={job} />
+                          <div className="mt-1 text-[12.5px] text-muted">{jobSubject(job)}</div>
                           {newVulns === null ? null : <div className="mt-1 text-[12.5px]">{newVulns}</div>}
                           {source === undefined ? null : (
                             <div className="mt-1 text-[12.5px] text-muted">{source.name ?? source.repository}</div>

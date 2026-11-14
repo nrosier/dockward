@@ -113,6 +113,10 @@ The routes are in `frontend/src/routes.tsx`. This is the built map:
 - Status: the Sources list and form are built (`frontend/src/pages/SourcesPage.tsx`, `SourceFormPage.tsx`). The design is the Harbor mapping design, reused with no new visual, as decision 51 allows. The user reviews and approves it in the browser before release.
 - Removed (spinoff, decision 1): the Harbor project and repository pickers, the project webhook proposal, the scheduled scan card, the Scans card and its scanner switch states, and the Harbor source columns.
 
+## Jobs page: action line (#407)
+
+Decided (2026-11-14, #407): each Jobs row shows what the job does as a muted small line under the image name in the Image cell, using `jobSubject` (`frontend/src/components/jobs/labels.ts`), the same function the dashboard uses, so both pages show the same wording. A scan job that carries a scanner names it; a database refresh names the scanner it refreshed; a job with no known kind shows `jobs.subject.unknown`, never an empty line. The table columns do not change, the line wraps inside the cell, and no new design is needed because the page structure is unchanged. Catalog keys: the existing `jobs.subject.*` keys, plus `jobs.subject.scannedWith` and `jobs.subject.scannedPlainWith`.
+
 ## Jobs page: purge failed jobs (#243)
 
 Decided (2026-11-08, user, #243, decisions 1 to 4; spinoff decision 58 renamed the page): the Jobs page has a "Purge failed jobs" button that deletes every failed job in one action, after a confirmation that shows the count. Rules: [api.md](api.md), "Purge failed jobs" (the route is `/api/v1/jobs/purge-failed`).
