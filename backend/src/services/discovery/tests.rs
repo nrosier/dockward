@@ -1001,6 +1001,54 @@ async fn a_tag_moved_to_a_scanned_digest_queues_one_rescan_per_scanner() {
     assert_eq!(scan_triggers(&env).await.len(), 2);
 }
 
+/// #391: running discovery again for a tag already moved to a scanned digest adds no scan job,
+/// whether the first rescan jobs are still waiting or have finished.
+#[tokio::test]
+async fn a_second_discovery_of_a_moved_tag_queues_no_duplicate_rescan() {
+    let env = env("moved-no-dup").await;
+    env.add_source("s1", REPO, "latest").await;
+    set_tags(&env.script, REPO, &["latest", "other"]);
+    let a = put_single(&env.script, REPO, "other", "amd64", "a");
+    put_single(&env.script, REPO, "latest", "amd64", "b");
+    env.add_source("s2", REPO, "other").await;
+    assert_eq!(env.run(REPO, NOW).await.queued, 2);
+    store_platforms(&env, &a).await;
+    store_platforms(&env, &digest_of_latest(&env).await).await;
+    env.script.route(
+        &format!("/v2/{REPO}/manifests/latest"),
+        env.script
+            .reply_for(&format!("/v2/{REPO}/manifests/other"))
+            .unwrap(),
+    );
+    env.run(REPO, NOW + 3600).await;
+    let active = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM jobs WHERE json_extract(payload, '$.kind') = 'scan'
+             AND json_extract(payload, '$.trigger') = 'tag_moved'
+             AND status IN ('queued', 'running')",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .unwrap()
+    };
+    let before = active().await;
+    assert_eq!(before, 2);
+
+    // A second discovery while the rescans wait.
+    env.run(REPO, NOW + 7200).await;
+    assert_eq!(active().await, before);
+    assert_eq!(scan_triggers(&env).await, vec!["tag_moved"; 2]);
+
+    // And after they finished: the tag is already on that digest, so nothing is queued.
+    sqlx::query("UPDATE jobs SET status = 'done' WHERE json_extract(payload, '$.kind') = 'scan'")
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    env.run(REPO, NOW + 10800).await;
+    assert_eq!(active().await, 0);
+    assert_eq!(scan_triggers(&env).await, vec!["tag_moved"; 2]);
+}
+
 async fn digest_of_latest(env: &Env) -> String {
     sqlx::query_scalar("SELECT i.digest FROM images i JOIN tag_observations o ON o.image_id = i.id WHERE o.tag = 'latest'")
         .fetch_one(&env.pool)

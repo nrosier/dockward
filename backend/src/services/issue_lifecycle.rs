@@ -2795,6 +2795,43 @@ mod tests {
         assert_eq!(patched.matches("Found by ").count(), 1);
     }
 
+    /// #391: a tag moved to a new digest and rescanned (`tag_moved` runs) gets an issue body with
+    /// the `Found by` line, naming the scanners of the new digest's runs.
+    #[tokio::test]
+    async fn the_issue_body_carries_found_by_after_a_moved_tag_rescan() {
+        let fx = Fixture::new("found-by-rescan", "CRITICAL", true).await;
+        // `v1` was on an old digest that was clean; it moves to a digest scanned earlier.
+        fx.report("v1", "sha256:old", 100).await;
+        fx.observe("v1", "sha256:new", 200).await;
+        // The rescan: both scanners finish on the new digest with `tag_moved` and report the CVE.
+        fx.scan_run("sha256:new", "grype", &[("CVE-2026-0001", "openssl")])
+            .await;
+        fx.scan_run("sha256:new", "trivy", &[("CVE-2026-0001", "openssl")])
+            .await;
+        sqlx::query(
+            "UPDATE scan_runs SET trigger = 'tag_moved' WHERE image_platform_id = 'plat-sha256:new'",
+        )
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        fx.finding("m1", "v1", "CVE-2026-0001", "CRITICAL", 210)
+            .await;
+
+        fx.reconcile("ghcr.io/o/app:v1").await;
+
+        let created = fx.github.creates();
+        assert_eq!(created.len(), 1);
+        let body = created[0]["body"].as_str().unwrap();
+        assert!(
+            body.lines().any(|line| line.starts_with("Found by ")),
+            "{body}"
+        );
+        assert!(
+            body.contains("\nFound by 2 scanners: `Grype`, `Trivy`\n"),
+            "{body}"
+        );
+    }
+
     /// d14: the issue stays open while an enabled scanner has no finished run for the newest
     /// image, and the fixed note is posted only when every enabled scanner has finished and none
     /// reports the CVE. The issue is never closed.
