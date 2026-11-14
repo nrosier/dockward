@@ -344,3 +344,17 @@ pub async fn insert_platform(
     .map_err(db_err)?;
     Ok(done.rows_affected() == 1)
 }
+
+/// The ids of every platform row of an image.
+pub async fn platform_ids_of_image(
+    conn: &mut SqliteConnection,
+    image_id: &str,
+) -> Result<Vec<String>, AppError> {
+    sqlx::query_scalar!(
+        r#"SELECT id AS "id!" FROM image_platforms WHERE image_id = ? ORDER BY platform, id"#,
+        image_id
+    )
+    .fetch_all(conn)
+    .await
+    .map_err(db_err)
+}

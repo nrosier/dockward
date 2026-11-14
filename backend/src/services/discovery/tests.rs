@@ -939,3 +939,93 @@ async fn a_discovery_with_no_new_tags_is_recorded_as_empty() {
         JobOutcome::DoneEmpty(None)
     );
 }
+
+/// Marks every platform of the image `digest` as stored, as a finished pull does.
+async fn store_platforms(env: &Env, digest: &str) {
+    sqlx::query(
+        "UPDATE image_platforms SET state = 'stored', pulled_at = 1
+         WHERE image_id = (SELECT id FROM images WHERE digest = ?)",
+    )
+    .bind(digest)
+    .execute(&env.pool)
+    .await
+    .unwrap();
+}
+
+async fn scan_triggers(env: &Env) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT json_extract(payload, '$.trigger') FROM jobs
+         WHERE json_extract(payload, '$.kind') = 'scan' ORDER BY rowid",
+    )
+    .fetch_all(&env.pool)
+    .await
+    .unwrap()
+}
+
+/// #391: a tag that moves back to a digest already stored queues a scan of it, once.
+#[tokio::test]
+async fn a_tag_moved_to_a_scanned_digest_queues_one_rescan_per_scanner() {
+    let env = env("moved-rescan").await;
+    env.add_source("s1", REPO, "latest").await;
+    set_tags(&env.script, REPO, &["latest", "other"]);
+    // `other` reaches digest A first; `latest` is on B.
+    let a = put_single(&env.script, REPO, "other", "amd64", "a");
+    put_single(&env.script, REPO, "latest", "amd64", "b");
+    env.add_source("s2", REPO, "other").await;
+    assert_eq!(env.run(REPO, NOW).await.queued, 2);
+    store_platforms(&env, &a).await;
+    store_platforms(&env, &digest_of_latest(&env).await).await;
+    assert!(scan_triggers(&env).await.is_empty());
+
+    // `latest` moves to A, which is known: no pull, but a scan per enabled scanner.
+    env.script.route(
+        &format!("/v2/{REPO}/manifests/latest"),
+        env.script
+            .reply_for(&format!("/v2/{REPO}/manifests/other"))
+            .unwrap(),
+    );
+    let report = env.run(REPO, NOW + 3600).await;
+    assert_eq!(report.queued, 0, "no pull job for a known digest");
+    assert_eq!(env.pulls().await, 2);
+    assert_eq!(scan_triggers(&env).await, vec!["tag_moved"; 2]);
+    let source: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT source_id FROM jobs WHERE json_extract(payload, '$.kind') = 'scan'",
+    )
+    .fetch_all(&env.pool)
+    .await
+    .unwrap();
+    assert!(source.iter().all(|s| s.as_deref() == Some("s1")));
+
+    // A second discovery of the same digest queues nothing more.
+    env.run(REPO, NOW + 7200).await;
+    assert_eq!(scan_triggers(&env).await.len(), 2);
+}
+
+async fn digest_of_latest(env: &Env) -> String {
+    sqlx::query_scalar("SELECT i.digest FROM images i JOIN tag_observations o ON o.image_id = i.id WHERE o.tag = 'latest'")
+        .fetch_one(&env.pool)
+        .await
+        .unwrap()
+}
+
+/// #391: a tag moved to a digest whose pull has not finished queues no scan: the pull job does.
+#[tokio::test]
+async fn a_tag_moved_to_an_unstored_digest_queues_no_scan_beside_the_pull() {
+    let env = env("moved-unstored").await;
+    env.add_source("s1", REPO, "*").await;
+    set_tags(&env.script, REPO, &["latest", "other"]);
+    let a = put_single(&env.script, REPO, "other", "amd64", "a");
+    put_single(&env.script, REPO, "latest", "amd64", "b");
+    assert_eq!(env.run(REPO, NOW).await.queued, 2);
+    // Digest A is still `queued` (not pulled). `latest` moves to it.
+    env.script.route(
+        &format!("/v2/{REPO}/manifests/latest"),
+        env.script
+            .reply_for(&format!("/v2/{REPO}/manifests/other"))
+            .unwrap(),
+    );
+    let _ = a;
+    assert_eq!(env.run(REPO, NOW + 3600).await.queued, 0);
+    assert_eq!(env.pulls().await, 2, "no duplicate pull job");
+    assert!(scan_triggers(&env).await.is_empty());
+}
