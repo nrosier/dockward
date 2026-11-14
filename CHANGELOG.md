@@ -4,6 +4,9 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+### Changed
+- The Jobs page shows what each job does as a muted line under the image, with the same wording as the dashboard (`jobSubject`). A scan names its scanner and a database refresh names the scanner it refreshed (#407).
+
 ## 0.9.0 - 2026-11-14
 
 ### Changed

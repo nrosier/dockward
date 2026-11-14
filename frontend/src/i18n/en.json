@@ -672,6 +672,8 @@
   "jobs.subject.pulledPlain": "New image pulled",
   "jobs.subject.scanned": "Vulnerability scan: {image}",
   "jobs.subject.scannedPlain": "Vulnerability scan",
+  "jobs.subject.scannedWith": "Vulnerability scan with {scanner}: {image}",
+  "jobs.subject.scannedPlainWith": "Vulnerability scan with {scanner}",
   "jobs.subject.discovery": "Discovery: {repo}",
   "jobs.subject.discoveryPlain": "Discovery",
   "jobs.subject.published": "Publish to GitHub: {image}",
