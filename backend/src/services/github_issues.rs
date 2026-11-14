@@ -191,7 +191,39 @@ fn fenced(text: &str) -> String {
         }
     }
     let fence = "`".repeat((longest + 1).max(3));
-    format!("{fence}text\n{text}\n{fence}\n")
+    let wrapped = wrap(text, DESCRIPTION_WIDTH);
+    format!("{fence}text\n{wrapped}\n{fence}\n")
+}
+
+/// The width, in characters, a new issue's description is wrapped at inside its fence.
+const DESCRIPTION_WIDTH: usize = 80;
+
+/// Hard-wraps `text` at `width` characters (not bytes). Each existing line is wrapped on its own,
+/// so a line break in the text stays. A line longer than `width` breaks at its last space that
+/// leaves at most `width` characters before it, and that space becomes the line break. A line
+/// with no such space is split at `width`, so a long word is cut and nothing is added or lost.
+fn wrap(text: &str, width: usize) -> String {
+    let width = width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    for line in text.split('\n') {
+        let chars: Vec<char> = line.chars().collect();
+        let mut start = 0;
+        while chars.len() - start > width {
+            let window = &chars[start..=start + width];
+            match window.iter().rposition(|c| *c == ' ').filter(|p| *p > 0) {
+                Some(p) => {
+                    out.push(chars[start..start + p].iter().collect());
+                    start += p + 1;
+                }
+                None => {
+                    out.push(chars[start..start + width].iter().collect());
+                    start += width;
+                }
+            }
+        }
+        out.push(chars[start..].iter().collect());
+    }
+    out.join("\n")
 }
 
 /// Makes a value safe inside one Markdown table cell: no pipe and no line break.
@@ -1253,8 +1285,100 @@ mod tests {
         );
         assert!(body.contains("A flaw ``` @bob"));
         assert!(body.contains("````text\n"));
+        let long = "word ".repeat(40);
+        let wrapped = issue_body("CVE-2026-1", "HIGH", "p", None, "a/b", Some(&long));
+        let fence_lines: Vec<&str> = wrapped
+            .split("```text\n")
+            .nth(1)
+            .unwrap()
+            .split("\n```")
+            .next()
+            .unwrap()
+            .split('\n')
+            .collect();
+        assert!(fence_lines.len() > 1);
+        assert!(fence_lines.iter().all(|l| l.chars().count() <= 80));
         let none = issue_body("CVE-2026-1", "HIGH", "p", None, "a/b", Some(""));
         assert!(!none.contains("Description"));
+    }
+
+    #[test]
+    fn wrap_breaks_a_long_description_at_spaces_within_80_characters() {
+        let text = (1..=60)
+            .map(|n| format!("word{n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let wrapped = wrap(&text, 80);
+        assert!(wrapped.contains('\n'));
+        for line in wrapped.split('\n') {
+            assert!(line.chars().count() <= 80, "{line}");
+            assert!(!line.starts_with(' ') && !line.ends_with(' '));
+        }
+        // Each break replaced exactly one space, so nothing is added or lost.
+        assert_eq!(wrapped.replace('\n', " "), text);
+        // A short text and its own line breaks are kept.
+        assert_eq!(wrap("short\ntext", 80), "short\ntext");
+        let exact = "a".repeat(80);
+        assert_eq!(wrap(&exact, 80), exact);
+    }
+
+    #[test]
+    fn wrap_splits_a_word_longer_than_the_width() {
+        let word = "x".repeat(200);
+        let wrapped = wrap(&word, 80);
+        let lines: Vec<&str> = wrapped.split('\n').collect();
+        assert_eq!(
+            lines.iter().map(|l| l.chars().count()).collect::<Vec<_>>(),
+            vec![80, 80, 40]
+        );
+        assert_eq!(wrapped.replace('\n', ""), word);
+        // A long word after a short one: the space is the break, then the word is split.
+        let mixed = format!("see {word}");
+        let wrapped = wrap(&mixed, 80);
+        assert_eq!(wrapped.split('\n').next(), Some("see"));
+        assert_eq!(wrapped.replace('\n', ""), mixed.replacen(' ', "", 1));
+    }
+
+    #[test]
+    fn wrap_counts_characters_and_never_splits_one() {
+        let text = "é".repeat(100);
+        let wrapped = wrap(&text, 80);
+        assert_eq!(wrapped.split('\n').next().unwrap().chars().count(), 80);
+        assert_eq!(wrapped.replace('\n', ""), text);
+        let words = "日本語 ".repeat(40);
+        let wrapped = wrap(words.trim_end(), 80);
+        assert!(wrapped.split('\n').all(|l| l.chars().count() <= 80));
+        assert_eq!(wrapped.replace('\n', " "), words.trim_end());
+    }
+
+    #[test]
+    fn a_wrapped_description_keeps_the_longer_fence() {
+        let text = format!("{} ```` {}", "a ".repeat(30), "b ".repeat(30));
+        let body = issue_body("CVE-2026-1", "HIGH", "p", None, "a/b", Some(&text));
+        assert!(body.contains("`````text\n"));
+        assert!(body.ends_with("\n`````\n"));
+        let inner = body
+            .split("`````text\n")
+            .nth(1)
+            .unwrap()
+            .trim_end_matches("\n`````\n");
+        assert_eq!(inner.replace('\n', " "), text.trim());
+    }
+
+    #[test]
+    fn a_wrapped_body_still_gets_its_found_by_line_replaced() {
+        let description = "overflow ".repeat(40);
+        let body = issue_body("CVE-2026-1", "HIGH", "p", None, "a/b", Some(&description));
+        let one = with_found_by(&body, "Found by 1 scanner: `Trivy`").unwrap();
+        let two = with_found_by(&one, "Found by 2 scanners: `Grype`, `Trivy`").unwrap();
+        assert_eq!(two.matches("Found by ").count(), 1);
+        assert!(two.contains("Found by 2 scanners: `Grype`, `Trivy`"));
+        assert!(two.contains("overflow overflow overflow"));
+        assert!(
+            with_severity(&two, "LOW")
+                .unwrap()
+                .contains("| Severity | LOW |")
+        );
     }
 
     #[test]
