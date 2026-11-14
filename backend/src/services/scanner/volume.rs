@@ -15,8 +15,10 @@
 //! holding the version text; it is replaced by writing a temporary file and renaming it, so a
 //! rollback is a pointer change and never moves a binary.
 //!
-//! Phase 1 places no binary here: downloading and verifying one is phase 2. This module holds no
-//! database code and logs nothing; its callers log the scanner key and the version only.
+//! A binary is placed here only by [`super::install`] (#403), after its checksum and Sigstore
+//! bundle verified; the staging folder `scanners/<scanner>/.install` exists only while an install
+//! runs. This module holds no database code and logs nothing; its callers log the scanner key and
+//! the version only.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -154,8 +156,6 @@ impl ScannerVolume {
     /// so a later [`Self::rollback`] returns to it. A further update replaces the previous one:
     /// the folder of the version that drops out of both pointers is deleted. The binary of
     /// `version` must already be in place. Recording the version already in use changes nothing.
-    // Phase 2 (download and verification, #390) installs a version through this.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn record_current(&self, scanner: Scanner, version: Version) -> Result<(), AppError> {
         if !self.has_binary(scanner, version) {
             return Err(AppError::NotFound);
@@ -181,8 +181,6 @@ impl ScannerVolume {
     /// Switches the current pointer to the previous version, and the old current one becomes the
     /// previous one, so a second rollback goes back. Returns the version now in use.
     /// [`AppError::NotFound`] when no previous version with a binary is kept.
-    // Phase 2 and the UI phase (#390) expose this as an admin action.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn rollback(&self, scanner: Scanner) -> Result<Version, AppError> {
         let Some(previous) = self.read(scanner, Slot::Previous).version() else {
             return Err(AppError::NotFound);
@@ -202,7 +200,6 @@ impl ScannerVolume {
     }
 
     /// Removes a pointer. A missing pointer is fine.
-    #[cfg_attr(not(test), allow(dead_code))]
     fn clear(&self, scanner: Scanner, slot: Slot) -> Result<(), AppError> {
         match std::fs::remove_file(self.scanner_dir(scanner).join(slot.file_name())) {
             Ok(()) => Ok(()),
@@ -212,7 +209,6 @@ impl ScannerVolume {
     }
 
     /// Deletes the folder of one version. A missing folder is fine.
-    #[cfg_attr(not(test), allow(dead_code))]
     fn remove_version(&self, scanner: Scanner, version: Version) -> Result<(), AppError> {
         remove_dir(&self.version_dir(scanner, version))
     }

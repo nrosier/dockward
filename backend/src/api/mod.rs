@@ -19,6 +19,7 @@ pub mod oidc;
 mod route_tests;
 pub mod scan;
 pub mod scan_settings;
+pub mod scanners;
 pub mod sources;
 #[allow(dead_code)] // Shared by the extractor and the routes.
 pub mod state;

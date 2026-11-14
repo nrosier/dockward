@@ -62,4 +62,10 @@ pub struct AppState {
     /// The live scanner selection: the bundled binaries or a newer downloaded one, and a
     /// downloaded version marked broken (#390). Shared with the scan job.
     pub scanner_programs: Arc<crate::services::scanner::selection::ScannerPrograms>,
+    /// Downloads, verifies and installs a scanner on an admin's request, and rolls back (#403).
+    /// Shares `scanner_programs`, so an install changes what the next scan runs.
+    pub scanner_installer: Arc<crate::services::scanner::install::Installer>,
+    /// Scanner installs: 6 per scanner per hour, held in memory (#403). Each one downloads
+    /// tens of MB.
+    pub scanner_install_limiter: RateLimiter,
 }

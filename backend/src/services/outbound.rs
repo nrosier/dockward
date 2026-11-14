@@ -36,10 +36,19 @@ pub enum TargetClass {
     /// `api.github.com` only ([`SCANNER_RELEASE_HOST`]). No token is sent, the configured GitHub
     /// base URL is ignored, and there is no opt-out.
     ScannerRelease,
+    /// The scanner release assets (#403): the archive, the checksums file and its Sigstore
+    /// bundle, from `github.com` and the host its release downloads redirect to
+    /// ([`SCANNER_DOWNLOAD_HOSTS`]). No token is sent and there is no opt-out.
+    ScannerDownload,
 }
 
 /// The only host the [`TargetClass::ScannerRelease`] client may reach.
 pub const SCANNER_RELEASE_HOST: &str = "api.github.com";
+
+/// The only hosts the [`TargetClass::ScannerDownload`] client may reach. Verified 2026-11-14:
+/// `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>` answers `302` with a
+/// `Location` on `release-assets.githubusercontent.com`.
+pub const SCANNER_DOWNLOAD_HOSTS: &[&str] = &["github.com", "release-assets.githubusercontent.com"];
 
 /// Errors from the outbound layer. Messages are fixed text and never include the URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,8 +216,8 @@ pub struct OutboundClient {
     allow_private: bool,
     /// Set for the GitHub client: the live configured GitHub URLs.
     github: Option<GithubTarget>,
-    /// Set for a class limited to one fixed host: any other host is refused before a request.
-    fixed_host: Option<&'static str>,
+    /// Set for a class limited to fixed hosts: any other host is refused before a request.
+    fixed_hosts: Option<&'static [&'static str]>,
 }
 
 impl OutboundClient {
@@ -221,10 +230,10 @@ impl OutboundClient {
         {
             return require_https(url);
         }
-        if let Some(fixed) = self.fixed_host
+        if let Some(fixed) = self.fixed_hosts
             && !url
                 .host_str()
-                .is_some_and(|host| host.eq_ignore_ascii_case(fixed))
+                .is_some_and(|host| fixed.iter().any(|name| host.eq_ignore_ascii_case(name)))
         {
             return Err(OutboundError::HostNotAllowed);
         }
@@ -280,14 +289,15 @@ pub fn client(class: TargetClass, allow_private: bool) -> Result<OutboundClient,
         class,
         allow_private,
         github: None,
-        fixed_host: fixed_host_of(class),
+        fixed_hosts: fixed_hosts_of(class),
     })
 }
 
-/// The fixed host of a class that may reach one host only.
-fn fixed_host_of(class: TargetClass) -> Option<&'static str> {
+/// The fixed hosts of a class that may reach named hosts only.
+fn fixed_hosts_of(class: TargetClass) -> Option<&'static [&'static str]> {
     match class {
-        TargetClass::ScannerRelease => Some(SCANNER_RELEASE_HOST),
+        TargetClass::ScannerRelease => Some(&[SCANNER_RELEASE_HOST]),
+        TargetClass::ScannerDownload => Some(SCANNER_DOWNLOAD_HOSTS),
         TargetClass::Harbor
         | TargetClass::Oidc
         | TargetClass::Alerts
@@ -340,7 +350,7 @@ pub fn github_client(target: GithubTarget) -> Result<OutboundClient, OutboundErr
         class: TargetClass::GitHub,
         allow_private: false,
         github: Some(target),
-        fixed_host: None,
+        fixed_hosts: None,
     })
 }
 
@@ -383,7 +393,7 @@ pub fn client_trusting(
         allow_private,
         github: None,
         // A loopback test server stands in for the fixed host.
-        fixed_host: None,
+        fixed_hosts: None,
     })
 }
 
@@ -592,6 +602,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_scanner_download_client_reaches_the_release_asset_hosts_only() {
+        let client = match client(TargetClass::ScannerDownload, false) {
+            Ok(client) => client,
+            Err(err) => panic!("client: {err}"),
+        };
+        let url = |text: &str| match reqwest::Url::parse(text) {
+            Ok(url) => url,
+            Err(err) => panic!("url: {err}"),
+        };
+        for allowed in [
+            "https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_checksums.txt",
+            "https://release-assets.githubusercontent.com/github-production-release-asset/1/2",
+        ] {
+            assert!(client.get(&url(allowed)).is_ok(), "{allowed}");
+        }
+        for other in [
+            "https://api.github.com/repos/aquasecurity/trivy/releases/latest",
+            "https://objects.githubusercontent.com/x",
+            "https://github.com.evil.test/",
+            "https://evilgithub.com/",
+            "https://8.8.8.8/",
+        ] {
+            assert_eq!(
+                client.get(&url(other)).err(),
+                Some(OutboundError::HostNotAllowed),
+                "{other}"
+            );
+        }
+        assert_eq!(
+            client.get(&url("http://github.com/")).err(),
+            Some(OutboundError::NotHttps)
+        );
+    }
+
     #[tokio::test]
     async fn resolver_refuses_loopback_hostname() {
         // `localhost` resolves to loopback on every supported system. No network access is needed.
@@ -757,6 +802,15 @@ pub(crate) mod socket_tests {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
+        loopback_tls_server_bytes(move |head| handler(head).into_bytes()).await
+    }
+
+    /// Like [`loopback_tls_server_with`], but the response is raw bytes, so a test can serve a
+    /// binary body such as a gzip archive.
+    pub(crate) async fn loopback_tls_server_bytes<F>(handler: F) -> (u16, reqwest::Certificate)
+    where
+        F: Fn(&str) -> Vec<u8> + Send + Sync + 'static,
+    {
         let handler = StdArc::new(handler);
         let names = vec!["localhost".to_owned(), "127.0.0.1".to_owned()];
         let certified = match rcgen::generate_simple_self_signed(names) {
@@ -800,7 +854,7 @@ pub(crate) mod socket_tests {
                             }
                         }
                         let response = handler(&String::from_utf8_lossy(&head));
-                        let _ = tls.write_all(response.as_bytes()).await;
+                        let _ = tls.write_all(&response).await;
                         let _ = tls.shutdown().await;
                     }
                 });
