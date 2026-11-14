@@ -4,9 +4,15 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.9.1 - 2026-11-14
+
 ### Changed
+- Bundled scanners: Trivy v0.76.2, Grype v0.121.3 (unchanged from 0.9.0).
 - The Jobs page shows what each job does as a muted line under the image, with the same wording as the dashboard (`jobSubject`). A scan names its scanner and a database refresh names the scanner it refreshed (#407).
 - The jobs API returns `scanner` for a scan job as well as a database refresh job, so the Jobs page names the scanner on a scan row (#410).
+
+### Upgrade notes
+- No migration; the Jobs page and the jobs API change only.
 
 ## 0.9.0 - 2026-11-14
 
