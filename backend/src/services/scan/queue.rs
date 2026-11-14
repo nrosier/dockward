@@ -98,6 +98,41 @@ pub async fn queue_scans_in(
     only: Option<&str>,
     now: i64,
 ) -> Result<usize, AppError> {
+    let open_only = matches!(trigger, "db_update" | "manual");
+    queue_scans_with(conn, platform_id, source_id, trigger, only, open_only, now).await
+}
+
+/// Queues a rescan for a tag that moved to a digest already known (#391). The trigger is
+/// `tag_moved`, and only a scanner with a queued or running run for the platform is skipped:
+/// a digest scanned for another tag, even under `tag_moved`, is scanned again so the moved
+/// tag's findings are rebuilt. A digest not yet stored queues nothing (its pull job does it).
+pub async fn queue_moved_rescan_in(
+    conn: &mut SqliteConnection,
+    platform_id: &str,
+    source_id: &str,
+    now: i64,
+) -> Result<usize, AppError> {
+    queue_scans_with(
+        conn,
+        platform_id,
+        Some(source_id),
+        "tag_moved",
+        None,
+        true,
+        now,
+    )
+    .await
+}
+
+async fn queue_scans_with(
+    conn: &mut SqliteConnection,
+    platform_id: &str,
+    source_id: Option<&str>,
+    trigger: &str,
+    only: Option<&str>,
+    open_only: bool,
+    now: i64,
+) -> Result<usize, AppError> {
     if !TRIGGERS.contains(&trigger) {
         return Err(AppError::InternalError);
     }
@@ -113,7 +148,7 @@ pub async fn queue_scans_in(
     // A first pull or a moved tag is scanned once per platform and trigger. A database rescan
     // happens again after every newer database, and a forced scan whenever the user asks, so
     // both skip only a scanner whose run is still waiting or running.
-    let known = if matches!(trigger, "db_update" | "manual") {
+    let known = if open_only {
         db::scanners_with_open_run(conn, platform_id).await?
     } else {
         db::scanners_with_run(conn, platform_id, trigger).await?

@@ -613,6 +613,22 @@ impl Discovery {
                 db::touch_observation(&mut tx, &item.source_id, &item.tag, &image_id, now).await?;
             }
             if !added {
+                // A tag that moved to a digest already known keeps no stale findings (#391):
+                // each stored platform is scanned again for this source. A platform still
+                // waiting for its pull is skipped by the queueing, its pull job scans it.
+                if moved && recorded {
+                    let platforms = db::platform_ids_of_image(&mut tx, &image_id).await?;
+                    for platform_id in &platforms {
+                        // Scan jobs are not counted: `queued` is the number of pull jobs.
+                        crate::services::scan::queue::queue_moved_rescan_in(
+                            &mut tx,
+                            platform_id,
+                            &item.source_id,
+                            now,
+                        )
+                        .await?;
+                    }
+                }
                 continue;
             }
             let trigger = if moved { "tag_moved" } else { "first_pull" };

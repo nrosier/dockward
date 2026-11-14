@@ -1623,3 +1623,66 @@ async fn both_sources_down_does_not_fail_the_scan_and_the_next_scan_retries() {
         1
     );
 }
+
+/// #391: a tag that moves to a digest already scanned is scanned again with `tag_moved`, and
+/// the scan rebuilds the tag's rows from that digest's results: a CVE it no longer reports is
+/// fixed for the tag.
+#[tokio::test]
+async fn a_moved_tag_rescan_rebuilds_its_findings_from_the_new_digest() {
+    let (_, grype) = ok_scripts("");
+    let fx = Fx::new("moved-rescan", "", &grype).await;
+    exec(
+        &fx.pool,
+        "INSERT INTO system_config (key, value) VALUES ('scanners.enabled', 'grype')",
+        &[],
+    )
+    .await;
+    // `v1` is scanned on IMG_OLD and has open rows.
+    fx.queue(P_OLD).await;
+    fx.drain().await;
+    assert!(fx.tag_rows("v1").await.iter().any(|r| r.3 == "open"));
+
+    // IMG_NEW was scanned earlier under another tag and is clean.
+    fx.image(IMG_NEW, "sha256:new").await;
+    fx.platform(P_NEW, IMG_NEW, "linux/amd64").await;
+    fx.observe("v2", IMG_NEW, 150).await;
+    fx.script(
+        "grype",
+        r#"echo '{"matches":[],"descriptor":{"version":"0.121.2"}}'"#,
+    );
+    fx.queue(P_NEW).await;
+    fx.drain().await;
+    assert!(
+        fx.tag_rows("v1").await.iter().any(|r| r.3 == "open"),
+        "v1 is stale"
+    );
+
+    // `v1` moves to IMG_NEW. Nothing rebuilds its rows until the rescan runs.
+    fx.observe("v1", IMG_NEW, 200).await;
+    let mut conn = fx.pool.acquire().await.unwrap_or_else(|e| panic!("{e}"));
+    let queued = queue::queue_moved_rescan_in(&mut conn, P_NEW, "s1", NOW).await;
+    assert_eq!(queued.ok(), Some(1));
+    // A repeat while the rescan waits adds nothing.
+    let again = queue::queue_moved_rescan_in(&mut conn, P_NEW, "s1", NOW).await;
+    assert_eq!(again.ok(), Some(0));
+    drop(conn);
+    assert!(
+        run_triggers_of(&fx.pool, P_NEW)
+            .await
+            .contains(&("grype".to_owned(), "tag_moved".to_owned()))
+    );
+    fx.drain().await;
+    let rows = fx.tag_rows("v1").await;
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|r| r.3 == "fixed"), "{rows:?}");
+}
+
+async fn run_triggers_of(pool: &SqlitePool, platform: &str) -> Vec<(String, String)> {
+    sqlx::query_as::<_, (String, String)>(
+        "SELECT scanner, trigger FROM scan_runs WHERE image_platform_id = ? ORDER BY rowid",
+    )
+    .bind(platform)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_else(|err| panic!("runs: {err}"))
+}
