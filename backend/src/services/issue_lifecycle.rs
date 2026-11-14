@@ -2467,7 +2467,9 @@ mod tests {
             "CVE-2024-6",
             "HIGH",
             "openssl",
-            Some("Buffer overflow in the parser."),
+            Some(
+                "Buffer overflow in the parser that lets a remote attacker write past the end of a heap buffer.",
+            ),
             10,
         )
         .await;
@@ -2478,7 +2480,10 @@ mod tests {
         let creates = fx.github.creates();
         assert_eq!(creates.len(), 2);
         let with = creates[0]["body"].as_str().unwrap();
-        assert!(with.contains("Buffer overflow in the parser."));
+        assert!(with.contains(
+            "Buffer overflow in the parser that lets a remote attacker write past the end of\na heap buffer."
+        ));
+        assert!(with.contains("```text\n"));
         let without = creates[1]["body"].as_str().unwrap();
         assert!(without.contains("| Package | `zlib` |"));
         assert!(!without.contains("Description"));
