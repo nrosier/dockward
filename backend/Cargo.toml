@@ -10,7 +10,7 @@ aes-gcm = "=0.11.1"
 argon2 = "=0.6.0"
 axum = "=0.8.9"
 base64 = "=0.23.1"
-flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
+flate2 = { version = "=1.1.11", default-features = false, features = ["rust_backend"] }
 hkdf = "=0.13.0"
 hmac = "=0.13.0"
 sha1 = "=0.11.0"
