@@ -2,7 +2,7 @@
 name = "dockward"
 version = "0.9.1"
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 license = "MIT"
 
 [dependencies]
