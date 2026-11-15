@@ -1459,9 +1459,9 @@ async fn a_twelve_step_chain_completes_in_one_run() {
     }
     // Each analysis but the last links to the next one. The fake removes the analysis a link names.
     fx.gh.with(|state| {
-        for index in 0..11usize {
+        for (index, analysis) in state.analyses.iter_mut().enumerate().take(11) {
             let next = 201 + index as u64;
-            state.analyses[index].confirm_next = Some(format!(
+            analysis.confirm_next = Some(format!(
                 "https://api.github.com/repos/octo/app/code-scanning/analyses/{next}?confirm_delete"
             ));
         }
