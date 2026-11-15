@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 
 FROM node:26.13.0-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94 AS frontend
 WORKDIR /build
@@ -34,7 +34,7 @@ RUN test -n "$REVISION" || { echo 'REVISION build argument is required (the sour
 # outbound TLS (rustls-platform-verifier reads /etc/ssl/certs/ca-certificates.crt),
 # /data for the runtime user, and /tmp at 1777 for SQLite temporary files.
 # The repository index is pinned by the alpine:3.24 tag, so the version follows the release branch.
-FROM alpine:3.24 AS rootfs
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS rootfs
 RUN apk add --no-cache ca-certificates \
     && mkdir -p /rootfs/etc/ssl/certs /rootfs/data /rootfs/tmp \
     && cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ca-certificates.crt \
