@@ -7,9 +7,6 @@
     "customManagers:githubActionsVersions"
   ],
   "pinDigests": true,
-  "env": {
-    "npm_config_allow_remote": "all"
-  },
   "vulnerabilityAlerts": {
     "labels": ["security"],
     "automerge": false
