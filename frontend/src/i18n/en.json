@@ -680,7 +680,7 @@
   "jobs.subject.publishedPlain": "Publish to GitHub",
   "jobs.subject.cleanup": "Housekeeping: cleanup",
   "jobs.subject.retention": "Housekeeping: retention",
-  "jobs.subject.unknown": "Background job",
+  "jobs.subject.unknown": "Unknown job",
   "login.totp.title": "Enter your code",
   "login.totp.help": "Enter the 6-digit code from your authenticator app.",
   "login.totp.timeout": "This step times out after 5 minutes. If it does, go back and sign in again.",

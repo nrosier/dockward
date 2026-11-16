@@ -47,7 +47,7 @@ describe("jobSubject", () => {
       "Vulnerability scan with Grype: ghcr.io/team/app:1.2",
     );
     expect(jobSubject(job({ kind: "scan", scanner: "grype" }))).toBe("Vulnerability scan with Grype");
-    expect(jobSubject(job({ kind: null }))).toBe("Background job");
+    expect(jobSubject(job({ kind: null }))).toBe("Unknown job");
     expect(jobSubject(job({ kind: "discover", image: { ...image, tag: null } }))).toBe("Discovery: ghcr.io/team/app");
     expect(jobSubject(job({ kind: "discover" }))).toBe("Discovery");
     expect(jobSubject(job({ kind: "publish", image }))).toBe("Publish to GitHub: ghcr.io/team/app:1.2");
