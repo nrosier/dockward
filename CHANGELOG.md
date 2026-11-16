@@ -4,6 +4,18 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.9.2 - 2026-11-16
+
+### Changed
+- Bundled scanners: Trivy v0.76.2, Grype v0.121.3 (unchanged from 0.9.1).
+- The Jobs page shows "Unknown job" for a job with no known kind, where it showed "Background job" (#407, PR #453).
+- Dependency updates through Renovate (PRs #413 to #452): the Rust toolchain moves to 1.100.0 and the frontend build image to Node 26.13.1; Rust crates jsonwebtoken 12, nix 0.32, jsonschema 0.61.2, rand 0.10.4, rust-embed 8.14.0 and flate2 1.1.11; frontend packages vite 8.3.8, @vitejs/plugin-react 6.3.0, jsdom 31, Tailwind CSS 4.3.5, TanStack Query 5.107.1, lucide-react 1.73.0, oxlint 1.93.0 and the Testing Library packages; and the CI workflow actions (docker/login-action, cosign-installer, codeql-action, harden-runner, syft). Base images, actions and the compose image are pinned by digest. The lock files were refreshed.
+
+### Upgrade notes
+- No migration.
+- The Jobs page fallback wording changed to "Unknown job".
+- Dependency updates only; no other behaviour change.
+
 ## 0.9.1 - 2026-11-14
 
 ### Changed
