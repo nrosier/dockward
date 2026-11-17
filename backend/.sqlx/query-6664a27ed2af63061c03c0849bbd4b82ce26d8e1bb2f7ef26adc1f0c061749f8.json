@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM alert_pending WHERE image_id = ? AND event = 'new_high_or_critical'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6664a27ed2af63061c03c0849bbd4b82ce26d8e1bb2f7ef26adc1f0c061749f8"
+}

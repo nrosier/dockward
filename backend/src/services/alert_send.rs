@@ -34,21 +34,32 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// The latest instant `time::rfc3339` can format (9999-12-31T23:59:59Z).
 const MAX_RFC3339_SECS: i64 = 253_402_300_799;
 
-/// What happened. The two events of `specs/alerts.md`.
+/// What happened. The three routable events of `specs/alerts.md` (Routing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertEvent {
     JobFailed,
-    CriticalCve,
+    /// One summary per scan and source of the CVEs that are new and HIGH or CRITICAL.
+    NewHighOrCritical,
+    /// One CVE is no longer reported on the latest scan of its image.
+    CveFixed,
 }
 
 impl AlertEvent {
-    /// The wire name used in the webhook body and the mail subject.
+    /// The wire name used in the webhook body, the mail subject and a channel's event set.
     pub fn as_str(self) -> &'static str {
         match self {
             AlertEvent::JobFailed => "job_failed",
-            AlertEvent::CriticalCve => "critical_cve",
+            AlertEvent::NewHighOrCritical => "new_high_or_critical",
+            AlertEvent::CveFixed => "cve_fixed",
         }
     }
+}
+
+/// One CVE listed in a summary alert: its id and severity only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedCve {
+    pub id: String,
+    pub severity: String,
 }
 
 /// One alert to deliver. It carries no token, key, or URL. `error` is text the caller has
@@ -59,7 +70,7 @@ pub struct Alert {
     /// Unix seconds.
     pub occurred_at: i64,
     pub mapping_id: String,
-    /// `<project>/<repository>`.
+    /// `<hub host>/<repository>`.
     pub harbor: String,
     /// `<owner>/<repo>`.
     pub github: String,
@@ -67,29 +78,51 @@ pub struct Alert {
     pub severity: Option<String>,
     pub image_tag: Option<String>,
     pub error: Option<String>,
+    /// The CVEs a summary lists, at most [`SUMMARY_LIMIT`]. Empty for other events.
+    pub cves: Vec<ListedCve>,
+    /// How many new CVEs a summary has beyond the listed ones.
+    pub more: usize,
 }
+
+/// The most CVEs one summary alert lists by id. The rest are counted as "and N more".
+pub const SUMMARY_LIMIT: usize = 10;
 
 impl Alert {
     /// One human-readable sentence, so Slack and Teams incoming webhooks work unchanged.
     /// It never includes the `error` field.
     pub fn text(&self) -> String {
+        let place = match self.image_tag.as_deref() {
+            Some(tag) => format!("{}:{tag}", self.harbor),
+            None => self.harbor.clone(),
+        };
         match self.event {
             AlertEvent::JobFailed => format!(
                 "Dockward sync failed for {} to {}.",
                 self.harbor, self.github
             ),
-            AlertEvent::CriticalCve => {
-                let cve = self.cve_id.as_deref().unwrap_or("unknown CVE");
-                match self.image_tag.as_deref() {
-                    Some(tag) => format!(
-                        "Dockward found new CRITICAL {cve} in {}:{tag} for {}.",
-                        self.harbor, self.github
-                    ),
-                    None => format!(
-                        "Dockward found new CRITICAL {cve} in {} for {}.",
-                        self.harbor, self.github
-                    ),
+            AlertEvent::NewHighOrCritical => {
+                let total = self.cves.len() + self.more;
+                let noun = if total == 1 { "CVE" } else { "CVEs" };
+                let mut list = self
+                    .cves
+                    .iter()
+                    .map(|cve| format!("{} ({})", cve.id, cve.severity))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if self.more > 0 {
+                    list.push_str(&format!(" and {} more", self.more));
                 }
+                format!(
+                    "Dockward found {total} new HIGH or CRITICAL {noun} in {place} for {}: {list}.",
+                    self.github
+                )
+            }
+            AlertEvent::CveFixed => {
+                let cve = self.cve_id.as_deref().unwrap_or("unknown CVE");
+                format!(
+                    "Dockward no longer finds {cve} in {place} for {}.",
+                    self.github
+                )
             }
         }
     }
@@ -116,6 +149,15 @@ pub fn webhook_body(alert: &Alert) -> Value {
         "text": alert.text(),
     });
     if let Some(map) = body.as_object_mut() {
+        if alert.event == AlertEvent::NewHighOrCritical {
+            let cves: Vec<Value> = alert
+                .cves
+                .iter()
+                .map(|cve| json!({"id": cve.id, "severity": cve.severity}))
+                .collect();
+            map.insert("cves".to_owned(), Value::Array(cves));
+            map.insert("more".to_owned(), json!(alert.more));
+        }
         for (name, value) in [
             ("cve_id", &alert.cve_id),
             ("severity", &alert.severity),
@@ -389,7 +431,22 @@ mod tests {
             severity: None,
             image_tag: None,
             error: None,
+            cves: Vec::new(),
+            more: 0,
         }
+    }
+
+    fn summary(listed: usize, more: usize) -> Alert {
+        let mut item = alert(AlertEvent::NewHighOrCritical);
+        item.image_tag = Some("1.2.3".to_owned());
+        item.cves = (0..listed)
+            .map(|n| ListedCve {
+                id: format!("CVE-2026-{:04}", n + 1),
+                severity: if n == 0 { "CRITICAL" } else { "HIGH" }.to_owned(),
+            })
+            .collect();
+        item.more = more;
+        item
     }
 
     fn smtp_config(host: &str, tls: TlsMode) -> SmtpConfig {
@@ -406,23 +463,32 @@ mod tests {
 
     #[test]
     fn webhook_body_matches_the_spec_shape() {
-        let mut full = alert(AlertEvent::CriticalCve);
-        full.cve_id = Some("CVE-2026-0001".to_owned());
-        full.severity = Some("CRITICAL".to_owned());
-        full.image_tag = Some("1.2.3".to_owned());
+        let full = summary(2, 0);
         let body = webhook_body(&full);
         assert_eq!(
             body,
             json!({
-                "event": "critical_cve",
+                "event": "new_high_or_critical",
                 "occurred_at": "2001-09-09T01:46:40Z",
                 "mapping": {"id": "map_1", "harbor": "proj/repo", "github": "acme/app"},
-                "cve_id": "CVE-2026-0001",
-                "severity": "CRITICAL",
                 "image_tag": "1.2.3",
+                "cves": [
+                    {"id": "CVE-2026-0001", "severity": "CRITICAL"},
+                    {"id": "CVE-2026-0002", "severity": "HIGH"},
+                ],
+                "more": 0,
                 "text": full.text(),
             })
         );
+
+        let mut fixed = alert(AlertEvent::CveFixed);
+        fixed.cve_id = Some("CVE-2026-0009".to_owned());
+        fixed.severity = Some("HIGH".to_owned());
+        fixed.image_tag = Some("1.2.3".to_owned());
+        let body = webhook_body(&fixed);
+        assert_eq!(body["event"], "cve_fixed");
+        assert_eq!(body["cve_id"], "CVE-2026-0009");
+        assert!(body.get("cves").is_none(), "a fixed alert has no list");
 
         let mut failed = alert(AlertEvent::JobFailed);
         failed.error = Some("upload failed".to_owned());
@@ -430,21 +496,39 @@ mod tests {
         assert_eq!(body["event"], "job_failed");
         assert_eq!(body["error"], "upload failed");
         // Unset optional fields are absent, not null.
-        for name in ["cve_id", "severity", "image_tag"] {
+        for name in ["cve_id", "severity", "image_tag", "cves", "more"] {
             assert!(body.get(name).is_none(), "an unset field was serialised");
         }
         assert!(body["text"].is_string());
     }
 
     #[test]
+    fn summary_text_lists_ten_then_and_n_more() {
+        let item = summary(SUMMARY_LIMIT, 3);
+        let text = item.text();
+        assert!(
+            text.starts_with("Dockward found 13 new HIGH or CRITICAL CVEs in proj/repo:1.2.3 for acme/app: CVE-2026-0001 (CRITICAL), CVE-2026-0002 (HIGH),"),
+            "{text}"
+        );
+        assert!(text.contains("CVE-2026-0010 (HIGH) and 3 more."), "{text}");
+        assert!(!text.contains("CVE-2026-0011"));
+        assert_eq!(
+            summary(1, 0).text(),
+            "Dockward found 1 new HIGH or CRITICAL CVE in proj/repo:1.2.3 for acme/app: CVE-2026-0001 (CRITICAL)."
+        );
+    }
+
+    #[test]
     fn text_is_one_sentence_without_secrets() {
         let mut failed = alert(AlertEvent::JobFailed);
         failed.error = Some("secret-marker-9f3".to_owned());
-        let mut cve = alert(AlertEvent::CriticalCve);
-        cve.cve_id = Some("CVE-2026-0001".to_owned());
-        cve.image_tag = Some("1.2.3".to_owned());
-        cve.error = Some("secret-marker-9f3".to_owned());
-        for item in [failed, cve] {
+        let mut cves = summary(3, 2);
+        cves.error = Some("secret-marker-9f3".to_owned());
+        let mut fixed = alert(AlertEvent::CveFixed);
+        fixed.cve_id = Some("CVE-2026-0001".to_owned());
+        fixed.image_tag = Some("1.2.3".to_owned());
+        fixed.error = Some("secret-marker-9f3".to_owned());
+        for item in [failed, cves, fixed] {
             let text = item.text();
             assert!(!text.contains('\n'), "the text spans several lines");
             assert!(text.ends_with('.'), "the text is not a sentence");

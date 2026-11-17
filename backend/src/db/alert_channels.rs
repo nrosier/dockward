@@ -15,6 +15,8 @@ pub struct ChannelRow {
     pub kind: String,
     pub config_encrypted: String,
     pub enabled: bool,
+    /// The JSON array of event names this channel receives (`specs/alerts.md`, Routing).
+    pub events: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -26,6 +28,7 @@ impl fmt::Debug for ChannelRow {
             .field("kind", &self.kind)
             .field("config_encrypted", &"<redacted>")
             .field("enabled", &self.enabled)
+            .field("events", &self.events)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish()
@@ -39,13 +42,16 @@ pub async fn insert(
     kind: &str,
     config_encrypted: &str,
     enabled: bool,
+    events: &str,
 ) -> Result<(), AppError> {
     sqlx::query!(
-        "INSERT INTO alert_channels (id, kind, config_encrypted, enabled) VALUES (?, ?, ?, ?)",
+        "INSERT INTO alert_channels (id, kind, config_encrypted, enabled, events)
+         VALUES (?, ?, ?, ?, ?)",
         id,
         kind,
         config_encrypted,
-        enabled
+        enabled,
+        events
     )
     .execute(&mut *conn)
     .await
@@ -58,7 +64,7 @@ pub async fn find(conn: &mut SqliteConnection, id: &str) -> Result<Option<Channe
     sqlx::query_as!(
         ChannelRow,
         r#"SELECT id AS "id!", kind AS "kind!", config_encrypted AS "config_encrypted!",
-                  enabled AS "enabled!: bool", created_at AS "created_at!: i64",
+                  enabled AS "enabled!: bool", events AS "events!", created_at AS "created_at!: i64",
                   updated_at AS "updated_at!: i64"
            FROM alert_channels WHERE id = ?"#,
         id
@@ -88,7 +94,7 @@ pub async fn list(
     sqlx::query_as!(
         ChannelRow,
         r#"SELECT id AS "id!", kind AS "kind!", config_encrypted AS "config_encrypted!",
-                  enabled AS "enabled!: bool", created_at AS "created_at!: i64",
+                  enabled AS "enabled!: bool", events AS "events!", created_at AS "created_at!: i64",
                   updated_at AS "updated_at!: i64"
            FROM alert_channels
            ORDER BY CASE WHEN ? = 1 THEN created_at END ASC,
@@ -105,21 +111,23 @@ pub async fn list(
     .map_err(|_| AppError::InternalError)
 }
 
-/// Sets `enabled` and, when given, replaces the encrypted config. Bumps `updated_at`.
-/// Returns false when no row has this id.
+/// Sets `enabled` and, when given, replaces the encrypted config and the event set. Bumps
+/// `updated_at`. Returns false when no row has this id.
 pub async fn update(
     conn: &mut SqliteConnection,
     id: &str,
     enabled: bool,
     config_encrypted: Option<&str>,
+    events: Option<&str>,
 ) -> Result<bool, AppError> {
     sqlx::query!(
         "UPDATE alert_channels
          SET enabled = ?, config_encrypted = COALESCE(?, config_encrypted),
-             updated_at = unixepoch()
+             events = COALESCE(?, events), updated_at = unixepoch()
          WHERE id = ?",
         enabled,
         config_encrypted,
+        events,
         id
     )
     .execute(&mut *conn)

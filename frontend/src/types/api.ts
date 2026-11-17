@@ -289,10 +289,13 @@ export interface GithubUrlSettings {
   web_url: string;
 }
 
+export type AlertEvent = "job_failed" | "new_high_or_critical" | "cve_fixed";
+
 export interface AlertChannel {
   id: string;
   kind: "smtp" | "webhook";
   enabled: boolean;
+  events: AlertEvent[];
   created_at: string;
   updated_at: string;
 }

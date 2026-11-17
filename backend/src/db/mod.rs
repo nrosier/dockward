@@ -6,6 +6,7 @@ pub mod acceptances;
 pub mod advisory_lookups;
 pub mod alert_channels;
 pub mod alert_deliveries;
+pub mod alert_pending;
 #[cfg(test)]
 mod alias_migration;
 #[allow(dead_code)] // Used by the audit writer and the admin audit list.
@@ -218,6 +219,7 @@ mod tests {
             "alert_carryovers",
             "alert_channels",
             "alert_deliveries",
+            "alert_pending",
             "analysis_retirements",
             "audit_log",
             "carryover_refs",
@@ -440,13 +442,13 @@ mod tests {
             .await
             .map_err(|_| AppError::InternalError)?;
         assert_eq!((runs, findings), (1, 1));
-        // Every migration applied, in order: 0007 (aliases), 0008 (manual trigger), 0009 (TOTP), 0010 (empty jobs), 0012 (CVE scanners), 0013 (id reason), 0014 (fixed note), 0015 (acceptance kind), 0016 (advisory lookups), 0017 (scanner releases).
+        // Every migration applied, in order: 0007 (aliases), 0008 (manual trigger), 0009 (TOTP), 0010 (empty jobs), 0012 (CVE scanners), 0013 (id reason), 0014 (fixed note), 0015 (acceptance kind), 0016 (advisory lookups), 0017 (scanner releases), 0018 (alert routing).
         let versions: Vec<i64> =
             sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&pool)
                 .await
                 .map_err(|_| AppError::InternalError)?;
-        assert_eq!(versions, (1..=17).collect::<Vec<i64>>());
+        assert_eq!(versions, (1..=18).collect::<Vec<i64>>());
         let names: Vec<(String,)> = sqlx::query_as(
             "SELECT name FROM sqlite_master
              WHERE name IN ('idx_scan_runs_current', 'newest_digest_tags', 'tag_scan_times',
@@ -482,6 +484,56 @@ mod tests {
         assert_eq!(left, 0);
         Ok(())
     }
+    /// Migration 0018 adds `alert_channels.events`: a channel saved before it keeps receiving
+    /// job failures (`["job_failed"]`), and a value that is not a JSON array is refused.
+    #[tokio::test]
+    async fn migration_0018_gives_existing_channels_job_failed() -> Result<(), AppError> {
+        let options = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let migrator = sqlx::migrate!("./migrations");
+        migrator
+            .run_to(17, &pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        sqlx::query(
+            "INSERT INTO alert_channels (id, kind, config_encrypted, enabled)
+             VALUES ('old', 'webhook', 'v1:FAKE', 1)",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|_| AppError::InternalError)?;
+        migrator
+            .run(&pool)
+            .await
+            .map_err(|_| AppError::InternalError)?;
+        let events: String =
+            sqlx::query_scalar("SELECT events FROM alert_channels WHERE id = 'old'")
+                .fetch_one(&pool)
+                .await
+                .map_err(|_| AppError::InternalError)?;
+        assert_eq!(events, r#"["job_failed"]"#);
+        // The dispatcher's query finds it for a job failure and for nothing else.
+        let for_failure = super::alert_deliveries::list_enabled_channels(&pool, "job_failed")
+            .await?
+            .len();
+        let for_cves =
+            super::alert_deliveries::list_enabled_channels(&pool, "new_high_or_critical")
+                .await?
+                .len();
+        assert_eq!((for_failure, for_cves), (1, 0));
+        let bad = sqlx::query("UPDATE alert_channels SET events = 'job_failed' WHERE id = 'old'")
+            .execute(&pool)
+            .await;
+        assert!(bad.is_err(), "a value that is not a JSON array was stored");
+        Ok(())
+    }
+
     /// Migration 0015 adds `cve_acceptances.kind`: a row written before it reads as
     /// `accepted`, only `accepted` and `false_positive` are allowed, and the partial unique
     /// index still allows one active verdict per source and CVE, of either kind.

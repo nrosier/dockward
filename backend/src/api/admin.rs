@@ -169,6 +169,8 @@ pub struct CreateChannelBody {
     pub kind: String,
     #[serde(default)]
     pub enabled: bool,
+    /// The events the channel receives. Without it the channel receives `job_failed`.
+    pub events: Option<Vec<String>>,
     pub config: serde_json::Value,
 }
 
@@ -177,16 +179,18 @@ impl fmt::Debug for CreateChannelBody {
         f.debug_struct("CreateChannelBody")
             .field("kind", &self.kind)
             .field("enabled", &self.enabled)
+            .field("events", &self.events)
             .field("config", &REDACTED)
             .finish()
     }
 }
 
-/// Body for `PUT /api/v1/admin/alert-channels/:id`. Without `config` only `enabled`
-/// changes. `config` is write-only.
+/// Body for `PUT /api/v1/admin/alert-channels/:id`. Without `config` and `events` only
+/// `enabled` changes. `config` is write-only.
 #[derive(Deserialize)]
 pub struct UpdateChannelBody {
     pub enabled: Option<bool>,
+    pub events: Option<Vec<String>>,
     pub config: Option<serde_json::Value>,
 }
 
@@ -194,6 +198,7 @@ impl fmt::Debug for UpdateChannelBody {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UpdateChannelBody")
             .field("enabled", &self.enabled)
+            .field("events", &self.events)
             .field("config", &self.config.as_ref().map(|_| REDACTED))
             .finish()
     }
@@ -241,6 +246,7 @@ pub async fn create_alert_channel(
         state.allow_private_alerts,
         &body.kind,
         body.enabled,
+        body.events.as_deref(),
         body.config,
     )
     .await?;
@@ -330,6 +336,7 @@ pub async fn update_alert_channel(
         state.allow_private_alerts,
         &id,
         body.enabled,
+        body.events.as_deref(),
         body.config,
     )
     .await?;
@@ -1159,6 +1166,7 @@ mod tests {
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         let invalid = router
+            .clone()
             .oneshot(channel_request(
                 "POST",
                 base,
@@ -1169,6 +1177,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // The event set (#458): an unknown name is 422, a known set is saved and returned
+        // without any secret.
+        let unknown = router
+            .clone()
+            .oneshot(channel_request(
+                "PUT",
+                &format!("{base}/{id}"),
+                Some(&admin_cookie),
+                &csrf,
+                r#"{"events":["new_critical"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let routed = router
+            .oneshot(channel_request(
+                "PUT",
+                &format!("{base}/{id}"),
+                Some(&admin_cookie),
+                &csrf,
+                r#"{"events":["cve_fixed","new_high_or_critical"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(routed.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(routed.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(!text.contains("FAKE_ROUTE_TOKEN"));
+        assert!(!text.contains("hooks.example.test"));
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["events"],
+            serde_json::json!(["new_high_or_critical", "cve_fixed"])
+        );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -35,7 +35,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
 | Admin: Health | `AdminHealth.dc.html` | `/admin/health` |
 | Admin: Settings > OIDC | `AdminOidc.dc.html` | `/admin/settings/oidc` |
 | Admin: Settings > Users | `AdminUsers.dc.html` | `/admin/settings/users` |
-| Admin: Settings > Alerts | `AdminAlerts.dc.html` | `/admin/settings/alerts` |
+| Admin: Settings > Alerts | `AdminAlertsRouting.html` (layout v2, #458; replaces `AdminAlerts.dc.html`) | `/admin/settings/alerts` |
 | Admin: Settings > Backup and restore | `AdminBackup.dc.html` | `/admin/settings/backup` |
 | Admin: Settings > GitHub | (no artboard; minimal) | `/admin/settings/github` |
 | About dialog | `About.html` | modal opened from the header version |
@@ -47,7 +47,7 @@ Purpose: app shell, page map, screen designs, visual direction, status pills, i1
   - Removed (dockward 0.2.0, decision 1): the Harbor-era approval note for this screen no longer applies. The reused parts are listed under "Sources and Images".
   - Removed (dockward 0.2.0, decision 1): the Harbor-era approval note for this screen no longer applies. The reused parts are listed under "Sources and Images".
   - Admin Settings shows its four sections as a row of pill links under the tabs. Each section has its own URL.
-  - Alert channels: saved config is never returned, so editing a channel means entering its whole config again. The edit form says so.
+  - Alert channels: saved secrets are never returned. An SMTP form is filled from the non-secret settings, with the password left blank; a webhook's URL and headers are not shown. The edit form says so. Layout v2 (#458): see Settings > Alerts below.
   - Removed (dockward 0.2.0, decision 1): the Harbor-era approval note for this screen no longer applies. The reused parts are listed under "Sources and Images".
   - CVE list (Decided 2026-11-05, user, #129): the default view shows every severity. CVE status uses an OPEN pill (neutral) and an ACCEPTED pill (accent). Decided (2026-11-07, user, #196, decisions 21 and 22): the list shows the CVEs of the newest scanned digest of each mapping only. A CVE that is open only on an older tag is not listed. The `tag` filter offers the newest-digest tags only. Rules: [cve-lifecycle.md](cve-lifecycle.md), "Tracking per tag". The filter header is replaced by the control bar in "CVE list control bar" below (2026-11-08, user, #257).
   - Accept risk is a modal dialog (Radix Dialog).
@@ -180,7 +180,10 @@ Decided 2026-11-08 (user, #257, decisions 1 to 13), with the Fix available group
 - Settings > GitHub: an admin sets the instance GitHub API base URL and web URL. Two optional text fields, a save button, and a discard button; empty means github.com. An invalid value shows `settings.github_url_invalid`. Rules: [security.md](security.md), "GitHub base URL".
 - Settings > OIDC: OIDC settings and the toggle that restricts regular users to OIDC sign-in. Every change is audited as `oidc.config_change`. Admin break-glass is always available.
 - Settings > Users: an admin can create a local user, change a user's role, and delete a user. The password must be at least 15 characters and at most 64. An OIDC user's role comes from the group claim and is shown read-only.
-- Settings > Alerts: alert channels. Saved config is never returned, so editing a channel means entering its whole config again. The edit form says so.
+- Settings > Alerts: alert channels. Decided (2026-11-17, user, #458): layout v2 (`specs/designs/AdminAlertsRouting.html`).
+  - Master list: per channel the kind icon and name, the added and updated dates, a summary (email: host, recipient count, event count; webhook: the event count only), the enable switch, and Edit (Editing while open).
+  - Edit form: A, the events this channel receives (three checkboxes in three columns: Job failed, New HIGH or CRITICAL CVE, CVE fixed). B, SMTP host, port and TLS (60 / 15 / 25) with the plain-SMTP warning. C, username and password (50 / 50); the password is never shown, and blank keeps the saved one. D, from and to (50 / 50); to is a list of removable chips, added with Enter or a comma. E, the footer: "Send test email" with its result on the left (email only), Cancel and Save on the right.
+  - Save sends the event set. A saved webhook's URL and headers are secret and not shown: leaving the URL empty keeps them, so its events can change without entering them again.
 - Settings > Backup and restore: creates a backup. Restore is a CLI command, not in this screen ([security.md](security.md)).
 - Setup page (first run, not a Settings screen): shown only while no users exist.
 

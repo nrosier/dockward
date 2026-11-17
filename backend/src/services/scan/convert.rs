@@ -15,11 +15,15 @@
 //! - A CVE the tag had `open` that no scanner of the image reports any more becomes `fixed`.
 //!   Whether a GitHub issue may close is decided later by the issue rules, which wait for every
 //!   enabled scanner (#224 d14), so a missing scanner never closes one.
+//! - Alerts (#458, `specs/alerts.md`): a CVE that no row of the source had before is recorded
+//!   as new, and a row that becomes `fixed` is recorded as fixed, in `alert_pending`. The alerts
+//!   are sent once every run of the image has ended (`services::alerts`), not here.
 
 use std::collections::HashSet;
 
 use sqlx::SqliteConnection;
 
+use crate::db::alert_pending;
 use crate::db::findings::{self, Finding};
 use crate::db::scans as scans_db;
 use crate::error::AppError;
@@ -116,6 +120,19 @@ pub async fn recompute_image(
             if let Some(alias) = row.alias.as_deref() {
                 findings::fold_alias(conn, &tag.source_id, &tag.tag, &row.cve_id, alias).await?;
             }
+            // New to the source: no tag of it had a row for this CVE (or its folded alias).
+            if alert_pending::source_never_reported(conn, &tag.source_id, &row.cve_id).await? {
+                alert_pending::record(
+                    conn,
+                    alert_pending::NEW,
+                    image_id,
+                    &tag.source_id,
+                    &tag.tag,
+                    &row.cve_id,
+                    now,
+                )
+                .await?;
+            }
             let id = ids::new_id()?;
             findings::upsert(
                 conn,
@@ -147,6 +164,16 @@ pub async fn recompute_image(
         for cve_id in scans_db::open_cve_ids(conn, &tag.source_id, &tag.tag).await? {
             if !reported.contains(cve_id.as_str()) {
                 scans_db::mark_fixed(conn, &tag.source_id, &tag.tag, &cve_id).await?;
+                alert_pending::record(
+                    conn,
+                    alert_pending::FIXED,
+                    image_id,
+                    &tag.source_id,
+                    &tag.tag,
+                    &cve_id,
+                    now,
+                )
+                .await?;
             }
         }
     }

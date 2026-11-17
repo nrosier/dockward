@@ -1221,7 +1221,7 @@ pub(crate) async fn enabled_scanner_keys(
 /// True while an enabled scanner has no `done` run for some platform of the image. An evicted
 /// platform counts through its last `done` run. A queued, running or failed run is not a result,
 /// so it holds issue closing open (#224 d14; `specs/spinoff-local-scan.md`, section 9).
-async fn image_awaits_scanner(
+pub(crate) async fn image_awaits_scanner(
     conn: &mut sqlx::SqliteConnection,
     image_id: &str,
     enabled: &[String],

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO alert_pending (event, image_id, source_id, image_tag, cve_id, created_at)\n         VALUES (?, ?, ?, ?, ?, ?)\n         ON CONFLICT (event, image_id, source_id, image_tag, cve_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "8fafa61e6bb77eec3a2c4ec377ef77051f9c157d16d4cd4a76715f96f8f04658"
+}

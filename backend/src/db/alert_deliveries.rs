@@ -57,16 +57,22 @@ pub async fn release(
     .map_err(|_| AppError::InternalError)
 }
 
-/// Every enabled alert channel, oldest first. The dispatcher reads the channels with this
-/// one query, so channel CRUD stays in `db::alert_channels`.
-pub async fn list_enabled_channels(pool: &SqlitePool) -> Result<Vec<ChannelRow>, AppError> {
+/// Every enabled alert channel whose event set holds `event`, oldest first. The dispatcher
+/// reads the channels with this one query, so channel CRUD stays in `db::alert_channels`.
+pub async fn list_enabled_channels(
+    pool: &SqlitePool,
+    event: &str,
+) -> Result<Vec<ChannelRow>, AppError> {
     sqlx::query_as!(
         ChannelRow,
         r#"SELECT id AS "id!", kind AS "kind!", config_encrypted AS "config_encrypted!",
-                  enabled AS "enabled!: bool", created_at AS "created_at!: i64",
+                  enabled AS "enabled!: bool", events AS "events!", created_at AS "created_at!: i64",
                   updated_at AS "updated_at!: i64"
-           FROM alert_channels WHERE enabled = 1
-           ORDER BY created_at ASC, id ASC"#
+           FROM alert_channels
+           WHERE enabled = 1
+             AND EXISTS (SELECT 1 FROM json_each(alert_channels.events) e WHERE e.value = ?)
+           ORDER BY created_at ASC, id ASC"#,
+        event
     )
     .fetch_all(pool)
     .await

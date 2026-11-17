@@ -34,7 +34,7 @@ Spinoff sections 5, 6 and 8 hold the rules.
 5. **Merge**: the merged `cve_findings` of each tag are recomputed in one transaction.
 6. **Publish**: when every scan of the source's newest image has ended, one publish job builds one merged SARIF, uploads it to Code Scanning, and runs the issue rules.
 7. **Database refresh** (daily): `db_update` jobs refresh the Trivy and Grype databases. A newer database rescans every stored platform image by digest, and then publishes each source's newest image.
-8. **Alerts**: a job that fails after its last attempt raises the job-failed alert. A new CRITICAL CVE raises the CVE alert ([alerts.md](alerts.md)).
+8. **Alerts**: a job that fails after its last attempt raises the job-failed alert. When a scan ends, its new HIGH or CRITICAL CVEs raise one summary alert, and each CVE no longer reported raises a fixed alert. Each channel receives only the events ticked for it ([alerts.md](alerts.md)).
 
 ## Decisions
 
