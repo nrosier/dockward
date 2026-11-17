@@ -98,7 +98,8 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    fn text(self) -> &'static str {
+    /// The fixed word of the outcome, logged and returned by the on-demand route.
+    pub fn text(self) -> &'static str {
         match self {
             Outcome::Newer(_) => "newer",
             Outcome::Current(_) => "current",

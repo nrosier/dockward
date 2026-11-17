@@ -68,4 +68,10 @@ pub struct AppState {
     /// Scanner installs: 6 per scanner per hour, held in memory (#403). Each one downloads
     /// tens of MB.
     pub scanner_install_limiter: RateLimiter,
+    /// The scanner release check, the same one the daily task runs (#461). The admin health
+    /// page's "Check now" runs it on demand.
+    pub upstream_check: crate::services::scanner::upstream_check::UpstreamCheck,
+    /// On-demand scanner release checks: 5 per admin per hour, held in memory (#461). Each one
+    /// makes two unauthenticated GitHub calls.
+    pub release_check_limiter: RateLimiter,
 }

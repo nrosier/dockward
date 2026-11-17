@@ -181,6 +181,69 @@ pub async fn clear_broken(
     }
 }
 
+/// The per-scanner outcome words of one release check.
+fn release_outcomes(
+    outcomes: [crate::services::scanner::upstream_check::Outcome; 2],
+) -> serde_json::Value {
+    serde_json::json!({
+        "trivy": outcomes[0].text(),
+        "grype": outcomes[1].text(),
+    })
+}
+
+/// `POST /api/v1/admin/scanner-releases/check` (#461). Runs the same release check as the daily
+/// task, for Trivy and Grype, through `UpstreamCheck::check_once`. `200` with
+/// `{"scanners":{"trivy","grype"}}`, each one of `newer`, `current`, `bundled_version_unknown`;
+/// `429` with `Retry-After` over 5 an hour per admin; `502` with `kind`
+/// `release_check_failed` when GitHub gave no usable answer for a scanner (the other scanner's
+/// answer is still recorded; the failed one records nothing); `500` with `kind` `storage_failed`
+/// when an answer could not be stored. The body never holds a URL or upstream text.
+pub async fn check_releases(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+) -> Result<Response, AppError> {
+    use crate::services::scanner::upstream_check::Outcome;
+
+    if let Err(retry_after) = state
+        .release_check_limiter
+        .check(&format!("user:{}", admin.id), Instant::now())
+    {
+        return Ok(too_many_requests(retry_after));
+    }
+    let outcomes = state
+        .upstream_check
+        .check_once(
+            &state.pool,
+            state.about.bundled_versions(),
+            crate::worker::now_secs(),
+        )
+        .await;
+    let scanners = release_outcomes(outcomes);
+    let (status, code, message, kind) = if outcomes.contains(&Outcome::Unavailable) {
+        (
+            StatusCode::BAD_GATEWAY,
+            "upstream_unreachable",
+            "The scanner release check could not reach GitHub.",
+            "release_check_failed",
+        )
+    } else if outcomes.contains(&Outcome::NotStored) {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "An internal error occurred.",
+            "storage_failed",
+        )
+    } else {
+        return Ok(Json(serde_json::json!({ "scanners": scanners })).into_response());
+    };
+    let body = serde_json::json!({
+        "error": {"code": code, "message": message},
+        "kind": kind,
+        "scanners": scanners,
+    });
+    Ok((status, Json(body)).into_response())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -210,6 +273,11 @@ mod tests {
     }
 
     async fn fx(name: &str) -> Fx {
+        fx_with(name, |_| {}).await
+    }
+
+    /// [`fx`], with `adjust` applied to the state before the router is built.
+    async fn fx_with(name: &str, adjust: impl FnOnce(&mut crate::api::state::AppState)) -> Fx {
         let (mut state, dir) = test_state(name).await;
         seed_user(&state.pool, "adm", "admin").await;
         seed_user(&state.pool, "usr", "user").await;
@@ -235,6 +303,7 @@ mod tests {
             trivy: Some("v0.76.2".to_owned()),
             grype: Some("v0.121.3".to_owned()),
         });
+        adjust(&mut state);
         let pool = state.pool.clone();
         let root =
             config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
@@ -460,6 +529,156 @@ mod tests {
         assert_eq!(body["error"]["code"], "csrf_invalid");
         // Nothing was cleared.
         assert!(volume.is_broken(Scanner::Trivy, v("0.76.5")));
+        fx.finish().await;
+    }
+
+    // ---- On-demand scanner release check (#461) ----
+
+    const CHECK: &str = "/api/v1/admin/scanner-releases/check";
+
+    fn release_json(status: &str, tag: &str) -> String {
+        let body = format!(r#"{{"tag_name":"{tag}","prerelease":false,"draft":false}}"#);
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// A fixture whose upstream answers `trivy` and `grype` with the given raw responses. The
+    /// bundled versions are Trivy v0.76.2 and Grype v0.121.3.
+    async fn check_fx(name: &str, trivy: String, grype: String) -> Fx {
+        let (port, root) =
+            crate::services::outbound::socket_tests::loopback_tls_server_with(move |head| {
+                let target = head.split_whitespace().nth(1).unwrap_or_default();
+                match target {
+                    "/repos/aquasecurity/trivy/releases/latest" => trivy.clone(),
+                    "/repos/anchore/grype/releases/latest" => grype.clone(),
+                    _ => release_json("404 Not Found", "x"),
+                }
+            })
+            .await;
+        fx_with(name, move |state| {
+            state.upstream_check =
+                crate::services::scanner::upstream_check::UpstreamCheck::local(port, root);
+        })
+        .await
+    }
+
+    async fn release_row(pool: &sqlx::SqlitePool, scanner: &str) -> Option<(String, bool)> {
+        sqlx::query_as::<_, (String, bool)>(
+            "SELECT latest_version, newer_than_bundled FROM scanner_releases WHERE scanner = ?",
+        )
+        .bind(scanner)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_release_check_route_runs_the_check_and_records_a_newer_release() {
+        let fx = check_fx(
+            "release-check-ok",
+            release_json("200 OK", "v0.77.0"),
+            release_json("200 OK", "v0.121.3"),
+        )
+        .await;
+        let csrf = fx.csrf.clone();
+        let (status, body) = fx.post(CHECK, &fx.admin, Some(&csrf)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body,
+            serde_json::json!({"scanners": {"trivy": "newer", "grype": "current"}})
+        );
+        assert!(!body.to_string().contains("http"), "{body}");
+        assert_eq!(
+            release_row(&fx.pool, "trivy").await,
+            Some(("0.77.0".to_owned(), true))
+        );
+        assert_eq!(
+            release_row(&fx.pool, "grype").await,
+            Some(("0.121.3".to_owned(), false))
+        );
+        // The About card reads the recorded answer.
+        let (_, about) = get_json(&fx.router, "/api/v1/about", &fx.admin).await;
+        assert_eq!(about["scanners"]["trivy"]["update_available"], true);
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_release_check_records_nothing_and_returns_a_fixed_error() {
+        let fx = check_fx(
+            "release-check-fail",
+            release_json("503 Service Unavailable", "v0.77.0"),
+            release_json("503 Service Unavailable", "v0.122.0"),
+        )
+        .await;
+        let csrf = fx.csrf.clone();
+        let (status, body) = fx.post(CHECK, &fx.admin, Some(&csrf)).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(body["kind"], "release_check_failed");
+        assert_eq!(body["error"]["code"], "upstream_unreachable");
+        assert_eq!(body["scanners"]["trivy"], "unavailable");
+        assert!(!body.to_string().contains("503"), "{body}");
+        assert_eq!(release_row(&fx.pool, "trivy").await, None);
+        assert_eq!(release_row(&fx.pool, "grype").await, None);
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn the_release_check_route_is_rate_limited_per_admin() {
+        let fx = check_fx(
+            "release-check-limit",
+            release_json("200 OK", "v0.77.0"),
+            release_json("200 OK", "v0.121.3"),
+        )
+        .await;
+        let csrf = fx.csrf.clone();
+        for _ in 0..5 {
+            assert_eq!(
+                fx.post(CHECK, &fx.admin, Some(&csrf)).await.0,
+                StatusCode::OK
+            );
+        }
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(CHECK)
+            .header("cookie", &fx.admin)
+            .header("x-csrf-token", &csrf)
+            .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                1234,
+            ))))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = fx.router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().contains_key("retry-after"));
+        fx.finish().await;
+    }
+
+    #[tokio::test]
+    async fn the_release_check_route_requires_an_admin_session_and_csrf() {
+        let fx = check_fx(
+            "release-check-auth",
+            release_json("200 OK", "v0.77.0"),
+            release_json("200 OK", "v0.122.0"),
+        )
+        .await;
+        let csrf = fx.csrf.clone();
+        assert_eq!(
+            fx.post(CHECK, &fx.anonymous, Some(&csrf)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            fx.post(CHECK, &fx.user, Some(&csrf)).await.0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, body) = fx.post(CHECK, &fx.admin, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "csrf_invalid");
+        // None of the refused calls ran the check.
+        assert_eq!(release_row(&fx.pool, "trivy").await, None);
         fx.finish().await;
     }
 }
