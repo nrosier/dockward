@@ -5,7 +5,10 @@
 //! The whole channel config is one JSON document, encrypted into
 //! `alert_channels.config_encrypted` with the credentials key and an AAD that binds it
 //! to its row. The config is write-only: no response carries it, and no audit row
-//! carries a value from it. Sending is not done here (#57).
+//! carries a value from it. The one exception is [`settings`]: it returns the SMTP
+//! settings that are not secret, so the edit form can be filled in. The SMTP password is
+//! never returned, only whether one is set. Sending alerts is not done here (#57); the
+//! SMTP test mail only calls the sender.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -18,6 +21,7 @@ use zeroize::Zeroizing;
 use crate::auth::crypto::{self, DerivedKey};
 use crate::db::alert_channels::{self as rows, ChannelRow};
 use crate::error::AppError;
+use crate::services::alert_send;
 use crate::services::audit::{self, Actor};
 use crate::services::ids;
 use crate::services::outbound::{self, TargetClass};
@@ -25,6 +29,10 @@ use crate::services::pagination::{Page, Pagination};
 use crate::services::time;
 
 const REDACTED: &str = "<redacted>";
+
+/// A marker a client puts in an SMTP config to keep the saved password. It is removed
+/// before the config is parsed, and it is never stored.
+const KEEP_PASSWORD: &str = "keep_password";
 
 /// How the SMTP connection is secured. There is no plaintext option.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +86,34 @@ impl fmt::Debug for WebhookConfig {
             .field("headers", &REDACTED)
             .finish()
     }
+}
+
+/// The SMTP settings that are safe to show again: everything except the password.
+#[derive(Debug, Clone, Serialize)]
+pub struct SmtpSettings {
+    pub host: String,
+    pub port: u16,
+    pub tls: TlsMode,
+    pub username: Option<String>,
+    pub from: String,
+    pub to: Vec<String>,
+    pub password_set: bool,
+}
+
+/// Settings of one channel for the edit form. Only SMTP has any: a webhook URL or header
+/// can be a secret, so a webhook channel has none.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelSettings {
+    pub smtp: Option<SmtpSettings>,
+}
+
+/// The result of a test mail. `error` is fixed text from the sender, never a value from
+/// the config.
+#[derive(Debug, Clone, Serialize)]
+pub struct TestResult {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A channel as returned by the API. It has no `config` field, by construction.
@@ -219,6 +255,90 @@ fn seal(key: &DerivedKey, id: &str, config: &Config) -> Result<String, AppError>
     crypto::encrypt(key, &config_aad(id), &json)
 }
 
+/// Decrypts the stored config of an SMTP channel.
+fn open_smtp(key: &DerivedKey, row: &ChannelRow) -> Result<SmtpConfig, AppError> {
+    let plain = crypto::decrypt(key, &config_aad(&row.id), &row.config_encrypted)?;
+    serde_json::from_slice(&plain).map_err(|_| AppError::InternalError)
+}
+
+/// Removes the `keep_password` marker from `raw`. When it is `true` and `stored` is an SMTP
+/// channel, the stored password is filled in, unless `raw` has its own password.
+fn apply_kept_password(
+    key: &DerivedKey,
+    stored: &ChannelRow,
+    raw: &mut serde_json::Value,
+) -> Result<(), AppError> {
+    let Some(map) = raw.as_object_mut() else {
+        return Ok(());
+    };
+    if map.remove(KEEP_PASSWORD) != Some(serde_json::Value::Bool(true)) || stored.kind != "smtp" {
+        return Ok(());
+    }
+    if let Some(password) = open_smtp(key, stored)?.password {
+        map.entry("password")
+            .or_insert(serde_json::Value::String(password));
+    }
+    Ok(())
+}
+
+/// The settings of channel `id` for the edit form. A missing channel is `404`.
+pub async fn settings(
+    pool: &SqlitePool,
+    credentials_key: &DerivedKey,
+    id: &str,
+) -> Result<ChannelSettings, AppError> {
+    let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+    let row = rows::find(&mut conn, id).await?.ok_or(AppError::NotFound)?;
+    if row.kind != "smtp" {
+        return Ok(ChannelSettings { smtp: None });
+    }
+    let config = open_smtp(credentials_key, &row)?;
+    Ok(ChannelSettings {
+        smtp: Some(SmtpSettings {
+            host: config.host,
+            port: config.port,
+            tls: config.tls,
+            username: config.username,
+            from: config.from,
+            to: config.to,
+            password_set: config.password.as_deref().is_some_and(|p| !p.is_empty()),
+        }),
+    })
+}
+
+/// Sends a test mail with the SMTP config `raw`, which is validated like a saved one.
+/// With `channel_id` and `"keep_password": true` in `raw`, the saved password of that
+/// channel is used. A bad config is `422`, an unknown channel `404`. A failed send is not
+/// an error: it is `ok: false` with fixed text.
+pub async fn test_smtp(
+    pool: &SqlitePool,
+    credentials_key: &DerivedKey,
+    allow_private: bool,
+    channel_id: Option<&str>,
+    mut raw: serde_json::Value,
+) -> Result<TestResult, AppError> {
+    if let Some(id) = channel_id {
+        let mut conn = pool.acquire().await.map_err(|_| AppError::InternalError)?;
+        let stored = rows::find(&mut conn, id).await?.ok_or(AppError::NotFound)?;
+        apply_kept_password(credentials_key, &stored, &mut raw)?;
+    }
+    let Config::Smtp(config) = Config::parse("smtp", raw, allow_private)? else {
+        return Err(AppError::InternalError);
+    };
+    Ok(
+        match alert_send::send_smtp_test(&config, allow_private).await {
+            Ok(()) => TestResult {
+                ok: true,
+                error: None,
+            },
+            Err(error) => TestResult {
+                ok: false,
+                error: Some(error.to_string()),
+            },
+        },
+    )
+}
+
 /// Creates a channel. Returns `422` for an invalid kind or config. The row and the
 /// `alert.config_change` audit row commit together.
 pub async fn create(
@@ -264,7 +384,8 @@ pub async fn update(
         fields.push("enabled");
     }
     let sealed = match config {
-        Some(raw) => {
+        Some(mut raw) => {
+            apply_kept_password(credentials_key, &current, &mut raw)?;
             let parsed = Config::parse(&current.kind, raw, allow_private)?;
             fields.push("config");
             Some(seal(credentials_key, id, &parsed)?)
@@ -570,6 +691,117 @@ mod tests {
         starttls["tls"] = json!("starttls");
         starttls["port"] = json!(587);
         assert!(make(&pool, "smtp", starttls).await.is_ok());
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn settings_omit_the_password_and_keep_password_reuses_it() {
+        let (pool, dir) = fresh_pool("settings").await;
+        let mail = make(&pool, "smtp", smtp_config()).await.unwrap();
+        let hook = make(&pool, "webhook", webhook_config()).await.unwrap();
+
+        let shown = settings(&pool, &key(), &mail.id).await.unwrap();
+        let text = serde_json::to_string(&shown).unwrap();
+        assert!(!text.contains(FAKE_PASSWORD), "the password was returned");
+        let smtp = shown.smtp.unwrap();
+        assert_eq!(smtp.host, "smtp.example.test");
+        assert_eq!(smtp.to, ["ops@example.test"]);
+        assert!(smtp.password_set);
+        // A webhook has no settings to show, since its URL and headers are secrets.
+        assert!(
+            settings(&pool, &key(), &hook.id)
+                .await
+                .unwrap()
+                .smtp
+                .is_none()
+        );
+        assert!(matches!(
+            settings(&pool, &key(), "nope").await,
+            Err(AppError::NotFound)
+        ));
+
+        // An update without a password but with the marker keeps the stored password.
+        let mut kept = smtp_config();
+        let map = kept.as_object_mut().unwrap();
+        map.remove("password");
+        map.insert("host".to_owned(), json!("smtp2.example.test"));
+        map.insert(KEEP_PASSWORD.to_owned(), json!(true));
+        update(&pool, &key(), &actor(), false, &mail.id, None, Some(kept))
+            .await
+            .unwrap();
+        let plain = crypto::decrypt(
+            &key(),
+            &config_aad(&mail.id),
+            &stored(&pool, &mail.id).await,
+        )
+        .unwrap();
+        let text = String::from_utf8(plain.to_vec()).unwrap();
+        assert!(text.contains(FAKE_PASSWORD), "the password was dropped");
+        assert!(text.contains("smtp2.example.test"));
+        assert!(!text.contains(KEEP_PASSWORD), "the marker was stored");
+
+        // A new password wins over the marker.
+        let mut replaced = smtp_config();
+        replaced["password"] = json!("FAKE_NEW_PASSWORD_2");
+        replaced
+            .as_object_mut()
+            .unwrap()
+            .insert(KEEP_PASSWORD.to_owned(), json!(true));
+        update(
+            &pool,
+            &key(),
+            &actor(),
+            false,
+            &mail.id,
+            None,
+            Some(replaced),
+        )
+        .await
+        .unwrap();
+        let plain = crypto::decrypt(
+            &key(),
+            &config_aad(&mail.id),
+            &stored(&pool, &mail.id).await,
+        )
+        .unwrap();
+        let text = String::from_utf8(plain.to_vec()).unwrap();
+        assert!(text.contains("FAKE_NEW_PASSWORD_2"));
+        assert!(!text.contains(FAKE_PASSWORD));
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_mail_validates_and_reports_a_blocked_target_as_text() {
+        let (pool, dir) = fresh_pool("test-mail").await;
+        let mail = make(&pool, "smtp", smtp_config()).await.unwrap();
+
+        // An invalid config is a 422, like a save.
+        let mut bad = smtp_config();
+        bad["to"] = json!([]);
+        let invalid = test_smtp(&pool, &key(), false, None, bad).await;
+        assert!(matches!(invalid, Err(AppError::ValidationFailed(_))));
+        // An unknown channel is a 404.
+        let missing = test_smtp(&pool, &key(), false, Some("nope"), smtp_config()).await;
+        assert!(matches!(missing, Err(AppError::NotFound)));
+
+        // A private host is refused by the address check: the answer is ok: false with
+        // fixed text, and the text holds nothing from the config.
+        let mut private = smtp_config();
+        let map = private.as_object_mut().unwrap();
+        map.insert("host".to_owned(), json!("127.0.0.1"));
+        map.remove("password");
+        map.insert(KEEP_PASSWORD.to_owned(), json!(true));
+        let result = test_smtp(&pool, &key(), false, Some(&mail.id), private)
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        let error = result.error.unwrap();
+        assert_eq!(error, "alert target is a blocked address");
+        assert!(!error.contains(FAKE_PASSWORD));
 
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);

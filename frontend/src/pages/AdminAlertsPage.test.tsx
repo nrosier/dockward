@@ -13,6 +13,19 @@ const channel = {
   updated_at: "2026-11-02T00:00:00Z",
 };
 
+const emptySettings = { smtp: null };
+const savedSettings = {
+  smtp: {
+    host: "smtp.example.org",
+    port: 587,
+    tls: "starttls",
+    username: "mailer",
+    from: "hg@example.org",
+    to: ["a@example.org", "b@example.org"],
+    password_set: true,
+  },
+};
+
 describe("AdminAlertsPage", () => {
   beforeEach(() => {
     vi.stubGlobal(
@@ -34,6 +47,9 @@ describe("AdminAlertsPage", () => {
       if (path.startsWith("/api/v1/admin/alert-channels?")) {
         return json({ items: [channel], page: 1, page_size: 200, total: 1 });
       }
+      if (path === "/api/v1/admin/alert-channels/ch1/settings") {
+        return json(emptySettings);
+      }
       if (path === "/api/v1/admin/alert-channels/ch1" && init?.method === "PUT") {
         return json(channel);
       }
@@ -42,7 +58,7 @@ describe("AdminAlertsPage", () => {
     renderAt(<AdminAlertsPage />, "/admin/settings/alerts");
     await userEvent.click(await screen.findByRole("button", { name: t("account.credentials.edit") }));
 
-    fireEvent.change(screen.getByLabelText(t("admin.alerts.host")), { target: { value: "smtp.example.org" } });
+    fireEvent.change(await screen.findByLabelText(t("admin.alerts.host")), { target: { value: "smtp.example.org" } });
     fireEvent.change(screen.getByLabelText(t("admin.alerts.port")), { target: { value: "465" } });
     fireEvent.change(screen.getByLabelText(t("admin.alerts.password")), { target: { value: "smtp-pass" } });
     fireEvent.change(screen.getByLabelText(t("admin.alerts.from")), { target: { value: "hg@example.org" } });
@@ -62,8 +78,73 @@ describe("AdminAlertsPage", () => {
 
     // Opening the form again shows nothing from the last submit.
     await userEvent.click(screen.getByRole("button", { name: t("account.credentials.edit") }));
-    expect(screen.getByLabelText(t("admin.alerts.password"))).toHaveValue("");
+    expect(await screen.findByLabelText(t("admin.alerts.password"))).toHaveValue("");
     expect(screen.getByLabelText(t("admin.alerts.to"))).toHaveValue("");
+  });
+
+  it("fills the edit form from the saved settings, never the password", async () => {
+    const fetchMock = stubApi((path, init) => {
+      if (path.startsWith("/api/v1/admin/alert-channels?")) {
+        return json({ items: [channel], page: 1, page_size: 200, total: 1 });
+      }
+      if (path === "/api/v1/admin/alert-channels/ch1/settings") {
+        return json(savedSettings);
+      }
+      if (path === "/api/v1/admin/alert-channels/ch1" && init?.method === "PUT") {
+        return json(channel);
+      }
+      return undefined;
+    });
+    renderAt(<AdminAlertsPage />, "/admin/settings/alerts");
+    await userEvent.click(await screen.findByRole("button", { name: t("account.credentials.edit") }));
+
+    expect(await screen.findByLabelText(t("admin.alerts.host"))).toHaveValue("smtp.example.org");
+    expect(screen.getByLabelText(t("admin.alerts.port"))).toHaveValue("587");
+    expect(screen.getByLabelText(t("admin.alerts.username"))).toHaveValue("mailer");
+    expect(screen.getByLabelText(t("admin.alerts.from"))).toHaveValue("hg@example.org");
+    expect(screen.getByLabelText(t("admin.alerts.to"))).toHaveValue("a@example.org, b@example.org");
+    expect(screen.getByLabelText(t("admin.alerts.password"))).toHaveValue("");
+    expect(screen.getByRole("button", { name: t("admin.alerts.starttls") })).toHaveAttribute("aria-pressed", "true");
+
+    // Saving without a new password keeps the saved one.
+    await userEvent.click(screen.getByRole("button", { name: t("admin.alerts.save") }));
+    await vi.waitFor(() => expect(screen.queryByLabelText(t("admin.alerts.host"))).toBeNull());
+    const put = fetchMock.mock.calls.find((call) => (call[1] as RequestInit | undefined)?.method === "PUT");
+    const body = JSON.parse(String(((put ?? [])[1] as RequestInit).body)) as { config: Record<string, unknown> };
+    expect(body.config.keep_password).toBe(true);
+    expect(body.config).not.toHaveProperty("password");
+    expect(body.config.tls).toBe("starttls");
+  });
+
+  it("sends a test email with the form values and shows the result", async () => {
+    const fetchMock = stubApi((path, init) => {
+      if (path.startsWith("/api/v1/admin/alert-channels?")) {
+        return json({ items: [channel], page: 1, page_size: 200, total: 1 });
+      }
+      if (path === "/api/v1/admin/alert-channels/ch1/settings") {
+        return json(savedSettings);
+      }
+      if (path === "/api/v1/admin/alert-channels/test" && init?.method === "POST") {
+        return json({ ok: false, error: "alert delivery failed to connect" });
+      }
+      return undefined;
+    });
+    renderAt(<AdminAlertsPage />, "/admin/settings/alerts");
+    await userEvent.click(await screen.findByRole("button", { name: t("account.credentials.edit") }));
+    await screen.findByLabelText(t("admin.alerts.host"));
+    await userEvent.click(screen.getByRole("button", { name: t("admin.alerts.test") }));
+
+    expect(
+      await screen.findByText(t("admin.alerts.testFailed", { reason: "alert delivery failed to connect" })),
+    ).toBeInTheDocument();
+    const post = fetchMock.mock.calls.find((call) => (call[1] as RequestInit | undefined)?.method === "POST");
+    const body = JSON.parse(String(((post ?? [])[1] as RequestInit).body)) as {
+      channel_id: string;
+      config: Record<string, unknown>;
+    };
+    expect(body.channel_id).toBe("ch1");
+    expect(body.config.host).toBe("smtp.example.org");
+    expect(body.config.keep_password).toBe(true);
   });
 
   it("has no delete control and toggles enabled with only that field", async () => {

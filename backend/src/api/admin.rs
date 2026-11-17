@@ -247,6 +247,70 @@ pub async fn create_alert_channel(
     Ok((StatusCode::CREATED, Json(channel)).into_response())
 }
 
+/// `GET /api/v1/admin/alert-channels/:id/settings`. The SMTP settings without the
+/// password, to fill the edit form. Returns `200` or `404`.
+pub async fn alert_channel_settings(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<String>,
+) -> Result<Json<alert_channels::ChannelSettings>, AppError> {
+    Ok(Json(
+        alert_channels::settings(&state.pool, &state.credentials_key, &id).await?,
+    ))
+}
+
+/// Body for `POST /api/v1/admin/alert-channels/test`. `config` holds secrets, so `Debug`
+/// does not print it.
+#[derive(Deserialize)]
+pub struct TestChannelBody {
+    /// The saved channel whose password `config` may keep with `"keep_password": true`.
+    pub channel_id: Option<String>,
+    pub config: serde_json::Value,
+}
+
+impl fmt::Debug for TestChannelBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TestChannelBody")
+            .field("channel_id", &self.channel_id)
+            .field("config", &REDACTED)
+            .finish()
+    }
+}
+
+/// Test mails allowed per admin in one window. Each one is an outbound SMTP send.
+const TEST_MAIL_LIMIT: u32 = 5;
+const TEST_MAIL_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+static TEST_MAIL_LIMITER: std::sync::LazyLock<crate::api::hardening::RateLimiter> =
+    std::sync::LazyLock::new(|| {
+        crate::api::hardening::RateLimiter::new(TEST_MAIL_LIMIT, TEST_MAIL_WINDOW)
+    });
+
+/// `POST /api/v1/admin/alert-channels/test`. Sends a fixed test mail with the given SMTP
+/// config. Returns `200` with `{"ok", "error"?}`, `404` for an unknown `channel_id`, `422`
+/// for an invalid config, or `429` after 5 requests a minute per admin.
+pub async fn test_alert_channel(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    body: axum::body::Bytes,
+) -> Result<Response, AppError> {
+    if let Err(retry) =
+        TEST_MAIL_LIMITER.check(&format!("user:{}", admin.id), std::time::Instant::now())
+    {
+        return Ok(crate::api::hardening::too_many_requests(retry));
+    }
+    let body: TestChannelBody = parse_body(&body)?;
+    let result = alert_channels::test_smtp(
+        &state.pool,
+        &state.credentials_key,
+        state.allow_private_alerts,
+        body.channel_id.as_deref(),
+        body.config,
+    )
+    .await?;
+    Ok(Json(result).into_response())
+}
+
 /// `PUT /api/v1/admin/alert-channels/:id`. Returns `200`, `404`, or `422`.
 pub async fn update_alert_channel(
     State(state): State<AppState>,

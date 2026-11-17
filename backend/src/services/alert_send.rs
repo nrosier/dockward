@@ -293,6 +293,23 @@ fn smtp_message(config: &SmtpConfig, alert: &Alert) -> Result<Message, SendError
         .map_err(|_| SendError::Config)
 }
 
+/// The fixed test message: it names no mapping and carries nothing from the config.
+fn smtp_test_message(config: &SmtpConfig) -> Result<Message, SendError> {
+    let from: Mailbox = config.from.parse().map_err(|_| SendError::Config)?;
+    let mut builder = Message::builder()
+        .from(from)
+        .subject("[HarborGate] test message");
+    for address in &config.to {
+        let to: Mailbox = address.parse().map_err(|_| SendError::Config)?;
+        builder = builder.to(to);
+    }
+    builder
+        .body(
+            "This is a test message from HarborGate. Alert email is set up correctly.\n".to_owned(),
+        )
+        .map_err(|_| SendError::Config)
+}
+
 /// Delivers `alert` by SMTP to every `to` address in one message.
 ///
 /// The host is resolved and checked by [`outbound::resolve_checked`] on every call, and the
@@ -300,6 +317,21 @@ fn smtp_message(config: &SmtpConfig, alert: &Alert) -> Result<Message, SendError
 pub async fn send_smtp(
     config: &SmtpConfig,
     alert: &Alert,
+    allow_private: bool,
+) -> Result<(), SendError> {
+    let message = smtp_message(config, alert)?;
+    deliver_smtp(config, message, allow_private).await
+}
+
+/// Sends a fixed test message to every `to` address, by the same path as a real alert.
+pub async fn send_smtp_test(config: &SmtpConfig, allow_private: bool) -> Result<(), SendError> {
+    let message = smtp_test_message(config)?;
+    deliver_smtp(config, message, allow_private).await
+}
+
+async fn deliver_smtp(
+    config: &SmtpConfig,
+    message: Message,
     allow_private: bool,
 ) -> Result<(), SendError> {
     let addresses = outbound::resolve_checked(
@@ -319,7 +351,6 @@ pub async fn send_smtp(
         (None, _) => None,
     };
     let transport = smtp_transport(&target, credentials)?;
-    let message = smtp_message(config, alert)?;
     // lettre's own timeout covers only the TCP connect, so the whole send is bounded here.
     tokio::time::timeout(SEND_TIMEOUT, transport.send(message))
         .await
@@ -542,6 +573,30 @@ mod tests {
         assert!(raw.contains("Subject: [Dockward] job_failed proj/repo"));
         assert!(raw.contains("a@example.com"));
         assert!(raw.contains("b@example.com"));
+    }
+
+    #[test]
+    fn test_message_is_fixed_and_goes_to_every_recipient() {
+        let config = smtp_config("mail.example.com", TlsMode::Implicit);
+        let message = match smtp_test_message(&config) {
+            Ok(message) => message,
+            Err(_) => panic!("message build failed"),
+        };
+        let raw = String::from_utf8_lossy(&message.formatted()).into_owned();
+        assert!(raw.contains("Subject: [HarborGate] test message"));
+        assert!(raw.contains("a@example.com"));
+        assert!(raw.contains("b@example.com"));
+        assert!(!raw.contains("pw-for-test"));
+    }
+
+    #[tokio::test]
+    async fn smtp_test_to_a_private_host_is_refused_before_connecting() {
+        let mut config = smtp_config("127.0.0.1", TlsMode::Implicit);
+        config.port = 9;
+        assert_eq!(
+            send_smtp_test(&config, false).await,
+            Err(SendError::Blocked)
+        );
     }
 
     #[tokio::test]

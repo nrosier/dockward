@@ -26,6 +26,7 @@ Purpose: the single home for alert rules. Covers admin-configured email (SMTP) a
 - The 24-hour window is enforced by checking `sent_at`, not by the constraint. See [database.md](database.md) for the write rule.
 - Source: none external. The tables are a local design to implement the user's decided 24-hour dedupe.
 - Channel secrets are never returned by the API after save. See [api.md](api.md).
+- Decided (2026-11-17, user): an SMTP channel's non-secret settings (host, port, tls, username, from, to) are returned to the admin edit form so it is not empty, with only `password_set` for the password. Saving with `"keep_password": true` keeps the stored password. Webhook settings stay write-only. An admin can send a fixed test mail from the SMTP form, before or after saving.
 
 ## Payload rules
 
