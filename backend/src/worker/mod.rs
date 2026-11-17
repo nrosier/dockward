@@ -467,6 +467,7 @@ mod tests {
             false,
             "webhook",
             true,
+            None,
             serde_json::json!({"url": "https://hooks.example.test/services/FAKE_URL_TOKEN_1"}),
         )
         .await

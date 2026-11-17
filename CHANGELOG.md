@@ -4,6 +4,13 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+### Added
+- Alert routing (#458): each alert channel has its own set of events: job failed, new HIGH or CRITICAL CVE, and CVE fixed. A channel is sent only the events ticked for it. New HIGH or CRITICAL CVEs are sent as one summary per scan (the first 10, then "and N more"), and a CVE that is no longer reported is sent once per fix; that alert never closes a GitHub issue. The alert channel page follows the new layout, with the event checklist, recipient chips and the test email in the footer.
+
+### Upgrade notes
+- Migration 0018 adds the event set. Existing channels keep job failures only, as before; tick the CVE events to receive them.
+- Webhook bodies use the event names `new_high_or_critical` (with `cves` and `more`) and `cve_fixed`. The old `critical_cve` name was never sent.
+
 ## 0.9.2 - 2026-11-16
 
 ### Changed

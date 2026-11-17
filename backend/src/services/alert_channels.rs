@@ -9,6 +9,9 @@
 //! settings that are not secret, so the edit form can be filled in. The SMTP password is
 //! never returned, only whether one is set. Sending alerts is not done here (#57); the
 //! SMTP test mail only calls the sender.
+//!
+//! Each channel has an event set (#458, `specs/alerts.md`, Routing): the events it receives,
+//! from [`EVENTS`]. It is not a secret, so it is returned with the channel.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -33,6 +36,38 @@ const REDACTED: &str = "<redacted>";
 /// A marker a client puts in an SMTP config to keep the saved password. It is removed
 /// before the config is parsed, and it is never stored.
 const KEEP_PASSWORD: &str = "keep_password";
+
+/// The routable events, in the order the API returns them.
+pub const EVENTS: [&str; 3] = ["job_failed", "new_high_or_critical", "cve_fixed"];
+
+/// The event set of a channel created without one: the one event sent before #458.
+const DEFAULT_EVENTS: [&str; 1] = ["job_failed"];
+
+/// Checks an event set and returns it without repeats, in the order of [`EVENTS`]. An unknown
+/// name is a `422`. An empty set is allowed: the channel then receives nothing.
+pub fn normalize_events(events: &[String]) -> Result<Vec<String>, AppError> {
+    // The unknown name is not echoed: the message is fixed text.
+    if events.iter().any(|e| !EVENTS.contains(&e.as_str())) {
+        return Err(invalid(
+            "Unknown alert event. Use job_failed, new_high_or_critical or cve_fixed.",
+        ));
+    }
+    Ok(EVENTS
+        .iter()
+        .filter(|known| events.iter().any(|e| e == *known))
+        .map(|known| (*known).to_owned())
+        .collect())
+}
+
+fn events_json(events: &[String]) -> Result<String, AppError> {
+    serde_json::to_string(events).map_err(|_| AppError::InternalError)
+}
+
+/// The stored event set of a row. A value that does not read is an internal error.
+fn parse_events(stored: &str) -> Result<Vec<String>, AppError> {
+    let events: Vec<String> = serde_json::from_str(stored).map_err(|_| AppError::InternalError)?;
+    normalize_events(&events).map_err(|_| AppError::InternalError)
+}
 
 /// How the SMTP connection is secured. There is no plaintext option.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +157,8 @@ pub struct Channel {
     pub id: String,
     pub kind: String,
     pub enabled: bool,
+    /// The events the channel receives, from [`EVENTS`].
+    pub events: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -133,6 +170,7 @@ impl TryFrom<ChannelRow> for Channel {
         Ok(Self {
             created_at: time::rfc3339(row.created_at)?,
             updated_at: time::rfc3339(row.updated_at)?,
+            events: parse_events(&row.events)?,
             id: row.id,
             kind: row.kind,
             enabled: row.enabled,
@@ -339,8 +377,10 @@ pub async fn test_smtp(
     )
 }
 
-/// Creates a channel. Returns `422` for an invalid kind or config. The row and the
-/// `alert.config_change` audit row commit together.
+/// Creates a channel. Returns `422` for an invalid kind, config or event name. Without
+/// `events` the channel receives `job_failed`. The row and the `alert.config_change` audit
+/// row commit together.
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
     pool: &SqlitePool,
     credentials_key: &DerivedKey,
@@ -348,15 +388,27 @@ pub async fn create(
     allow_private: bool,
     kind: &str,
     enabled: bool,
+    events: Option<&[String]>,
     config: serde_json::Value,
 ) -> Result<Channel, AppError> {
+    let events = match events {
+        Some(events) => normalize_events(events)?,
+        None => DEFAULT_EVENTS.iter().map(|e| (*e).to_owned()).collect(),
+    };
     let config = Config::parse(kind, config, allow_private)?;
     let id = ids::new_id()?;
     let sealed = seal(credentials_key, &id, &config)?;
 
     let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
-    rows::insert(&mut tx, &id, kind, &sealed, enabled).await?;
-    record_change(&mut tx, actor, &id, kind, &["kind", "enabled", "config"]).await?;
+    rows::insert(&mut tx, &id, kind, &sealed, enabled, &events_json(&events)?).await?;
+    record_change(
+        &mut tx,
+        actor,
+        &id,
+        kind,
+        &["kind", "enabled", "events", "config"],
+    )
+    .await?;
     let row = rows::find(&mut tx, &id)
         .await?
         .ok_or(AppError::InternalError)?;
@@ -364,8 +416,10 @@ pub async fn create(
     Channel::try_from(row)
 }
 
-/// Updates a channel. `config`, when given, replaces the stored config. Without it only
-/// `enabled` changes. A missing channel is `404`. Nothing is written when nothing changed.
+/// Updates a channel. `config`, when given, replaces the stored config, and `events`, when
+/// given, replaces the event set. Without them only `enabled` changes. A missing channel is
+/// `404`, an unknown event name `422`. Nothing is written when nothing changed.
+#[allow(clippy::too_many_arguments)]
 pub async fn update(
     pool: &SqlitePool,
     credentials_key: &DerivedKey,
@@ -373,8 +427,10 @@ pub async fn update(
     allow_private: bool,
     id: &str,
     enabled: Option<bool>,
+    events: Option<&[String]>,
     config: Option<serde_json::Value>,
 ) -> Result<Channel, AppError> {
+    let events = events.map(normalize_events).transpose()?;
     let mut tx = pool.begin().await.map_err(|_| AppError::InternalError)?;
     let current = rows::find(&mut tx, id).await?.ok_or(AppError::NotFound)?;
 
@@ -383,6 +439,13 @@ pub async fn update(
     if new_enabled != current.enabled {
         fields.push("enabled");
     }
+    let new_events = match events {
+        Some(events) if events != parse_events(&current.events)? => {
+            fields.push("events");
+            Some(events_json(&events)?)
+        }
+        _ => None,
+    };
     let sealed = match config {
         Some(mut raw) => {
             apply_kept_password(credentials_key, &current, &mut raw)?;
@@ -396,7 +459,15 @@ pub async fn update(
     if fields.is_empty() {
         return Channel::try_from(current);
     }
-    if !rows::update(&mut tx, id, new_enabled, sealed.as_deref()).await? {
+    if !rows::update(
+        &mut tx,
+        id,
+        new_enabled,
+        sealed.as_deref(),
+        new_events.as_deref(),
+    )
+    .await?
+    {
         return Err(AppError::NotFound);
     }
     record_change(&mut tx, actor, id, &current.kind, &fields).await?;
@@ -507,7 +578,7 @@ mod tests {
         kind: &str,
         config: serde_json::Value,
     ) -> Result<Channel, AppError> {
-        create(pool, &key(), &actor(), false, kind, true, config).await
+        create(pool, &key(), &actor(), false, kind, true, None, config).await
     }
 
     async fn stored(pool: &SqlitePool, id: &str) -> String {
@@ -560,6 +631,7 @@ mod tests {
             false,
             &hook.id,
             Some(false),
+            None,
             Some(webhook_config()),
         )
         .await
@@ -598,9 +670,18 @@ mod tests {
             .collect();
         assert_eq!(
             keys,
-            ["created_at", "enabled", "id", "kind", "updated_at"],
+            [
+                "created_at",
+                "enabled",
+                "events",
+                "id",
+                "kind",
+                "updated_at"
+            ],
             "unexpected response fields"
         );
+        // A channel created without an event set receives job failures, as before #458.
+        assert_eq!(bodies[0]["events"], json!(["job_failed"]));
         assert_eq!(page.total, 2);
 
         pool.close().await;
@@ -641,6 +722,7 @@ mod tests {
             true,
             "webhook",
             true,
+            None,
             json!({"url": "https://127.0.0.1/hook"}),
         )
         .await;
@@ -728,9 +810,18 @@ mod tests {
         map.remove("password");
         map.insert("host".to_owned(), json!("smtp2.example.test"));
         map.insert(KEEP_PASSWORD.to_owned(), json!(true));
-        update(&pool, &key(), &actor(), false, &mail.id, None, Some(kept))
-            .await
-            .unwrap();
+        update(
+            &pool,
+            &key(),
+            &actor(),
+            false,
+            &mail.id,
+            None,
+            None,
+            Some(kept),
+        )
+        .await
+        .unwrap();
         let plain = crypto::decrypt(
             &key(),
             &config_aad(&mail.id),
@@ -755,6 +846,7 @@ mod tests {
             &actor(),
             false,
             &mail.id,
+            None,
             None,
             Some(replaced),
         )
@@ -837,6 +929,7 @@ mod tests {
             kind: "webhook".to_owned(),
             config_encrypted: "v1:FAKE_CIPHERTEXT".to_owned(),
             enabled: true,
+            events: "[]".to_owned(),
             created_at: 0,
             updated_at: 0,
         };
@@ -850,9 +943,18 @@ mod tests {
         let first = stored(&pool, &hook.id).await;
 
         // Only `enabled` changes: the stored config is untouched.
-        update(&pool, &key(), &actor(), false, &hook.id, Some(false), None)
-            .await
-            .unwrap();
+        update(
+            &pool,
+            &key(),
+            &actor(),
+            false,
+            &hook.id,
+            Some(false),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(stored(&pool, &hook.id).await, first);
         // A config replacement changes the ciphertext.
         update(
@@ -862,17 +964,37 @@ mod tests {
             false,
             &hook.id,
             None,
+            None,
             Some(webhook_config()),
         )
         .await
         .unwrap();
         assert_ne!(stored(&pool, &hook.id).await, first);
         // Nothing changed: no write and no audit row.
-        update(&pool, &key(), &actor(), false, &hook.id, Some(false), None)
-            .await
-            .unwrap();
+        update(
+            &pool,
+            &key(),
+            &actor(),
+            false,
+            &hook.id,
+            Some(false),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         // An unknown channel is a 404.
-        let missing = update(&pool, &key(), &actor(), false, "nope", Some(true), None).await;
+        let missing = update(
+            &pool,
+            &key(),
+            &actor(),
+            false,
+            "nope",
+            Some(true),
+            None,
+            None,
+        )
+        .await;
         assert!(matches!(missing, Err(AppError::NotFound)));
 
         let audit_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
@@ -883,7 +1005,7 @@ mod tests {
         .unwrap();
         assert_eq!(audit_rows.len(), 3, "unexpected number of audit rows");
         let expected_fields = [
-            vec!["kind", "enabled", "config"],
+            vec!["kind", "enabled", "events", "config"],
             vec!["enabled"],
             vec!["config"],
         ];
@@ -902,6 +1024,122 @@ mod tests {
             assert_eq!(value["kind"], "webhook");
             assert_eq!(value["fields"], json!(fields));
         }
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_event_set_is_validated_saved_and_returned_without_secrets() {
+        let (pool, dir) = fresh_pool("events").await;
+        let all: Vec<String> = [
+            "cve_fixed",
+            "job_failed",
+            "new_high_or_critical",
+            "cve_fixed",
+        ]
+        .iter()
+        .map(|e| (*e).to_owned())
+        .collect();
+        let hook = create(
+            &pool,
+            &key(),
+            &actor(),
+            false,
+            "webhook",
+            true,
+            Some(&all),
+            webhook_config(),
+        )
+        .await
+        .unwrap();
+        // Known order, no repeats.
+        assert_eq!(
+            hook.events,
+            ["job_failed", "new_high_or_critical", "cve_fixed"]
+        );
+
+        // An unknown name is refused on create and on update, and nothing is stored.
+        let bad = vec!["new_critical".to_owned()];
+        let refused = create(
+            &pool,
+            &key(),
+            &actor(),
+            false,
+            "webhook",
+            true,
+            Some(&bad),
+            webhook_config(),
+        )
+        .await;
+        assert!(matches!(refused, Err(AppError::ValidationFailed(_))));
+        assert_eq!(channel_count(&pool).await, 1);
+        let refused = update(
+            &pool,
+            &key(),
+            &actor(),
+            false,
+            &hook.id,
+            None,
+            Some(&bad),
+            None,
+        )
+        .await;
+        assert!(matches!(refused, Err(AppError::ValidationFailed(_))));
+
+        // An update of the events alone keeps the stored config, and is audited by name.
+        let before = stored(&pool, &hook.id).await;
+        let only_fixed = vec!["cve_fixed".to_owned()];
+        let updated = update(
+            &pool,
+            &key(),
+            &actor(),
+            false,
+            &hook.id,
+            None,
+            Some(&only_fixed),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.events, ["cve_fixed"]);
+        assert_eq!(stored(&pool, &hook.id).await, before);
+        let fields: String = sqlx::query_scalar(
+            "SELECT details FROM audit_log ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(fields.contains(r#""fields":["events"]"#), "{fields}");
+
+        // The list returns the event set and no secret.
+        let page = list(&pool, &ListQuery::default()).await.unwrap();
+        let text = serde_json::to_string(&page).unwrap();
+        assert!(text.contains(r#""events":["cve_fixed"]"#), "{text}");
+        for secret in [
+            "FAKE_URL_TOKEN_1",
+            "FAKE_HEADER_SECRET_1",
+            "hooks.example.test",
+            "v1:",
+        ] {
+            assert!(!text.contains(secret), "a secret leaked into the list");
+        }
+
+        // An empty set is allowed: the channel then receives nothing.
+        let none: Vec<String> = Vec::new();
+        let cleared = update(
+            &pool,
+            &key(),
+            &actor(),
+            false,
+            &hook.id,
+            None,
+            Some(&none),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(cleared.events.is_empty());
 
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);

@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Admin: Alert channels, layout v2 (#458)</title>
+<style>
+body{margin:0;background:#0b0c18;color:#eceafa;font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.45}
+a{color:#a390fb;text-decoration:none}
+h1,h2,p,ul{margin:0}
+.muted{color:#9b98b8}
+.help{color:#9b98b8;font-size:12.5px}
+.card{background:#15162a;border:1px solid #25264a;border-radius:10px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:0 14px;border-radius:8px;border:1px solid #2e3056;background:#1b1c34;color:#eceafa;font:600 13px 'Inter',sans-serif;cursor:pointer}
+.btn-primary{background:#a390fb;border-color:#a390fb;color:#0b0c18;font-weight:600}
+.btn-sm{min-height:30px;padding:0 10px;font-size:12.5px}
+.btn:disabled{opacity:.5}
+.field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.label{font-weight:600;font-size:13px}
+.input{min-height:40px;border-radius:8px;border:1px solid #2e3056;background:#0f1022;color:#eceafa;padding:0 12px;font:14px 'Inter',sans-serif;width:100%;box-sizing:border-box}
+.switch{width:44px;height:26px;border-radius:999px;border:1px solid #2e3056;background:#1b1c34;position:relative;padding:0;flex:none}
+.switch span{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#9b98b8}
+.switch.on{background:#a390fb;border-color:#a390fb}
+.switch.on span{left:21px;background:#0b0c18}
+.seg{display:inline-flex;border:1px solid #2e3056;border-radius:8px;overflow:hidden;align-self:flex-start}
+.seg button{background:transparent;border:0;color:#c9c6e4;font:500 13px 'Inter',sans-serif;padding:0 14px;min-height:40px}
+.seg button[aria-pressed="true"]{background:#2a2b52;color:#eceafa}
+.grid{display:grid;gap:16px 20px;align-items:start}
+.g-60-15-25{grid-template-columns:60% 15% 25%}
+.g-50-50{grid-template-columns:1fr 1fr}
+.g-3{grid-template-columns:repeat(3,1fr)}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;background:#2a2b52;border:1px solid #3a3c63;font-size:12.5px}
+.chip b{font-weight:600;cursor:pointer;color:#c9c6e4}
+.chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:40px;border-radius:8px;border:1px solid #2e3056;background:#0f1022;padding:6px 10px;box-sizing:border-box}
+.chips input{flex:1 1 160px;background:transparent;border:0;color:#eceafa;font:14px 'Inter',sans-serif;outline:none;min-width:120px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.item{display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center;padding:14px 18px;border-bottom:1px solid #1d1e38}
+.item:last-child{border-bottom:0}
+.summary{font-size:12.5px;color:#c9c6e4}
+.stamp{font-size:12px;color:#9b98b8}
+.warn{font-size:12.5px;color:#fdba74}
+.check{display:flex;gap:10px;align-items:flex-start}
+.check input{margin-top:3px}
+</style>
+</head>
+<body>
+<div style="max-width:72rem;margin:0 auto;padding:28px 32px 56px;display:flex;flex-direction:column;gap:20px">
+
+  <!-- Page header -->
+  <header class="row">
+    <div style="display:flex;flex-direction:column;gap:4px">
+      <span class="help">Dockward / Admin</span>
+      <h1 style="font-size:24px;font-weight:650;letter-spacing:-0.01em">Alert channels</h1>
+    </div>
+    <button type="button" class="btn btn-primary">Add channel</button>
+  </header>
+
+  <!-- MASTER LIST -->
+  <section class="card" aria-labelledby="master">
+    <h2 id="master" style="position:absolute;left:-9999px">Alert channels</h2>
+    <ul style="list-style:none;margin:0;padding:0">
+      <li class="item">
+        <div class="row" style="justify-content:flex-start;gap:12px">
+          <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#b4b1d0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 6-10 7L2 6"/></svg>
+          <div style="display:flex;flex-direction:column;gap:2px">
+            <span style="font-weight:500">Email (SMTP)</span>
+            <span class="stamp">Added 2026-10-30 · updated 2026-11-02</span>
+          </div>
+        </div>
+        <div class="summary">smtp.example.org · 2 recipients · 1 event</div>
+        <div class="row" style="justify-content:flex-end;gap:12px">
+          <span class="help" id="e1">Enabled</span>
+          <button type="button" class="switch on" role="switch" aria-checked="true" aria-labelledby="e1"><span></span></button>
+          <button type="button" class="btn btn-sm" aria-pressed="true" style="background:#2a2b52">Editing</button>
+        </div>
+      </li>
+      <li class="item">
+        <div class="row" style="justify-content:flex-start;gap:12px">
+          <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#b4b1d0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          <div style="display:flex;flex-direction:column;gap:2px">
+            <span style="font-weight:500">Webhook</span>
+            <span class="stamp">Added 2026-10-30</span>
+          </div>
+        </div>
+        <div class="summary">Webhook · 1 event</div>
+        <div class="row" style="justify-content:flex-end;gap:12px">
+          <span class="help" id="e2">Disabled</span>
+          <button type="button" class="switch" role="switch" aria-checked="false" aria-labelledby="e2"><span></span></button>
+          <button type="button" class="btn btn-sm">Edit</button>
+        </div>
+      </li>
+    </ul>
+  </section>
+
+  <!-- DETAIL FORM -->
+  <form class="card" style="padding:20px 22px;display:flex;flex-direction:column;gap:20px" aria-labelledby="ed">
+    <div style="display:flex;flex-direction:column;gap:4px">
+      <h2 id="ed" style="font-size:15px;font-weight:600">Edit email channel</h2>
+      <p class="help">Saved settings are encrypted and not shown. To change this channel, enter all its settings again.</p>
+    </div>
+
+    <!-- Section A: events -->
+    <fieldset style="border:0;margin:0;padding:0;display:flex;flex-direction:column;gap:10px">
+      <legend class="label" style="margin-bottom:10px">Events this channel receives</legend>
+      <div class="grid g-3">
+        <label class="check"><input type="checkbox" checked><span><span style="font-weight:500">Job failed</span><br><span class="help">A discover, pull or scan job fails for good after its retries.</span></span></label>
+        <label class="check"><input type="checkbox"><span><span style="font-weight:500">New HIGH or CRITICAL CVE</span><br><span class="help">A new HIGH or CRITICAL CVE appears on a source. Sent once per CVE.</span></span></label>
+        <label class="check"><input type="checkbox"><span><span style="font-weight:500">CVE fixed</span><br><span class="help">No longer reported on the latest scan. The GitHub issue is not closed; it gets a note.</span></span></label>
+      </div>
+    </fieldset>
+
+    <!-- Section B: connection -->
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="grid g-60-15-25">
+        <div class="field"><label class="label" for="h">SMTP host</label><input id="h" class="input" placeholder="smtp.example.org"></div>
+        <div class="field"><label class="label" for="pt">Port</label><input id="pt" class="input" placeholder="465" inputmode="numeric" style="max-width:7rem"></div>
+        <div class="field"><span class="label" id="tls">TLS</span>
+          <div class="seg" role="group" aria-labelledby="tls">
+            <button type="button" aria-pressed="true">Implicit TLS</button>
+            <button type="button" aria-pressed="false">STARTTLS</button>
+          </div>
+        </div>
+      </div>
+      <p class="warn">Plain, unencrypted SMTP is not allowed. Use implicit TLS (usually port 465) or STARTTLS (usually port 587).</p>
+    </div>
+
+    <!-- Section C: credentials -->
+    <div class="grid g-50-50">
+      <div class="field"><label class="label" for="su">Username <span class="help" style="font-weight:400">(optional)</span></label><input id="su" class="input" placeholder="alerts"></div>
+      <div class="field">
+        <label class="label" for="sp">Password <span class="help" style="font-weight:400">(optional)</span></label>
+        <input id="sp" class="input" type="password" placeholder="Saved · leave blank to keep">
+        <span class="help">A password is saved for this channel. It is never shown; leave the field blank to keep it.</span>
+      </div>
+    </div>
+
+    <!-- Section D: addresses -->
+    <div class="grid g-50-50">
+      <div class="field"><label class="label" for="fr">From address</label><input id="fr" class="input" placeholder="dockward@example.org"></div>
+      <div class="field">
+        <span class="label" id="to-l">To addresses</span>
+        <div class="chips" role="group" aria-labelledby="to-l">
+          <span class="chip">ops@example.org <b aria-label="Remove ops@example.org">×</b></span>
+          <span class="chip">alerts@example.org <b aria-label="Remove alerts@example.org">×</b></span>
+          <input aria-label="Add a recipient" placeholder="Add address">
+        </div>
+        <span class="help">Press Enter or comma to add an address. Remove one with ×.</span>
+      </div>
+    </div>
+
+    <!-- Section E: footer -->
+    <div class="row" style="border-top:1px solid #25264a;padding-top:16px">
+      <div class="row" style="justify-content:flex-start;gap:12px">
+        <button type="button" class="btn" data-state="smtp-only">Send test email</button>
+        <span id="tr" role="status" aria-live="polite" class="help" style="color:#86efac">Test email sent to ops@example.org, alerts@example.org.</span>
+      </div>
+      <div class="row" style="justify-content:flex-end;gap:10px">
+        <button type="button" class="btn">Cancel</button>
+        <button type="button" class="btn btn-primary">Save channel</button>
+      </div>
+    </div>
+  </form>
+
+</div>
+</body>
+</html>

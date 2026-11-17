@@ -1779,3 +1779,153 @@ async fn a_downloaded_scanner_that_exits_non_zero_is_a_normal_scan_failure() {
     assert_eq!(state.broken, None);
     assert!(!fx.dir.join("scanners/trivy/0.77.0/broken").exists());
 }
+
+/// #458: the scan path records the new and fixed CVEs, and the scan alerts send one summary of
+/// the new HIGH and CRITICAL CVEs once every run of the image has ended. A second identical scan
+/// sends nothing new, and a CVE that goes away is sent once as fixed.
+#[tokio::test]
+async fn the_scan_path_sends_one_summary_and_then_the_fixes() {
+    use crate::services::alert_send::AlertEvent;
+    use crate::services::alerts::Notifier;
+    use std::sync::{Arc, Mutex};
+
+    let (trivy, grype) = ok_scripts("");
+    let fx = Fx::new("alerts", &trivy, &grype).await;
+    let key = Arc::new(
+        crate::auth::crypto::credentials_key(
+            &crate::config::parse_encryption_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+                .unwrap_or_else(|_| panic!("key")),
+        )
+        .unwrap_or_else(|_| panic!("key")),
+    );
+    let actor = crate::services::audit::Actor {
+        user_id: None,
+        username: "test-admin".to_owned(),
+    };
+    let events = vec!["new_high_or_critical".to_owned(), "cve_fixed".to_owned()];
+    if crate::services::alert_channels::create(
+        &fx.pool,
+        &key,
+        &actor,
+        false,
+        "webhook",
+        true,
+        Some(&events),
+        serde_json::json!({"url": "https://hooks.example.test/services/FAKE"}),
+    )
+    .await
+    .is_err()
+    {
+        panic!("channel");
+    }
+    let seen: Arc<Mutex<Vec<crate::services::alert_send::Alert>>> = Arc::default();
+    let log = seen.clone();
+    let notifier = Notifier::with_sender(fx.pool.clone(), key, move |_config, alert| {
+        if let Ok(mut list) = log.lock() {
+            list.push(alert);
+        }
+        Box::pin(async { Ok(()) })
+    });
+    let runs = |pool: SqlitePool| async move {
+        sqlx::query_scalar::<_, String>("SELECT id FROM scan_runs ORDER BY rowid")
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default()
+    };
+    let taken = |seen: &Arc<Mutex<Vec<crate::services::alert_send::Alert>>>| {
+        seen.lock().map(|list| list.clone()).unwrap_or_default()
+    };
+
+    // The first scan: both runs, then the alerts after each, as the job handler does.
+    fx.queue(P_OLD).await;
+    fx.drain().await;
+    for run_id in runs(fx.pool.clone()).await {
+        if notifier.scan_alerts(&run_id, NOW).await.is_err() {
+            panic!("scan alerts");
+        }
+    }
+    let first = taken(&seen);
+    assert_eq!(first.len(), 1, "one summary for the scan: {first:?}");
+    assert_eq!(first[0].event, AlertEvent::NewHighOrCritical);
+    let listed: Vec<&str> = first[0].cves.iter().map(|cve| cve.id.as_str()).collect();
+    assert!(listed.contains(&"CVE-2026-4738"), "{listed:?}");
+    assert!(
+        first[0]
+            .cves
+            .iter()
+            .all(|cve| cve.severity == "CRITICAL" || cve.severity == "HIGH")
+    );
+    let high_or_critical = count(
+        &fx.pool,
+        "SELECT COUNT(*) FROM cve_findings WHERE severity IN ('CRITICAL', 'HIGH')",
+        &[],
+    )
+    .await;
+    assert_eq!(
+        (first[0].cves.len() + first[0].more) as i64,
+        high_or_critical
+    );
+
+    // A second identical scan: nothing new.
+    queue_scans(&fx.pool, P_OLD, Some("s1"), "db_update", NOW)
+        .await
+        .ok();
+    fx.drain().await;
+    for run_id in runs(fx.pool.clone()).await {
+        if notifier.scan_alerts(&run_id, NOW + 1).await.is_err() {
+            panic!("scan alerts");
+        }
+    }
+    assert_eq!(taken(&seen).len(), 1, "an identical scan sent an alert");
+
+    // Both scanners stop reporting everything: each CVE is sent once as fixed.
+    let empty_grype = fx.dir.join("grype-empty.json");
+    let empty_trivy = fx.dir.join("trivy-empty.json");
+    let trivy_text = read(Path::new(TRIVY_FIXTURE));
+    let trivy_value: serde_json::Value =
+        serde_json::from_str(&trivy_text).unwrap_or_else(|_| panic!("trivy fixture"));
+    let mut trivy_value = trivy_value;
+    if let Some(results) = trivy_value
+        .get_mut("Results")
+        .and_then(|r| r.as_array_mut())
+    {
+        for result in results {
+            if let Some(map) = result.as_object_mut() {
+                map.remove("Vulnerabilities");
+            }
+        }
+    }
+    let written = std::fs::write(&empty_trivy, trivy_value.to_string()).and_then(|()| {
+        std::fs::write(
+            &empty_grype,
+            br#"{"matches":[],"descriptor":{"version":"0.121.2"}}"#,
+        )
+    });
+    if let Err(err) = written {
+        panic!("write: {err}");
+    }
+    fx.script("grype", &format!("cat '{}'", empty_grype.display()));
+    fx.script("trivy", &format!("cat '{}'", empty_trivy.display()));
+    queue_scans(&fx.pool, P_OLD, Some("s1"), "db_update", NOW)
+        .await
+        .ok();
+    fx.drain().await;
+    for run_id in runs(fx.pool.clone()).await {
+        if notifier.scan_alerts(&run_id, NOW + 2).await.is_err() {
+            panic!("scan alerts");
+        }
+    }
+    let all = taken(&seen);
+    let fixed: Vec<&str> = all
+        .iter()
+        .filter(|alert| alert.event == AlertEvent::CveFixed)
+        .filter_map(|alert| alert.cve_id.as_deref())
+        .collect();
+    let tracked = count(&fx.pool, "SELECT COUNT(*) FROM cve_findings", &[]).await;
+    assert_eq!(fixed.len() as i64, tracked, "one fixed alert per CVE");
+    assert!(fixed.contains(&"CVE-2026-4738"));
+    assert_eq!(
+        count(&fx.pool, "SELECT COUNT(*) FROM alert_pending", &[]).await,
+        0
+    );
+}

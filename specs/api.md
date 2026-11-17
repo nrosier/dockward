@@ -184,9 +184,9 @@ All routes are `admin`.
 | PUT | `/api/v1/admin/users/:id/role` | yes | `409` for an OIDC user. |
 | GET, PUT | `/api/v1/admin/oidc` | yes | The client secret is write-only. `422` when `oidc_only_users` is on while OIDC is incomplete. |
 | GET, PUT | `/api/v1/admin/github-url` | yes | `422 settings.github_url_invalid` for a value that fails the rules in [security.md](security.md), "GitHub base URL". |
-| GET | `/api/v1/admin/alert-channels` | yes | Config never returned. |
-| POST | `/api/v1/admin/alert-channels` | yes | `422` on failure. |
-| PUT | `/api/v1/admin/alert-channels/:id` | yes | |
+| GET | `/api/v1/admin/alert-channels` | yes | Config never returned. Each channel is `{"id","kind","enabled","events","created_at","updated_at"}`; `events` is the event set (#458). |
+| POST | `/api/v1/admin/alert-channels` | yes | Body `{"kind","enabled","events"?,"config"}`. Without `events` the channel takes `["job_failed"]`. `422` on failure, including an unknown event name. |
+| PUT | `/api/v1/admin/alert-channels/:id` | yes | Body `{"enabled"?,"events"?,"config"?}`. `events` replaces the event set; without `config` the stored config is kept. Event names: `job_failed`, `new_high_or_critical`, `cve_fixed`; any other is `422`. Repeats are dropped and the set is returned in that order. |
 | GET | `/api/v1/admin/alert-channels/:id/settings` | yes | The SMTP settings without the password, to fill the edit form. A webhook has none (`smtp: null`). `404` for an unknown channel. |
 | POST | `/api/v1/admin/alert-channels/test` | yes | Sends one fixed test mail with the form values. `200 {"ok","error"?}`; a failed send is `ok: false`. `422` for a bad config, `404` for an unknown `channel_id`, `429` after 5 a minute per admin. |
 | DELETE | `/api/v1/admin/users/:id/totp` | yes | Clears the user's TOTP and recovery codes. `204`, `404` for an unknown user. Audited as `user.totp_reset` with the user's id only (#341). |

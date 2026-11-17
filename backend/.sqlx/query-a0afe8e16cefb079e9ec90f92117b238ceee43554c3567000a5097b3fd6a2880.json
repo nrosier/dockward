@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!\", kind AS \"kind!\", config_encrypted AS \"config_encrypted!\",\n                  enabled AS \"enabled!: bool\", created_at AS \"created_at!: i64\",\n                  updated_at AS \"updated_at!: i64\"\n           FROM alert_channels WHERE enabled = 1\n           ORDER BY created_at ASC, id ASC",
+  "query": "SELECT id AS \"id!\", kind AS \"kind!\", config_encrypted AS \"config_encrypted!\",\n                  enabled AS \"enabled!: bool\", events AS \"events!\", created_at AS \"created_at!: i64\",\n                  updated_at AS \"updated_at!: i64\"\n           FROM alert_channels\n           WHERE enabled = 1\n             AND EXISTS (SELECT 1 FROM json_each(alert_channels.events) e WHERE e.value = ?)\n           ORDER BY created_at ASC, id ASC",
   "describe": {
     "columns": [
       {
@@ -48,8 +48,19 @@
         }
       },
       {
-        "name": "created_at!: i64",
+        "name": "events!",
         "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "alert_channels",
+            "name": "events"
+          }
+        }
+      },
+      {
+        "name": "created_at!: i64",
+        "ordinal": 5,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -60,7 +71,7 @@
       },
       {
         "name": "updated_at!: i64",
-        "ordinal": 5,
+        "ordinal": 6,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -71,7 +82,7 @@
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       true,
@@ -79,8 +90,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "cb3ad86360690db991f7f326afa7b90e671fa4c91b7b085810583fa093c6899c"
+  "hash": "a0afe8e16cefb079e9ec90f92117b238ceee43554c3567000a5097b3fd6a2880"
 }

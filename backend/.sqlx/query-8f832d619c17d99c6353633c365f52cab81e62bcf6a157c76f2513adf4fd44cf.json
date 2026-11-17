@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.source_id AS \"source_id!\", p.image_tag AS \"image_tag!\",\n                  p.cve_id AS \"cve_id!\", f.severity AS \"severity!\"\n           FROM alert_pending p\n           JOIN cve_findings f\n             ON f.source_id = p.source_id AND f.image_tag = p.image_tag AND f.cve_id = p.cve_id\n           WHERE p.image_id = ? AND p.event = 'new_high_or_critical'\n             AND f.status = 'open' AND f.severity IN ('CRITICAL', 'HIGH')\n           ORDER BY p.source_id, CASE f.severity WHEN 'CRITICAL' THEN 0 ELSE 1 END,\n                    p.cve_id, p.image_tag",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "alert_pending",
+            "name": "source_id"
+          }
+        }
+      },
+      {
+        "name": "image_tag!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "alert_pending",
+            "name": "image_tag"
+          }
+        }
+      },
+      {
+        "name": "cve_id!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "alert_pending",
+            "name": "cve_id"
+          }
+        }
+      },
+      {
+        "name": "severity!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cve_findings",
+            "name": "severity"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8f832d619c17d99c6353633c365f52cab81e62bcf6a157c76f2513adf4fd44cf"
+}

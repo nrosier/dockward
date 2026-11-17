@@ -1,16 +1,45 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
+import { Link2, Mail } from "lucide-react";
+import { useState, type FormEvent, type KeyboardEvent } from "react";
 import { CardHeading, FormError, formatDate, INPUT, messageOf, Segmented, statusOf } from "../components/admin/parts";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Field } from "../components/ui/Field";
 import { ErrorMessage, LoadingMessage } from "../components/ui/StatusMessage";
 import { Switch } from "../components/ui/Switch";
-import { t } from "../i18n";
+import { t, type MessageKey } from "../i18n";
 import { api } from "../lib/api";
-import type { AlertChannel, AlertChannelSettings, AlertSmtpSettings, AlertTestResult, Page } from "../types/api";
+import type {
+  AlertChannel,
+  AlertChannelSettings,
+  AlertEvent,
+  AlertSmtpSettings,
+  AlertTestResult,
+  Page,
+} from "../types/api";
 
 const CHANNELS_KEY = ["admin", "alert-channels"] as const;
+
+// The routable events, in the order of the API and the approved layout (#458).
+const EVENTS: { value: AlertEvent; label: MessageKey; help: MessageKey }[] = [
+  { value: "job_failed", label: "admin.alerts.event.jobFailed", help: "admin.alerts.event.jobFailedHelp" },
+  { value: "new_high_or_critical", label: "admin.alerts.event.newCve", help: "admin.alerts.event.newCveHelp" },
+  { value: "cve_fixed", label: "admin.alerts.event.fixed", help: "admin.alerts.event.fixedHelp" },
+];
+
+// A new channel receives job failures, as every channel did before #458.
+const DEFAULT_EVENTS: AlertEvent[] = ["job_failed"];
+
+// Splits typed text into addresses: every piece before a comma is complete.
+function splitAddresses(text: string): { done: string[]; rest: string } {
+  const parts = text.split(",");
+  const rest = parts.pop() ?? "";
+  return { done: parts.map((part) => part.trim()).filter((part) => part !== ""), rest };
+}
+
+function addUnique(list: string[], more: string[]): string[] {
+  return more.reduce((acc, address) => (acc.includes(address) ? acc : [...acc, address]), list);
+}
 
 type Kind = "smtp" | "webhook";
 type Tls = "implicit" | "starttls";
@@ -41,7 +70,9 @@ function ChannelForm({
   const [username, setUsername] = useState(saved?.username ?? "");
   const [password, setPassword] = useState("");
   const [from, setFrom] = useState(saved?.from ?? "");
-  const [to, setTo] = useState(saved === null ? "" : saved.to.join(", "));
+  const [to, setTo] = useState<string[]>(saved === null ? [] : saved.to);
+  const [toDraft, setToDraft] = useState("");
+  const [events, setEvents] = useState<AlertEvent[]>(channel?.events ?? DEFAULT_EVENTS);
   const [url, setUrl] = useState("");
   const [headers, setHeaders] = useState<HeaderRow[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -54,9 +85,42 @@ function ChannelForm({
     setUsername("");
     setPassword("");
     setFrom("");
-    setTo("");
+    setTo([]);
+    setToDraft("");
     setUrl("");
     setHeaders([]);
+  }
+
+  // The chips plus whatever is still typed in the address field.
+  function recipients(): string[] {
+    const draft = toDraft.trim();
+    return draft === "" ? to : addUnique(to, [draft]);
+  }
+
+  function onToChange(value: string) {
+    const { done, rest } = splitAddresses(value);
+    if (done.length > 0) {
+      setTo(addUnique(to, done));
+    }
+    setToDraft(rest);
+  }
+
+  function onToKey(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const draft = toDraft.trim();
+      if (draft !== "") {
+        setTo(addUnique(to, [draft]));
+        setToDraft("");
+      }
+    } else if (event.key === "Backspace" && toDraft === "" && to.length > 0) {
+      setTo(to.slice(0, -1));
+    }
+  }
+
+  function toggleEvent(value: AlertEvent, on: boolean) {
+    const next = on ? [...events, value] : events.filter((event) => event !== value);
+    setEvents(EVENTS.map((event) => event.value).filter((event) => next.includes(event)));
   }
 
   function buildConfig(): Record<string, unknown> {
@@ -66,10 +130,7 @@ function ChannelForm({
         port: Number.parseInt(port, 10),
         tls,
         from: from.trim(),
-        to: to
-          .split(",")
-          .map((address) => address.trim())
-          .filter((address) => address !== ""),
+        to: recipients(),
       };
       if (username !== "") {
         config.username = username;
@@ -89,13 +150,25 @@ function ChannelForm({
     return config;
   }
 
+  // A saved webhook keeps its URL and headers when the URL field is left empty, so the
+  // events can change without entering a secret again.
+  const keepWebhook = channel !== null && kind === "webhook" && url.trim() === "" && headers.length === 0;
+
   const save = useMutation({
     mutationFn: () => {
-      const config = buildConfig();
       if (channel === null) {
-        return api<AlertChannel>("POST", "/admin/alert-channels", { kind, enabled: true, config });
+        return api<AlertChannel>("POST", "/admin/alert-channels", {
+          kind,
+          enabled: true,
+          events,
+          config: buildConfig(),
+        });
       }
-      return api<AlertChannel>("PUT", `/admin/alert-channels/${channel.id}`, { enabled: channel.enabled, config });
+      const body: Record<string, unknown> = { enabled: channel.enabled, events };
+      if (!keepWebhook) {
+        body.config = buildConfig();
+      }
+      return api<AlertChannel>("PUT", `/admin/alert-channels/${channel.id}`, body);
     },
     onSuccess: () => {
       clearConfig();
@@ -119,16 +192,7 @@ function ChannelForm({
     onSuccess: (result) => {
       setTestResult(
         result.ok
-          ? {
-              ok: true,
-              text: t("admin.alerts.testOk", {
-                to: to
-                  .split(",")
-                  .map((address) => address.trim())
-                  .filter((address) => address !== "")
-                  .join(", "),
-              }),
-            }
+          ? { ok: true, text: t("admin.alerts.testOk", { to: recipients().join(", ") }) }
           : { ok: false, text: t("admin.alerts.testFailed", { reason: result.error ?? t("errors.generic") }) },
       );
     },
@@ -156,15 +220,18 @@ function ChannelForm({
   const title = channel
     ? t(channel.kind === "smtp" ? "admin.alerts.editSmtp" : "admin.alerts.editWebhook")
     : t("admin.alerts.add");
+  const note =
+    saved !== null
+      ? t("admin.alerts.formNoteSmtp")
+      : channel !== null && channel.kind === "webhook"
+        ? t("admin.alerts.formNoteWebhook")
+        : t("admin.alerts.formNote");
+  const optional = <span className="font-normal text-muted"> {t("admin.alerts.optional")}</span>;
 
   return (
     <Card className="p-5" aria-labelledby="alert-form">
-      <form onSubmit={submit} className="flex flex-col gap-4">
-        <CardHeading
-          id="alert-form"
-          title={title}
-          help={t(saved === null ? "admin.alerts.formNote" : "admin.alerts.formNoteSmtp")}
-        />
+      <form onSubmit={submit} className="flex flex-col gap-5">
+        <CardHeading id="alert-form" title={title} help={note} />
         {fixedKind === null ? (
           <div className="flex flex-col gap-1.5">
             <span id="alert-kind" className="text-[13px] font-semibold">
@@ -181,56 +248,142 @@ function ChannelForm({
             />
           </div>
         ) : null}
+
+        {/* Section A: the events this channel receives. */}
+        <fieldset className="m-0 flex flex-col gap-2.5 border-0 p-0">
+          <legend className="mb-2.5 text-[13px] font-semibold">{t("admin.alerts.events")}</legend>
+          <div className="grid grid-cols-1 gap-x-5 gap-y-4 md:grid-cols-3">
+            {EVENTS.map((event) => (
+              <div key={event.value} className="flex items-start gap-2.5">
+                <input
+                  id={`event-${event.value}`}
+                  type="checkbox"
+                  className="mt-[3px] size-4 cursor-pointer accent-accent"
+                  aria-describedby={`event-${event.value}-help`}
+                  checked={events.includes(event.value)}
+                  onChange={(e) => toggleEvent(event.value, e.target.checked)}
+                />
+                <div className="flex flex-col">
+                  <label htmlFor={`event-${event.value}`} className="cursor-pointer text-[13px] font-medium">
+                    {t(event.label)}
+                  </label>
+                  <span id={`event-${event.value}-help`} className="text-[12.5px] text-muted">
+                    {t(event.help)}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </fieldset>
+
         {kind === "smtp" ? (
           <>
-            <Field id="smtp-host" label={t("admin.alerts.host")}>
-              <input id="smtp-host" className={INPUT} autoComplete="off" value={host} onChange={(e) => setHost(e.target.value)} />
-            </Field>
-            <div className="flex flex-wrap gap-4">
-              <div className="flex-1 basis-36">
-                <Field id="smtp-port" label={t("admin.alerts.port")}>
-                  <input id="smtp-port" className={INPUT} inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value)} />
+            {/* Section B: connection, 60 / 15 / 25. */}
+            <div className="flex flex-col gap-2">
+              <div className="grid grid-cols-1 items-start gap-x-5 gap-y-4 lg:grid-cols-[12fr_3fr_5fr]">
+                <Field id="smtp-host" label={t("admin.alerts.host")}>
+                  <input id="smtp-host" className={INPUT} autoComplete="off" value={host} onChange={(e) => setHost(e.target.value)} />
                 </Field>
+                <Field id="smtp-port" label={t("admin.alerts.port")}>
+                  <input
+                    id="smtp-port"
+                    className={`${INPUT} max-w-28`}
+                    inputMode="numeric"
+                    value={port}
+                    onChange={(e) => setPort(e.target.value)}
+                  />
+                </Field>
+                <div className="flex min-w-0 flex-col gap-1.5">
+                  <span id="smtp-tls" className="text-[13px] font-semibold">
+                    {t("admin.alerts.tls")}
+                  </span>
+                  <Segmented
+                    labelId="smtp-tls"
+                    value={tls}
+                    onChange={(value) => setTls(value === "starttls" ? "starttls" : "implicit")}
+                    options={[
+                      { value: "implicit", label: t("admin.alerts.implicit") },
+                      { value: "starttls", label: t("admin.alerts.starttls") },
+                    ]}
+                  />
+                </div>
               </div>
-              <div className="flex flex-[3] basis-60 flex-col gap-1.5">
-                <span id="smtp-tls" className="text-[13px] font-semibold">
-                  {t("admin.alerts.tls")}
-                </span>
-                <Segmented
-                  labelId="smtp-tls"
-                  value={tls}
-                  onChange={(value) => setTls(value === "starttls" ? "starttls" : "implicit")}
-                  options={[
-                    { value: "implicit", label: t("admin.alerts.implicit") },
-                    { value: "starttls", label: t("admin.alerts.starttls") },
-                  ]}
+              <p className="text-[12.5px] text-high-ink">{t("admin.alerts.noPlain")}</p>
+            </div>
+
+            {/* Section C: credentials, 50 / 50. The password is never shown. */}
+            <div className="grid grid-cols-1 items-start gap-x-5 gap-y-4 md:grid-cols-2">
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="smtp-user" className="text-[13px] font-semibold">
+                  {t("admin.alerts.username")}
+                  {optional}
+                </label>
+                <input id="smtp-user" className={INPUT} autoComplete="off" value={username} onChange={(e) => setUsername(e.target.value)} />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="smtp-password" className="text-[13px] font-semibold">
+                  {t("admin.alerts.password")}
+                  {optional}
+                </label>
+                <input
+                  id="smtp-password"
+                  className={INPUT}
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder={keepPassword ? t("admin.alerts.passwordKeep") : undefined}
+                  aria-describedby={keepPassword ? "smtp-password-help" : undefined}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
                 />
+                {keepPassword ? (
+                  <p id="smtp-password-help" className="text-[12.5px] text-muted">
+                    {t("admin.alerts.passwordSaved")}
+                  </p>
+                ) : null}
               </div>
             </div>
-            <span className="text-[12.5px] text-muted">{t("admin.alerts.noPlain")}</span>
-            <Field id="smtp-user" label={t("admin.alerts.username")}>
-              <input id="smtp-user" className={INPUT} autoComplete="off" value={username} onChange={(e) => setUsername(e.target.value)} />
-            </Field>
-            <Field
-              id="smtp-password"
-              label={t("admin.alerts.password")}
-              help={keepPassword ? t("admin.alerts.passwordSaved") : undefined}
-            >
-              <input
-                id="smtp-password"
-                className={INPUT}
-                type="password"
-                autoComplete="new-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </Field>
-            <Field id="smtp-from" label={t("admin.alerts.from")}>
-              <input id="smtp-from" className={INPUT} value={from} onChange={(e) => setFrom(e.target.value)} />
-            </Field>
-            <Field id="smtp-to" label={t("admin.alerts.to")} help={t("admin.alerts.toHelp")}>
-              <input id="smtp-to" className={INPUT} value={to} onChange={(e) => setTo(e.target.value)} />
-            </Field>
+
+            {/* Section D: addresses, 50 / 50. The to addresses are removable chips. */}
+            <div className="grid grid-cols-1 items-start gap-x-5 gap-y-4 md:grid-cols-2">
+              <Field id="smtp-from" label={t("admin.alerts.from")}>
+                <input id="smtp-from" className={INPUT} value={from} onChange={(e) => setFrom(e.target.value)} />
+              </Field>
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="smtp-to" className="text-[13px] font-semibold">
+                  {t("admin.alerts.to")}
+                </label>
+                <div className="flex min-h-9 flex-wrap items-center gap-1.5 rounded-lg border border-muted bg-bg px-2.5 py-1.5">
+                  {to.map((address) => (
+                    <span
+                      key={address}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-2 py-0.5 pr-1 pl-2.5 text-[12.5px]"
+                    >
+                      {address}
+                      <button
+                        type="button"
+                        className="cursor-pointer rounded-full px-1 font-semibold text-muted hover:text-text focus-visible:outline-2 focus-visible:outline-accent"
+                        aria-label={t("admin.alerts.toRemove", { address })}
+                        onClick={() => setTo(to.filter((item) => item !== address))}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                  <input
+                    id="smtp-to"
+                    className="min-w-30 flex-1 basis-40 border-0 bg-transparent text-[13px] text-text outline-none"
+                    placeholder={t("admin.alerts.toAdd")}
+                    aria-describedby="smtp-to-help"
+                    value={toDraft}
+                    onChange={(e) => onToChange(e.target.value)}
+                    onKeyDown={onToKey}
+                  />
+                </div>
+                <p id="smtp-to-help" className="text-[12.5px] text-muted">
+                  {t("admin.alerts.toHelp")}
+                </p>
+              </div>
+            </div>
           </>
         ) : (
           <>
@@ -270,32 +423,71 @@ function ChannelForm({
           </>
         )}
         <FormError message={error} />
-        {testResult === null ? null : testResult.ok ? (
-          <output className="text-[13px] text-ok-ink">{testResult.text}</output>
-        ) : (
-          <FormError message={testResult.text} />
-        )}
-        <div className="flex flex-wrap justify-end gap-2.5">
-          {kind === "smtp" ? (
-            <Button onClick={runTest} disabled={test.isPending || save.isPending}>
-              {test.isPending ? t("admin.alerts.testing") : t("admin.alerts.test")}
+
+        {/* Section E: the footer. Test email left, with its result beside it; Cancel and Save right. */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
+            {kind === "smtp" ? (
+              <Button onClick={runTest} disabled={test.isPending || save.isPending}>
+                {test.isPending ? t("admin.alerts.testing") : t("admin.alerts.test")}
+              </Button>
+            ) : null}
+            {testResult === null ? null : testResult.ok ? (
+              <output className="text-[12.5px] text-ok-ink">{testResult.text}</output>
+            ) : (
+              <p role="alert" className="text-[12.5px] text-crit-ink">
+                {testResult.text}
+              </p>
+            )}
+          </div>
+          <div className="flex flex-wrap justify-end gap-2.5">
+            <Button
+              onClick={() => {
+                clearConfig();
+                onDone();
+              }}
+            >
+              {t("common.cancel")}
             </Button>
-          ) : null}
-          <Button
-            onClick={() => {
-              clearConfig();
-              onDone();
-            }}
-          >
-            {t("common.cancel")}
-          </Button>
-          <Button type="submit" variant="primary" disabled={save.isPending}>
-            {t("admin.alerts.save")}
-          </Button>
+            <Button type="submit" variant="primary" disabled={save.isPending}>
+              {t("admin.alerts.save")}
+            </Button>
+          </div>
         </div>
       </form>
     </Card>
   );
+}
+
+// The summary line of a channel in the list: host, recipients and events for email; the
+// events alone for a webhook, whose settings are secret.
+function ChannelSummary({ channel }: { channel: AlertChannel }) {
+  const settings = useQuery({
+    queryKey: [...CHANNELS_KEY, channel.id, "summary"],
+    queryFn: () => api<AlertChannelSettings>("GET", `/admin/alert-channels/${channel.id}/settings`),
+    enabled: channel.kind === "smtp",
+  });
+  const count = channel.events.length;
+  const events =
+    count === 0
+      ? t("admin.alerts.summaryNoEvents")
+      : count === 1
+        ? t("admin.alerts.summaryEvent")
+        : t("admin.alerts.summaryEvents", { count });
+  const parts: string[] = [];
+  const smtp = settings.data?.smtp ?? null;
+  if (channel.kind === "webhook") {
+    parts.push(t("admin.alerts.webhook"));
+  } else if (smtp !== null) {
+    parts.push(smtp.host);
+    parts.push(
+      smtp.to.length === 1
+        ? t("admin.alerts.summaryRecipient")
+        : t("admin.alerts.summaryRecipients", { count: smtp.to.length }),
+    );
+  }
+  parts.push(events);
+  return <span className="text-[12.5px] text-muted">{parts.join(" · ")}</span>;
 }
 
 // Loads the saved SMTP settings, then opens the edit form with them filled in. Nothing
@@ -373,12 +565,23 @@ export default function AdminAlertsPage() {
                   });
             const editing = typeof form === "object" && form !== null && form.id === channel.id;
             return (
-              <li key={channel.id} className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-5 py-3">
-                <div className="flex flex-col">
-                  <span className="font-medium">{name}</span>
-                  <span className="text-[12.5px] text-muted">{dates}</span>
-                </div>
+              <li
+                key={channel.id}
+                className="grid grid-cols-1 items-center gap-3 border-t border-border px-5 py-3 md:grid-cols-[auto_1fr_auto] md:gap-3.5"
+              >
                 <div className="flex items-center gap-3">
+                  {channel.kind === "smtp" ? (
+                    <Mail aria-hidden="true" className="size-5 text-muted" />
+                  ) : (
+                    <Link2 aria-hidden="true" className="size-5 text-muted" />
+                  )}
+                  <div className="flex flex-col">
+                    <span className="font-medium">{name}</span>
+                    <span className="text-[12px] text-muted">{dates}</span>
+                  </div>
+                </div>
+                <ChannelSummary channel={channel} />
+                <div className="flex items-center gap-3 md:justify-end">
                   <label htmlFor={`enabled-${channel.id}`} className="text-[12.5px] text-muted">
                     {channel.enabled ? t("admin.alerts.enabled") : t("admin.alerts.disabled")}
                     <span className="sr-only"> {name}</span>

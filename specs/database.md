@@ -38,8 +38,9 @@ Purpose: schema reference for dockward 0.2.0's SQLite database, and the decision
 | `totp_secrets` | One row per local user who started TOTP enrolment: the sealed secret, `enabled`, `totp_last_step` (replay guard), timestamps. Migration 0009 (#341). |
 | `totp_recovery_codes` | Argon2id hashes of a user's recovery codes and `used_at`. Migration 0009 (#341). |
 | `audit_log` | Admin and security-relevant actions. |
-| `alert_channels` | SMTP and webhook destinations, encrypted. |
+| `alert_channels` | SMTP and webhook destinations, encrypted, with the events each receives. |
 | `alert_deliveries` | The 24-hour alert dedupe log. |
+| `alert_pending` | CVE changes of a scan not alerted yet (#458). Rows are deleted when the scan ends and its alerts are sent. |
 | `job_runs` | Housekeeping run history (`cleanup`, `retention`, `discover`, `db_update`). Counts and error text only. |
 
 Views: `newest_digest_tags` (the tags of a source's newest image, decision 49) and `tag_scan_times` (when each tag was last scanned). Both are read by the CVE list and the dashboard.
@@ -149,7 +150,9 @@ CONFLICT: the code at `origin/main` (`backend/src/services/audit.rs`, `ACTIONS`)
 - **Shared issues** (decision 47): one `github_issues` row per (GitHub repository, CVE). Sources that target the same GitHub repository share it. The fixed note is posted only when no source for that repository reports the CVE; Dockward never closes an issue. Deleting a source never closes or changes an issue on GitHub.
 - **Retention** (spinoff section 9): `publish_reports` and `scan_runs` are kept 90 days, except that the latest `done` run per (platform image, scanner) is never deleted. `jobs` and `job_runs` are kept 90 days. `alert_deliveries` are kept 30 days. `audit_log` is kept 365 days. `images`, `tag_observations`, and `image_platforms` are not under age retention.
 - **Failed-job purge** (decisions 1 to 4 of #243): deletes `jobs` rows with `status = 'failed'` in scope and nothing else. `publish_reports.job_id` becomes NULL when its job is deleted, and the report stays.
-- **Alert dedupe** (Decided 2026-11-03, delegated): the 24-hour window is enforced by the upsert `INSERT ... ON CONFLICT (channel_id, dedupe_key) DO UPDATE SET sent_at = excluded.sent_at WHERE alert_deliveries.sent_at < unixepoch() - 86400`. Send only when one row changed. Job failure keys are `job_failed:<job id>`.
+- **Alert dedupe** (Decided 2026-11-03, delegated): the 24-hour window is enforced by the upsert `INSERT ... ON CONFLICT (channel_id, dedupe_key) DO UPDATE SET sent_at = excluded.sent_at WHERE alert_deliveries.sent_at < unixepoch() - 86400`. Send only when one row changed. Keys: `job_failed:<job id>`, `scan:<scan id>:<source id>` and `cve_fixed:<CVE id>:<scan id>` ([alerts.md](alerts.md), Deduplication).
+- **Alert routing** (Decided 2026-11-17, delegated, #458; migration `0018_alert_routing.sql`): `alert_channels.events` is `TEXT NOT NULL DEFAULT '["job_failed"]'` with `CHECK (json_valid(events) AND json_type(events) = 'array')`, a JSON array of `job_failed`, `new_high_or_critical` and `cve_fixed`. Existing rows get the default. The dispatcher reads only enabled channels whose array holds the event (`json_each`). Not a secret.
+- **Pending alerts** (Decided 2026-11-17, delegated, #458): `alert_pending` (`id`, `event` `new_high_or_critical` or `cve_fixed`, `image_id`, `source_id`, `image_tag`, `cve_id`, `created_at`) with `UNIQUE (event, image_id, source_id, image_tag, cve_id)`, cascading from `images` and `image_sources`. The convert step writes a row in the transaction that stores a scan run; the scan alerts read and delete the image's rows in one transaction when no run or pull of the image is open. Ids, tags and CVE ids only.
 - **Retention clock** (decision 18): eviction deletes the OCI layout only. The `image_platforms` row stays with state `evicted`, and findings and scan history stay.
 - **Foreign keys on user deletion** (Decided 2026-11-03, delegated): the user deletion order is `image_sources`, then `user_credentials`, then `users`. `created_by`, `revoked_by`, and `actor_user_id` are `ON DELETE SET NULL`, with `*_username` snapshots kept for attribution.
 

@@ -2,7 +2,9 @@
 //! and section 6).
 //!
 //! `discover` runs the discovery service. `pull` runs the pull job (`services::storage::job`),
-//! which queues the scans. `scan` runs the scan job and the convert step (`services::scan`).
+//! which queues the scans. `scan` runs the scan job and the convert step (`services::scan`), and
+//! then the scan alerts (`services::alerts`, #458), which send only once every run of the image
+//! has ended.
 //! `publish` runs the publish job (`services::publish`). `db_update` runs the daily database refresh
 //! (`services::scanner::db_update`). Any other kind fails once, permanently.
 
@@ -24,6 +26,8 @@ use sqlx::SqlitePool;
 #[derive(Deserialize)]
 struct KindOnly {
     kind: Option<String>,
+    /// The scan run of a `scan` job.
+    run_id: Option<String>,
 }
 
 /// Dispatches a claimed job by the `kind` of its payload.
@@ -58,9 +62,11 @@ impl SpinoffJobs {
 
 impl JobHandler for SpinoffJobs {
     async fn run(&self, job: ClaimedJob) -> JobOutcome {
-        let kind = serde_json::from_str::<KindOnly>(&job.payload)
-            .ok()
-            .and_then(|parsed| parsed.kind);
+        let parsed = serde_json::from_str::<KindOnly>(&job.payload).ok();
+        let (kind, run_id) = match parsed {
+            Some(parsed) => (parsed.kind, parsed.run_id),
+            None => (None, None),
+        };
         match kind.as_deref() {
             Some("discover") => {
                 self.discovery
@@ -78,14 +84,21 @@ impl JobHandler for SpinoffJobs {
                 .await
             }
             Some("scan") => {
-                run_scan(
+                let outcome = run_scan(
                     &self.pool,
                     &self.scan,
                     &self.store,
                     &job,
                     crate::worker::now_secs(),
                 )
-                .await
+                .await;
+                // Whatever the outcome: a run that failed for good can be the last open run of
+                // its image. A run that will retry is open again, so nothing is sent yet.
+                if let Some(run_id) = run_id.as_deref() {
+                    self.notifier
+                        .spawn_scan_alerts(run_id, crate::worker::now_secs());
+                }
+                outcome
             }
             Some("publish") => self.publisher.run(&job).await,
             Some("db_update") => run_db_update(&self.pool, &self.scan, &job).await,
