@@ -24,9 +24,9 @@ expect 0 "real Dockerfile and changelog" bash "$check" "$root/Dockerfile" "$root
 
 # Dockerfile says v0.76.1 where v0.76.2 is expected.
 sed 's/^# trivy v0.76.2$/# trivy v0.76.1/' "$root/Dockerfile" > "$tmp/old-trivy"
-sed 's/^# grype v0.121.3$/# grype v0.121.2/' "$root/Dockerfile" > "$tmp/old-grype"
+sed 's/^# grype v0.122.0$/# grype v0.121.2/' "$root/Dockerfile" > "$tmp/old-grype"
 expect nonzero "Dockerfile trivy v0.76.1 vs expected v0.76.2" bash "$check" "$tmp/old-trivy" "$root/CHANGELOG.md"
-expect nonzero "Dockerfile grype v0.121.2 vs expected v0.121.3" bash "$check" "$tmp/old-grype" "$root/CHANGELOG.md"
+expect nonzero "Dockerfile grype v0.121.3 vs expected v0.122.0" bash "$check" "$tmp/old-grype" "$root/CHANGELOG.md"
 
 # Changelog without the Bundled scanners line.
 grep -v 'Bundled scanners' "$root/CHANGELOG.md" > "$tmp/no-notes"
@@ -38,7 +38,7 @@ cat > "$tmp/bin/docker" <<'S'
 #!/usr/bin/env bash
 case "$*" in
   *trivy*) echo "Version: ${STUB_TRIVY:-0.76.2}" ;;
-  *grype*) echo "Application:         grype"; echo "Version:             ${STUB_GRYPE:-0.121.3}" ;;
+  *grype*) echo "Application:         grype"; echo "Version:             ${STUB_GRYPE:-0.122.0}" ;;
 esac
 S
 chmod +x "$tmp/bin/docker"
