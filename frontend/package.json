@@ -1,7 +1,7 @@
 {
   "name": "dockward-frontend",
   "private": true,
-  "version": "0.9.3",
+  "version": "0.9.4",
   "type": "module",
   "engines": {
     "node": "26"
