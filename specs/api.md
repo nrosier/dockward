@@ -187,10 +187,15 @@ All routes are `admin`.
 | GET | `/api/v1/admin/alert-channels` | yes | Config never returned. |
 | POST | `/api/v1/admin/alert-channels` | yes | `422` on failure. |
 | PUT | `/api/v1/admin/alert-channels/:id` | yes | |
+| GET | `/api/v1/admin/alert-channels/:id/settings` | yes | The SMTP settings without the password, to fill the edit form. A webhook has none (`smtp: null`). `404` for an unknown channel. |
+| POST | `/api/v1/admin/alert-channels/test` | yes | Sends one fixed test mail with the form values. `200 {"ok","error"?}`; a failed send is `ok: false`. `422` for a bad config, `404` for an unknown `channel_id`, `429` after 5 a minute per admin. |
 | DELETE | `/api/v1/admin/users/:id/totp` | yes | Clears the user's TOTP and recovery codes. `204`, `404` for an unknown user. Audited as `user.totp_reset` with the user's id only (#341). |
 | GET | `/api/v1/admin/audit-log` | yes | Filters `action`, `actor_user_id`. |
 | GET | `/api/v1/admin/jobs` | yes | Housekeeping runs from `job_runs`. Filter `kind`. |
 | GET | `/api/v1/admin/health` | yes | Spinoff target: per-hub reachability, the pinned scanner versions, the database build time per scanner, free disk of the store, and the caller's client IP and its source. The Harbor and robot fields are removed. Field shape UNVERIFIED. |
+| POST | `/api/v1/admin/scanners/{scanner}/install` | yes | `scanner` is `trivy` or `grype`, else `404`. Installs the latest stable upstream release if its checksum and Sigstore bundle verify (#403; [integrations.md](integrations.md), "Scanner install and rollback"). `200 {"scanner","version"}`. A refusal is the error envelope plus a fixed `kind`. Limited to 6 per scanner per hour (`429`). Audited as `scanner.install`. No path or URL is returned. |
+| POST | `/api/v1/admin/scanners/{scanner}/rollback` | yes | Switches the current pointer to the previous downloaded version. `200 {"scanner","version"}`; `409` `no_previous_version` when none is kept. Audited as `scanner.rollback`. |
+| POST | `/api/v1/admin/scanners/{scanner}/clear-broken` | yes | Removes the broken marker of the downloaded version and re-runs selection. `200 {"scanner","version"}`; `409` `no_broken_mark`. Audited as `scanner.clear_broken`. No path is returned. |
 | POST | `/api/v1/admin/backup` | yes | `{"file","path"}`. Writes only to the configured backup directory. |
 | GET | `/api/v1/admin/logs` | yes | Query `level` (minimum level), `q`. |
 | GET, PUT | `/api/v1/admin/log-level` | yes | `info`, `debug`, or `trace`. A level above `info` reverts after 30 minutes. |

@@ -178,8 +178,16 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             get(api::admin::list_alert_channels).post(api::admin::create_alert_channel),
         )
         .route(
+            "/api/v1/admin/alert-channels/test",
+            post(api::admin::test_alert_channel),
+        )
+        .route(
             "/api/v1/admin/alert-channels/{id}",
             axum::routing::put(api::admin::update_alert_channel),
+        )
+        .route(
+            "/api/v1/admin/alert-channels/{id}/settings",
+            get(api::admin::alert_channel_settings),
         )
         .route(
             "/api/v1/admin/oidc",

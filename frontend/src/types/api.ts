@@ -297,6 +297,51 @@ export interface AlertChannel {
   updated_at: string;
 }
 
+export interface AlertSmtpSettings {
+  host: string;
+  port: number;
+  tls: "implicit" | "starttls";
+  username: string | null;
+  from: string;
+  to: string[];
+  password_set: boolean;
+}
+
+export interface AlertChannelSettings {
+  smtp: AlertSmtpSettings | null;
+}
+
+export interface AlertTestResult {
+  ok: boolean;
+  error?: string;
+}
+
+export interface ProjectWebhook {
+  id: string;
+  harbor_base_url: string;
+  harbor_project: string;
+  owner: string;
+  created_at: string | null;
+  rotated_at: string | null;
+  mappings: string[];
+}
+
+export interface ProjectWebhookTokenRotated {
+  webhook_url: string;
+  mappings: string[];
+}
+
+export interface ProjectWebhookSecretRotated {
+  auth_secret: string;
+  mappings: string[];
+}
+
+export interface UnmatchedRepository {
+  repository: string;
+  count: number;
+  last_seen_at: string;
+}
+
 // Mapping pickers (specs/api.md, "Pickers"). Names only: no token, no URL
 // with credentials.
 export interface PickerList<T> extends Page<T> {

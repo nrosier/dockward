@@ -8,7 +8,7 @@ import { ErrorMessage, LoadingMessage } from "../components/ui/StatusMessage";
 import { Switch } from "../components/ui/Switch";
 import { t } from "../i18n";
 import { api } from "../lib/api";
-import type { AlertChannel, Page } from "../types/api";
+import type { AlertChannel, AlertChannelSettings, AlertSmtpSettings, AlertTestResult, Page } from "../types/api";
 
 const CHANNELS_KEY = ["admin", "alert-channels"] as const;
 
@@ -19,29 +19,34 @@ interface HeaderRow {
   value: string;
 }
 
-// `null` id means a new channel. The form holds secrets, so it only lives in
-// this component's state and is unmounted after a successful save.
+// `null` channel means a new channel. The form holds secrets, so it only lives in
+// this component's state and is unmounted after a successful save. `saved` holds the
+// settings of an SMTP channel that are safe to show again (never the password).
 function ChannelForm({
   kind: initialKind,
   channel,
+  saved,
   onDone,
 }: {
   kind: Kind | null;
   channel: AlertChannel | null;
+  saved: AlertSmtpSettings | null;
   onDone: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [kind, setKind] = useState<Kind>(initialKind ?? "smtp");
-  const [host, setHost] = useState("");
-  const [port, setPort] = useState("");
-  const [tls, setTls] = useState<Tls>("implicit");
-  const [username, setUsername] = useState("");
+  const [kind, setKind] = useState<Kind>(channel?.kind ?? initialKind ?? "smtp");
+  const [host, setHost] = useState(saved?.host ?? "");
+  const [port, setPort] = useState(saved === null ? "" : String(saved.port));
+  const [tls, setTls] = useState<Tls>(saved?.tls ?? "implicit");
+  const [username, setUsername] = useState(saved?.username ?? "");
   const [password, setPassword] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  const [from, setFrom] = useState(saved?.from ?? "");
+  const [to, setTo] = useState(saved === null ? "" : saved.to.join(", "));
   const [url, setUrl] = useState("");
   const [headers, setHeaders] = useState<HeaderRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const keepPassword = saved?.password_set === true;
 
   function clearConfig() {
     setHost("");
@@ -71,6 +76,8 @@ function ChannelForm({
       }
       if (password !== "") {
         config.password = password;
+      } else if (keepPassword) {
+        config.keep_password = true;
       }
       return config;
     }
@@ -101,10 +108,48 @@ function ChannelForm({
     },
   });
 
+  const test = useMutation({
+    mutationFn: () => {
+      const body: Record<string, unknown> = { config: buildConfig() };
+      if (channel !== null) {
+        body.channel_id = channel.id;
+      }
+      return api<AlertTestResult>("POST", "/admin/alert-channels/test", body);
+    },
+    onSuccess: (result) => {
+      setTestResult(
+        result.ok
+          ? {
+              ok: true,
+              text: t("admin.alerts.testOk", {
+                to: to
+                  .split(",")
+                  .map((address) => address.trim())
+                  .filter((address) => address !== "")
+                  .join(", "),
+              }),
+            }
+          : { ok: false, text: t("admin.alerts.testFailed", { reason: result.error ?? t("errors.generic") }) },
+      );
+    },
+    onError: (failure) => {
+      const status = statusOf(failure);
+      setTestResult({
+        ok: false,
+        text: status === 429 ? t("admin.alerts.testLimit") : status === 422 ? messageOf(failure) : t("errors.generic"),
+      });
+    },
+  });
+
   function submit(event: FormEvent) {
     event.preventDefault();
     setError(null);
     save.mutate();
+  }
+
+  function runTest() {
+    setTestResult(null);
+    test.mutate();
   }
 
   const fixedKind = channel?.kind ?? null;
@@ -115,7 +160,11 @@ function ChannelForm({
   return (
     <Card className="p-5" aria-labelledby="alert-form">
       <form onSubmit={submit} className="flex flex-col gap-4">
-        <CardHeading id="alert-form" title={title} help={t("admin.alerts.formNote")} />
+        <CardHeading
+          id="alert-form"
+          title={title}
+          help={t(saved === null ? "admin.alerts.formNote" : "admin.alerts.formNoteSmtp")}
+        />
         {fixedKind === null ? (
           <div className="flex flex-col gap-1.5">
             <span id="alert-kind" className="text-[13px] font-semibold">
@@ -162,7 +211,11 @@ function ChannelForm({
             <Field id="smtp-user" label={t("admin.alerts.username")}>
               <input id="smtp-user" className={INPUT} autoComplete="off" value={username} onChange={(e) => setUsername(e.target.value)} />
             </Field>
-            <Field id="smtp-password" label={t("admin.alerts.password")}>
+            <Field
+              id="smtp-password"
+              label={t("admin.alerts.password")}
+              help={keepPassword ? t("admin.alerts.passwordSaved") : undefined}
+            >
               <input
                 id="smtp-password"
                 className={INPUT}
@@ -217,7 +270,17 @@ function ChannelForm({
           </>
         )}
         <FormError message={error} />
+        {testResult === null ? null : testResult.ok ? (
+          <output className="text-[13px] text-ok-ink">{testResult.text}</output>
+        ) : (
+          <FormError message={testResult.text} />
+        )}
         <div className="flex flex-wrap justify-end gap-2.5">
+          {kind === "smtp" ? (
+            <Button onClick={runTest} disabled={test.isPending || save.isPending}>
+              {test.isPending ? t("admin.alerts.testing") : t("admin.alerts.test")}
+            </Button>
+          ) : null}
           <Button
             onClick={() => {
               clearConfig();
@@ -233,6 +296,23 @@ function ChannelForm({
       </form>
     </Card>
   );
+}
+
+// Loads the saved SMTP settings, then opens the edit form with them filled in. Nothing
+// is cached, so every open reads the current settings.
+function EditChannelForm({ channel, onDone }: { channel: AlertChannel; onDone: () => void }) {
+  const settings = useQuery({
+    queryKey: [...CHANNELS_KEY, channel.id, "settings"],
+    queryFn: () => api<AlertChannelSettings>("GET", `/admin/alert-channels/${channel.id}/settings`),
+    gcTime: 0,
+  });
+  if (settings.isPending) {
+    return <LoadingMessage />;
+  }
+  if (settings.isError) {
+    return <ErrorMessage />;
+  }
+  return <ChannelForm kind={null} channel={channel} saved={settings.data.smtp} onDone={onDone} />;
 }
 
 export default function AdminAlertsPage() {
@@ -318,13 +398,10 @@ export default function AdminAlertsPage() {
           })}
         </ul>
       </Card>
-      {form === null ? null : (
-        <ChannelForm
-          key={form === "new" ? "new" : form.id}
-          kind={null}
-          channel={form === "new" ? null : form}
-          onDone={() => setForm(null)}
-        />
+      {form === null ? null : form === "new" ? (
+        <ChannelForm key="new" kind={null} channel={null} saved={null} onDone={() => setForm(null)} />
+      ) : (
+        <EditChannelForm key={form.id} channel={form} onDone={() => setForm(null)} />
       )}
     </div>
   );
