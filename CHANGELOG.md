@@ -4,11 +4,16 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.9.4 - 2026-11-17
+
 ### Changed
-- The "Check now" button on the admin health page also runs the scanner release check for Trivy and Grype, so the Scanners card shows the latest stable release and a fresh "Checked" time. It calls the new admin route `POST /api/v1/admin/scanner-releases/check`, which uses the same check as the daily task, is limited to 5 per admin per hour, and shows a fixed error on the Scanners card when GitHub cannot be reached; the health results stay shown (#461).
+- Bundled scanners: Trivy v0.76.2, Grype v0.122.0 (unchanged from 0.9.3).
+- The "Check now" button on the admin health page also runs the scanner release check for Trivy and Grype, so the Scanners card shows the latest stable release and a fresh "Checked" time. It calls the new admin route `POST /api/v1/admin/scanner-releases/check`, which uses the same check as the daily task, is limited to 5 per admin per hour, and shows a fixed error on the Scanners card when GitHub cannot be reached; the health results stay shown (#461, PR #467).
+- Dependency updates through Renovate (PRs #462 to #468): frontend packages @tanstack/react-query 5.108.0, lucide-react 1.74.0 and oxlint 1.94.0; the CI workflow tool anchore/syft v1.57.2; the Rust crates email_address 0.2.10 and filetime 0.2.30 through a lock file maintenance (backend/Cargo.lock) and a frontend lock file refresh; and the digest pin of the `ghcr.io/nrosier/dockward:latest` image in `docker-compose.yml`.
 
 ### Upgrade notes
 - No migration. The daily scanner release check is unchanged.
+- Dependency updates only apart from the "Check now" change; no other behaviour change.
 
 ## 0.9.3 - 2026-11-17
 
