@@ -337,6 +337,11 @@ mod tests {
                 6,
                 std::time::Duration::from_secs(3600),
             ),
+            upstream_check: crate::services::scanner::upstream_check::UpstreamCheck::live(),
+            release_check_limiter: crate::api::hardening::RateLimiter::new(
+                5,
+                std::time::Duration::from_secs(3600),
+            ),
         };
         (crate::app(Vec::new(), state), pool, dir)
     }

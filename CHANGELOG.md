@@ -4,6 +4,12 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+### Changed
+- The "Check now" button on the admin health page also runs the scanner release check for Trivy and Grype, so the Scanners card shows the latest stable release and a fresh "Checked" time. It calls the new admin route `POST /api/v1/admin/scanner-releases/check`, which uses the same check as the daily task, is limited to 5 per admin per hour, and shows a fixed error on the Scanners card when GitHub cannot be reached; the health results stay shown (#461).
+
+### Upgrade notes
+- No migration. The daily scanner release check is unchanged.
+
 ## 0.9.3 - 2026-11-17
 
 ### Changed

@@ -125,7 +125,8 @@ function Confirm({
 
 // The Scanners card, the install failure and broken-scanner cards, and the data-volume card
 // (specs/frontend.md, "Admin health page"). Nothing installs without the confirmation.
-export function ScannersPanel() {
+// `checkError` is the fixed line of a failed on-demand release check, shown on the Scanners card.
+export function ScannersPanel({ checkError = null }: { checkError?: string | null } = {}) {
   const client = useQueryClient();
   const about = useQuery({
     queryKey: ["about"],
@@ -241,6 +242,11 @@ export function ScannersPanel() {
       <Card className="flex flex-col gap-3 py-5" aria-labelledby="scanners-card">
         <div className="px-5">
           <CardHeading id="scanners-card" title={t("admin.scanners.title")} help={t("admin.scanners.help")} />
+          {checkError === null ? null : (
+            <p role="alert" className="mt-2 text-[13px] text-crit-ink">
+              {checkError}
+            </p>
+          )}
         </div>
         <div className="overflow-x-auto">
           <table className="w-full border-collapse">

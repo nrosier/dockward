@@ -777,6 +777,8 @@
   "admin.scanners.col.previous": "Previous",
   "admin.scanners.checked": "Checked {time}",
   "admin.scanners.notChecked": "Not checked yet",
+  "admin.scanners.check.failed": "The scanner release check could not reach GitHub. The last result is shown.",
+  "admin.scanners.check.rateLimited": "Too many scanner release checks. Wait and try again later.",
   "admin.scanners.bundledTag": "(bundled)",
   "admin.scanners.downloadedTag": "(downloaded)",
   "admin.scanners.unknown": "unknown",

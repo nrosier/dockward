@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ScannersPanel } from "../components/admin/ScannersPanel";
 import { Badge, CardHeading, ROW, TD, TH } from "../components/admin/parts";
 import { HEALTH_INTERVAL_MS } from "../components/shell/Topbar";
@@ -6,7 +6,7 @@ import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { ErrorMessage, LoadingMessage } from "../components/ui/StatusMessage";
 import { t } from "../i18n";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import type { HealthCheck, HealthReport } from "../types/api";
 
 function CheckPill({ check }: { check: HealthCheck }) {
@@ -55,7 +55,17 @@ function ScanPill({ state }: { state: HealthCheck["code_scanning"] }) {
   return <Badge tone="crit">{t("admin.health.scan.unavailable")}</Badge>;
 }
 
+// The fixed line for a failed on-demand scanner release check (specs/api.md). It never holds a
+// URL or upstream text.
+function releaseCheckError(error: unknown): string {
+  if (error instanceof ApiError && error.status === 429) {
+    return t("admin.scanners.check.rateLimited");
+  }
+  return t("admin.scanners.check.failed");
+}
+
 export default function AdminHealthPage() {
+  const client = useQueryClient();
   // The same key and staleTime as the Topbar, so both share one request.
   const health = useQuery({
     queryKey: ["admin", "health"],
@@ -63,6 +73,17 @@ export default function AdminHealthPage() {
     staleTime: HEALTH_INTERVAL_MS,
     refetchInterval: HEALTH_INTERVAL_MS,
   });
+  // "Check now" also runs the scanner release check (#461); the Scanners card then reloads
+  // About, whose "Checked" time comes from the recorded answer.
+  const releaseCheck = useMutation({
+    mutationFn: () => api<unknown>("POST", "/admin/scanner-releases/check"),
+    onSettled: () => client.invalidateQueries({ queryKey: ["about"] }),
+  });
+  const checking = health.isFetching || releaseCheck.isPending;
+  const checkNow = () => {
+    releaseCheck.mutate();
+    void health.refetch();
+  };
 
   if (health.isPending) {
     return <LoadingMessage />;
@@ -76,11 +97,11 @@ export default function AdminHealthPage() {
   return (
     <div className="flex flex-col gap-5">
       <div className="flex justify-end">
-        <Button disabled={health.isFetching} onClick={() => void health.refetch()}>
-          {health.isFetching ? t("admin.health.checking") : t("admin.health.checkNow")}
+        <Button disabled={checking} onClick={checkNow}>
+          {checking ? t("admin.health.checking") : t("admin.health.checkNow")}
         </Button>
       </div>
-      <ScannersPanel />
+      <ScannersPanel checkError={releaseCheck.isError ? releaseCheckError(releaseCheck.error) : null} />
       <div className="grid grid-cols-1 gap-5">
         <ChecksCard id="health-github" title={t("admin.health.github")} checks={report.github} />
       </div>

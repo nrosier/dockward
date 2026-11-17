@@ -168,6 +168,10 @@ pub(crate) fn app(trusted_proxies: Vec<config::Cidr>, state: api::state::AppStat
             "/api/v1/admin/scanners/{scanner}/clear-broken",
             post(api::scanners::clear_broken),
         )
+        .route(
+            "/api/v1/admin/scanner-releases/check",
+            post(api::scanners::check_releases),
+        )
         .route("/api/v1/admin/logs", get(api::admin::logs))
         .route(
             "/api/v1/admin/log-level",
@@ -674,6 +678,8 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
         scanner_programs,
         scanner_installer,
         scanner_install_limiter: api::hardening::RateLimiter::new(6, Duration::from_secs(3600)),
+        upstream_check: services::scanner::upstream_check::UpstreamCheck::live(),
+        release_check_limiter: api::hardening::RateLimiter::new(5, Duration::from_secs(3600)),
     };
     let terminate = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(BIND_ADDR).await?;
@@ -784,7 +790,7 @@ async fn serve(app_log: Arc<services::app_log::AppLog>) -> Result<(), Box<dyn st
     // its own task and never blocks a scan; a failure records nothing.
     let upstream_task = tokio::spawn(services::scanner::upstream_check::run(
         state.pool.clone(),
-        services::scanner::upstream_check::UpstreamCheck::live(),
+        state.upstream_check.clone(),
         bundled_versions,
         stop_rx.clone(),
     ));
@@ -999,6 +1005,11 @@ pub(crate) mod tests {
                 6,
                 std::time::Duration::from_secs(3600),
             ),
+            upstream_check: crate::services::scanner::upstream_check::UpstreamCheck::live(),
+            release_check_limiter: crate::api::hardening::RateLimiter::new(
+                5,
+                std::time::Duration::from_secs(3600),
+            ),
         };
         let response = app(Vec::new(), state)
             .oneshot(
@@ -1082,6 +1093,11 @@ pub(crate) mod tests {
             ),
             scanner_install_limiter: crate::api::hardening::RateLimiter::new(
                 6,
+                std::time::Duration::from_secs(3600),
+            ),
+            upstream_check: crate::services::scanner::upstream_check::UpstreamCheck::live(),
+            release_check_limiter: crate::api::hardening::RateLimiter::new(
+                5,
                 std::time::Duration::from_secs(3600),
             ),
         };
