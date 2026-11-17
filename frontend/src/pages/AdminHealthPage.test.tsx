@@ -139,7 +139,7 @@ describe("AdminHealthPage Check now (#461)", () => {
     await userEvent.setup().click(screen.getByRole("button", { name: t("admin.health.checkNow") }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(t("admin.scanners.check.failed"));
-    expect(screen.queryByText(/api\.github\.com/)).not.toBeInTheDocument();
+    expect(document.body.textContent ?? "").not.toContain("api.github.com");
     // The health results stay on the page.
     expect(screen.getByText("203.0.113.24")).toBeInTheDocument();
     expect(screen.getByText("example-org/web")).toBeInTheDocument();
