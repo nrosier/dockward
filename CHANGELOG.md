@@ -4,12 +4,20 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.9.3 - 2026-11-17
+
+### Changed
+- Bundled scanners: Trivy v0.76.2, Grype v0.122.0 (Grype bumped from v0.121.3; Trivy unchanged).
+
 ### Added
-- Alert routing (#458): each alert channel has its own set of events: job failed, new HIGH or CRITICAL CVE, and CVE fixed. A channel is sent only the events ticked for it. New HIGH or CRITICAL CVEs are sent as one summary per scan (the first 10, then "and N more"), and a CVE that is no longer reported is sent once per fix; that alert never closes a GitHub issue. The alert channel page follows the new layout, with the event checklist, recipient chips and the test email in the footer.
+- Alert routing (#458): each alert channel has its own set of events: job failed, new HIGH or CRITICAL CVE, and CVE fixed. A channel is sent only the events ticked for it. New HIGH or CRITICAL CVEs are sent as one summary per scan (the first 10, then "and N more"), and a CVE that is no longer reported is sent once per fix; that alert never closes a GitHub issue. The alert channel page follows the new layout, with the event checklist, recipient chips and the test email in the footer (PR #459).
+- The SMTP alert channel form can send a fixed test email with the form values, and the edit form loads the saved non-secret settings. The password is never returned; the form sends `keep_password` to keep it. The test route is limited to 5 a minute per admin (#456, PR #457).
 
 ### Upgrade notes
-- Migration 0018 adds the event set. Existing channels keep job failures only, as before; tick the CVE events to receive them.
+- Migration 0018 (`0018_alert_routing.sql`) runs on start.
+- Existing alert channels keep job failures only, as before, until the admin ticks the CVE events for them.
 - Webhook bodies use the event names `new_high_or_critical` (with `cves` and `more`) and `cve_fixed`. The old `critical_cve` name was never sent.
+- The bundled Grype moves from v0.121.3 to v0.122.0 (digest `sha256:013e16ae...`). Trivy stays at v0.76.2.
 
 ## 0.9.2 - 2026-11-16
 

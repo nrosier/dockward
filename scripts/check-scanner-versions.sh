@@ -12,7 +12,7 @@
 set -euo pipefail
 
 EXPECTED_TRIVY="v0.76.2"
-EXPECTED_GRYPE="v0.121.3"
+EXPECTED_GRYPE="v0.122.0"
 
 dockerfile="${1:-Dockerfile}"
 changelog="${2:-CHANGELOG.md}"
