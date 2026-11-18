@@ -10,7 +10,7 @@ RUN npm run build
 
 # The frontend is built before the backend so rust-embed can embed
 # /src/frontend/dist (relative to the backend crate: ../frontend/dist).
-FROM rust:1.100.0-alpine@sha256:de1e0058543a81ed7b046629167db587c67a94bdf37cce14eb27f0ec83baaffb AS backend
+FROM rust:1.100.0-alpine@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 AS backend
 # cargo-auditable embeds the dependency list in the binary, so Trivy and Grype can read
 # the Rust crates in the image (specs/testing-and-ci.md). Pinned; Renovate does not track it.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
