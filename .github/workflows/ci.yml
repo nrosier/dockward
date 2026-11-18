@@ -157,8 +157,16 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
+      # 2026-11-18, decided by the user (dialogue). GHSA-fc5q-39xc-vjpf (picomatch, ReDoS) is
+      # accepted: every picomatch release up to 4.0.7 is listed as vulnerable with no patched
+      # version, and npm's only fix downgrades vite to 6.2.7 and vitest to 3.1.4. The package is
+      # used by the dev-only test and build tooling, not the shipped app. The step fails on any
+      # other high or critical advisory. Removal: drop the exception when picomatch, vite or
+      # vitest ships a patched version. Check at each Renovate update.
       - name: Audit dependencies
-        run: npm audit --audit-level=high
+        run: |
+          npm audit --audit-level=high --json > /tmp/audit.json || true
+          python3 -c "import json; d=json.load(open('/tmp/audit.json')); accepted={'GHSA-fc5q-39xc-vjpf'}; urls=[a['url'] for v in d.get('vulnerabilities',{}).values() if v.get('severity') in ('high','critical') for a in v.get('via',[]) if isinstance(a,dict)]; left=sorted({u for u in urls if u.rsplit('/',1)[-1] not in accepted}); print('unaccepted high or critical advisories:', left or 'none'); raise SystemExit(1 if left else 0)"
 
       - name: Lint
         run: npm run lint --if-present
