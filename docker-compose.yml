@@ -7,7 +7,7 @@
 services:
   dockward:
     # Pin a version tag for production instead of latest.
-    image: ghcr.io/nrosier/dockward:latest@sha256:e9719c9ea41915cc517f87f2c9aca43eb31e91b1664c49bc87a049fba7dd359a
+    image: ghcr.io/nrosier/dockward:latest@sha256:22401be43c690934e37b6c9d1312352ae4146b15463460b3d6ca37a266cf1614
     container_name: dockward
     restart: unless-stopped
     # PID 1 does not reap children or forward signals on its own.
