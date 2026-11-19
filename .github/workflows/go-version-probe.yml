@@ -1,6 +1,6 @@
 name: go-version-probe
 on:
-  workflow_dispatch:
+  pull_request:
 permissions:
   contents: read
 jobs:
