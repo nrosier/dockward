@@ -122,6 +122,14 @@ jobs:
           REVISION: ${{ github.sha }}
         run: docker build --build-arg "REVISION=$REVISION" -t dockward-ci:scanner-check .
 
+      # Only `go version <binary>` is used, to read the Go release of the source-built scanners.
+      # The runner's default Go is not the latest, so the version is set explicitly (#482).
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.27.4"
+          cache: false
+
       - name: Check the scanner versions the image reports
         run: bash scripts/check-scanner-versions.sh Dockerfile CHANGELOG.md dockward-ci:scanner-check
 

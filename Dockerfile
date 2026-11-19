@@ -41,17 +41,57 @@ RUN apk add --no-cache ca-certificates \
     && chown 65532:65532 /rootfs/data \
     && chmod 1777 /rootfs/tmp
 
-# Pinned scanner binaries (decisions 28-29). Taken from the verified release images by digest,
-# never a floating tag. The release of each pin is recorded in the comment above its FROM line and
-# checked by scripts/check-scanner-pins.sh (CI and the release steps). Each binary is static (CGO_ENABLED=0), so it runs on scratch.
+# Pinned scanner binaries (decisions 28-29, #482, #483). Built here from the source of the latest
+# stable upstream tag with the latest stable Go, not taken from the release images, so the Go
+# standard library in each binary is the one we choose. Each tag is cloned from the public GitHub
+# repository and must resolve to the pinned commit, or the build fails. The tag, the commit and
+# the Go release are checked by scripts/check-scanner-pins.sh and
+# scripts/check-scanner-versions.sh (CI and the release steps). CGO_ENABLED=0 keeps each binary
+# static, so it runs on scratch. GOTOOLCHAIN=local forbids a toolchain download, so the build
+# uses the pinned image's Go or fails. The output is linux/amd64, the platform the image ships for.
+# Go builder: golang:1.27.4-alpine, pinned by index digest.
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS gobuild
+ARG GO_VERSION=go1.27.4
+RUN apk add --no-cache git \
+    && test "$(go env GOVERSION)" = "$GO_VERSION" \
+    || { echo "builder Go is $(go env GOVERSION), expected $GO_VERSION" >&2; exit 1; }
+ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local
+
 # trivy v0.76.2
-FROM aquasec/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb AS trivy
-# grype v0.122.0
-FROM anchore/grype@sha256:013e16ae96bd64108973e3e9fecec63f7ff276358d34c46c25d33e2aac96539f AS grype
+# Tag v0.76.2 is a lightweight tag on commit 3f6334d223b52188324af3b9923b4249cd206652.
+# Build flags from upstream goreleaser.yml at the tag (no build tags). The version is injected
+# without the leading v, as goreleaser's {{.Version}} does, so `trivy --version` prints 0.76.2.
+FROM gobuild AS trivy
+ARG TRIVY_VERSION=v0.76.2
+ARG TRIVY_COMMIT=3f6334d223b52188324af3b9923b4249cd206652
+WORKDIR /src/trivy
+RUN git clone --quiet --depth 1 --branch "$TRIVY_VERSION" https://github.com/aquasecurity/trivy.git . \
+    && test "$(git rev-parse HEAD)" = "$TRIVY_COMMIT" \
+    || { echo "trivy $TRIVY_VERSION does not resolve to $TRIVY_COMMIT" >&2; exit 1; }
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -ldflags="-s -w -X github.com/aquasecurity/trivy/pkg/version/app.ver=${TRIVY_VERSION#v}" -o /out/trivy ./cmd/trivy \
+    && test "$(go version /out/trivy)" = "/out/trivy: $(go env GOVERSION)"
+
+# grype v0.122.1
+# Tag v0.122.1 is an annotated tag (object 7f47ebe808ea6c8162d3bc630efc237c533c545c) on commit
+# 8f3ddeddc4a4ed6314248aaf0a7c510f98db8882. Build tags from upstream .goreleaser.yaml at the tag. The
+# version is injected without the leading v, as goreleaser's {{.Version}} does.
+FROM gobuild AS grype
+ARG GRYPE_VERSION=v0.122.1
+ARG GRYPE_COMMIT=8f3ddeddc4a4ed6314248aaf0a7c510f98db8882
+WORKDIR /src/grype
+RUN git clone --quiet --depth 1 --branch "$GRYPE_VERSION" https://github.com/anchore/grype.git . \
+    && test "$(git rev-parse HEAD)" = "$GRYPE_COMMIT" \
+    || { echo "grype $GRYPE_VERSION does not resolve to $GRYPE_COMMIT" >&2; exit 1; }
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -tags "containers_image_openpgp,exclude_graphdriver_btrfs" -ldflags="-s -w -X main.version=${GRYPE_VERSION#v}" -o /out/grype ./cmd/grype \
+    && test "$(go version /out/grype)" = "/out/grype: $(go env GOVERSION)"
 
 FROM rootfs AS rootfs-with-scanners
-COPY --from=trivy /usr/local/bin/trivy /rootfs/usr/local/bin/trivy
-COPY --from=grype /grype /rootfs/usr/local/bin/grype
+COPY --from=trivy /out/trivy /rootfs/usr/local/bin/trivy
+COPY --from=grype /out/grype /rootfs/usr/local/bin/grype
 # The licence and notice texts of dockward, Trivy and Grype (Apache-2.0 for the scanners), taken
 # from the files the About dialog shows, so the image and the dialog carry the same text.
 COPY --from=frontend /build/src/licenses/ /rootfs/usr/share/licenses/
