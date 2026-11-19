@@ -46,8 +46,8 @@ RUN apk add --no-cache ca-certificates \
 # checked by scripts/check-scanner-pins.sh (CI and the release steps). Each binary is static (CGO_ENABLED=0), so it runs on scratch.
 # trivy v0.76.2
 FROM aquasec/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb AS trivy
-# grype v0.122.0
-FROM anchore/grype@sha256:013e16ae96bd64108973e3e9fecec63f7ff276358d34c46c25d33e2aac96539f AS grype
+# grype v0.122.1
+FROM anchore/grype@sha256:661583704a253c0448ed63998b5ea2cd9d5a76ee71eedc4aed439b8ce3e93a1c AS grype
 
 FROM rootfs AS rootfs-with-scanners
 COPY --from=trivy /usr/local/bin/trivy /rootfs/usr/local/bin/trivy

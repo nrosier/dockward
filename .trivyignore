@@ -1,0 +1,8 @@
+# CVE-2026-97054 (GHSA-rg98-f588-44xg, Go stdlib HTTP/1 MaxBytesReader)
+# Decided 2026-11-19, user, dialogue, PR #480: accepted risk.
+# Affects the bundled trivy and grype binaries, built with Go 1.27.3. The fix is in Go 1.27.4
+# and 1.26.11, which are published, but no bundled scanner is rebuilt on them yet.
+# Reason: dockward does not run an HTTP/1 server that uses MaxBytesReader; the scanners run
+# only as one-shot commands (backend/src/services/scanner/mod.rs scan_args).
+# Removal: delete this entry when Trivy or Grype is rebuilt on Go 1.27.4 or later.
+CVE-2026-97054
