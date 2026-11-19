@@ -1,0 +1,13 @@
+name: go-version-probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v7.1.0
+        with:
+          go-version: "1.27.4"
+      - run: go version
