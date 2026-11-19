@@ -50,6 +50,6 @@ Spinoff sections 5, 6 and 8 hold the rules.
 ## Tech stack
 
 - Backend: Rust 1.99.1, Tokio, Axum, SQLx (SQLite WAL), reqwest, OpenIDConnect-rs, Argon2, AES-GCM, zeroize.
-- Scanners: Trivy 0.76.2 and Grype 0.121.3, both pinned by image digest in the Dockerfile, with the release recorded in a comment above each pin and checked by `scripts/check-scanner-pins.sh` (see [integrations.md](integrations.md), "Pinned binaries").
+- Scanners: Trivy 0.76.2 and Grype 0.122.1, both built from source in the Dockerfile from a pinned upstream tag and commit with Go 1.27.4 (builder image pinned by digest), with the release recorded in a comment above each stage and checked by `scripts/check-scanner-pins.sh` and `scripts/check-scanner-versions.sh` (see [integrations.md](integrations.md), "Pinned binaries").
 - Frontend: React 19, TypeScript, Vite, Tailwind CSS v4, Radix UI Primitives, Lucide React, TanStack Query v5, Recharts.
 - Build: multi-stage Dockerfile (Node, Rust, the pinned scanner images, then `scratch`). See [deployment.md](deployment.md).

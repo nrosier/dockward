@@ -4,6 +4,20 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.9.5 - 2026-11-19
+
+### Changed
+- Bundled scanners: Trivy v0.76.2, Grype v0.122.1, now built from source with Go 1.27.4 (Grype bumped from v0.122.0; Trivy unchanged). The image build clones each upstream tag from GitHub, checks it against the pinned commit (Trivy `3f6334d2`, Grype `8f3ddedd`), and builds a static binary on the `golang:1.27.4-alpine` image pinned by digest. The release images `aquasec/trivy` and `anchore/grype` are no longer used (#482, #483).
+- The source build fixes the Go standard library advisory CVE-2026-97054 (GHSA-rg98-f588-44xg, HTTP/1 `MaxBytesReader`) in both scanners, which the upstream release builds carried through Go 1.27.3. The required Trivy gate passes with no accepted risk.
+- `scripts/check-scanner-pins.sh` and `scripts/check-scanner-versions.sh` check the pinned source tag, commit and Go release in place of a release image digest, and in image mode also the Go release each built binary reports.
+- The Rust crate lettre moves to 0.11.24, which fixes six SMTP advisories (RUSTSEC-2026-0560 to RUSTSEC-2026-0565). The frontend audit accepts the picomatch advisory GHSA-fc5q-39xc-vjpf (PR #479).
+- Lock file maintenance for the Rust and frontend lock files (PR #478).
+- Dependency updates through Renovate (PRs #470 to #477): the Rust crates sqlx 0.9.1 and zeroize 1.9.2; the frontend package lucide-react 1.75.0; the CI workflow actions step-security/harden-runner v2.23.0 and actions/dependency-review-action v5.0.1; the digest pin of the `rust:1.100.0-alpine` build image; and the digest pin of the `ghcr.io/nrosier/dockward:latest` image in `docker-compose.yml`.
+
+### Upgrade notes
+- No migration.
+- The bundled scanners are built from source. Grype moves from v0.122.0 to v0.122.1; Trivy stays at v0.76.2. A newer scanner downloaded to the data volume still overrides the bundled one, as before.
+
 ## 0.9.4 - 2026-11-17
 
 ### Changed
