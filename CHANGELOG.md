@@ -4,6 +4,9 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+### Security
+- Trivy is built with klauspost/compress v1.20.5 instead of the upstream v1.20.1, fixing CVE-2026-116591 (#387).
+
 ## 0.9.6 - 2026-11-24
 
 ### Changed

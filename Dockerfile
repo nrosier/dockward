@@ -61,17 +61,24 @@ ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local
 # Tag v0.76.2 is a lightweight tag on commit 3f6334d223b52188324af3b9923b4249cd206652.
 # Build flags from upstream goreleaser.yml at the tag (no build tags). The version is injected
 # without the leading v, as goreleaser's {{.Version}} does, so `trivy --version` prints 0.76.2.
+# The module github.com/klauspost/compress is forced to v1.20.5 (upstream v0.76.2 pins v1.20.1,
+# which carries CVE-2026-116591, issue #387; v1.20.2 is the first fixed version). `go get` edits
+# go.mod and go.sum in the cloned source only, and the build fails unless the binary reports it.
 FROM gobuild AS trivy
 ARG TRIVY_VERSION=v0.76.2
 ARG TRIVY_COMMIT=3f6334d223b52188324af3b9923b4249cd206652
+ARG KLAUSPOST_COMPRESS_VERSION=v1.20.5
 WORKDIR /src/trivy
 RUN git clone --quiet --depth 1 --branch "$TRIVY_VERSION" https://github.com/aquasecurity/trivy.git . \
     && test "$(git rev-parse HEAD)" = "$TRIVY_COMMIT" \
     || { echo "trivy $TRIVY_VERSION does not resolve to $TRIVY_COMMIT" >&2; exit 1; }
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go build -ldflags="-s -w -X github.com/aquasecurity/trivy/pkg/version/app.ver=${TRIVY_VERSION#v}" -o /out/trivy ./cmd/trivy \
-    && test "$(go version /out/trivy)" = "/out/trivy: $(go env GOVERSION)"
+    go get "github.com/klauspost/compress@${KLAUSPOST_COMPRESS_VERSION}" \
+    && go build -ldflags="-s -w -X github.com/aquasecurity/trivy/pkg/version/app.ver=${TRIVY_VERSION#v}" -o /out/trivy ./cmd/trivy \
+    && test "$(go version /out/trivy)" = "/out/trivy: $(go env GOVERSION)" \
+    && go version -m /out/trivy | grep -Eq "github.com/klauspost/compress[[:space:]]+${KLAUSPOST_COMPRESS_VERSION}[[:space:]]" \
+    || { echo "trivy binary does not report klauspost/compress ${KLAUSPOST_COMPRESS_VERSION}" >&2; exit 1; }
 
 # grype v0.122.1
 # Tag v0.122.1 is an annotated tag (object 7f47ebe808ea6c8162d3bc630efc237c533c545c) on commit
