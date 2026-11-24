@@ -4,6 +4,17 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.9.6 - 2026-11-24
+
+### Changed
+- Dependency updates through Renovate (PRs #487 to #499): the digest pins of the `docker/dockerfile:1` syntax image and the `ghcr.io/nrosier/dockward:latest` image; the frontend packages @testing-library/user-event 14.6.13, @testing-library/jest-dom 8, vitest 5.1.1, @tanstack/react-query 5.108.4, react-router 8.5.2 and lucide-react 1.79.0; the Rust crates jsonschema 0.63.1 and qrcode 0.15.0; the CI workflow actions github/codeql-action v4.39.4, taiki-e/install-action v2.90.8 and ossf/scorecard-action v2.6.0; and a lock file maintenance.
+- The Rust crates url 2.5.9 and form_urlencoded 1.2.3 fix the advisory RUSTSEC-2026-0592. The advisory made the required Rust audit fail on main (PR #500).
+
+### Upgrade notes
+- No migration.
+- No behaviour change.
+- The bundled scanners are unchanged: Trivy v0.76.2, Grype v0.122.1.
+
 ## 0.9.5 - 2026-11-19
 
 ### Changed
