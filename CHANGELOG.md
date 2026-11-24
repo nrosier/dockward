@@ -4,8 +4,15 @@ All notable changes are recorded here. Versions follow semantic versioning.
 
 ## Unreleased
 
+## 0.9.7 - 2026-11-24
+
 ### Security
-- Trivy is built with klauspost/compress v1.20.5 instead of the upstream v1.20.1, fixing CVE-2026-116591 (#387).
+- Trivy is built with klauspost/compress v1.20.5 instead of the upstream v1.20.1, fixing the advisory CVE-2026-116591 (issue #387, PR #502).
+
+### Upgrade notes
+- No migration.
+- The bundled Trivy is rebuilt with klauspost/compress v1.20.5.
+- The bundled scanners are unchanged: Trivy v0.76.2, Grype v0.122.1.
 
 ## 0.9.6 - 2026-11-24
 
