@@ -100,14 +100,14 @@ jobs:
 
       - name: Upload Grype SARIF
         if: ${{ always() && steps.grype.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: ${{ runner.temp }}/security-scan/grype-results.sarif
           category: grype-engine/source
 
       - name: Upload Trivy SARIF
         if: ${{ always() && steps.trivy.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: ${{ runner.temp }}/security-scan/trivy-results.sarif
           category: trivy-engine/source
@@ -211,14 +211,14 @@ jobs:
 
       - name: Upload Grype SARIF
         if: ${{ always() && steps.grype.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: ${{ runner.temp }}/security-scan/grype-results.sarif
           category: grype-engine/image
 
       - name: Upload Trivy SARIF
         if: ${{ always() && steps.trivy.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: ${{ runner.temp }}/security-scan/trivy-results.sarif
           category: trivy-engine/image
@@ -303,14 +303,14 @@ jobs:
 
       - name: Upload Grype SARIF
         if: ${{ always() && steps.grype.outcome == 'success' }}
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: ${{ runner.temp }}/security-scan/grype-results.sarif
           category: grype-engine/image
 
       - name: Upload Trivy SARIF
         if: ${{ always() && steps.trivy.outcome == 'success' }}
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: ${{ runner.temp }}/security-scan/trivy-results.sarif
           category: trivy-engine/image
